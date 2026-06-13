@@ -1,8 +1,20 @@
 const express = require('express');
 const cors = require('cors');
+const http = require('http');
+const { Server } = require('socket.io');
+const bookingSocket = require('./socket/bookingSocket');
 require('dotenv').config();
 
 const app = express();
+const httpServer = http.createServer(app);
+
+const io = new Server(httpServer, {
+  cors: { origin: '*' },
+});
+
+io.on('connection', (socket) => {
+  bookingSocket(io, socket);
+});
 
 app.use(cors());
 app.use(express.json());
@@ -15,6 +27,6 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });

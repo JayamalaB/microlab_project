@@ -3,9 +3,12 @@ import 'technician_booking_detail_screen.dart';
 import 'technician_history_screen.dart';
 import 'technician_slot_screen.dart';
 import 'technician_profile_screen.dart';
+import 'booking_request_overlay.dart';
+import 'technician_active_job_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/screens/customer/support_chatbot.dart';
 
 // ─── Technician Booking Model ─────────────────────────────────────────────────
@@ -67,14 +70,48 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
   // Mock bookings — replace with GET /api/technician/bookings
   late List<TechnicianBooking> _bookings;
 
-  // Simulated incoming new request (replace with WebSocket / FCM push)
-  Timer? _newRequestTimer;
+  StreamSubscription<SocketBooking>? _bookingRequestSub;
+  StreamSubscription<int>? _bookingCancelledSub;
+  bool _overlayOpen = false;
 
   @override
   void initState() {
     super.initState();
     _loadMockData();
-    _simulateIncomingRequest();
+    _listenToSocket();
+  }
+
+  void _listenToSocket() {
+    _bookingRequestSub =
+        SocketService.instance.onBookingRequest.listen((booking) {
+      if (!mounted || _overlayOpen) return;
+      _overlayOpen = true;
+      showBookingRequestOverlay(context, booking).then((accepted) {
+        _overlayOpen = false;
+        if (!accepted || !mounted) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => TechnicianActiveJobScreen(
+              bookingId:      booking.bookingId,
+              patientName:    booking.patientName,
+              patientMobile:  booking.patientMobile,
+              patientAddress: booking.patientAddress,
+              patientLat:     booking.patientLat,
+              patientLng:     booking.patientLng,
+              hospital:       booking.hospital,
+            ),
+          ),
+        );
+      });
+    });
+
+    _bookingCancelledSub =
+        SocketService.instance.onBookingCancelled.listen((_) {
+      // Another technician accepted — overlay will have already timed out
+      // or the user will be on the overlay; the overlay's silent timeout
+      // handles this gracefully (no action needed here).
+    });
   }
 
   void _loadMockData() {
@@ -117,28 +154,6 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
     ];
   }
 
-  // Simulate a new request arriving after 4 seconds
-  void _simulateIncomingRequest() {
-    _newRequestTimer = Timer(const Duration(seconds: 4), () {
-      if (!mounted) return;
-      final newBooking = TechnicianBooking(
-        id: 'BK00124000',
-        customerName: 'Anitha Raj',
-        customerPhone: '9876543220',
-        address: '5, Besant Nagar, 2nd Street',
-        city: 'Chennai',
-        pincode: '600090',
-        date: DateTime.now().add(const Duration(days: 1)),
-        timeSlot: '12:00 PM',
-        testNames: ['Thyroid Profile', 'Vitamin Panel'],
-        mode: 'Home Collection',
-        status: 'Pending',
-        isVip: true,
-        assignedAt: DateTime.now(),
-      );
-      _showNewRequestDialog(newBooking);
-    });
-  }
 
   void _showNewRequestDialog(TechnicianBooking booking) {
     showDialog(
@@ -274,7 +289,8 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
 
   @override
   void dispose() {
-    _newRequestTimer?.cancel();
+    _bookingRequestSub?.cancel();
+    _bookingCancelledSub?.cancel();
     super.dispose();
   }
 

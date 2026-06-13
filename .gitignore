@@ -1,0 +1,11 @@
+# Node
+server/node_modules/
+
+# Flutter/Dart
+client/.dart_tool/
+client/.flutter-plugins
+client/.flutter-plugins-dependencies
+client/build/
+
+# Environment — never commit secrets
+server/.env

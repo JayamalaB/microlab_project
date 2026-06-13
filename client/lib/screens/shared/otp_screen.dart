@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/socket_service.dart';
 import '../customer/customer_home_screen.dart';
 import '../technician/technician_dashboard_screen.dart';
 
@@ -133,8 +134,20 @@ class _OtpScreenState extends State<OtpScreen> {
       FocusScope.of(context).requestFocus(_focusNodes[0]);
     } else {
       setState(() => _isVerifying = false);
+      // TODO: replace apiUserId with the real user ID from API response
+      // e.g. final apiUserId = apiResponse['user_id'] as int;
+      const int apiUserId = 1; // placeholder until real auth API is wired
+      _connectSocket(apiUserId);
       _showSuccess();
     }
+  }
+
+  void _connectSocket(int userId) {
+    SocketService.instance.connect(
+      userId: userId,
+      role:   widget.userRole == 'technician' ? 'technician' : 'customer',
+      name:   widget.mobile, // TODO: replace with real name from API
+    );
   }
 
   void _showSuccess() {
