@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/api_service.dart';
 import 'onboarding_screen.dart';
+import '../customer/customer_home_screen.dart';
+import '../technician/technician_dashboard_screen.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -68,18 +71,31 @@ class _SplashScreenState extends State<SplashScreen>
 
     _dotController.repeat();
 
-    // Navigate after 2.5s
-    Future.delayed(const Duration(milliseconds: 2500), () {
-      if (mounted) {
-        Navigator.of(context).pushReplacement(
-          PageRouteBuilder(
-            pageBuilder: (_, __, ___) => const OnboardingScreen(),
-            transitionsBuilder: (_, anim, __, child) =>
-                FadeTransition(opacity: anim, child: child),
-            transitionDuration: const Duration(milliseconds: 400),
-          ),
-        );
+    // Navigate after 2.5s — skip login if session is stored
+    Future.delayed(const Duration(milliseconds: 2500), () async {
+      if (!mounted) return;
+      final info = await ApiService.getUserInfo();
+      if (!mounted) return;
+      final Widget next;
+      if (info != null) {
+        final role = info['role']!;
+        final mobile = info['mobile']!;
+        if (role == 'technician') {
+          next = TechnicianDashboardScreen(mobile: mobile);
+        } else {
+          next = CustomerHomeScreen(mobile: mobile, isVip: false);
+        }
+      } else {
+        next = const OnboardingScreen();
       }
+      Navigator.of(context).pushReplacement(
+        PageRouteBuilder(
+          pageBuilder: (_, __, ___) => next,
+          transitionsBuilder: (_, anim, __, child) =>
+              FadeTransition(opacity: anim, child: child),
+          transitionDuration: const Duration(milliseconds: 400),
+        ),
+      );
     });
   }
 

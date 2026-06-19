@@ -74,25 +74,29 @@ class TestModel {
 
   factory TestModel.fromJson(Map<String, dynamic> j) {
     final hasOffer = j['offer'] == 'yes';
-    final original = double.tryParse(j['original_price'] ?? '0') ?? 0;
+    final original =
+        double.tryParse(j['original_price']?.toString() ?? '0') ?? 0;
     final offerPct = hasOffer
-        ? double.tryParse(j['offer_percent'] ?? j['offer_pct'] ?? '0')
+        ? double.tryParse(
+            (j['discount_percent'] ?? j['offer_percent'] ?? j['offer_pct'] ?? '0')
+                .toString())
         : null;
-    final finalP = double.tryParse(j['final_price'] ?? '0') ?? original;
+    final finalP =
+        double.tryParse(j['final_price']?.toString() ?? '0') ?? original;
     return TestModel(
-      id: j['id']?.toString() ??
+      id: (j['id'] ?? j['package_id'])?.toString() ??
           DateTime.now().microsecondsSinceEpoch.toString(),
       name: j['name'] ?? '',
       type: j['type'] ?? 'single',
       category: j['category'] ?? '',
-      description: j['description'] ?? '',
+      description: j['description'] ?? j['despt'] ?? '',
       hasOffer: hasOffer,
       originalPrice: original,
       offerPercent: offerPct,
       finalPrice: finalP,
       docRequired: (j['doc_req'] ?? 'no') == 'yes',
-      startDate: j['start_date'],
-      endDate: j['end_date'],
+      startDate: j['start_date']?.toString(),
+      endDate: j['end_date']?.toString(),
       reportStatus: j['report_sts'] ?? '',
     );
   }
@@ -104,7 +108,15 @@ class BranchModel {
   final String id;
   final String name;
   final String address;
-  BranchModel({required this.id, required this.name, required this.address});
+  final String? location;
+  final String? pincode;
+  BranchModel({
+    required this.id,
+    required this.name,
+    required this.address,
+    this.location,
+    this.pincode,
+  });
 }
 
 // ─── Booking Model ────────────────────────────────────────────────────────────

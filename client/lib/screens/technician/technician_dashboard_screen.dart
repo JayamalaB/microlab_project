@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/screens/customer/support_chatbot.dart';
+import 'package:microlab/services/api_service.dart';
+import 'package:microlab/screens/shared/onboarding_screen.dart';
 
 // ─── Technician Booking Model ─────────────────────────────────────────────────
 
@@ -270,6 +272,46 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
     );
   }
 
+  Future<void> _logout() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Logout?',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+        content: const Text('Are you sure you want to logout?',
+            style: TextStyle(fontSize: 14, color: AppColors.textSecondary)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel',
+                style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFD32F2F),
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('Logout',
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    final token = await ApiService.getToken();
+    if (token != null) await ApiService.logout(token);
+    await ApiService.clearToken();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+      (_) => false,
+    );
+  }
+
   void _onNavTap(int index) => setState(() => _selectedIndex = index);
 
   @override
@@ -344,7 +386,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
                   child: TechnicianProfileScreen(
                     embedded: true,
                     mobile: widget.mobile,
-                    onLogout: () => Navigator.of(context).popUntil((r) => r.isFirst),
+                    onLogout: _logout,
                   )),
             ],
           ),

@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/api_service.dart';
+import 'package:sms_autofill/sms_autofill.dart';
 import '../customer/customer_home_screen.dart';
 import '../technician/technician_dashboard_screen.dart';
 
@@ -15,8 +17,7 @@ class OtpScreen extends StatefulWidget {
   State<OtpScreen> createState() => _OtpScreenState();
 }
 
-class _OtpScreenState extends State<OtpScreen> {
-  // 4 individual controllers + focus nodes
+class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
   final List<TextEditingController> _controllers =
       List.generate(4, (_) => TextEditingController());
   final List<FocusNode> _focusNodes = List.generate(4, (_) => FocusNode());
@@ -26,8 +27,7 @@ class _OtpScreenState extends State<OtpScreen> {
   bool _hasError = false;
   String _errorMsg = '';
 
-  // Countdown
-  int _secondsLeft = 30;
+  int _secondsLeft = 60;
   Timer? _timer;
   bool _canResend = false;
 
@@ -35,14 +35,21 @@ class _OtpScreenState extends State<OtpScreen> {
   void initState() {
     super.initState();
     _startTimer();
-    _listenForAutoFill();
+    listenForCode();
+    _printAppHash();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       FocusScope.of(context).requestFocus(_focusNodes[0]);
     });
   }
 
+  Future<void> _printAppHash() async {
+    final hash = await SmsAutoFill().getAppSignature;
+    // ignore: avoid_print
+    print('APP HASH FOR SMS: [$hash]');
+  }
+
   void _startTimer() {
-    _secondsLeft = 30;
+    _secondsLeft = 60;
     _canResend = false;
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (t) {
@@ -58,12 +65,11 @@ class _OtpScreenState extends State<OtpScreen> {
     });
   }
 
-  // Simulates SMS autofill (on Android, use sms_autofill package)
-  void _listenForAutoFill() {
-    Future.delayed(const Duration(seconds: 2), () {
-      if (!mounted) return;
-      _fillOtp('8351'); // mock autofill
-    });
+  @override
+  void codeUpdated() {
+    if (code != null && code!.length == 4) {
+      _fillOtp(code!);
+    }
   }
 
   void _fillOtp(String otp) {
@@ -116,39 +122,44 @@ class _OtpScreenState extends State<OtpScreen> {
       _hasError = false;
     });
 
-    // TODO: Replace with real API call
-    // POST /api/auth/verify-otp { mobile, otp: _currentOtp, role: widget.userRole }
-    await Future.delayed(const Duration(milliseconds: 1200));
-
-    if (!mounted) return;
-
-    // Mock: '0000' = wrong, anything else = success
-    if (_currentOtp == '0000') {
+    try {
+      final result = await ApiService.verifyOtp(widget.mobile, _currentOtp);
+      if (!mounted) return;
+      if (result['success'] == true) {
+        final token = result['data']?['token'];
+        if (token != null) await ApiService.saveToken(token);
+        await ApiService.saveUserInfo(widget.mobile, widget.userRole);
+        setState(() => _isVerifying = false);
+        _showSuccess();
+      } else {
+        setState(() {
+          _isVerifying = false;
+          _hasError = true;
+          _errorMsg = result['message'] ?? 'Incorrect OTP. Please try again.';
+          for (final c in _controllers) {
+            c.clear();
+          }
+        });
+        FocusScope.of(context).requestFocus(_focusNodes[0]);
+      }
+    } catch (_) {
+      if (!mounted) return;
       setState(() {
         _isVerifying = false;
         _hasError = true;
-        _errorMsg = 'Incorrect OTP. Please try again.';
-        for (final c in _controllers) c.clear();
+        _errorMsg = 'Network error. Please try again.';
       });
-      FocusScope.of(context).requestFocus(_focusNodes[0]);
-    } else {
-      setState(() => _isVerifying = false);
-      _showSuccess();
     }
   }
 
   void _showSuccess() {
-    if (widget.userRole == 'customer' || widget.userRole == 'vip_customer') {
-      // TODO: replace mock with real API response
-      // final apiResponse = await http.post('/api/auth/verify-otp', ...);
-      // final isVip = apiResponse['customer_type'] == 'vip';
-      final isVip = widget.userRole == 'vip_customer'; // mock detection
+    if (widget.userRole == 'customer') {
       Navigator.pushAndRemoveUntil(
         context,
         MaterialPageRoute(
           builder: (_) => CustomerHomeScreen(
             mobile: widget.mobile,
-            isVip: isVip,
+            isVip: false,
           ),
         ),
         (route) => false,
@@ -171,7 +182,6 @@ class _OtpScreenState extends State<OtpScreen> {
       ),
     );
 
-    // TODO: Navigate to home
     if (widget.userRole == 'technician') {
       Navigator.pushAndRemoveUntil(
         context,
@@ -188,7 +198,9 @@ class _OtpScreenState extends State<OtpScreen> {
 
   Future<void> _resend() async {
     if (!_canResend) return;
-    for (final c in _controllers) c.clear();
+    for (final c in _controllers) {
+      c.clear();
+    }
     setState(() {
       _hasError = false;
       _isAutoFilled = false;
@@ -196,8 +208,11 @@ class _OtpScreenState extends State<OtpScreen> {
     FocusScope.of(context).requestFocus(_focusNodes[0]);
     _startTimer();
 
-    // TODO: POST /api/auth/send-otp { mobile: widget.mobile }
+    try {
+      await ApiService.sendOtp(widget.mobile, widget.userRole);
+    } catch (_) {}
 
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('OTP resent to +91 ${widget.mobile}'),
@@ -211,6 +226,7 @@ class _OtpScreenState extends State<OtpScreen> {
 
   @override
   void dispose() {
+    cancel();
     _timer?.cancel();
     for (final c in _controllers) c.dispose();
     for (final f in _focusNodes) f.dispose();
