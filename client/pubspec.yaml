@@ -17,11 +17,14 @@ dependencies:
   url_launcher: ^6.3.0
   pdf: ^3.11.0
   printing: ^5.13.2
+  http: ^1.2.2
   socket_io_client: ^2.0.3+1
   google_maps_flutter: ^2.9.0
   geolocator: ^13.0.2
   permission_handler: ^11.3.1
   shared_preferences: ^2.3.4
+  audioplayers: ^6.0.0
+  geocoding: ^3.0.0
 
 dev_dependencies:
   flutter_test:
@@ -30,3 +33,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/sounds/beeb_sound.mp3

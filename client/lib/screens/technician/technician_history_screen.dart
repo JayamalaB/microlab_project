@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
-import 'technician_dashboard_screen.dart';
+import 'package:microlab/models/technician_booking.dart';
 
 class TechnicianHistoryScreen extends StatelessWidget {
   final String mobile;

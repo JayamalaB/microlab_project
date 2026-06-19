@@ -3,6 +3,7 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const bookingSocket = require('./socket/bookingSocket');
+const bookingController = require('./controllers/bookingController');
 require('dotenv').config();
 
 const app = express();
@@ -12,6 +13,9 @@ const io = new Server(httpServer, {
   cors: { origin: '*' },
 });
 
+// Give bookingController a reference to io so REST updates can push to sockets
+bookingController.setIo(io);
+
 io.on('connection', (socket) => {
   bookingSocket(io, socket);
 });
@@ -20,7 +24,10 @@ app.use(cors());
 app.use(express.json());
 
 // Routes
-app.use('/api/auth', require('./routes/auth'));
+app.use('/api/auth',         require('./routes/auth'));
+app.use('/api/tests',        require('./routes/tests'));
+app.use('/api/bookings',     require('./routes/bookings'));
+app.use('/api/technicians',  require('./routes/technicians'));
 
 app.get('/', (req, res) => {
   res.json({ success: true, message: 'MediCollect API running' });
