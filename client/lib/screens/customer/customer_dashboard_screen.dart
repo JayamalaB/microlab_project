@@ -7,8 +7,8 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/services/api_service.dart';
 import 'package:microlab/constants/app_constants.dart';
-import '../shared/location_picker_screen.dart';
 import 'customer_home_screen.dart';
 import 'checkout_screen.dart';
 import 'my_bookings_screen.dart';
@@ -58,7 +58,6 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   double? _lng;
   BranchModel? _selectedBranch;
   bool _loadingBranches = false;
-  // Real patientId from auth session — falls back to 1 if socket not yet connected
   int get _patientId {
     final id = SocketService.instance.userId;
     return id > 0 ? id : 1;
@@ -73,9 +72,6 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   String _searchQuery = '';
   String _selectedCategory = 'All';
   bool _showOffersOnly = false;
-
-  // Mock branches — replace with GET /api/branches
-  List<BranchModel> _branches = [];
 
   // Mock tests — replace with GET /api/tests
   List<TestModel> _allTests = [];
@@ -105,7 +101,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   @override
   void initState() {
     super.initState();
-    _loadMockData();
+    _loadData();
     // Pre-add tests from offers/other screens
     if (widget.initialCartTests.isNotEmpty) {
       _cart.addAll(widget.initialCartTests);
@@ -115,79 +111,14 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     });
   }
 
-  void _loadMockData() {
+  Future<void> _loadData() async {
     setState(() => _loadingTests = true);
-
-    // Mock API response — replace with:
-    // GET /api/tests → List<TestModel>
-    // GET /api/branches → List<BranchModel>
-    Future.delayed(const Duration(milliseconds: 600), () {
-      if (!mounted) return;
-      setState(() {
-        _branches = [
-          BranchModel(id: '1', name: 'Anna Nagar Branch', address: '14, 3rd Ave, Anna Nagar, Chennai'),
-          BranchModel(id: '2', name: 'T Nagar Branch', address: '8, Pondy Bazaar, T Nagar, Chennai'),
-          BranchModel(id: '3', name: 'Velachery Branch', address: '22, 100 Feet Rd, Velachery, Chennai'),
-          BranchModel(id: '4', name: 'Tambaram Branch', address: '5, GST Road, Tambaram, Chennai'),
-        ];
-
-        _allTests = [
-          TestModel.fromJson({
-            'id': '1', 'name': 'HbA1c', 'type': 'single', 'category': 'Diabetes',
-            'description': '3-month average blood sugar control indicator',
-            'offer': 'yes', 'original_price': '600', 'offer_pct': '10',
-            'final_price': '540', 'doc_req': 'no',
-            'start_date': '28-04-2026', 'end_date': '30-04-2026', 'report_sts': '48 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '2', 'name': 'Complete Blood Count (CBC)', 'type': 'single', 'category': 'General',
-            'description': 'Full blood panel including RBC, WBC and platelets',
-            'offer': 'no', 'original_price': '350', 'final_price': '350',
-            'doc_req': 'no', 'report_sts': '24 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '3', 'name': 'Thyroid Profile (T3, T4, TSH)', 'type': 'single', 'category': 'Thyroid',
-            'description': 'Complete thyroid function evaluation',
-            'offer': 'yes', 'original_price': '900', 'offer_pct': '15',
-            'final_price': '765', 'doc_req': 'no',
-            'start_date': '01-05-2026', 'end_date': '31-05-2026', 'report_sts': '24 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '4', 'name': 'Lipid Profile', 'type': 'single', 'category': 'Heart',
-            'description': 'Cholesterol, HDL, LDL and triglycerides',
-            'offer': 'no', 'original_price': '500', 'final_price': '500',
-            'doc_req': 'no', 'report_sts': '24 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '5', 'name': 'Diabetes Care Package', 'type': 'package', 'category': 'Diabetes',
-            'description': 'HbA1c + Fasting glucose + Insulin + Lipid Profile',
-            'offer': 'yes', 'original_price': '1800', 'offer_pct': '20',
-            'final_price': '1440', 'doc_req': 'no',
-            'start_date': '01-05-2026', 'end_date': '31-05-2026', 'report_sts': '48 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '6', 'name': 'Full Body Checkup', 'type': 'package', 'category': 'General',
-            'description': '60+ parameters — CBC, liver, kidney, thyroid, vitamins & more',
-            'offer': 'yes', 'original_price': '3500', 'offer_pct': '25',
-            'final_price': '2625', 'doc_req': 'yes',
-            'start_date': '01-05-2026', 'end_date': '31-05-2026', 'report_sts': '72 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '7', 'name': 'Vitamin Panel (B12, D3, Folate)', 'type': 'single', 'category': 'Vitamins',
-            'description': 'Essential vitamins for energy and immunity',
-            'offer': 'no', 'original_price': '1200', 'final_price': '1200',
-            'doc_req': 'no', 'report_sts': '48 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '8', 'name': 'Kidney Function Test (KFT)', 'type': 'single', 'category': 'Kidney',
-            'description': 'Creatinine, urea, uric acid and eGFR',
-            'offer': 'no', 'original_price': '450', 'final_price': '450',
-            'doc_req': 'no', 'report_sts': '24 hrs',
-          }),
-        ];
-        _loadingTests = false;
-      });
-    });
+    try {
+      final tests = await ApiService.getPackages();
+      if (mounted) setState(() { _allTests = tests; _loadingTests = false; });
+    } catch (_) {
+      if (mounted) setState(() => _loadingTests = false);
+    }
   }
 
   void _toggleCart(TestModel test) {
@@ -221,7 +152,6 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       builder: (_) => _LocationSheet(
         mode: _mode,
         modes: _modes,
-        branches: _branches,
         selectedBranch: _selectedBranch,
         pincode: _pincode,
         city: _city,
@@ -873,7 +803,6 @@ class _LocationBar extends StatelessWidget {
 class _LocationSheet extends StatefulWidget {
   final String mode;
   final List<String> modes;
-  final List<BranchModel> branches;
   final BranchModel? selectedBranch;
   final String? pincode;
   final String? city;
@@ -887,7 +816,6 @@ class _LocationSheet extends StatefulWidget {
   const _LocationSheet({
     required this.mode,
     required this.modes,
-    required this.branches,
     required this.selectedBranch,
     required this.pincode,
     required this.city,
@@ -912,9 +840,9 @@ class _LocationSheetState extends State<_LocationSheet> {
   bool _locationError = false;
   bool _branchError = false;
 
-  // Branches filtered by pincode/city search
   List<BranchModel> _filteredBranches = [];
-  bool _searchingBranches = false;
+  bool _loadingBranches = false;
+  Timer? _debounceTimer;
 
   // Pincode auto-detection
   String? _detectedArea;
@@ -946,10 +874,13 @@ class _LocationSheetState extends State<_LocationSheet> {
     _pincodeCtrl.text = widget.pincode ?? '';
     _cityCtrl.text = widget.city ?? '';
     _filteredBranches = widget.branches;
+    _addressCtrl.text = '';
 
-    _pincodeCtrl.addListener(_filterBranches);
-    _cityCtrl.addListener(_filterBranches);
+    _pincodeCtrl.addListener(_scheduleFetch);
+    _cityCtrl.addListener(_scheduleFetch);
     _pincodeCtrl.addListener(_onPincodeChanged);
+
+    if (_mode == 'Lab Test') _fetchBranches();
   }
 
   Future<void> _getCurrentLocation() async {
@@ -958,7 +889,6 @@ class _LocationSheetState extends State<_LocationSheet> {
       _gpsSelected = false;
       _manualSelected = false;
     });
-    
     try {
       LocationPermission perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied) {
@@ -973,28 +903,14 @@ class _LocationSheetState extends State<_LocationSheet> {
         setState(() => _isGeocoding = false);
         return;
       }
-      
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
       ).timeout(const Duration(seconds: 10));
-      
       _gpsLat = pos.latitude;
       _gpsLng = pos.longitude;
-      
-      // Reverse geocode to get address
       final address = await _reverseGeocode(pos.latitude, pos.longitude);
-      
-      setState(() {
-        _gpsAddress = address;
-        _gpsSelected = true;
-        _isGeocoding = false;
-      });
-      
-      debugPrint('[LocationSheet] GPS Location: ${pos.latitude}, ${pos.longitude}');
-      debugPrint('[LocationSheet] GPS Address: $address');
-      
+      setState(() { _gpsAddress = address; _gpsSelected = true; _isGeocoding = false; });
     } catch (e) {
-      debugPrint('[LocationSheet] GPS error: $e');
       setState(() => _isGeocoding = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1003,54 +919,34 @@ class _LocationSheetState extends State<_LocationSheet> {
       }
     }
   }
-  
+
   Future<String> _reverseGeocode(double lat, double lng) async {
     try {
       final apiKey = AppConstants.googleMapsApiKey;
       if (apiKey.isEmpty) return '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}';
-      
       final url = Uri.parse(
-        'https://maps.googleapis.com/maps/api/geocode/json'
-        '?latlng=$lat,$lng'
-        '&key=$apiKey',
+        'https://maps.googleapis.com/maps/api/geocode/json?latlng=$lat,$lng&key=$apiKey',
       );
-      
       final response = await http.get(url).timeout(const Duration(seconds: 8));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         if (data['status'] == 'OK') {
           final results = data['results'] as List;
-          if (results.isNotEmpty) {
-            return results[0]['formatted_address'] as String;
-          }
+          if (results.isNotEmpty) return results[0]['formatted_address'] as String;
         }
       }
-    } catch (e) {
-      debugPrint('[LocationSheet] Reverse geocoding error: $e');
-    }
+    } catch (_) {}
     return '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}';
   }
-  
+
   Future<void> _detectLocationFromPincode() async {
     final pincode = _pincodeCtrl.text.trim();
-    if (pincode.length != 6) {
-      setState(() => _locationError = true);
-      return;
-    }
-    
-    setState(() {
-      _isGeocoding = true;
-      _gpsSelected = false;
-      _manualSelected = false;
-      _locationError = false;
-    });
-    
+    if (pincode.length != 6) { setState(() => _locationError = true); return; }
+    setState(() { _isGeocoding = true; _gpsSelected = false; _manualSelected = false; _locationError = false; });
     try {
-      // First detect area from pincode API
       final res = await http
           .get(Uri.parse('https://api.postalpincode.in/pincode/$pincode'))
           .timeout(const Duration(seconds: 8));
-          
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
         if (data.isNotEmpty && data[0]['Status'] == 'Success') {
@@ -1061,20 +957,13 @@ class _LocationSheetState extends State<_LocationSheet> {
             final district = po['District'] as String;
             final state = po['State'] as String;
             final city = _cityCtrl.text.trim().isEmpty ? district : _cityCtrl.text.trim();
-            
             setState(() {
               _detectedArea = '$area, $district, $state';
               if (_cityCtrl.text.trim().isEmpty) _cityCtrl.text = district;
             });
-            
-            // Geocode to get coordinates
-            final geoUri = Uri.parse(
-              'https://maps.googleapis.com/maps/api/geocode/json'
-              '?address=$pincode,India'
-              '&key=${AppConstants.googleMapsApiKey}',
-            );
-            
-            final geoRes = await http.get(geoUri).timeout(const Duration(seconds: 8));
+            final geoRes = await http.get(Uri.parse(
+              'https://maps.googleapis.com/maps/api/geocode/json?address=$pincode,India&key=${AppConstants.googleMapsApiKey}',
+            )).timeout(const Duration(seconds: 8));
             if (geoRes.statusCode == 200) {
               final geoData = jsonDecode(geoRes.body) as Map<String, dynamic>;
               if (geoData['status'] == 'OK') {
@@ -1083,17 +972,8 @@ class _LocationSheetState extends State<_LocationSheet> {
                   final loc = (results[0]['geometry'] as Map)['location'] as Map;
                   _manualLat = (loc['lat'] as num).toDouble();
                   _manualLng = (loc['lng'] as num).toDouble();
-                  
-                  // Build manual address
                   _manualAddress = '$area, $city, $state - $pincode';
-                  
-                  setState(() {
-                    _manualSelected = true;
-                    _isGeocoding = false;
-                  });
-                  
-                  debugPrint('[LocationSheet] Pincode detected: $_manualAddress');
-                  debugPrint('[LocationSheet] Coordinates: $_manualLat, $_manualLng');
+                  setState(() { _manualSelected = true; _isGeocoding = false; });
                   return;
                 }
               }
@@ -1101,82 +981,44 @@ class _LocationSheetState extends State<_LocationSheet> {
           }
         }
       }
-      
-      // If pincode API fails, try direct geocoding
-      final geoUri = Uri.parse(
-        'https://maps.googleapis.com/maps/api/geocode/json'
-        '?address=$pincode,India'
-        '&key=${AppConstants.googleMapsApiKey}',
-      );
-      
-      final geoRes = await http.get(geoUri).timeout(const Duration(seconds: 8));
-      if (geoRes.statusCode == 200) {
-        final geoData = jsonDecode(geoRes.body) as Map<String, dynamic>;
-        if (geoData['status'] == 'OK') {
-          final results = geoData['results'] as List;
-          if (results.isNotEmpty) {
-            final loc = (results[0]['geometry'] as Map)['location'] as Map;
-            _manualLat = (loc['lat'] as num).toDouble();
-            _manualLng = (loc['lng'] as num).toDouble();
-            _manualAddress = results[0]['formatted_address'] as String;
-            
-            setState(() {
-              _manualSelected = true;
-              _isGeocoding = false;
-            });
-            
-            debugPrint('[LocationSheet] Geocoded pincode: $_manualAddress');
-            return;
-          }
-        }
-      }
-      
-      setState(() {
-        _detectedArea = 'Not found';
-        _isGeocoding = false;
-        _locationError = true;
-      });
-      
-    } catch (e) {
-      debugPrint('[LocationSheet] Pincode detection error: $e');
-      setState(() {
-        _isGeocoding = false;
-        _locationError = true;
-      });
+      setState(() { _detectedArea = 'Not found'; _isGeocoding = false; _locationError = true; });
+    } catch (_) {
+      setState(() { _isGeocoding = false; _locationError = true; });
     }
   }
-  
+
   void _onPincodeChanged() {
     final pin = _pincodeCtrl.text.trim();
     if (_mode != 'Home Collection') return;
     if (pin.length == 6) {
-      // Auto-detect when pincode length is 6
       _detectLocationFromPincode();
     } else {
       if (_detectedArea != null || _detecting) {
-        setState(() { 
-          _detectedArea = null; 
-          _detecting = false;
-          _manualSelected = false;
-        });
+        setState(() { _detectedArea = null; _detecting = false; _manualSelected = false; });
       }
     }
   }
 
-  void _filterBranches() {
+  void _scheduleFetch() {
     if (_mode != 'Lab Test') return;
-    final query = (_pincodeCtrl.text + _cityCtrl.text).trim().toLowerCase();
-    setState(() {
-      _branch = null;
-      if (query.isEmpty) {
-        _filteredBranches = widget.branches;
-      } else {
-        _filteredBranches = widget.branches.where((b) =>
-          b.name.toLowerCase().contains(query) ||
-          b.address.toLowerCase().contains(query)
-        ).toList();
-      }
-    });
+    _debounceTimer?.cancel();
+    setState(() => _branch = null);
+    _debounceTimer = Timer(const Duration(milliseconds: 600), _fetchBranches);
+  }
+
+  Future<void> _fetchBranches() async {
+    final pincode = _pincodeCtrl.text.trim();
+    final city = _cityCtrl.text.trim();
+    if (mounted) setState(() => _loadingBranches = true);
+    try {
+      final branches = await ApiService.getBranches(
+        pincode: pincode.isEmpty ? null : pincode,
+        city: city.isEmpty ? null : city,
+      );
+      if (mounted) setState(() { _filteredBranches = branches; _loadingBranches = false; });
+    } catch (_) {
+      if (mounted) setState(() { _filteredBranches = []; _loadingBranches = false; });
+    }
   }
 
   void _apply() {
@@ -1221,9 +1063,10 @@ class _LocationSheetState extends State<_LocationSheet> {
 
   @override
   void dispose() {
-    _pincodeCtrl.removeListener(_filterBranches);
-    _cityCtrl.removeListener(_filterBranches);
+    _pincodeCtrl.removeListener(_scheduleFetch);
+    _cityCtrl.removeListener(_scheduleFetch);
     _pincodeCtrl.removeListener(_onPincodeChanged);
+    _debounceTimer?.cancel();
     _pincodeCtrl.dispose();
     _cityCtrl.dispose();
     _addressCtrl.dispose();
@@ -1654,7 +1497,22 @@ class _LocationSheetState extends State<_LocationSheet> {
                 ),
               ),
               const SizedBox(height: 8),
-              if (_filteredBranches.isEmpty)
+              if (_loadingBranches)
+                Container(
+                  padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: AppColors.divider),
+                  ),
+                  child: const Row(children: [
+                    SizedBox(width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                    SizedBox(width: 10),
+                    Text('Loading branches…', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                  ]),
+                )
+              else if (_filteredBranches.isEmpty)
                 Container(
                   padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
                   decoration: BoxDecoration(
@@ -1684,13 +1542,20 @@ class _LocationSheetState extends State<_LocationSheet> {
                   dropdownColor: AppColors.white,
                   borderRadius: BorderRadius.circular(12),
                   isExpanded: true,
-                  items: _filteredBranches.map((b) => DropdownMenuItem(
-                    value: b,
-                    child: Text(b.name,
-                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  )).toList(),
+                  items: _filteredBranches.map((b) {
+                    final sub = [
+                      if ((b.location ?? '').isNotEmpty) b.location!,
+                      if ((b.pincode ?? '').isNotEmpty) b.pincode!,
+                    ].join(', ');
+                    return DropdownMenuItem(
+                      value: b,
+                      child: Text(
+                        sub.isNotEmpty ? '${b.name} · $sub' : b.name,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    );
+                  }).toList(),
                   onChanged: (b) => setState(() { _branch = b; _branchError = false; }),
                 ),
               if (_branchError) ...[

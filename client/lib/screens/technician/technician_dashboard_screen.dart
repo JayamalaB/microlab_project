@@ -13,6 +13,8 @@ import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/screens/customer/support_chatbot.dart';
+import 'package:microlab/services/api_service.dart';
+import 'package:microlab/screens/shared/onboarding_screen.dart';
 
 // ─── Technician Dashboard Screen ──────────────────────────────────────────────
 
@@ -280,6 +282,124 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
     ));
   }
 
+  void _markInProgress(TechnicianBooking booking) {
+    setState(() {
+      final idx = _bookings.indexWhere((b) => b.id == booking.id);
+      if (idx != -1) {
+        _bookings[idx] = TechnicianBooking(
+          id: booking.id,
+          customerName: booking.customerName,
+          customerPhone: booking.customerPhone,
+          address: booking.address,
+          city: booking.city,
+          pincode: booking.pincode,
+          date: booking.date,
+          timeSlot: booking.timeSlot,
+          testNames: booking.testNames,
+          mode: booking.mode,
+          status: 'Journey Started',
+          isVip: booking.isVip,
+          docRequired: booking.docRequired,
+          assignedAt: booking.assignedAt,
+        );
+      }
+    });
+  }
+
+  void _markCompleted(TechnicianBooking booking) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Mark as Completed?',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+        content: Text(
+          'Confirm that you have collected samples from ${booking.customerName}.',
+          style: const TextStyle(fontSize: 14, color: AppColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel',
+                style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              setState(() {
+                final idx = _bookings.indexWhere((b) => b.id == booking.id);
+                if (idx != -1) {
+                  _bookings[idx] = TechnicianBooking(
+                    id: booking.id,
+                    customerName: booking.customerName,
+                    customerPhone: booking.customerPhone,
+                    address: booking.address,
+                    city: booking.city,
+                    pincode: booking.pincode,
+                    date: booking.date,
+                    timeSlot: booking.timeSlot,
+                    testNames: booking.testNames,
+                    mode: booking.mode,
+                    status: 'Completed',
+                    isVip: booking.isVip,
+                    docRequired: booking.docRequired,
+                    assignedAt: booking.assignedAt,
+                  );
+                }
+              });
+              Navigator.pop(context);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.brandGreen,
+              elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('Confirm', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _logout() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Logout?',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+        content: const Text('Are you sure you want to logout?',
+            style: TextStyle(fontSize: 14, color: AppColors.textSecondary)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel',
+                style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFD32F2F),
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('Logout',
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    final token = await ApiService.getToken();
+    if (token != null) await ApiService.logout(token);
+    await ApiService.clearToken();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+      (_) => false,
+    );
+  }
+
   void _onNavTap(int index) => setState(() => _selectedIndex = index);
 
   @override
@@ -420,7 +540,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
                     child: TechnicianProfileScreen(
                       embedded: true,
                       mobile: widget.mobile,
-                      onLogout: () => Navigator.of(context).popUntil((r) => r.isFirst),
+                      onLogout: _logout,
                     )),
               ],
             ),

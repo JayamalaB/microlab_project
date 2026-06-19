@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/api_service.dart';
+import 'package:microlab/screens/shared/onboarding_screen.dart';
 import 'add_member_screen.dart';
 import 'my_bookings_screen.dart';
 import 'customer_dashboard_screen.dart';
@@ -52,6 +54,49 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
       dob: DateTime(1988, 3, 22),
     ),
   ];
+
+  Future<void> _logout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Logout?',
+            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+        content: const Text('Are you sure you want to logout?',
+            style: TextStyle(fontSize: 14, color: AppColors.textSecondary)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel',
+                style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFD32F2F),
+              elevation: 0,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('Logout',
+                style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final token = await ApiService.getToken();
+    if (token != null) {
+      try { await ApiService.logout(token); } catch (_) {}
+    }
+    await ApiService.clearToken();
+    if (!mounted) return;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+      (route) => false,
+    );
+  }
 
   void _openAddMember() async {
     final result = await Navigator.push<MemberModel>(
@@ -211,7 +256,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                   embedded: true,
                   onAddMember: _openAddMember,
                   onEditMember: _openEditMember,
-                  onLogout: () => Navigator.of(context).popUntil((r) => r.isFirst),
+                  onLogout: _logout,
                 ),
               ),
             ],
