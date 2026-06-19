@@ -873,7 +873,6 @@ class _LocationSheetState extends State<_LocationSheet> {
     _branch = widget.selectedBranch;
     _pincodeCtrl.text = widget.pincode ?? '';
     _cityCtrl.text = widget.city ?? '';
-    _filteredBranches = widget.branches;
     _addressCtrl.text = '';
 
     _pincodeCtrl.addListener(_scheduleFetch);
