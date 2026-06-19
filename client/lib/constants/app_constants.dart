@@ -1,9 +1,7 @@
 class AppConstants {
-  // TODO: Replace with your deployed server URL
-  // Local dev example:  'http://192.168.1.10:5000'
-  // Production example: 'https://api.yourdomain.com'
-  static const String serverUrl = 'http://192.168.1.10:5000';
+  static const String serverUrl = 'https://chat.neuralarc.com';
   static const String socketUrl = serverUrl;
+  static const String googleMapsApiKey = 'AIzaSyBIGPfna9mxSXpAJOhp0xigKhyZeeU0L0I';
 
   // How often the technician pings location while on an active job
   static const int locationPingSeconds = 5;

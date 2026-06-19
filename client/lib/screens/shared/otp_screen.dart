@@ -134,9 +134,13 @@ class _OtpScreenState extends State<OtpScreen> {
       FocusScope.of(context).requestFocus(_focusNodes[0]);
     } else {
       setState(() => _isVerifying = false);
-      // TODO: replace apiUserId with the real user ID from API response
-      // e.g. final apiUserId = apiResponse['user_id'] as int;
-      const int apiUserId = 1; // placeholder until real auth API is wired
+      const technicianIds = {
+        '8056535850': 1,
+        '7339535472': 2,
+      };
+      final int apiUserId = widget.userRole == 'technician'
+          ? (technicianIds[widget.mobile] ?? 1)
+          : 1;
       _connectSocket(apiUserId);
       _showSuccess();
     }

@@ -3,7 +3,9 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/razorpay_service.dart';
-import 'technician_dashboard_screen.dart';
+import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/models/technician_booking.dart';
+import 'technician_active_job_screen.dart';
 
 // ─── Prescription doc model ──────────────────────────────────────────────────
 
@@ -116,7 +118,7 @@ class _TechnicianBookingDetailScreenState
 
   // Payment
   bool _isProcessingPayment = false;
-  bool _paymentDone = false; // tracks if tests payment collected
+  bool _paymentDone = false;
 
   // New customer form
   bool _showNewCustomerForm = false;
@@ -148,10 +150,8 @@ class _TechnicianBookingDetailScreenState
   double get _testsTotal =>
       _selectedTests.fold(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
 
-  // Service charge already paid by customer at booking — NOT collected here
   double get _serviceChargePaid => widget.booking.serviceChargePaid;
 
-  // Only tests amount is due at collection
   double get _amountDue => _testsTotal;
 
   int get _currentStepIndex =>
@@ -183,13 +183,24 @@ class _TechnicianBookingDetailScreenState
   void _saveNewCustomer() {
     final name    = _ncNameCtrl.text.trim();
     final mobile  = _ncMobileCtrl.text.trim();
+    
+    if (name.isEmpty || mobile.length != 10) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please fill all required fields'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
     final tests   = List<Map<String, String>>.from(_additionalCustomerTests);
 
     final newBooking = TechnicianBooking(
       id: 'BK${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}',
       customerName: name,
       customerPhone: mobile,
-      address: widget.booking.address,   // same location as current booking
+      address: widget.booking.address,
       city: widget.booking.city,
       pincode: widget.booking.pincode,
       date: widget.booking.date,
@@ -202,7 +213,6 @@ class _TechnicianBookingDetailScreenState
       assignedAt: DateTime.now(),
     );
 
-    // Notify dashboard to add this booking
     widget.onNewBooking?.call(newBooking);
 
     setState(() {
@@ -220,9 +230,6 @@ class _TechnicianBookingDetailScreenState
       _showAddCustTest = false;
       _custTestSearch = '';
     });
-
-    // TODO: POST /api/bookings/additional
-    // { name, mobile, email, dob, gender, relation, healthCondition, tests, booking_id, address }
 
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text('$name added with ${tests.length} test(s) — visible in dashboard'),
@@ -278,53 +285,152 @@ class _TechnicianBookingDetailScreenState
 
   // ── Journey advance ───────────────────────────────────────
 
-  void _advanceStatus() {
-    final next = _nextStatus;
-    if (next == null) return;
+// ── Journey advance ───────────────────────────────────────
 
-    // If next step is Completed, check payment first
-    if (next == 'Completed') {
-      if (!_paymentDone && _amountDue > 0) {
-        _showCompleteSheet(); // shows "Make Payment" first
-      } else {
-        _showOtpDialog(); // payment done → go to OTP
-      }
-      return;
-    }
-
-    // All other transitions: confirm + advance
-    String actionLabel = next;
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Text('$actionLabel?',
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-        content: Text(
-          _journeySteps.firstWhere((s) => s.status == next).description,
-          style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary))),
-          ElevatedButton(
-            onPressed: () {
-              setState(() => _currentStatus = next);
-              Navigator.pop(context);
-              // TODO: PUT /api/bookings/${widget.booking.id}/status { status: next }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.brandGreen, elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('Confirm', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
+void _advanceStatus() {
+  // If already completed, don't allow any further actions
+  if (_currentStatus == 'Completed') {
+    // Just pop the screen if it's completed
+    Navigator.of(context).pop(true);
+    return;
   }
 
-  // ── OTP dialog ────────────────────────────────────────────
+  final next = _nextStatus;
+  if (next == null) return;
+
+  // Check if we're already in progress and trying to start again
+  if (next == 'Journey Started' && _currentStatus == 'Journey Started') {
+    // Resume the journey instead of starting a new one
+    _resumeJourney();
+    return;
+  }
+
+  // Completed: payment check → OTP dialog
+  if (next == 'Completed') {
+    if (!_paymentDone && _amountDue > 0) {
+      _showCompleteSheet();
+    } else {
+      _showOtpDialog();
+    }
+    return;
+  }
+
+  showDialog(
+    context: context,
+    builder: (_) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Text('$next?',
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+      content: Text(
+        _journeySteps.firstWhere((s) => s.status == next).description,
+        style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary))),
+        ElevatedButton(
+          onPressed: () {
+            Navigator.pop(context);
+            _handleStatusTransition(next);
+          },
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.brandGreen, elevation: 0,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+          child: const Text('Confirm', style: TextStyle(color: Colors.white)),
+        ),
+      ],
+    ),
+  );
+}
+
+  // Applies the correct socket event and navigation for each status transition,
+// mirroring the behaviour of the dashboard "Start Journey" card flow.
+void _handleStatusTransition(String next) {
+  final bookingId = int.tryParse(widget.booking.id) ?? 0;
+
+  switch (next) {
+    case 'Journey Started':
+      // Only update status and emit if not already in progress
+      if (_currentStatus != 'Journey Started') {
+        setState(() => _currentStatus = 'Journey Started');
+        // Notify customer immediately
+        if (bookingId > 0) SocketService.instance.emitEnRoute(bookingId: bookingId);
+      }
+      
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => TechnicianActiveJobScreen(
+            bookingId: bookingId,
+            patientName: widget.booking.customerName,
+            patientMobile: widget.booking.customerPhone,
+            patientAddress: widget.booking.address,
+            patientLat: widget.booking.patientLat,
+            patientLng: widget.booking.patientLng,
+            hospital: widget.booking.hospital,
+            startInEnRoute: true,
+          ),
+        ),
+      ).then((wasCompleted) {
+        // If OTP was verified inside, propagate the completion signal up to
+        // whoever opened this Manage Booking screen (e.g. the dashboard).
+        if (wasCompleted == true && mounted) {
+          // CRITICAL: Set status to Completed before popping
+          setState(() => _currentStatus = 'Completed');
+          // Pop with true to signal completion to parent
+          Navigator.of(context).pop(true);
+        } else if (wasCompleted == false && mounted) {
+          // If not completed, make sure status is still Journey Started
+          // This handles the case where user came back without completing
+          setState(() => _currentStatus = 'Journey Started');
+        }
+      });
+      break;
+
+    case 'Destination Reached':
+      setState(() => _currentStatus = 'Destination Reached');
+      if (bookingId > 0) SocketService.instance.emitArrived(bookingId: bookingId);
+      break;
+
+    default:
+      // Collection Started and any future intermediate steps — local state only
+      setState(() => _currentStatus = next);
+  }
+}
+// ── Resume Journey ───────────────────────────────────────
+
+void _resumeJourney() {
+  final bookingId = int.tryParse(widget.booking.id) ?? 0;
+  
+  Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) => TechnicianActiveJobScreen(
+        bookingId: bookingId,
+        patientName: widget.booking.customerName,
+        patientMobile: widget.booking.customerPhone,
+        patientAddress: widget.booking.address,
+        patientLat: widget.booking.patientLat,
+        patientLng: widget.booking.patientLng,
+        hospital: widget.booking.hospital,
+        startInEnRoute: true,
+      ),
+    ),
+  ).then((wasCompleted) {
+    if (wasCompleted == true && mounted) {
+      // CRITICAL: Set status to Completed before popping
+      setState(() => _currentStatus = 'Completed');
+      // Signal completion to parent screen
+      Navigator.of(context).pop(true);
+    } else if (wasCompleted == false && mounted) {
+      // If not completed, status stays as Journey Started
+      // This handles the case where user came back without completing
+      setState(() => _currentStatus = 'Journey Started');
+    }
+  });
+}
+ // ── OTP dialog ────────────────────────────────────────────
 
   void _showOtpDialog() {
     for (final c in _otpControllers) c.clear();
@@ -464,8 +570,6 @@ class _TechnicianBookingDetailScreenState
       ),
     );
 
-    // Auto-focus first OTP box — call directly on the node so it
-    // finds its own scope, avoiding the cross-scope assertion.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _otpFocusNodes[0].requestFocus();
     });
@@ -473,14 +577,17 @@ class _TechnicianBookingDetailScreenState
 
   Future<void> _verifyOtp(BuildContext ctx, StateSetter setDialogState) async {
     final otp = _otpControllers.map((c) => c.text).join();
-    if (otp.length < 4) return;
+    if (otp.length < 4) {
+      setDialogState(() => _otpError = true);
+      return;
+    }
 
     setState(() => _isVerifyingOtp = true);
-
-    // TODO: POST /api/bookings/${widget.booking.id}/verify-otp { otp }
-    await Future.delayed(const Duration(milliseconds: 1000));
+    setDialogState(() {});
 
     // Mock: any non-'0000' OTP succeeds
+    await Future.delayed(const Duration(milliseconds: 1000));
+
     if (otp == '0000') {
       setState(() { _isVerifyingOtp = false; _otpError = true; });
       setDialogState(() {});
@@ -489,13 +596,22 @@ class _TechnicianBookingDetailScreenState
         _isVerifyingOtp = false;
         _currentStatus = 'Completed';
       });
+      SocketService.instance.emitCollectionCompleted(
+        bookingId: int.tryParse(widget.booking.id) ?? 0,
+      );
       Navigator.pop(ctx);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('OTP verified — booking marked as Completed!'),
-        backgroundColor: AppColors.brandGreen,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text('OTP verified — booking marked as Completed!'),
+          backgroundColor: AppColors.brandGreen,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          duration: const Duration(seconds: 2),
+        ));
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) Navigator.of(context).pop(true); // signals completion to caller
+        });
+      }
     }
   }
 
@@ -584,7 +700,9 @@ class _TechnicianBookingDetailScreenState
               bytes: bytes, fileName: image.name, uploadedAt: DateTime.now())));
         }
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('Error picking image: $e');
+    }
     setState(() => _docIsPicking = false);
   }
 
@@ -601,8 +719,6 @@ class _TechnicianBookingDetailScreenState
   }
 
   // ── Payment ───────────────────────────────────────────────
-
-  // ── Complete sheet — payment then OTP ────────────────────
 
   void _showCompleteSheet() {
     showModalBottomSheet(
@@ -652,7 +768,6 @@ class _TechnicianBookingDetailScreenState
                         Navigator.pop(ctx);
                         _collectPayment(onDone: () {
                           setState(() => _paymentDone = true);
-                          // Re-open sheet after payment success
                           Future.delayed(
                               const Duration(milliseconds: 300), _showCompleteSheet);
                         });
@@ -702,14 +817,6 @@ class _TechnicianBookingDetailScreenState
         ),
       ),
     );
-  }
-
-  void _collectPaymentThenOtp() {
-    if (!_paymentDone && _amountDue > 0) {
-      _showCompleteSheet();
-    } else {
-      _showOtpDialog();
-    }
   }
 
   void _collectPayment({VoidCallback? onDone}) {
@@ -772,7 +879,7 @@ class _TechnicianBookingDetailScreenState
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
-          onPressed: () => Navigator.pop(context),
+          onPressed: () => Navigator.pop(context, _isCompleted ? true : null),
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -808,7 +915,6 @@ class _TechnicianBookingDetailScreenState
             icon: Icons.alt_route_rounded,
             child: Column(
               children: [
-                // Stepper
                 ...List.generate(_journeySteps.length, (i) {
                   final step = _journeySteps[i];
                   final isDone = i < _currentStepIndex;
@@ -819,7 +925,6 @@ class _TechnicianBookingDetailScreenState
                     child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Icon + line — stretches to match text height
                       Column(children: [
                         AnimatedContainer(
                           duration: const Duration(milliseconds: 300),
@@ -879,31 +984,56 @@ class _TechnicianBookingDetailScreenState
                           ),
                         ),
                       ),
-                      if (isCurrent && _canAdvance) ...[
-                        const SizedBox(width: 8),
-                        GestureDetector(
-                          onTap: _advanceStatus,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: step.color,
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              _nextStatus == 'Completed'
-                                  ? 'Complete ▸'
-                                  : '${_journeySteps[i + 1].label} ▸',
-                              style: const TextStyle(
-                                  fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white),
-                            ),
-                          ),
-                        ),
-                      ],
+          if (isCurrent && _canAdvance) ...[
+  const SizedBox(width: 8),
+  if (_currentStatus == 'Journey Started') 
+    // Show Resume button only if not completed
+    GestureDetector(
+      onTap: _resumeJourney,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1565C0),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: const Text(
+          'Resume ▸',
+          style: TextStyle(
+            fontSize: 11, 
+            fontWeight: FontWeight.w700, 
+            color: Colors.white
+          ),
+        ),
+      ),
+    )
+  else if (_currentStatus != 'Completed')
+    GestureDetector(
+      onTap: _advanceStatus,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: step.color,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          _nextStatus == 'Completed'
+              ? 'Complete ▸'
+              : '${_journeySteps[i + 1].label} ▸',
+          style: const TextStyle(
+            fontSize: 11, 
+            fontWeight: FontWeight.w700, 
+            color: Colors.white
+          ),
+        ),
+      ),
+    ),
+],          
                     ],
                   ));
                 }),
               ],
             ),
+            
           ),
 
           const SizedBox(height: 14),
@@ -921,7 +1051,9 @@ class _TechnicianBookingDetailScreenState
                 'Mode', widget.booking.mode,
               ),
               _InfoRow(Icons.location_on_outlined, 'Address',
-                  '${widget.booking.address}, ${widget.booking.city} – ${widget.booking.pincode}'),
+                  [widget.booking.address, widget.booking.city, widget.booking.pincode]
+                      .where((s) => s.isNotEmpty)
+                      .join(', ')),
               _InfoRow(Icons.event_outlined, 'Date', _formatDate(widget.booking.date)),
               _InfoRow(Icons.schedule_outlined, 'Slot', widget.booking.timeSlot),
               if (widget.booking.isVip)
@@ -946,7 +1078,7 @@ class _TechnicianBookingDetailScreenState
 
           const SizedBox(height: 14),
 
-          // ── Tests (editable unless completed) ─────────────
+          // ── Tests ──────────────────────────────────────────
           _SectionCard(
             title: 'Tests & Packages',
             icon: Icons.science_outlined,
@@ -991,7 +1123,6 @@ class _TechnicianBookingDetailScreenState
                   ]),
                 )),
 
-                // Add test (only if not completed)
                 if (!_isCompleted && !_showAddTest)
                   GestureDetector(
                     onTap: () => setState(() => _showAddTest = true),
@@ -1056,7 +1187,6 @@ class _TechnicianBookingDetailScreenState
                   )),
                 ],
 
-                // Billing summary
                 if (_selectedTests.isNotEmpty) ...[
                   const Divider(height: 20),
                   _BillRow('Tests Total', '₹${_testsTotal.toInt()}', bold: true, green: true),
@@ -1071,13 +1201,12 @@ class _TechnicianBookingDetailScreenState
 
           const SizedBox(height: 14),
 
-          // ── Prescription / Document (multi-image) ─────────
+          // ── Prescription / Document ─────────────────────────
           _SectionCard(
             title: 'Prescription / Document',
             icon: Icons.description_outlined,
             badge: widget.booking.docRequired ? 'REQUIRED' : null,
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              // Info note
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
@@ -1118,7 +1247,6 @@ class _TechnicianBookingDetailScreenState
               ),
               const SizedBox(height: 12),
 
-              // Thumbnail grid — shown when images are present
               if (_docUploads.isNotEmpty) ...[
                 SizedBox(
                   height: 104,
@@ -1149,7 +1277,6 @@ class _TechnicianBookingDetailScreenState
                 const SizedBox(height: 12),
               ],
 
-              // Empty upload tile
               if (_docUploads.isEmpty)
                 GestureDetector(
                   onTap: _docIsPicking ? null : _showDocSourcePicker,
@@ -1187,7 +1314,6 @@ class _TechnicianBookingDetailScreenState
                   ),
                 ),
 
-              // Verify / verified row
               if (_docUploads.isNotEmpty && !_docVerified) ...[
                 const SizedBox(height: 10),
                 SizedBox(
@@ -1219,7 +1345,7 @@ class _TechnicianBookingDetailScreenState
             ]),
           ),
 
-          // ── Collect Payment (tests amount only) ───────────
+          // ── Collect Payment ──────────────────────────────
           if (!_isCompleted)
             _SectionCard(
               title: 'Collect Payment',
@@ -1245,15 +1371,21 @@ class _TechnicianBookingDetailScreenState
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: _isProcessingPayment ? null : () => _collectPayment(onDone: null),
+                    onPressed: _isProcessingPayment || _amountDue == 0 ? null : () => _collectPayment(onDone: null),
                     icon: _isProcessingPayment
                         ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                         : const Icon(Icons.payment_outlined, size: 18),
-                    label: Text(_isProcessingPayment ? 'Processing…' : 'Collect ₹${_amountDue.toInt()} via Razorpay',
-                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                    label: Text(
+                      _amountDue == 0 
+                          ? 'No Payment Required' 
+                          : (_isProcessingPayment ? 'Processing…' : 'Collect ₹${_amountDue.toInt()} via Razorpay'),
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                    ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1565C0), foregroundColor: Colors.white,
-                      elevation: 0, padding: const EdgeInsets.symmetric(vertical: 12),
+                      backgroundColor: _amountDue == 0 ? AppColors.brandGreen : const Color(0xFF1565C0), 
+                      foregroundColor: Colors.white,
+                      elevation: 0, 
+                      padding: const EdgeInsets.symmetric(vertical: 12),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     ),
                   ),
@@ -1297,7 +1429,6 @@ class _TechnicianBookingDetailScreenState
                   ),
 
                 if (_showNewCustomerForm) ...[
-                  // Name
                   _FormField(
                     label: 'Full Name *',
                     controller: _ncNameCtrl,
@@ -1307,7 +1438,6 @@ class _TechnicianBookingDetailScreenState
                   ),
                   const SizedBox(height: 10),
 
-                  // Mobile
                   _FormField(
                     label: 'Mobile Number *',
                     controller: _ncMobileCtrl,
@@ -1318,7 +1448,6 @@ class _TechnicianBookingDetailScreenState
                   ),
                   const SizedBox(height: 10),
 
-                  // Email
                   _FormField(
                     label: 'Email Address',
                     controller: _ncEmailCtrl,
@@ -1328,7 +1457,6 @@ class _TechnicianBookingDetailScreenState
                   ),
                   const SizedBox(height: 10),
 
-                  // Date of Birth
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -1381,7 +1509,6 @@ class _TechnicianBookingDetailScreenState
                   ),
                   const SizedBox(height: 10),
 
-                  // Gender
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -1413,7 +1540,6 @@ class _TechnicianBookingDetailScreenState
                   ),
                   const SizedBox(height: 10),
 
-                  // Relation
                   DropdownButtonFormField<String>(
                     value: _ncRelCtrl.text.isEmpty ? null : _ncRelCtrl.text,
                     isExpanded: true,
@@ -1433,7 +1559,6 @@ class _TechnicianBookingDetailScreenState
                   ),
                   const SizedBox(height: 12),
 
-                  // Health Condition / Notes
                   _FormField(
                     label: 'Health Condition / Notes',
                     controller: _ncHealthCtrl,
@@ -1443,7 +1568,6 @@ class _TechnicianBookingDetailScreenState
                   ),
                   const SizedBox(height: 12),
 
-                  // Tests for new customer
                   const Text('Tests for this customer',
                       style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                   const SizedBox(height: 8),
@@ -1474,7 +1598,6 @@ class _TechnicianBookingDetailScreenState
                   )),
 
                   const SizedBox(height: 6),
-                  // Add test — search and select
                   if (!_showAddCustTest)
                     GestureDetector(
                       onTap: () => setState(() => _showAddCustTest = true),
@@ -1544,7 +1667,6 @@ class _TechnicianBookingDetailScreenState
 
                   const SizedBox(height: 14),
 
-                  // Submit / Cancel
                   Row(children: [
                     Expanded(
                       child: OutlinedButton(
@@ -1572,7 +1694,6 @@ class _TechnicianBookingDetailScreenState
                         onPressed: (_ncNameCtrl.text.trim().isNotEmpty &&
                                 _ncMobileCtrl.text.trim().length == 10)
                             ? () => _saveNewCustomer()
-                              
                             : null,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppColors.brandGreen,
@@ -1593,7 +1714,6 @@ class _TechnicianBookingDetailScreenState
         ],
       ),
 
-      // Bottom save bar (hidden after completed)
       bottomNavigationBar: _isCompleted
           ? null
           : Container(
@@ -1606,17 +1726,17 @@ class _TechnicianBookingDetailScreenState
                 height: 50,
                 child: ElevatedButton(
                   onPressed: () {
-                    // TODO: PUT /api/bookings/${widget.booking.id} { tests: _selectedTests }
-                    Navigator.pop(context);
                     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text('Changes saved'),
+                      content: const Text('Changes saved'),
                       backgroundColor: AppColors.brandGreen,
                       behavior: SnackBarBehavior.floating,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ));
+                    Navigator.pop(context);
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen, foregroundColor: Colors.white,
+                    backgroundColor: AppColors.brandGreen, 
+                    foregroundColor: Colors.white,
                     elevation: 0,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
@@ -1754,7 +1874,6 @@ class _CompleteStep extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Step circle
           Container(
             width: 32, height: 32,
             decoration: BoxDecoration(
@@ -1779,7 +1898,6 @@ class _CompleteStep extends StatelessWidget {
           ),
           const SizedBox(width: 12),
 
-          // Text
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1796,7 +1914,6 @@ class _CompleteStep extends StatelessWidget {
           ),
           const SizedBox(width: 10),
 
-          // Button
           GestureDetector(
             onTap: onTap,
             child: Container(

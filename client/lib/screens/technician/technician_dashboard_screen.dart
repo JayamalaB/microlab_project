@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'package:geolocator/geolocator.dart';
+import 'package:microlab/constants/app_constants.dart';
+import 'package:microlab/models/technician_booking.dart';
 import 'technician_booking_detail_screen.dart';
 import 'technician_history_screen.dart';
 import 'technician_slot_screen.dart';
@@ -10,48 +13,6 @@ import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/screens/customer/support_chatbot.dart';
-
-// ─── Technician Booking Model ─────────────────────────────────────────────────
-
-class TechnicianBooking {
-  final String id;
-  final String customerName;
-  final String customerPhone;
-  final String address;
-  final String city;
-  final String pincode;
-  final DateTime date;
-  final String timeSlot;
-  final List<String> testNames;
-  final String mode; // 'Home Collection' | 'Lab Test'
-  final String status; // 'Pending'|'Confirmed'|'Journey Started'|'Destination Reached'|'Collection Started'|'Completed'|'Cancelled'
-  final bool isVip;
-  final bool docRequired;
-  final bool docVerified;
-  final double serviceChargePaid; // already collected at booking
-  final double testsTotal;       // amount due at collection
-  final DateTime? assignedAt;
-
-  TechnicianBooking({
-    required this.id,
-    required this.customerName,
-    required this.customerPhone,
-    required this.address,
-    required this.city,
-    required this.pincode,
-    required this.date,
-    required this.timeSlot,
-    required this.testNames,
-    required this.mode,
-    required this.status,
-    this.isVip = false,
-    this.docRequired = false,
-    this.docVerified = false,
-    this.serviceChargePaid = 99.0,
-    this.testsTotal = 0.0,
-    this.assignedAt,
-  });
-}
 
 // ─── Technician Dashboard Screen ──────────────────────────────────────────────
 
@@ -71,125 +32,237 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
   late List<TechnicianBooking> _bookings;
 
   StreamSubscription<SocketBooking>? _bookingRequestSub;
-  StreamSubscription<int>? _bookingCancelledSub;
   bool _overlayOpen = false;
+
+  // Availability — technician starts Offline after login
+  bool _isOnline = false;
+  bool _isTogglingOnline = false;
+  Timer? _idlePingTimer;
 
   @override
   void initState() {
     super.initState();
     _loadMockData();
+    // Sync local flag from the singleton so that if this widget is recreated
+    // (hot-reload, navigation stack rebuild) while the tech is already online,
+    // incoming booking_request events are not silently dropped by the
+    // !_isOnline guard in _listenToSocket.
+    _isOnline = SocketService.instance.isAvailable;
+    if (_isOnline) _startIdlePing();
     _listenToSocket();
   }
 
   void _listenToSocket() {
     _bookingRequestSub =
         SocketService.instance.onBookingRequest.listen((booking) {
-      if (!mounted || _overlayOpen) return;
+      if (!mounted || _overlayOpen || !_isOnline) return;
       _overlayOpen = true;
       showBookingRequestOverlay(context, booking).then((accepted) {
         _overlayOpen = false;
         if (!accepted || !mounted) return;
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => TechnicianActiveJobScreen(
-              bookingId:      booking.bookingId,
-              patientName:    booking.patientName,
-              patientMobile:  booking.patientMobile,
-              patientAddress: booking.patientAddress,
-              patientLat:     booking.patientLat,
-              patientLng:     booking.patientLng,
-              hospital:       booking.hospital,
-            ),
-          ),
-        );
+        // Add to dashboard as a pending task — technician starts when ready
+        setState(() {
+          _bookings.insert(0, TechnicianBooking(
+            id: booking.bookingId.toString(),
+            customerName: booking.patientName,
+            customerPhone: booking.patientMobile,
+            address: booking.patientAddress,
+            city: '',
+            pincode: '',
+            date: DateTime.now(),
+            timeSlot: 'ASAP',
+            testNames: const ['Home Collection'],
+            mode: 'Home Collection',
+            status: 'Confirmed',
+            isVip: false,
+            docRequired: false,
+            docVerified: false,
+            serviceChargePaid: 0,
+            testsTotal: 0,
+            assignedAt: DateTime.now(),
+            patientLat: booking.patientLat,
+            patientLng: booking.patientLng,
+            hospital: booking.hospital,
+          ));
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Booking #${booking.bookingId} added — start when ready'),
+          backgroundColor: AppColors.brandGreen,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          duration: const Duration(seconds: 3),
+        ));
       });
     });
 
-    _bookingCancelledSub =
-        SocketService.instance.onBookingCancelled.listen((_) {
-      // Another technician accepted — overlay will have already timed out
-      // or the user will be on the overlay; the overlay's silent timeout
-      // handles this gracefully (no action needed here).
-    });
+    // booking_cancelled is handled inside BookingRequestOverlay itself.
+    // The overlay subscribes to onBookingCancelled with a bookingId filter and
+    // calls Navigator.pop(false) on its own context — a single, safe dismiss path.
   }
 
   void _loadMockData() {
-    _bookings = [
-      TechnicianBooking(
-        id: 'BK00123456',
-        customerName: 'Ravi Kumar',
-        customerPhone: '9876543210',
-        address: '12, Gandhi Street, T Nagar',
-        city: 'Chennai',
-        pincode: '600017',
-        date: DateTime.now().add(const Duration(hours: 3)),
-        timeSlot: '10:00 AM',
-        testNames: ['HbA1c', 'CBC'],
-        mode: 'Home Collection',
-        status: 'Confirmed',
-        serviceChargePaid: 99.0,
-        testsTotal: 890.0,
-        isVip: false,
-        assignedAt: DateTime.now().subtract(const Duration(hours: 1)),
-      ),
-      TechnicianBooking(
-        id: 'BK00123789',
-        customerName: 'Priya Kumar',
-        customerPhone: '9876543211',
-        address: '8, Anna Salai, Adyar',
-        city: 'Chennai',
-        pincode: '600020',
-        date: DateTime.now().add(const Duration(hours: 5)),
-        timeSlot: '1:00 PM',
-        testNames: ['Diabetes Care Package'],
-        mode: 'Home Collection',
-        status: 'Journey Started',
-        serviceChargePaid: 99.0,
-        testsTotal: 1440.0,
-        isVip: true,
-        assignedAt: DateTime.now().subtract(const Duration(minutes: 30)),
-      ),
-      // Completed bookings are shown in History screen via GET /api/technician/bookings?status=completed
-    ];
+    _bookings = []; // Real bookings arrive via socket (booking_request events)
   }
 
+  // ── Online / Offline toggle ────────────────────────────────────────────────
 
-  void _showNewRequestDialog(TechnicianBooking booking) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _NewRequestDialog(
-        booking: booking,
-        onConfirm: () {
-          setState(() {
-            _bookings.insert(0, TechnicianBooking(
-              id: booking.id,
-              customerName: booking.customerName,
-              customerPhone: booking.customerPhone,
-              address: booking.address,
-              city: booking.city,
-              pincode: booking.pincode,
-              date: booking.date,
-              timeSlot: booking.timeSlot,
-              testNames: booking.testNames,
-              mode: booking.mode,
-              status: 'Confirmed',
-              isVip: booking.isVip,
-              assignedAt: DateTime.now(),
+  Future<void> _toggleAvailability() async {
+    if (_isTogglingOnline) return;
+    setState(() => _isTogglingOnline = true);
+
+    try {
+      if (_isOnline) {
+        _stopIdlePing();
+        SocketService.instance.goOffline();
+        if (mounted) setState(() => _isOnline = false);
+      } else {
+        // Ensure location permission is granted before going Online
+        var permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+        }
+        if (permission == LocationPermission.denied ||
+            permission == LocationPermission.deniedForever) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: const Text('Location permission is required to go online'),
+              backgroundColor: const Color(0xFFD32F2F),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             ));
-          });
-          Navigator.pop(context);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: const Text('Booking confirmed and added to your schedule'),
-            backgroundColor: AppColors.brandGreen,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
-        },
-        onCancel: () => Navigator.pop(context),
-      ),
+          }
+          return;
+        }
+
+        // Fetch position — fall back to last-known on timeout
+        Position? pos;
+        try {
+          pos = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(accuracy: LocationAccuracy.medium),
+          ).timeout(const Duration(seconds: 10));
+        } catch (_) {
+          pos = await Geolocator.getLastKnownPosition();
+        }
+
+        SocketService.instance.goOnline(
+          lat: pos?.latitude ?? 0.0,
+          lng: pos?.longitude ?? 0.0,
+        );
+        if (mounted) setState(() => _isOnline = true);
+        _startIdlePing();
+      }
+    } finally {
+      if (mounted) setState(() => _isTogglingOnline = false);
+    }
+  }
+
+  void _startIdlePing() {
+    _idlePingTimer?.cancel();
+    _idlePingTimer = Timer.periodic(
+      Duration(seconds: AppConstants.idlePingSeconds),
+      (_) async {
+        if (!mounted || !_isOnline) return;
+        try {
+          final pos = await Geolocator.getLastKnownPosition();
+          if (pos != null) {
+            SocketService.instance.emitIdleLocation(
+              lat: pos.latitude,
+              lng: pos.longitude,
+            );
+          }
+        } catch (_) {}
+      },
     );
+  }
+
+  void _stopIdlePing() {
+    _idlePingTimer?.cancel();
+    _idlePingTimer = null;
+  }
+
+  void _startJourney(TechnicianBooking booking) {
+    final bookingId = int.tryParse(booking.id) ?? 0;
+
+    // Immediately notify customer that tech is on the way, before the screen
+    // opens and GPS warms up — otherwise customer sees "Connecting..." forever.
+    if (bookingId > 0) {
+      SocketService.instance.emitEnRoute(bookingId: bookingId);
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TechnicianActiveJobScreen(
+          bookingId: bookingId,
+          patientName: booking.customerName,
+          patientMobile: booking.customerPhone,
+          patientAddress: booking.address,
+          patientLat: booking.patientLat,
+          patientLng: booking.patientLng,
+          hospital: booking.hospital,
+          startInEnRoute: true, // Skip the redundant internal "Start Journey" button
+        ),
+      ),
+    ).then((wasCompleted) {
+      if (!mounted) return;
+      if (wasCompleted == true) {
+        // OTP verified → collection complete → remove card from dashboard
+        setState(() => _bookings.removeWhere((b) => b.id == booking.id));
+        return;
+      }
+      // Tech exited mid-journey — keep card visible as "Journey Started"
+      final idx = _bookings.indexWhere((b) => b.id == booking.id);
+      if (idx != -1 && _bookings[idx].status == 'Confirmed') {
+        setState(() {
+          _bookings[idx] = TechnicianBooking(
+            id: booking.id,
+            customerName: booking.customerName,
+            customerPhone: booking.customerPhone,
+            address: booking.address,
+            city: booking.city,
+            pincode: booking.pincode,
+            date: booking.date,
+            timeSlot: booking.timeSlot,
+            testNames: booking.testNames,
+            mode: booking.mode,
+            status: 'Journey Started',
+            isVip: booking.isVip,
+            docRequired: booking.docRequired,
+            docVerified: booking.docVerified,
+            serviceChargePaid: booking.serviceChargePaid,
+            testsTotal: booking.testsTotal,
+            assignedAt: booking.assignedAt,
+            patientLat: booking.patientLat,
+            patientLng: booking.patientLng,
+            hospital: booking.hospital,
+          );
+        });
+      }
+    });
+  }
+
+  // Re-opens the active job screen for a booking already in progress.
+  // Does NOT re-emit emitEnRoute — customer already received it.
+  void _resumeJourney(TechnicianBooking booking) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TechnicianActiveJobScreen(
+          bookingId: int.tryParse(booking.id) ?? 0,
+          patientName: booking.customerName,
+          patientMobile: booking.customerPhone,
+          patientAddress: booking.address,
+          patientLat: booking.patientLat,
+          patientLng: booking.patientLng,
+          hospital: booking.hospital,
+          startInEnRoute: true,
+        ),
+      ),
+    ).then((wasCompleted) {
+      if (wasCompleted == true && mounted) {
+        setState(() => _bookings.removeWhere((b) => b.id == booking.id));
+      }
+    });
   }
 
   List<TechnicianBooking> get _pending => _bookings
@@ -207,90 +280,13 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
     ));
   }
 
-  void _markInProgress(TechnicianBooking booking) {
-    setState(() {
-      final idx = _bookings.indexWhere((b) => b.id == booking.id);
-      if (idx != -1) {
-        _bookings[idx] = TechnicianBooking(
-          id: booking.id,
-          customerName: booking.customerName,
-          customerPhone: booking.customerPhone,
-          address: booking.address,
-          city: booking.city,
-          pincode: booking.pincode,
-          date: booking.date,
-          timeSlot: booking.timeSlot,
-          testNames: booking.testNames,
-          mode: booking.mode,
-          status: 'Journey Started',
-          isVip: booking.isVip,
-          docRequired: booking.docRequired,
-          assignedAt: booking.assignedAt,
-        );
-      }
-    });
-  }
-
-  void _markCompleted(TechnicianBooking booking) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Mark as Completed?',
-            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
-        content: Text(
-          'Confirm that you have collected samples from ${booking.customerName}.',
-          style: const TextStyle(fontSize: 14, color: AppColors.textSecondary),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel',
-                style: TextStyle(color: AppColors.textSecondary)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              setState(() {
-                final idx = _bookings.indexWhere((b) => b.id == booking.id);
-                if (idx != -1) {
-                  _bookings[idx] = TechnicianBooking(
-                    id: booking.id,
-                    customerName: booking.customerName,
-                    customerPhone: booking.customerPhone,
-                    address: booking.address,
-                    city: booking.city,
-                    pincode: booking.pincode,
-                    date: booking.date,
-                    timeSlot: booking.timeSlot,
-                    testNames: booking.testNames,
-                    mode: booking.mode,
-                    status: 'Completed',
-                    isVip: booking.isVip,
-                    docRequired: booking.docRequired,
-                    assignedAt: booking.assignedAt,
-                  );
-                }
-              });
-              Navigator.pop(context);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.brandGreen,
-              elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('Confirm', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
-  }
-
   void _onNavTap(int index) => setState(() => _selectedIndex = index);
 
   @override
   void dispose() {
     _bookingRequestSub?.cancel();
-    _bookingCancelledSub?.cancel();
+    _stopIdlePing();
+    if (_isOnline) SocketService.instance.goOffline();
     super.dispose();
   }
 
@@ -299,115 +295,236 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.light.copyWith(statusBarColor: Colors.transparent),
       child: Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: _selectedIndex == 0
-          ? AppBar(
-              backgroundColor: AppColors.brandGreen,
-              elevation: 0,
-              automaticallyImplyLeading: false,
-              title: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('MicroLab',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600)),
-                  Text('Technician · +91 ${widget.mobile}',
-                      style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.75), fontSize: 11)),
+        backgroundColor: AppColors.background,
+        appBar: _selectedIndex == 0
+            ? AppBar(
+                backgroundColor: AppColors.brandGreen,
+                elevation: 0,
+                automaticallyImplyLeading: false,
+                title: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('MicroLab',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600)),
+                    Text('Technician · +91 ${widget.mobile}',
+                        style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.75), fontSize: 11)),
+                  ],
+                ),
+                actions: [
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: _isTogglingOnline
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              AnimatedContainer(
+                                duration: const Duration(milliseconds: 400),
+                                width: 8,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: _isOnline
+                                      ? Colors.greenAccent
+                                      : Colors.white38,
+                                ),
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                _isOnline ? 'Online' : 'Offline',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: _isOnline
+                                      ? Colors.greenAccent
+                                      : Colors.white60,
+                                ),
+                              ),
+                              Transform.scale(
+                                scale: 0.78,
+                                child: Switch(
+                                  value: _isOnline,
+                                  onChanged: _isTogglingOnline
+                                      ? null
+                                      : (_) => _toggleAvailability(),
+                                  activeThumbColor: Colors.greenAccent,
+                                  activeTrackColor:
+                                      Colors.greenAccent.withValues(alpha: 0.35),
+                                  inactiveThumbColor: Colors.white54,
+                                  inactiveTrackColor: Colors.white24,
+                                ),
+                              ),
+                            ],
+                          ),
+                  ),
                 ],
-              ),
-              actions: const [],
-            )
-          : null,
-      body: Stack(
-        children: [
-          IndexedStack(
-            index: _selectedIndex,
-            children: [
-              _pending.isEmpty
-                  ? _emptyState('No pending bookings', Icons.calendar_today_outlined)
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-                      itemCount: _pending.length,
-                      itemBuilder: (_, i) => _PendingBookingCard(
-                        booking: _pending[i],
-                        onCall: () => _callCustomer(_pending[i].customerPhone),
-                        onStartCollection: () => _markInProgress(_pending[i]),
-                        onComplete: () => _markCompleted(_pending[i]),
-                        onManage: () => Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => TechnicianBookingDetailScreen(
-                            booking: _pending[i],
-                            onNewBooking: (newBooking) {
-                              setState(() => _bookings.insert(0, newBooking));
-                            },
-                          ))),
+              )
+            : null,
+        body: Stack(
+          children: [
+            IndexedStack(
+              index: _selectedIndex,
+              children: [
+                !_isOnline
+                    ? _offlineState()
+                    : _pending.isEmpty
+                        ? _emptyState('No pending bookings', Icons.calendar_today_outlined)
+                        : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+                        itemCount: _pending.length,
+                        itemBuilder: (_, i) => _PendingBookingCard(
+                          booking: _pending[i],
+                          onCall: () => _callCustomer(_pending[i].customerPhone),
+                          onStartCollection: () => _startJourney(_pending[i]),
+                          onResume: () => _resumeJourney(_pending[i]),
+                          onManage: () {
+                            final b = _pending[i];
+                            Navigator.push(context, MaterialPageRoute(
+                              builder: (_) => TechnicianBookingDetailScreen(
+                                booking: b,
+                                onNewBooking: (newBooking) {
+                                  setState(() => _bookings.insert(0, newBooking));
+                                },
+                              ),
+                            )).then((wasCompleted) {
+                              if (wasCompleted == true && mounted) {
+                                setState(() => _bookings.removeWhere((bk) => bk.id == b.id));
+                              }
+                            });
+                          },
+                        ),
                       ),
-                    ),
-              SafeArea(
-                  top: false,
-                  bottom: false,
-                  child: TechnicianSlotScreen(embedded: true, mobile: widget.mobile)),
-              SafeArea(
-                  top: false,
-                  bottom: false,
-                  child: TechnicianHistoryScreen(embedded: true, mobile: widget.mobile)),
-              SafeArea(
-                  top: false,
-                  bottom: false,
-                  child: TechnicianProfileScreen(
-                    embedded: true,
-                    mobile: widget.mobile,
-                    onLogout: () => Navigator.of(context).popUntil((r) => r.isFirst),
-                  )),
-            ],
-          ),
-          const Positioned(
-            right: 16,
-            bottom: 88,
-            child: SupportChatbotButton(),
-          ),
-        ],
+                SafeArea(
+                    top: false,
+                    bottom: false,
+                    child: TechnicianSlotScreen(embedded: true, mobile: widget.mobile)),
+                SafeArea(
+                    top: false,
+                    bottom: false,
+                    child: TechnicianHistoryScreen(embedded: true, mobile: widget.mobile)),
+                SafeArea(
+                    top: false,
+                    bottom: false,
+                    child: TechnicianProfileScreen(
+                      embedded: true,
+                      mobile: widget.mobile,
+                      onLogout: () => Navigator.of(context).popUntil((r) => r.isFirst),
+                    )),
+              ],
+            ),
+            const Positioned(
+              right: 16,
+              bottom: 88,
+              child: SupportChatbotButton(),
+            ),
+          ],
+        ),
+        bottomNavigationBar: BottomNavigationBar(
+          currentIndex: _selectedIndex,
+          onTap: _onNavTap,
+          type: BottomNavigationBarType.fixed,
+          selectedItemColor: AppColors.brandGreen,
+          unselectedItemColor: AppColors.textSecondary,
+          backgroundColor: Colors.white,
+          selectedLabelStyle:
+              const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 11),
+          elevation: 8,
+          items: const [
+            BottomNavigationBarItem(
+              icon: Icon(Icons.dashboard_outlined),
+              activeIcon: Icon(Icons.dashboard),
+              label: 'Home',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.calendar_month_outlined),
+              activeIcon: Icon(Icons.calendar_month),
+              label: 'Schedule',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.history_outlined),
+              activeIcon: Icon(Icons.history),
+              label: 'History',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.person_outline_rounded),
+              activeIcon: Icon(Icons.person_rounded),
+              label: 'Profile',
+            ),
+          ],
+        ),
       ),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _selectedIndex,
-        onTap: _onNavTap,
-        type: BottomNavigationBarType.fixed,
-        selectedItemColor: AppColors.brandGreen,
-        unselectedItemColor: AppColors.textSecondary,
-        backgroundColor: Colors.white,
-        selectedLabelStyle:
-            const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
-        unselectedLabelStyle: const TextStyle(fontSize: 11),
-        elevation: 8,
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.dashboard_outlined),
-            activeIcon: Icon(Icons.dashboard),
-            label: 'Home',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.calendar_month_outlined),
-            activeIcon: Icon(Icons.calendar_month),
-            label: 'Schedule',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.history_outlined),
-            activeIcon: Icon(Icons.history),
-            label: 'History',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.person_outline_rounded),
-            activeIcon: Icon(Icons.person_rounded),
-            label: 'Profile',
-          ),
-        ],
-      ),
-    ), // Scaffold
-    ); // AnnotatedRegion
+    );
   }
+
+  Widget _offlineState() => Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 72,
+              height: 72,
+              decoration: const BoxDecoration(
+                color: Color(0xFFF3F4F6),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.wifi_off_rounded,
+                  size: 32, color: Color(0xFF9CA3AF)),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'You are Offline',
+              style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Toggle Online to start receiving bookings',
+              style:
+                  TextStyle(fontSize: 13, color: AppColors.textSecondary),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            _isTogglingOnline
+                ? const SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: AppColors.brandGreen))
+                : ElevatedButton.icon(
+                    onPressed: _toggleAvailability,
+                    icon: const Icon(Icons.power_settings_new_rounded,
+                        size: 18),
+                    label: const Text('Go Online',
+                        style: TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w600)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.brandGreen,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 28, vertical: 12),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+          ],
+        ),
+      );
 
   Widget _emptyState(String msg, IconData icon) => Center(
         child: Column(
@@ -436,14 +553,14 @@ class _PendingBookingCard extends StatelessWidget {
   final TechnicianBooking booking;
   final VoidCallback onCall;
   final VoidCallback onStartCollection;
-  final VoidCallback onComplete;
+  final VoidCallback onResume;
   final VoidCallback onManage;
 
   const _PendingBookingCard({
     required this.booking,
     required this.onCall,
     required this.onStartCollection,
-    required this.onComplete,
+    required this.onResume,
     required this.onManage,
   });
 
@@ -470,25 +587,36 @@ class _PendingBookingCard extends StatelessWidget {
 
   String _formatDate(DateTime d) {
     final now = DateTime.now();
-    final diff = d.difference(DateTime(now.year, now.month, now.day)).inDays;
+    final today = DateTime(now.year, now.month, now.day);
+    final date = DateTime(d.year, d.month, d.day);
+    final diff = date.difference(today).inDays;
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     if (diff == 0) return 'Today';
     if (diff == 1) return 'Tomorrow';
-    return '${d.day} ${months[d.month]}';
+    if (diff == -1) return 'Yesterday';
+    return '${d.day} ${months[d.month]} ${d.year}';
   }
 
   @override
   Widget build(BuildContext context) {
+    // Determine if booking is in progress (journey started but not completed)
+    final isInProgress = booking.status == 'Journey Started' || 
+                         booking.status == 'Destination Reached' || 
+                         booking.status == 'Collection Started';
+    
+    // Determine if booking is confirmed (ready to start)
+    final isConfirmed = booking.status == 'Confirmed';
+
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: booking.status == 'In Progress'
+          color: isInProgress
               ? const Color(0xFF1565C0).withValues(alpha: 0.4)
               : AppColors.divider,
-          width: booking.status == 'In Progress' ? 1.5 : 1,
+          width: isInProgress ? 1.5 : 1,
         ),
       ),
       child: ClipRRect(
@@ -581,7 +709,9 @@ class _PendingBookingCard extends StatelessWidget {
                     booking.mode == 'Home Collection'
                         ? Icons.home_outlined
                         : Icons.local_hospital_outlined,
-                    '${booking.address}, ${booking.city} – ${booking.pincode}',
+                    [booking.address, booking.city, booking.pincode]
+                        .where((s) => s.isNotEmpty)
+                        .join(', '),
                   ),
                   const SizedBox(height: 5),
 
@@ -622,12 +752,29 @@ class _PendingBookingCard extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(width: 8),
-                      if (booking.status == 'Confirmed') ...[
+                      if (isConfirmed) ...[
                         Expanded(
                           child: ElevatedButton.icon(
                             onPressed: onStartCollection,
                             icon: const Icon(Icons.directions_bike_rounded, size: 16),
                             label: const Text('Start Journey',
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF1565C0),
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(vertical: 9),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10)),
+                            ),
+                          ),
+                        ),
+                      ] else if (isInProgress) ...[
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: onResume,
+                            icon: const Icon(Icons.directions_bike_rounded, size: 16),
+                            label: const Text('Continue Journey',
                                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
                             style: ElevatedButton.styleFrom(
                               backgroundColor: const Color(0xFF1565C0),
@@ -652,252 +799,6 @@ class _PendingBookingCard extends StatelessWidget {
   }
 }
 
-
-// ─── New Request Dialog ───────────────────────────────────────────────────────
-
-class _NewRequestDialog extends StatelessWidget {
-  final TechnicianBooking booking;
-  final VoidCallback onConfirm;
-  final VoidCallback onCancel;
-
-  const _NewRequestDialog({
-    required this.booking,
-    required this.onConfirm,
-    required this.onCancel,
-  });
-
-  String _formatDate(DateTime d) {
-    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-    return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
-  }
-
-  void _callCustomer(BuildContext context) {
-    // TODO: url_launcher → launch('tel:+91${booking.customerPhone}')
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('Calling +91 ${booking.customerPhone}…'),
-      backgroundColor: AppColors.brandGreen,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Header — pulsing green + call button
-          Container(
-            padding: const EdgeInsets.fromLTRB(20, 16, 16, 16),
-            decoration: const BoxDecoration(
-              color: AppColors.brandGreen,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 36, height: 36,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.2),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.notification_important_outlined,
-                      color: Colors.white, size: 20),
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('New Booking Request',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700)),
-                      Text('Confirm to add to your schedule',
-                          style: TextStyle(
-                              color: Colors.white70, fontSize: 11)),
-                    ],
-                  ),
-                ),
-                // Call button in header
-                GestureDetector(
-                  onTap: () => _callCustomer(context),
-                  child: Container(
-                    width: 40, height: 40,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.1),
-                          blurRadius: 6,
-                        ),
-                      ],
-                    ),
-                    child: const Icon(Icons.phone_rounded,
-                        color: AppColors.brandGreen, size: 20),
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          // Body — booking details
-          Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Customer name + VIP badge
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(booking.customerName,
-                          style: const TextStyle(
-                              fontSize: 17,
-                              fontWeight: FontWeight.w700,
-                              color: AppColors.textPrimary)),
-                    ),
-                    if (booking.isVip)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFFB300),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(Icons.star_rounded, size: 11, color: Colors.white),
-                          SizedBox(width: 4),
-                          Text('VIP', style: TextStyle(
-                              fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white)),
-                        ]),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-
-                // Details
-                _DialogRow(Icons.event_outlined, 'Date',
-                    _formatDate(booking.date)),
-                const SizedBox(height: 10),
-                _DialogRow(Icons.schedule_outlined, 'Time',
-                    booking.timeSlot),
-                const SizedBox(height: 10),
-                _DialogRow(
-                  booking.mode == 'Home Collection'
-                      ? Icons.home_outlined
-                      : Icons.local_hospital_outlined,
-                  'Location',
-                  '${booking.address}\n${booking.city} – ${booking.pincode}',
-                ),
-                const SizedBox(height: 10),
-                _DialogRow(Icons.science_outlined, 'Tests',
-                    booking.testNames.join(', ')),
-
-                if (booking.docRequired) ...[
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 7),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFFF3E0),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                          color: const Color(0xFFFFCC02).withValues(alpha: 0.4)),
-                    ),
-                    child: const Row(children: [
-                      Icon(Icons.description_outlined,
-                          size: 14, color: Color(0xFFE65100)),
-                      SizedBox(width: 6),
-                      Expanded(child: Text('Prescription required — verify on arrival',
-                          style: TextStyle(
-                              fontSize: 12, color: Color(0xFFE65100)))),
-                    ]),
-                  ),
-                ],
-
-                const SizedBox(height: 20),
-
-                // Action buttons
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: onCancel,
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: const Color(0xFFD32F2F),
-                          side: const BorderSide(color: Color(0xFFD32F2F)),
-                          padding: const EdgeInsets.symmetric(vertical: 13),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
-                        ),
-                        child: const Text('Decline',
-                            style: TextStyle(
-                                fontSize: 14, fontWeight: FontWeight.w600)),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: onConfirm,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.brandGreen,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(vertical: 13),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
-                        ),
-                        child: const Text('Confirm',
-                            style: TextStyle(
-                                fontSize: 14, fontWeight: FontWeight.w600)),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _DialogRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-  const _DialogRow(this.icon, this.label, this.value);
-
-  @override
-  Widget build(BuildContext context) => Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 16, color: AppColors.brandGreen),
-          const SizedBox(width: 10),
-          SizedBox(
-            width: 64,
-            child: Text(label,
-                style: const TextStyle(
-                    fontSize: 13, color: AppColors.textSecondary)),
-          ),
-          Expanded(
-            child: Text(value,
-                style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: AppColors.textPrimary)),
-          ),
-        ],
-      );
-}
-
 class _InfoRow extends StatelessWidget {
   final IconData icon;
   final String text;
@@ -917,4 +818,3 @@ class _InfoRow extends StatelessWidget {
         ],
       );
 }
-

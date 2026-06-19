@@ -1,10 +1,14 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'my_bookings_screen.dart';
 import 'booking_widgets.dart';
+import 'booking_confirmation_screen.dart';
 import 'package:microlab/models.dart';
 
 // ─── Prescription doc model ───────────────────────────────────────────────────
@@ -27,6 +31,9 @@ class CheckoutScreen extends StatefulWidget {
   final String? city;
   final BranchModel? branch;
   final bool isVip;
+  final int patientId;
+  final double? patientLat;
+  final double? patientLng;
 
   const CheckoutScreen({
     super.key,
@@ -38,6 +45,9 @@ class CheckoutScreen extends StatefulWidget {
     this.city,
     this.branch,
     this.isVip = false,
+    this.patientId = 1,
+    this.patientLat,
+    this.patientLng,
   });
 
   @override
@@ -274,11 +284,69 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   Future<void> _confirmBooking(String razorpayPaymentId) async {
     setState(() => _isProcessing = true);
 
-    // TODO: POST /api/bookings { ...bookingData, razorpay_payment_id: razorpayPaymentId }
-    await Future.delayed(const Duration(milliseconds: 1200));
+    final address = [widget.address, widget.city, widget.pincode]
+        .where((s) => s != null && s.isNotEmpty)
+        .join(', ');
+
+    // Build items list from cart
+    final items = widget.cart.map((t) => {
+      'packageId':   int.tryParse(t.id) ?? 0,
+      'packageType': t.type == 'package' ? 'package' : 'test',
+      'finalPrice':  t.finalPrice,
+    }).toList();
+
+    final payload = {
+      'patientId':      widget.patientId,
+      'bookingType':    widget.mode == 'Home Collection' ? 'home_collection' : 'lab_visit',
+      'totalAmount':    _grandTotal,
+      'discountAmount': 0,
+      'sourceChannel':  'mobile_app',
+      'notes':          null,
+      'items':          items,
+    };
+
+    debugPrint('\n📤 [CHECKOUT] POST /api/bookings');
+    debugPrint('   patientId   : ${widget.patientId}');
+    debugPrint('   bookingType : ${payload['bookingType']}');
+    debugPrint('   totalAmount : ₹$_grandTotal');
+    debugPrint('   items       : ${items.length} — ${items.map((i) => 'pkg${i['packageId']}(₹${i['finalPrice']})').join(', ')}');
+    debugPrint('   razorpay_id : $razorpayPaymentId');
+
+    int bookingId;
+    String bookingRef;
+
+    try {
+      final url = Uri.parse('${AppConstants.serverUrl}/api/bookings');
+      final res = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      ).timeout(const Duration(seconds: 10));
+
+      debugPrint('📥 [CHECKOUT] Response ${res.statusCode}: ${res.body}');
+
+      if (res.statusCode != 201) {
+        throw Exception('Server returned ${res.statusCode}');
+      }
+
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      bookingId  = data['bookingId']  as int;
+      bookingRef = data['bookingRef'] as String;
+      debugPrint('✅ [CHECKOUT] Booking created — bookingId=$bookingId ref=$bookingRef');
+    } catch (e) {
+      debugPrint('❌ [CHECKOUT] API call failed: $e');
+      if (!mounted) return;
+      setState(() => _isProcessing = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Booking failed: $e'),
+        backgroundColor: Colors.red[700],
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
 
     final booking = BookingModel(
-      id: 'BK${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}',
+      id: bookingRef,
       member: widget.member,
       tests: widget.cart,
       mode: widget.mode,
@@ -303,12 +371,28 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     if (mounted) {
       setState(() => _isProcessing = false);
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => BookingConfirmationScreen(booking: booking),
-        ),
-      );
+      if (widget.mode == 'Home Collection') {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => BookingConfirmationScreen(
+              bookingId:      bookingId,
+              patientId:      widget.patientId,
+              patientName:    widget.member.name,
+              patientMobile:  widget.member.mobile,
+              patientAddress: address.isEmpty ? 'Home Collection' : address,
+              patientLat:     widget.patientLat,
+              patientLng:     widget.patientLng,
+              hospital:       'MicroLab Home Collection',
+            ),
+          ),
+        );
+      } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => _BookingSuccessScreen(booking: booking)),
+        );
+      }
     }
   }
 
@@ -1084,11 +1168,11 @@ class _PaymentOptionTile extends StatelessWidget {
   }
 }
 
-// ─── Booking Confirmation ─────────────────────────────────────────────────────
+// ─── Booking Success (Lab Test / static) ─────────────────────────────────────
 
-class BookingConfirmationScreen extends StatelessWidget {
+class _BookingSuccessScreen extends StatelessWidget {
   final BookingModel booking;
-  const BookingConfirmationScreen({super.key, required this.booking});
+  const _BookingSuccessScreen({required this.booking});
 
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];

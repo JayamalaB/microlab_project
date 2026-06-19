@@ -60,6 +60,9 @@ class _BookingConfirmationScreenState
       duration: const Duration(milliseconds: 1600),
     )..repeat(reverse: true);
 
+    debugPrint('\n🔵 [BOOKING CONFIRMATION] bookingId=${widget.bookingId} patientId=${widget.patientId}');
+    debugPrint('   Registering patient socket and emitting booking_request...');
+
     // Register patient socket and emit booking request
     SocketService.instance.registerPatientSocket(
       patientId: widget.patientId,
@@ -78,11 +81,14 @@ class _BookingConfirmationScreenState
 
     _acceptedSub = SocketService.instance.onBookingAccepted.listen((event) {
       if (event.bookingId != widget.bookingId || !mounted) return;
+      debugPrint('✅ [BOOKING CONFIRMATION] booking_accepted received!');
+      debugPrint('   technicianId=${event.technicianId} technicianName=${event.technicianName} trackingId=${event.trackingId}');
       _onAccepted(event);
     });
 
     _timeoutSub = SocketService.instance.onBookingTimeout.listen((id) {
       if (id != widget.bookingId || !mounted) return;
+      debugPrint('⏰ [BOOKING CONFIRMATION] booking_timeout for bookingId=$id');
       if (mounted) setState(() => _timedOut = true);
     });
 
@@ -111,6 +117,18 @@ class _BookingConfirmationScreenState
     setState(() => _accepted = true);
     _searchTimer?.cancel();
     HapticFeedback.mediumImpact();
+
+    // Persist active lab booking so patient can reopen tracking from dashboard
+    SocketService.instance.setActiveLabBooking(ActiveLabBookingInfo(
+      bookingId:     widget.bookingId,
+      patientId:     widget.patientId,
+      trackingId:    event.trackingId,
+      technicianId:  event.technicianId,
+      technicianName: event.technicianName,
+      patientLat:    widget.patientLat,
+      patientLng:    widget.patientLng,
+      patientAddress: widget.patientAddress,
+    ));
 
     Future.delayed(const Duration(milliseconds: 600), () {
       if (!mounted) return;
