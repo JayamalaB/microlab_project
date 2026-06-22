@@ -137,20 +137,32 @@ class _OtpScreenState extends State<OtpScreen> {
       const technicianIds = {
         '8056535850': 1,
         '7339535472': 2,
+        '6374500771': 3,
+      };
+      // branch_id per technician — matches users.branch_id in DB
+      // TODO: replace with real value from API login response
+      const technicianBranchIds = {
+        '8056535850': 7,  // Microlab Peelamedu (branch 7)
+        '7339535472': 7,
+        '6374500771': 7,
       };
       final int apiUserId = widget.userRole == 'technician'
           ? (technicianIds[widget.mobile] ?? 1)
           : 1;
-      _connectSocket(apiUserId);
+      final int? apiBranchId = widget.userRole == 'technician'
+          ? technicianBranchIds[widget.mobile]
+          : null;
+      _connectSocket(apiUserId, apiBranchId);
       _showSuccess();
     }
   }
 
-  void _connectSocket(int userId) {
+  void _connectSocket(int userId, int? branchId) {
     SocketService.instance.connect(
-      userId: userId,
-      role:   widget.userRole == 'technician' ? 'technician' : 'customer',
-      name:   widget.mobile, // TODO: replace with real name from API
+      userId:   userId,
+      role:     widget.userRole == 'technician' ? 'technician' : 'customer',
+      name:     widget.mobile, // TODO: replace with real name from API
+      branchId: branchId,
     );
   }
 

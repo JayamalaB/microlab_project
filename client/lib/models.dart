@@ -101,10 +101,36 @@ class TestModel {
 // ─── Branch Model ─────────────────────────────────────────────────────────────
 
 class BranchModel {
-  final String id;
-  final String name;
-  final String address;
-  BranchModel({required this.id, required this.name, required this.address});
+  final String  id;
+  final String  name;
+  final String  address;
+  final String? location;
+  final String? pincode;
+  final String? mobileNo;
+  final String? telephoneNo;
+  final String? email;
+
+  BranchModel({
+    required this.id,
+    required this.name,
+    required this.address,
+    this.location,
+    this.pincode,
+    this.mobileNo,
+    this.telephoneNo,
+    this.email,
+  });
+
+  factory BranchModel.fromJson(Map<String, dynamic> j) => BranchModel(
+        id:          j['branchId']?.toString() ?? '',
+        name:        j['name']        as String? ?? '',
+        address:     j['address']     as String? ?? '',
+        location:    j['location']    as String?,
+        pincode:     j['pincode']     as String?,
+        mobileNo:    j['mobileNo']    as String?,
+        telephoneNo: j['telephoneNo'] as String?,
+        email:       j['email']       as String?,
+      );
 }
 
 // ─── Booking Model ────────────────────────────────────────────────────────────

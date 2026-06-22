@@ -17,15 +17,20 @@ exports.createBooking = async (req, res) => {
 
   const {
     patientId,
-    patientIdRef   = null,
-    userId         = null,
-    roleId         = null,
-    bookingType    = 'home_collection',
-    totalAmount    = 0,
-    discountAmount = 0,
-    sourceChannel  = 'mobile_app',
-    notes          = null,
-    items          = [],
+    patientIdRef        = null,
+    userId              = null,
+    roleId              = null,
+    bookingType         = 'home_collection',
+    totalAmount         = 0,
+    discountAmount      = 0,
+    sourceChannel       = 'mobile_app',
+    notes               = null,
+    items               = [],
+    // branch booking fields (null for existing flows)
+    branchId            = null,
+    collectionDate      = null,
+    collectionLatitude  = null,
+    collectionLongitude = null,
   } = req.body;
 
   if (!patientId) {
@@ -44,18 +49,24 @@ exports.createBooking = async (req, res) => {
     // 1. Master booking record
     const bookingRef = `BK${Date.now()}`;
     console.log(`📋 Inserting booking with ref: ${bookingRef}`);
-    console.log(`   SQL params: user_id=${userId ?? null} patient_id=${patientId} booking_type=${bookingType} total=${totalAmount}`);
+    console.log(`   SQL params: user_id=${userId ?? null} patient_id=${patientId} booking_type=${bookingType} total=${totalAmount} branch_id=${branchId ?? 'null'} collection_date=${collectionDate ?? 'null'}`);
     const [bResult] = await conn.execute(
       `INSERT INTO booking
-         (user_id, role_id, patient_id, patient_id_ref, booking_ref,
-          booking_status, booking_type, total_amount, discount_amount,
-          source_channel, notes_remarks, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NOW(), NOW())`,
-      [userId ?? null, roleId ?? null, patientId, patientIdRef ?? null, bookingRef,
-       bookingType, totalAmount, discountAmount ?? 0, sourceChannel, notes ?? null]
+         (user_id, role_id, patient_id, patient_id_ref, branch_id, booking_ref,
+          booking_status, booking_type, collection_date, total_amount, discount_amount,
+          source_channel, notes_remarks, collection_latitude, collection_longitude,
+          created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        userId ?? null, roleId ?? null, patientId, patientIdRef ?? null,
+        branchId ?? null, bookingRef,
+        bookingType, collectionDate ?? null, totalAmount, discountAmount ?? 0,
+        sourceChannel, notes ?? null,
+        collectionLatitude ?? null, collectionLongitude ?? null,
+      ]
     );
     const bookingId = bResult.insertId;
-    console.log(`✅ booking inserted → booking_id=${bookingId}`);
+    console.log(`✅ booking inserted → booking_id=${bookingId} branch_id=${branchId ?? 'null'} collection_date=${collectionDate ?? 'null'}`);
 
     // 2. Patient → booking link
     await conn.execute(

@@ -14,7 +14,9 @@ class BookingConfirmationScreen extends StatefulWidget {
   final String patientAddress;
   final double? patientLat;
   final double? patientLng;
-  final String hospital;
+  final String  hospital;
+  final int?    branchId;
+  final String? branchName;
 
   const BookingConfirmationScreen({
     super.key,
@@ -26,6 +28,8 @@ class BookingConfirmationScreen extends StatefulWidget {
     this.patientLat,
     this.patientLng,
     required this.hospital,
+    this.branchId,
+    this.branchName,
   });
 
   @override
@@ -77,7 +81,10 @@ class _BookingConfirmationScreenState
       patientLat:     widget.patientLat,
       patientLng:     widget.patientLng,
       hospital:       widget.hospital,
+      branchId:       widget.branchId,
+      branchName:     widget.branchName,
     );
+    debugPrint('   branchId: ${widget.branchId ?? 'none'}  branchName: ${widget.branchName ?? '—'}');
 
     _acceptedSub = SocketService.instance.onBookingAccepted.listen((event) {
       if (event.bookingId != widget.bookingId || !mounted) return;

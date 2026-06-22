@@ -18,6 +18,8 @@ class SocketBooking {
   final String hospital;
   final String bookingType;
   final DateTime createdAt;
+  final int?    branchId;
+  final String? branchName;
 
   SocketBooking({
     required this.bookingId,
@@ -30,6 +32,8 @@ class SocketBooking {
     required this.hospital,
     this.bookingType = 'lab',
     required this.createdAt,
+    this.branchId,
+    this.branchName,
   });
 
   factory SocketBooking.fromJson(Map<String, dynamic> j) => SocketBooking(
@@ -44,6 +48,8 @@ class SocketBooking {
         bookingType:    j['bookingType']    as String? ?? 'lab',
         createdAt: DateTime.tryParse(j['createdAt'] as String? ?? '') ??
             DateTime.now(),
+        branchId:   j['branchId']   != null ? _toInt(j['branchId'])  : null,
+        branchName: j['branchName'] as String?,
       );
 
   static int _toInt(dynamic v) =>
@@ -213,7 +219,8 @@ class SocketService {
   int    userId   = 0;
   String userRole = ''; // 'technician' | 'customer' | 'driver'
   int?   sessionId;
-  String userName = '';
+  String userName   = '';
+  int?   _branchId;
 
   // ── Technician availability state ──────────────────────────────────────────
   // _isAvailable: tech has toggled "Online" on the dashboard.
@@ -310,6 +317,7 @@ class SocketService {
     required String role,
     required String name,
     int?    sessionId,
+    int?    branchId,
     double? lat,
     double? lng,
   }) {
@@ -322,6 +330,7 @@ class SocketService {
     userRole       = role;
     this.sessionId = sessionId;
     userName       = name;
+    _branchId      = branchId;
 
     _socket = io.io(
       AppConstants.socketUrl,
@@ -392,10 +401,11 @@ class SocketService {
       'technicianId':   userId,
       'technicianName': userName,
       'sessionId':      sessionId,
+      'branchId':       _branchId,
       'lat':            _lastLat,
       'lng':            _lastLng,
     });
-    _log('ONLINE', 'emitted technician_online  lat=$_lastLat lng=$_lastLng');
+    _log('ONLINE', 'emitted technician_online  branch=$_branchId lat=$_lastLat lng=$_lastLng');
   }
 
   void _emitTechnicianOffline() {
@@ -668,6 +678,7 @@ class SocketService {
     _activeBookingId = null;
     _lastLat         = null;
     _lastLng         = null;
+    _branchId        = null;
     _isDriverOnline  = false;
     _driverLat       = null;
     _driverLng       = null;
@@ -709,7 +720,9 @@ class SocketService {
     double? patientLat,
     double? patientLng,
     required String hospital,
-    String bookingType = 'lab',
+    String  bookingType = 'lab',
+    int?    branchId,
+    String? branchName,
   }) {
     _socket?.emit('booking_request', {
       'bookingId':      bookingId,
@@ -721,8 +734,10 @@ class SocketService {
       'patientLng':     patientLng,
       'hospital':       hospital,
       'bookingType':    bookingType,
+      if (branchId   != null) 'branchId':   branchId,
+      if (branchName != null) 'branchName': branchName,
     });
-    _log('EMIT', 'booking_request  id=$bookingId type=$bookingType');
+    _log('EMIT', 'booking_request  id=$bookingId type=$bookingType branch=$branchId ($branchName)');
   }
 
   /// Transport booking request — [bookingId] may be a String or int.

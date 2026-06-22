@@ -34,6 +34,12 @@ class CheckoutScreen extends StatefulWidget {
   final int patientId;
   final double? patientLat;
   final double? patientLng;
+  // Branch-booking pre-fills (null = old flow, picker shown as usual)
+  final DateTime? preSelectedDate;
+  final String?   preSelectedSlotLabel;
+  final int?      branchId;
+  final String?   collectionDate;
+  final int?      timeSlotId;
 
   const CheckoutScreen({
     super.key,
@@ -48,6 +54,11 @@ class CheckoutScreen extends StatefulWidget {
     this.patientId = 1,
     this.patientLat,
     this.patientLng,
+    this.preSelectedDate,
+    this.preSelectedSlotLabel,
+    this.branchId,
+    this.collectionDate,
+    this.timeSlotId,
   });
 
   @override
@@ -63,15 +74,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Date ─────────────────────────────────────────────────
   DateTime? _selectedDate;
 
-  // ── Available slots only (no unavailable shown) ───────────
-  // TODO: replace with GET /api/slots?date=_selectedDate
-  final List<TimeSlot> _availableSlots = const [
+  // ── Slots ─────────────────────────────────────────────────
+  // Hardcoded list used when no branchId is set (old flow).
+  static const List<TimeSlot> _staticSlots = [
     TimeSlot(id: '1', label: '10:00 AM', time: '10:00'),
     TimeSlot(id: '2', label: '12:00 PM', time: '12:00'),
     TimeSlot(id: '3', label: '1:00 PM',  time: '13:00'),
     TimeSlot(id: '4', label: '4:00 PM',  time: '16:00'),
     TimeSlot(id: '5', label: '5:00 PM',  time: '17:00'),
   ];
+  // API-loaded slots used when branchId is provided.
+  List<TimeSlot> _branchSlots  = [];
+  bool           _loadingSlots = false;
+  String         _slotsError   = '';
+
+  List<TimeSlot> get _availableSlots =>
+      widget.branchId != null ? _branchSlots : _staticSlots;
+
   TimeSlot? _selectedSlot;
 
   // ── Prescription / Document — multi-image upload ─────────
@@ -117,8 +136,27 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   @override
   void initState() {
     super.initState();
-    // If any test needs a prescription, lock to Pay Later until doc is verified
     if (_anyDocRequired) _paymentType = 'pay_later';
+
+    debugPrint('\n🧾 [CHECKOUT INIT] ──────────────────────────────────');
+    debugPrint('   mode        : ${widget.mode}');
+    debugPrint('   patientId   : ${widget.patientId}');
+    debugPrint('   branchId    : ${widget.branchId ?? '⚠️ null — static slots will be used'}');
+    debugPrint('   branch name : ${widget.branch?.name ?? '—'}');
+    debugPrint('   cart items  : ${widget.cart.length}');
+    debugPrint('   slot mode   : ${widget.branchId != null ? 'API (branch slots)' : 'STATIC (hardcoded)'}');
+    debugPrint('   date range  : ${widget.branchId != null ? 'today onward' : 'tomorrow onward'}');
+
+    if (widget.preSelectedDate != null) {
+      _selectedDate = widget.preSelectedDate;
+      debugPrint('   pre-date    : $_selectedDate');
+    }
+    if (widget.preSelectedSlotLabel != null) {
+      final id = widget.timeSlotId?.toString() ?? '0';
+      _selectedSlot = TimeSlot(id: id, label: widget.preSelectedSlotLabel!, time: '');
+      debugPrint('   pre-slot    : ${widget.preSelectedSlotLabel}');
+    }
+    debugPrint('────────────────────────────────────────────────────\n');
   }
 
   @override
@@ -128,12 +166,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   Future<void> _pickDate() async {
-    final now = DateTime.now();
+    final now      = DateTime.now();
     final tomorrow = now.add(const Duration(days: 1));
+    // Branch flow allows same-day booking; old flow starts from tomorrow
+    final firstDate = widget.branchId != null ? now : tomorrow;
+    debugPrint('\n📅 [DATE PICKER] branchId=${widget.branchId} → firstDate=${firstDate.toIso8601String().substring(0,10)} (${widget.branchId != null ? 'today allowed' : 'tomorrow earliest'})');
     final picked = await showDatePicker(
       context: context,
-      initialDate: _selectedDate ?? tomorrow,
-      firstDate: tomorrow,
+      initialDate: _selectedDate ?? firstDate,
+      firstDate: firstDate,
       lastDate: now.add(const Duration(days: 30)),
       helpText: 'SELECT APPOINTMENT DATE',
       builder: (ctx, child) => Theme(
@@ -148,12 +189,141 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       ),
     );
     if (picked != null) {
+      debugPrint('   picked      : ${picked.toIso8601String().substring(0,10)}');
       setState(() {
-        _selectedDate = picked;
-        _selectedSlot = null;
-        _selectedTechnician = null; // reset so VIP must re-pick per date
+        _selectedDate       = picked;
+        _selectedSlot       = null;
+        _selectedTechnician = null;
+        _branchSlots        = [];
+        _slotsError         = '';
       });
+      if (widget.branchId != null) {
+        debugPrint('   → branchId=${widget.branchId} — loading API slots');
+        _loadBranchSlots(picked);
+      } else {
+        debugPrint('   → no branchId — static slots shown (${_staticSlots.length} options)');
+      }
+    } else {
+      debugPrint('   picker dismissed — no date selected');
     }
+  }
+
+  String _toApiDate(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
+
+  Future<void> _loadBranchSlots(DateTime date) async {
+    final dateStr = _toApiDate(date);
+    debugPrint('\n🕐 [LOAD SLOTS] ─────────────────────────────────────');
+    debugPrint('   branchId    : ${widget.branchId}');
+    debugPrint('   date        : $dateStr');
+
+    setState(() { _loadingSlots = true; _slotsError = ''; });
+
+    try {
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/branches/slots')
+          .replace(queryParameters: {
+            'branchId': widget.branchId.toString(),
+            'date':     dateStr,
+          });
+      debugPrint('   → GET $uri');
+
+      final res  = await http.get(uri).timeout(const Duration(seconds: 10));
+      debugPrint('   ← status    : ${res.statusCode}');
+      debugPrint('   ← body      : ${res.body}');
+
+      if (!mounted) return;
+
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        if (body['success'] == true) {
+          final list = (body['slots'] as List).map((s) {
+            final m = s as Map<String, dynamic>;
+            return TimeSlot(
+              id:    m['timeSlotId']?.toString() ?? '',
+              label: m['label']     as String? ?? '',
+              time:  m['startTime'] as String? ?? '',
+            );
+          }).toList();
+          debugPrint('   ✅ slots     : ${list.length} available');
+          for (final s in list) { debugPrint('      • [${s.id}] ${s.label} (${s.time})'); }
+          setState(() {
+            _branchSlots  = list;
+            _loadingSlots = false;
+            _slotsError   = list.isEmpty ? 'No slots available for this date. Try another date.' : '';
+          });
+        } else {
+          debugPrint('   ⚠️  API returned success=false: ${body['message']}');
+          setState(() { _loadingSlots = false; _slotsError = body['message'] as String? ?? 'Could not load slots.'; });
+        }
+      } else {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        debugPrint('   ❌ HTTP ${res.statusCode}: ${body['message']}');
+        setState(() { _loadingSlots = false; _slotsError = body['message'] as String? ?? 'Could not load slots.'; });
+      }
+    } catch (e) {
+      debugPrint('   ❌ exception : $e');
+      if (!mounted) return;
+      setState(() { _loadingSlots = false; _slotsError = 'Could not reach server. Check your connection.'; });
+    }
+    debugPrint('────────────────────────────────────────────────────\n');
+  }
+
+  // ── Slot section body ─────────────────────────────────────
+  Widget _buildSlotBody() {
+    if (_selectedDate == null) {
+      return const Text(
+        'Please select a date first',
+        style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+      );
+    }
+    if (_loadingSlots) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 12),
+          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+        ),
+      );
+    }
+    if (_slotsError.isNotEmpty) {
+      return Text(
+        _slotsError,
+        style: const TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+      );
+    }
+    if (_availableSlots.isEmpty) {
+      return const Text(
+        'No slots available. Try another date.',
+        style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+      );
+    }
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: _availableSlots.map((slot) {
+        final isSelected = _selectedSlot?.id == slot.id;
+        return GestureDetector(
+          onTap: () => setState(() => _selectedSlot = slot),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+            decoration: BoxDecoration(
+              color: isSelected ? AppColors.brandGreen : Colors.white,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: isSelected ? AppColors.brandGreen : AppColors.divider,
+                width: isSelected ? 1.5 : 1,
+              ),
+            ),
+            child: Text(slot.label,
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: isSelected ? Colors.white : AppColors.textPrimary)),
+          ),
+        );
+      }).toList(),
+    );
   }
 
   // ── Prescription upload — multi-image ────────────────────
@@ -295,7 +465,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'finalPrice':  t.finalPrice,
     }).toList();
 
-    final payload = {
+    final payload = <String, dynamic>{
       'patientId':      widget.patientId,
       'bookingType':    widget.mode == 'Home Collection' ? 'home_collection' : 'lab_visit',
       'totalAmount':    _grandTotal,
@@ -303,6 +473,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'sourceChannel':  'mobile_app',
       'notes':          null,
       'items':          items,
+      if (widget.branchId       != null) 'branchId':       widget.branchId,
+      if (widget.collectionDate != null) 'collectionDate': widget.collectionDate,
+      if (widget.patientLat     != null) 'collectionLatitude':  widget.patientLat,
+      if (widget.patientLng     != null) 'collectionLongitude': widget.patientLng,
     };
 
     debugPrint('\n📤 [CHECKOUT] POST /api/bookings');
@@ -384,6 +558,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               patientLat:     widget.patientLat,
               patientLng:     widget.patientLng,
               hospital:       'MicroLab Home Collection',
+              branchId:       widget.branchId,
+              branchName:     widget.branch?.name,
             ),
           ),
         );
@@ -535,41 +711,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
           const SizedBox(height: 14),
 
-          // ── Time Slot (available only) ────────────────────
+          // ── Time Slot ─────────────────────────────────────
           _SectionCard(
             title: 'Time Slot',
             icon: Icons.schedule_outlined,
             required: true,
-            child: _selectedDate == null
-                ? const Text('Please select a date first',
-                    style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic))
-                : Wrap(
-                    spacing: 10,
-                    runSpacing: 10,
-                    children: _availableSlots.map((slot) {
-                      final isSelected = _selectedSlot?.id == slot.id;
-                      return GestureDetector(
-                        onTap: () => setState(() => _selectedSlot = slot),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: isSelected ? AppColors.brandGreen : Colors.white,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                              color: isSelected ? AppColors.brandGreen : AppColors.divider,
-                              width: isSelected ? 1.5 : 1,
-                            ),
-                          ),
-                          child: Text(slot.label,
-                              style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  color: isSelected ? Colors.white : AppColors.textPrimary)),
-                        ),
-                      );
-                    }).toList(),
-                  ),
+            child: _buildSlotBody(),
           ),
 
           const SizedBox(height: 14),

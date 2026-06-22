@@ -372,6 +372,24 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       _speedKmh = pos.speed > 0.5 ? pos.speed * 3.6 : null;
     });
 
+    // Keep ETA badge and progress bar live on every GPS tick (8 m resolution).
+    // Haversine gives the straight-line distance; the Directions API overrides
+    // this with the accurate road distance every 50 m when it responds.
+    if ((_status == _JobStatus.assigned || _status == _JobStatus.enRoute) &&
+        widget.patientLat != null && widget.patientLng != null) {
+      final hvKm = _haversineKm(
+          myPos, LatLng(widget.patientLat!, widget.patientLng!));
+      // Use GPS speed when moving; default 25 km/h when stationary/unknown.
+      // 1.3× converts straight-line to approximate road distance for ETA.
+      final speedKmh = (pos.speed > 1.0) ? pos.speed * 3.6 : 25.0;
+      final estEta = ((hvKm * 1.3 / speedKmh) * 60).ceil().clamp(1, 999);
+      setState(() {
+        _initialDistKm ??= hvKm; // seed progress bar before first API response
+        _distKm = hvKm;          // live straight-line; API overrides when ready
+        _etaMin = estEta;
+      });
+    }
+
     _rebuildSelfMarker();
 
     if (_followMode && _mapController != null) {
@@ -380,7 +398,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       ));
     }
 
-    // Draw route line from assigned state onwards
+    // Draw route line and refresh accurate road distance/ETA every 50 m
     if ((_status == _JobStatus.assigned || _status == _JobStatus.enRoute) &&
         widget.patientLat != null && widget.patientLng != null) {
       final patientPos = LatLng(widget.patientLat!, widget.patientLng!);

@@ -28,6 +28,7 @@ app.use('/api/auth',         require('./routes/auth'));
 app.use('/api/tests',        require('./routes/tests'));
 app.use('/api/bookings',     require('./routes/bookings'));
 app.use('/api/technicians',  require('./routes/technicians'));
+app.use('/api/branches',     require('./routes/branches'));
 
 app.get('/', (req, res) => {
   res.json({ success: true, message: 'MediCollect API running' });

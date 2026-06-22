@@ -699,6 +699,17 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                     ),
                     const SizedBox(height: 10),
                     _DetailRow(
+                      icon: Icons.location_city_rounded,
+                      label: 'Branch',
+                      value: widget.booking.branchName?.isNotEmpty == true
+                          ? widget.booking.branchName!
+                          : widget.booking.branchId != null
+                              ? 'Branch #${widget.booking.branchId}'
+                              : 'Unassigned',
+                      highlight: true,
+                    ),
+                    const SizedBox(height: 10),
+                    _DetailRow(
                       icon: Icons.tag_rounded,
                       label: 'Booking ID',
                       value: '#${widget.booking.bookingId}',
@@ -774,9 +785,15 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
 
 class _DetailRow extends StatelessWidget {
   final IconData icon;
-  final String label;
-  final String value;
-  const _DetailRow({required this.icon, required this.label, required this.value});
+  final String   label;
+  final String   value;
+  final bool     highlight;
+  const _DetailRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.highlight = false,
+  });
 
   @override
   Widget build(BuildContext context) => Row(
@@ -785,11 +802,14 @@ class _DetailRow extends StatelessWidget {
           Container(
             width: 32,
             height: 32,
-            decoration: const BoxDecoration(
-              color: AppColors.brandGreenSurface,
+            decoration: BoxDecoration(
+              color: highlight
+                  ? AppColors.brandGreen.withValues(alpha: 0.12)
+                  : AppColors.brandGreenSurface,
               shape: BoxShape.circle,
             ),
-            child: Icon(icon, size: 16, color: AppColors.brandGreen),
+            child: Icon(icon, size: 16,
+                color: highlight ? AppColors.brandGreen : AppColors.brandGreen),
           ),
           const SizedBox(width: 12),
           SizedBox(
@@ -805,10 +825,12 @@ class _DetailRow extends StatelessWidget {
             child: Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(value,
-                  style: const TextStyle(
+                  style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary)),
+                      color: highlight
+                          ? AppColors.brandGreen
+                          : AppColors.textPrimary)),
             ),
           ),
         ],

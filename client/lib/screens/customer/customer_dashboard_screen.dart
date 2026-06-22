@@ -56,8 +56,9 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   String? _city;
   double? _lat;
   double? _lng;
+  // Silently auto-detected from pincode — patient never sees or selects this.
   BranchModel? _selectedBranch;
-  bool _loadingBranches = false;
+  bool _branchDetecting = false;
   // Real patientId from auth session — falls back to 1 if socket not yet connected
   int get _patientId {
     final id = SocketService.instance.userId;
@@ -213,6 +214,88 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     );
   }
 
+  // ── Branch auto-detection ─────────────────────────────────
+  // Called silently whenever a 6-digit pincode becomes available.
+  // Patient never sees this — branch is stored and forwarded to CheckoutScreen.
+  Future<void> _autoDetectBranch(String pincode, {String? place}) async {
+    if (!mounted) return;
+    final effectivePlace = place ?? _city;
+    debugPrint('\n🏥 [BRANCH AUTO-DETECT] ─────────────────────────────');
+    debugPrint('   pincode     : $pincode');
+    debugPrint('   place/city  : ${effectivePlace ?? '— (no fallback)'}');
+    debugPrint('   mode        : $_mode');
+    setState(() { _branchDetecting = true; _selectedBranch = null; });
+
+    try {
+      final params = <String, String>{'pincode': pincode};
+      if (effectivePlace != null && effectivePlace.isNotEmpty) {
+        params['place'] = effectivePlace;
+      }
+      if (_lat != null) params['lat'] = _lat!.toString();
+      if (_lng != null) params['lng'] = _lng!.toString();
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/branches/lookup')
+          .replace(queryParameters: params);
+      debugPrint('   → GET $uri');
+
+      final res = await http
+          .get(uri)
+          .timeout(const Duration(seconds: 10));
+
+      debugPrint('   ← status    : ${res.statusCode}');
+      debugPrint('   ← body      : ${res.body}');
+
+      if (!mounted) return;
+
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        if (body['success'] == true) {
+          final branch = BranchModel.fromJson(body['branch'] as Map<String, dynamic>);
+          setState(() { _selectedBranch = branch; _branchDetecting = false; });
+          debugPrint('   ✅ branch    : ${branch.name} (id=${branch.id})');
+          debugPrint('   📍 address   : ${branch.address}');
+        } else {
+          setState(() => _branchDetecting = false);
+          debugPrint('   ⚠️  no branch : ${body['message']}');
+        }
+      } else {
+        setState(() => _branchDetecting = false);
+        debugPrint('   ❌ HTTP ${res.statusCode} — branch detection skipped');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _branchDetecting = false);
+      debugPrint('   ❌ error     : $e');
+    }
+    debugPrint('────────────────────────────────────────────────────\n');
+  }
+
+  // Extracts a 6-digit Indian pincode from a GPS reverse-geocoded address string.
+  // e.g. "12 Gandhi St, T Nagar, Chennai, Tamil Nadu 600017, India" → "600017"
+  void _tryExtractPincodeFromAddress(String address) {
+    debugPrint('\n📍 [GPS ADDRESS → PINCODE]');
+    debugPrint('   raw address : $address');
+    final pinMatch = RegExp(r'\b(\d{6})\b').firstMatch(address);
+    if (pinMatch != null) {
+      final pin = pinMatch.group(1)!;
+      // Try to extract city: split by comma, take 2nd segment, strip digits/dashes
+      String? extractedCity;
+      final parts = address.split(',');
+      if (parts.length >= 2) {
+        final candidate = parts[1].trim().replaceAll(RegExp(r'[\d\-\s]+$'), '').trim();
+        if (candidate.length > 2) extractedCity = candidate;
+      }
+      debugPrint('   extracted   : pin=$pin  city=${extractedCity ?? '— using _city=$_city'}');
+      final cityToUse = extractedCity ?? _city;
+      if (extractedCity != null) {
+        setState(() { _pincode = pin; _city = extractedCity; });
+      } else {
+        setState(() => _pincode = pin);
+      }
+      _autoDetectBranch(pin, place: cityToUse);
+    } else {
+      debugPrint('   ⚠️  no 6-digit pincode found in address — branch not auto-detected');
+    }
+  }
+
   void _showLocationSheet() {
     showModalBottomSheet(
       context: context,
@@ -225,16 +308,65 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         selectedBranch: _selectedBranch,
         pincode: _pincode,
         city: _city,
-        onModeChanged: (m) => setState(() {
-          _mode = m;
-          if (m == 'Home Collection') _selectedBranch = null;
-          if (m == 'Lab Test') { _pincode = null; _city = null; }
-        }),
-        onBranchChanged: (b) => setState(() => _selectedBranch = b),
-        onPincodeChanged: (p) => setState(() => _pincode = p),
+        onModeChanged: (m) {
+          final prev = _mode;
+          debugPrint('\n🔄 [MODE CHANGE] $prev → $m');
+          setState(() {
+            _mode = m;
+            // Only clear branch when SWITCHING from Lab Test → Home Collection.
+            // If mode hasn't changed (sheet re-confirmed same mode), keep state.
+            if (m == 'Home Collection' && prev == 'Lab Test') {
+              _selectedBranch = null;
+              debugPrint('   🏥 branch cleared (switched to Home Collection)');
+            }
+            if (m == 'Lab Test' && prev != 'Lab Test') {
+              _pincode = null;
+              _city    = null;
+              debugPrint('   🏥 pincode/city cleared (switched to Lab Test)');
+            }
+            if (m == prev) debugPrint('   ℹ️  mode unchanged — state preserved');
+          });
+        },
+        // Lab Test only — patient manually picks a branch.
+        onBranchChanged: (b) {
+          debugPrint('\n🏥 [BRANCH MANUAL SELECT] ${b?.name ?? 'cleared'} (Lab Test)');
+          setState(() => _selectedBranch = b);
+        },
+        // Home Collection — pincode set → trigger silent branch detection.
+        onPincodeChanged: (p) {
+          debugPrint('\n📮 [PINCODE SET] "$p"  mode=$_mode  (current pincode=$_pincode)');
+          // GPS flow sends null after address is confirmed.
+          // If we already extracted a pincode from the GPS address, keep it.
+          if (p == null && _pincode != null) {
+            debugPrint('   ℹ️  null received but keeping extracted pincode "$_pincode" — skipping override');
+            return;
+          }
+          setState(() {
+            _pincode        = p;
+            _selectedBranch = null;
+          });
+          if (p != null && p.length == 6 && _mode == 'Home Collection') {
+            debugPrint('   → 6 digits confirmed — starting branch auto-detect (city=$_city)');
+            _autoDetectBranch(p, place: _city);
+          } else {
+            debugPrint('   → skipped (length=${p?.length}, mode=$_mode)');
+          }
+        },
         onCityChanged: (c) => setState(() => _city = c),
-        onAddressChanged: (a) => setState(() => _address = a),
-        onLatLngChanged: (lat, lng) => setState(() { _lat = lat; _lng = lng; }),
+        // GPS / manual address — try to extract pincode from the address string.
+        onAddressChanged: (a) {
+          debugPrint('\n🏠 [ADDRESS SET] "$a"');
+          setState(() => _address = a);
+          if (a != null && a.isNotEmpty &&
+              _pincode == null && _mode == 'Home Collection') {
+            debugPrint('   → no pincode yet — scanning address for 6-digit code');
+            _tryExtractPincodeFromAddress(a);
+          }
+        },
+        onLatLngChanged: (lat, lng) {
+          debugPrint('\n📡 [GPS COORDS] lat=$lat  lng=$lng');
+          setState(() { _lat = lat; _lng = lng; });
+        },
       ),
     );
   }
@@ -248,22 +380,34 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         cart: _cart,
         onRemove: (t) => setState(() => _cart.removeWhere((x) => x.id == t.id)),
         onCheckout: () {
+          final branchId = _selectedBranch != null
+              ? int.tryParse(_selectedBranch!.id)
+              : null;
+          debugPrint('\n🛒 [CHECKOUT] ────────────────────────────────────');
+          debugPrint('   mode        : $_mode');
+          debugPrint('   pincode     : ${_pincode ?? '—'}');
+          debugPrint('   branch      : ${_selectedBranch?.name ?? '⚠️ none — slots will be static'}');
+          debugPrint('   branchId    : ${branchId ?? '⚠️ null'}');
+          debugPrint('   patientId   : $_patientId');
+          debugPrint('   cart items  : ${_cart.length}');
+          debugPrint('──────────────────────────────────────────────────\n');
           Navigator.pop(context);
           Navigator.push(
             context,
             MaterialPageRoute(
               builder: (_) => CheckoutScreen(
-                member: widget.member,
-                cart: List.from(_cart),
-                mode: _mode,
-                address: _address,
-                pincode: _pincode,
-                city: _city,
-                branch: _selectedBranch,
-                isVip: widget.isVip,
-                patientId: _patientId,
+                member:     widget.member,
+                cart:       List.from(_cart),
+                mode:       _mode,
+                address:    _address,
+                pincode:    _pincode,
+                city:       _city,
+                branch:     _selectedBranch,
+                isVip:      widget.isVip,
+                patientId:  _patientId,
                 patientLat: _lat,
                 patientLng: _lng,
+                branchId:   branchId,
               ),
             ),
           ).then((_) => setState(() => _cart.clear()));
@@ -1189,14 +1333,16 @@ class _LocationSheetState extends State<_LocationSheet> {
         widget.onCityChanged(null);
       } 
       else if (_manualSelected && _manualLat != null && _manualLng != null) {
-        // Use manual pincode-based location
-        final address = _addressCtrl.text.trim().isNotEmpty 
-            ? _addressCtrl.text.trim() 
+        // Use manual pincode-based location.
+        // city MUST fire before pincode so _city is ready when auto-detect triggers.
+        final address = _addressCtrl.text.trim().isNotEmpty
+            ? _addressCtrl.text.trim()
             : _manualAddress;
-        widget.onAddressChanged(address);
+        final city = _cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim();
+        widget.onCityChanged(city);                        // 1st — set city
+        widget.onAddressChanged(address);                  // 2nd
         widget.onLatLngChanged?.call(_manualLat, _manualLng);
-        widget.onPincodeChanged(_pincodeCtrl.text.trim());
-        widget.onCityChanged(_cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim());
+        widget.onPincodeChanged(_pincodeCtrl.text.trim()); // last — triggers auto-detect (city already set)
       }
       else {
         setState(() => _locationError = true);

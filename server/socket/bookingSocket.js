@@ -125,12 +125,16 @@ function _freeTechnician(technicianId, bookingId) {
 
 // Shared sort: all actors where isOnline===true AND isAvailable===true,
 // nearest GPS-equipped first, no-GPS actors appended at the end.
-function _sortedAvailableActors(patientLat, patientLng, actorMap) {
+// branchId: when non-null, only actors whose branchId matches (or is unset) are included.
+function _sortedAvailableActors(patientLat, patientLng, actorMap, branchId = null) {
   const withGps = [];
   const noGps   = [];
 
   actorMap.forEach((actor, id) => {
     if (!actor.isOnline || !actor.isAvailable) return; // offline / busy → skip
+    // Branch filter: skip actor only when BOTH sides have a branchId and they differ.
+    // Actors with no branchId set are treated as branch-agnostic (transition safety).
+    if (branchId != null && actor.branchId != null && actor.branchId !== branchId) return;
 
     if (
       actor.lat  != null && actor.lng  != null &&
@@ -150,15 +154,15 @@ function _sortedAvailableActors(patientLat, patientLng, actorMap) {
 }
 
 // Initial queue: capped at MAX_DRIVERS nearest available actors
-function buildQueue(patientLat, patientLng, actorMap) {
-  return _sortedAvailableActors(patientLat, patientLng, actorMap)
+function buildQueue(patientLat, patientLng, actorMap, branchId = null) {
+  return _sortedAvailableActors(patientLat, patientLng, actorMap, branchId)
     .slice(0, MAX_DRIVERS);
 }
 
 // Expansion queue: NO size cap — used when the initial queue is exhausted so
 // every newly-online actor gets a chance, not just the nearest MAX_DRIVERS.
-function buildFullQueue(patientLat, patientLng, actorMap) {
-  return _sortedAvailableActors(patientLat, patientLng, actorMap);
+function buildFullQueue(patientLat, patientLng, actorMap, branchId = null) {
+  return _sortedAvailableActors(patientLat, patientLng, actorMap, branchId);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -183,7 +187,8 @@ function dispatchAttempt(io, bookingId) {
       const fresh = buildFullQueue(
         bookingData.patientLat ?? null,
         bookingData.patientLng ?? null,
-        actorMap
+        actorMap,
+        bookingData.branchId   ?? null
       ).filter(a => !triedIds.has(a.id)); // never re-contact the same actor
 
       if (fresh.length > 0) {
@@ -197,10 +202,11 @@ function dispatchAttempt(io, bookingId) {
         );
         // Continue loop — techIdx already points to first fresh slot
       } else {
-        // Nobody left — emit timeout and clean up
+        // Nobody left — notify patient BEFORE deleting bookingRooms so
+        // _notifyPatient can still resolve patientId → socketId for direct delivery.
         dispatchQueues.delete(bookingId);
-        bookingRooms.delete(bookingId);
         _notifyPatient(io, bookingId, 'booking_timeout', { bookingId });
+        bookingRooms.delete(bookingId);
         if (bookingType !== 'transport') {
           dbRun(
             `UPDATE booking_requests
@@ -306,7 +312,7 @@ module.exports = function bookingSocket(io, socket) {
   // ════════════════════════════════════════════════════════════════════════════
 
   socket.on('technician_online', (data = {}) => {
-    const { technicianId, technicianName, sessionId, lat, lng } = data;
+    const { technicianId, technicianName, sessionId, lat, lng, branchId } = data;
     if (!technicianId) {
       console.warn('technician_online: missing technicianId');
       return;
@@ -321,6 +327,7 @@ module.exports = function bookingSocket(io, socket) {
       lng:         lng       ?? null,
       name:        technicianName,
       sessionId:   sessionId ?? null,
+      branchId:    branchId  ?? null,
       isOnline:    true,
       isAvailable: true,
     });
@@ -347,6 +354,7 @@ module.exports = function bookingSocket(io, socket) {
 
     logBlock('🟢', `Technician Online`, [
       `Technician : ${technicianName} (ID: ${technicianId})`,
+      `Branch     : ${branchId ?? 'unassigned'}`,
       `GPS        : ${lat != null ? `${lat.toFixed(5)}, ${lng.toFixed(5)}` : 'no GPS'}`,
       `Socket     : ${socket.id}`,
     ]);
@@ -382,6 +390,9 @@ module.exports = function bookingSocket(io, socket) {
     // technician currently being dispatched is never displaced.
     dispatchQueues.forEach((dispatch, bookingId) => {
       if (dispatch.bookingType !== 'lab') return;
+      // Branch guard: don't inject into bookings from a different branch
+      const bookingBranchId = dispatch.bookingData.branchId ?? null;
+      if (bookingBranchId != null && branchId != null && bookingBranchId !== branchId) return;
 
       // If already in the queue, refresh the snapshot so a reconnect with a new
       // socketId or updated GPS doesn't leave a stale entry.  dispatchAttempt
@@ -997,6 +1008,8 @@ module.exports = function bookingSocket(io, socket) {
       patientMobile = '', patientAddress = '',
       patientLat, patientLng, hospital,
       bookingType = 'lab',
+      branchId   = null,
+      branchName = null,
     } = data;
 
     if (!bookingId || !patientId) {
@@ -1039,7 +1052,7 @@ module.exports = function bookingSocket(io, socket) {
       return;
     }
 
-    const queue = buildQueue(patientLat, patientLng, actorMap);
+    const queue = buildQueue(patientLat, patientLng, actorMap, branchId);
 
     if (queue.length === 0) {
       socket.emit('booking_timeout', { bookingId });
@@ -1051,6 +1064,7 @@ module.exports = function bookingSocket(io, socket) {
     logBlock('📋', `Booking Created  #${bookingId}`, [
       `Patient    : ${patientName} (ID: ${patientId})`,
       `Type       : ${bookingType}`,
+      `Branch     : ${branchId ?? 'unassigned'}`,
       `Location   : ${
         patientLat != null
           ? `${Number(patientLat).toFixed(4)}, ${Number(patientLng).toFixed(4)}`
@@ -1070,6 +1084,7 @@ module.exports = function bookingSocket(io, socket) {
     const payload = {
       bookingId, patientId, patientName, patientMobile,
       patientAddress, patientLat, patientLng, hospital, bookingType,
+      branchId, branchName,
       createdAt: new Date().toISOString(),
     };
 
