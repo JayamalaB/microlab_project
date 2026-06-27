@@ -1,0 +1,138 @@
+{
+  "_readme": "MicroLab FAQ knowledge base. 'questions' are phrase triggers (case-insensitive substring match). Add more entries as needed.",
+
+  "faqs": [
+    {
+      "id": "bot_identity",
+      "questions": [
+        "who are you", "what are you", "are you a bot", "are you human",
+        "are you an ai", "what kind of assistant", "who made you",
+        "who created you", "what do you do", "what can you do",
+        "what are your capabilities", "how can you help"
+      ],
+      "answer": "🤖 I'm MicroLab's AI-powered support assistant. I can help you with:\n\n🔹 **Tests** — available tests, fasting, pricing, report timings\n🔹 **Bookings** — how to book, cancel, or reschedule\n🔹 **Branches** — locations, hours, contact numbers\n🔹 **Home Collection** — how it works, slot info\n🔹 **Reports** — turnaround times, how to download\n\nTry asking: 'Do I need to fast?', 'Where is T Nagar branch?', or 'How long for my report?'"
+    },
+    {
+      "id": "business_hours",
+      "questions": [
+        "business hours", "working hours", "when are you open",
+        "opening hours", "what time do you open", "what time do you close",
+        "lab hours", "timing", "open on sunday"
+      ],
+      "answer": "🕐 **MicroLab Branch Hours:**\n\n• **T Nagar & Anna Nagar** — Mon–Sat: 7:00 AM – 8:00 PM · Sun: 8:00 AM – 2:00 PM\n• **Adyar** — Mon–Sat: 7:30 AM – 7:30 PM · Sun: 8:00 AM – 1:00 PM\n\nHome collection slots are available from 6:00 AM – 11:00 AM."
+    },
+    {
+      "id": "fasting",
+      "questions": [
+        "fasting", "do i need to fast", "fast before test",
+        "empty stomach", "eat before", "can i drink water",
+        "fasting required", "fasting needed"
+      ],
+      "answer": "🍽️ **Fasting requirements:**\n\n• **Fasting required (8–12 hrs):** HbA1c, Fasting Blood Glucose, Lipid Profile, Triglycerides\n• **No fasting needed:** CBC, Thyroid Profile, Vitamin D, Urine Routine, COVID tests\n\nEach test card in the app shows whether fasting is required. When in doubt, check the test details before booking."
+    },
+    {
+      "id": "report_timing",
+      "questions": [
+        "report timing", "report time", "when will my report", "how long for report",
+        "report ready", "turnaround", "result time", "when will results",
+        "how long does", "report turnaround"
+      ],
+      "answer": "⏱️ **Typical report turnaround times:**\n\n• CBC, Blood Sugar, Urine Routine — 24 hrs\n• Thyroid Profile (T3/T4/TSH) — 24 hrs\n• HbA1c — 48 hrs\n• Lipid Profile — 24 hrs\n• Vitamins (D, B12) & Hormones — 48–72 hrs\n• Culture tests — 3–5 days\n\nYou'll receive an SMS and in-app notification once your report is ready."
+    },
+    {
+      "id": "collection_process",
+      "questions": [
+        "how collection works", "collection process", "how does home collection work",
+        "home collection", "sample collection", "technician visit",
+        "how does it work", "lab visit process"
+      ],
+      "answer": "🏠 **Home Collection:**\n1. Book & choose a time slot (6 AM – 11 AM)\n2. Our trained phlebotomist arrives at your door\n3. Sample collected & sent to the lab\n4. Report shared in the app within the promised time\n\n🏥 **Lab Visit:**\n1. Walk in or book a slot in advance\n2. Collect a token at the reception\n3. Sample collected in our phlebotomy room\n4. Download your report from the app"
+    },
+    {
+      "id": "branches_tnagar",
+      "questions": [
+        "t nagar", "tnagar", "pondy bazaar", "t nagar branch", "t nagar address"
+      ],
+      "answer": "📍 **MicroLab – T Nagar**\n\nAddress: 45, Pondy Bazaar, T Nagar, Chennai – 600017\n📞 +91 44-2815-0001\n🕐 Mon–Sat: 7:00 AM – 8:00 PM · Sun: 8:00 AM – 2:00 PM"
+    },
+    {
+      "id": "branches_adyar",
+      "questions": [
+        "adyar", "gandhi nagar", "adyar branch", "adyar address"
+      ],
+      "answer": "📍 **MicroLab – Adyar**\n\nAddress: 12, Gandhi Nagar, Adyar, Chennai – 600020\n📞 +91 44-2491-0002\n🕐 Mon–Sat: 7:30 AM – 7:30 PM · Sun: 8:00 AM – 1:00 PM"
+    },
+    {
+      "id": "branches_annanagar",
+      "questions": [
+        "anna nagar", "annanagar", "2nd avenue", "anna nagar branch", "anna nagar address"
+      ],
+      "answer": "📍 **MicroLab – Anna Nagar**\n\nAddress: 89, 2nd Avenue, Anna Nagar, Chennai – 600040\n📞 +91 44-2628-0003\n🕐 Mon–Sat: 7:00 AM – 8:00 PM · Sun: Closed"
+    },
+    {
+      "id": "all_branches",
+      "questions": [
+        "all branches", "branch locations", "where are you located",
+        "locations", "nearest branch", "all locations", "your branches"
+      ],
+      "answer": "📍 **MicroLab has 3 branches in Chennai:**\n\n1. **T Nagar** — 45, Pondy Bazaar · +91 44-2815-0001\n2. **Adyar** — 12, Gandhi Nagar · +91 44-2491-0002\n3. **Anna Nagar** — 89, 2nd Avenue · +91 44-2628-0003\n\nAll branches are open Mon–Sat. Sunday hours vary by location."
+    },
+    {
+      "id": "cancel_booking",
+      "questions": [
+        "cancel booking", "how to cancel", "cancel my booking",
+        "cancel appointment", "cancel test", "cancellation policy"
+      ],
+      "answer": "❌ **To cancel a booking:**\n\n1. Go to the **Bookings** tab in the app\n2. Open the booking you want to cancel\n3. Tap **Cancel Booking**\n\nRefunds for online payments are processed within **5–7 business days** back to your original payment method."
+    },
+    {
+      "id": "reschedule_booking",
+      "questions": [
+        "reschedule", "change slot", "change booking", "reschedule booking",
+        "change my appointment", "modify booking"
+      ],
+      "answer": "🔄 **To reschedule a booking:**\n\nCancel the existing booking and create a new one with your preferred slot. For urgent reschedules, call **1800-XXX-XXXX** and we'll assist you directly."
+    },
+    {
+      "id": "payment_issue",
+      "questions": [
+        "payment issue", "payment failed", "payment deducted", "money deducted",
+        "paid but not confirmed", "payment problem", "refund"
+      ],
+      "answer": "💳 **Payment issue?**\n\nIf payment was deducted but your booking wasn't confirmed, email us at **support@microlab.in** with:\n• Your mobile number\n• Payment screenshot\n• Approximate time of transaction\n\nWe'll resolve it within **24 hours**."
+    },
+    {
+      "id": "contact_support",
+      "questions": [
+        "contact support", "customer support", "how to contact",
+        "support email", "help desk", "raise a complaint", "phone number",
+        "helpline", "toll free"
+      ],
+      "answer": "📞 **Contact MicroLab Support:**\n\n• **Toll-Free:** 1800-XXX-XXXX\n• **Email:** support@microlab.in\n• **Hours:** Mon–Sat, 8:00 AM – 8:00 PM\n\nFor branch-specific queries, call the branch directly."
+    },
+    {
+      "id": "payment_methods",
+      "questions": [
+        "payment methods", "how can i pay", "accepted payments",
+        "upi", "cash on delivery", "cod", "online payment", "razorpay"
+      ],
+      "answer": "💳 We accept **Credit/Debit cards, UPI, Net Banking**, and **Pay Later** (pay at the lab) for eligible bookings. Payments are processed securely via Razorpay."
+    },
+    {
+      "id": "about_microlab",
+      "questions": [
+        "about microlab", "about your company", "what is microlab",
+        "tell me about microlab", "about this lab", "who is microlab"
+      ],
+      "answer": "🏥 **MicroLab Diagnostics** is a trusted diagnostic lab in Chennai offering accurate, affordable, and timely medical tests. We specialise in home blood sample collection, making it easy for patients to get tested from the comfort of their homes.\n\nWe have 3 branches across Chennai — T Nagar, Adyar, and Anna Nagar."
+    },
+    {
+      "id": "download_report",
+      "questions": [
+        "download report", "get my report", "access report", "view report",
+        "how to get report", "report download", "where is my report"
+      ],
+      "answer": "📄 **To access your report:**\n\n1. Open the MicroLab app\n2. Go to the **Reports** tab\n3. Select the booking\n4. Tap **Download PDF** or **Share**\n\nYou'll also receive an SMS notification when your report is ready."
+    }
+  ]
+}

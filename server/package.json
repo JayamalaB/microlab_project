@@ -15,8 +15,13 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "form-data": "^4.0.6",
     "jsonwebtoken": "^9.0.3",
-    "mysql2": "^3.22.5"
+    "multer": "^2.2.0",
+    "mysql2": "^3.22.5",
+    "openai": "^4.77.0",
+    "playwright": "^1.61.0",
+    "redis": "^4.7.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

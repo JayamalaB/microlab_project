@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+client/node_modules/
+
+# Environment (contains API keys — never commit)
+server/.env
+.env
+
+# Flutter build outputs
+client/build/
+client/.dart_tool/
+client/.flutter-plugins
+client/.flutter-plugins-dependencies
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+*.iml

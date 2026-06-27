@@ -17,6 +17,12 @@ dependencies:
   url_launcher: ^6.3.0
   pdf: ^3.11.0
   printing: ^5.13.2
+  http: ^1.2.0
+  webview_flutter: ^4.9.0         # YouTube inline player
+  webview_flutter_android: ^4.0.0  # AndroidWebViewController.setMediaPlaybackRequiresUserGesture
+  record: ^7.0.0              # microphone STT recording
+  audioplayers: ^6.1.0        # TTS WAV playback
+  path_provider: ^2.1.0       # temp directory for audio files
 
 dev_dependencies:
   flutter_test:
@@ -25,3 +31,7 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/banners/banner1.jpg
+    - assets/banners/banner2.png
+    - assets/banners/banner3.png
