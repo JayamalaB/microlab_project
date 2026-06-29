@@ -2,6 +2,17 @@ const crypto = require('crypto');
 const db  = require('../config/db');
 const jwt = require('jsonwebtoken');
 
+// In-memory OTP store — keyed by mobile number
+// Avoids a dependency on ip_otp_logs DB table that may not exist on all deployments.
+// OTPs expire after 5 minutes; a periodic sweep keeps memory clean.
+const _otpStore = new Map(); // mobile → { otp, role, expiresAt }
+setInterval(() => {
+  const now = Date.now();
+  for (const [mobile, entry] of _otpStore) {
+    if (entry.expiresAt < now) _otpStore.delete(mobile);
+  }
+}, 60_000);
+
 // ── HMAC helper — matches verifySecureId() in the PHP scripts ─────────────────
 function buildSecureId(mobileNo, userType, timestamp) {
   const message = `${mobileNo}|${userType}|${timestamp}`;
@@ -43,22 +54,12 @@ exports.sendOtp = async (req, res) => {
     return res.json({ success: true, message: 'OTP sent', data: { otp: '1234' } });
   }
 
-  // Technician: real OTP stored in ip_otp_logs
-  try {
-    const otp       = Math.floor(1000 + Math.random() * 9000).toString();
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+  // Technician: generate OTP and hold it in memory for 5 minutes
+  const otp = Math.floor(1000 + Math.random() * 9000).toString();
+  _otpStore.set(mobile, { otp, role, expiresAt: Date.now() + 5 * 60 * 1000 });
+  console.log(`   📲 [OTP] technician ${mobile} → ${otp}`);
 
-    await db.query('DELETE FROM ip_otp_logs WHERE mobile = ?', [mobile]);
-    await db.query(
-      'INSERT INTO ip_otp_logs (mobile, otp, role, expires_at) VALUES (?, ?, ?, ?)',
-      [mobile, otp, role, expiresAt]
-    );
-
-    res.json({ success: true, message: 'OTP sent', data: { otp } });
-  } catch (e) {
-    console.error('[sendOtp] DB error:', e.message);
-    res.status(500).json({ success: false, message: `Server error: ${e.message}` });
-  }
+  res.json({ success: true, message: 'OTP sent', data: { otp } });
 };
 
 // ── POST /api/auth/verify-otp ─────────────────────────────────────────────────
@@ -81,19 +82,14 @@ exports.verifyOtp = async (req, res) => {
     });
   }
 
-  // ── Technician: real OTP from ip_otp_logs ────────────────────────────────
-  const [rows] = await db.query(
-    'SELECT * FROM ip_otp_logs WHERE mobile = ? AND otp = ? AND role = ? AND expires_at > NOW()',
-    [mobile, otp, role]
-  );
-
-  if (rows.length === 0) {
+  // ── Technician: verify OTP from in-memory store ──────────────────────────
+  const otpEntry = _otpStore.get(mobile);
+  if (!otpEntry || otpEntry.otp !== otp || otpEntry.role !== role || otpEntry.expiresAt < Date.now()) {
     console.log('❌ OTP invalid or expired');
     return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
   }
-
-  await db.query('DELETE FROM ip_otp_logs WHERE mobile = ?', [mobile]);
-  console.log('✅ OTP verified — deleted from ip_otp_logs');
+  _otpStore.delete(mobile);
+  console.log('✅ OTP verified — cleared from store');
 
   // ── Technician: fetch profile from jayamala.neuralarc.com ────────────────
   if (role === 'technician') {
