@@ -1,5 +1,6 @@
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/services/notification_service.dart';
@@ -9,14 +10,14 @@ import 'package:microlab/screens/shared/splash_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Register the background handler BEFORE Firebase.initializeApp().
-  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-
-  // Initialize Firebase — reads google-services.json placed in android/app/.
-  await Firebase.initializeApp();
-
-  // Setup notification channel + permission + foreground listener.
-  await NotificationService.instance.initialize();
+  // Firebase + push notifications — Android only for now.
+  // Web requires explicit FirebaseOptions (from FlutterFire CLI); that will be
+  // wired up when web notification support is added in a later phase.
+  if (!kIsWeb) {
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+    await Firebase.initializeApp();
+    await NotificationService.instance.initialize();
+  }
 
   // Status bar style — transparent for splash
   SystemChrome.setSystemUIOverlayStyle(
