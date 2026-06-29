@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../constants/app_constants.dart';
+import 'notification_service.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  DATA MODELS  — socket event payloads
@@ -233,6 +234,19 @@ class SocketService {
   double? _lastLat;
   double? _lastLng;
 
+  // ── FCM push token ─────────────────────────────────────────────────────────
+  String? _fcmToken;
+
+  // Called by NotificationService after getToken() or onTokenRefresh.
+  void updateFcmToken(String token) {
+    _fcmToken = token;
+    // If already online, re-emit so the server stores the latest token.
+    if (_isAvailable && isConnected) {
+      _emitTechnicianOnline();
+      _log('FCM', 'token updated — re-emitted technician_online');
+    }
+  }
+
   // ── Driver availability state ──────────────────────────────────────────────
   bool    _isDriverOnline = false;
   double? _driverLat;
@@ -368,6 +382,11 @@ class SocketService {
 
     _registerEventHandlers();
     _socket!.connect();
+
+    // Fetch FCM token once per login so it's ready before the first goOnline().
+    if (role == 'technician') {
+      NotificationService.instance.loadToken();
+    }
   }
 
   // ── Reconnect helpers ──────────────────────────────────────────────────────
@@ -410,6 +429,7 @@ class SocketService {
       'branchId':       _branchId,
       'lat':            _lastLat,
       'lng':            _lastLng,
+      if (_fcmToken != null) 'fcmToken': _fcmToken,
     });
     _log('ONLINE', 'emitted technician_online  branch=$_branchId lat=$_lastLat lng=$_lastLng');
   }

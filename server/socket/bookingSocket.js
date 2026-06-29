@@ -19,7 +19,46 @@
 //   • Disconnect mid-job   → patient notified immediately via booking_cancelled
 
 'use strict';
-const db = require('../config/db');
+const db              = require('../config/db');
+const { messaging }   = require('../config/firebase');
+
+// Send FCM push to one device — fire-and-forget, never blocks dispatch.
+async function sendFcmPush(fcmToken, bookingData) {
+  if (!messaging || !fcmToken) return;
+  try {
+    const msgId = await messaging.send({
+      token: fcmToken,
+      notification: {
+        title: '🔔 New Booking Request',
+        body:  `${bookingData.patientName} • ${bookingData.patientAddress || 'Location pending'}`,
+      },
+      data: {
+        type:           'booking_request',
+        bookingId:      String(bookingData.bookingId   ?? ''),
+        patientId:      String(bookingData.patientId   ?? ''),
+        patientName:    String(bookingData.patientName ?? ''),
+        patientMobile:  String(bookingData.patientMobile  ?? ''),
+        patientAddress: String(bookingData.patientAddress ?? ''),
+        patientLat:     String(bookingData.patientLat  ?? ''),
+        patientLng:     String(bookingData.patientLng  ?? ''),
+        hospital:       String(bookingData.hospital    ?? ''),
+        bookingType:    String(bookingData.bookingType ?? 'lab'),
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId:             'booking_requests',
+          priority:              'max',
+          defaultSound:          true,
+          defaultVibrateTimings: true,
+        },
+      },
+    });
+    console.log(`   ✅ [FCM] push sent  booking=${bookingData.bookingId} msgId=${msgId}`);
+  } catch (e) {
+    console.error(`   ❌ [FCM] push failed  booking=${bookingData.bookingId}: ${e.message}`);
+  }
+}
 
 // ── Dispatch config ────────────────────────────────────────────────────────────
 const MAX_DRIVERS   = 3;       // initial queue cap (nearest N actors)
@@ -224,6 +263,9 @@ function dispatchAttempt(io, bookingId) {
 
     io.to(online.socketId).emit('booking_request', bookingData);
 
+    // FCM push — delivers even if the app is backgrounded or terminated.
+    sendFcmPush(online.fcmToken, bookingData);
+
     const distLabel = actor.dist === Infinity
       ? 'no GPS'
       : `${actor.dist.toFixed(1)} km`;
@@ -426,7 +468,7 @@ module.exports = function bookingSocket(io, socket) {
   // ════════════════════════════════════════════════════════════════════════════
 
   socket.on('technician_online', (data = {}) => {
-    const { technicianId, technicianName, sessionId, lat, lng, branchId } = data;
+    const { technicianId, technicianName, sessionId, lat, lng, branchId, fcmToken } = data;
     if (!technicianId) {
       console.warn('technician_online: missing technicianId');
       return;
@@ -442,9 +484,18 @@ module.exports = function bookingSocket(io, socket) {
       name:        technicianName,
       sessionId:   sessionId ?? null,
       branchId:    branchId  ?? null,
+      fcmToken:    fcmToken  ?? null,
       isOnline:    true,
       isAvailable: true,
     });
+
+    // Persist FCM token so it survives server restarts (next dispatchAttempt reads from Map).
+    if (fcmToken) {
+      dbRun(
+        `UPDATE ip_technician_live_location SET fcm_token = ? WHERE technician_id = ?`,
+        [fcmToken, technicianId]
+      );
+    }
 
     dbRun(
       `INSERT INTO ip_technician_live_location
