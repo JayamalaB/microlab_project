@@ -2,6 +2,80 @@ import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models.dart';
 
+Future<void> _confirmLogout(BuildContext context, VoidCallback onLogout) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    barrierDismissible: true,
+    builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      contentPadding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: const BoxDecoration(
+              color: Color(0xFFFFEBEE),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.logout_rounded,
+                size: 26, color: Color(0xFFD32F2F)),
+          ),
+          const SizedBox(height: 16),
+          const Text('Logout?',
+              style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary)),
+          const SizedBox(height: 8),
+          const Text(
+            'Are you sure you want to logout from MicroLab?',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textSecondary,
+                    side: const BorderSide(color: AppColors.divider),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Cancel',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFD32F2F),
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Logout',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+  if (confirmed == true) onLogout();
+}
+
 class ProfileScreen extends StatelessWidget {
   final String mobile;
   final bool isVip;
@@ -72,7 +146,7 @@ class ProfileScreen extends StatelessWidget {
           ],
           const Spacer(),
           TextButton.icon(
-            onPressed: onLogout,
+            onPressed: () => _confirmLogout(context, onLogout),
             icon: const Icon(Icons.logout_rounded, size: 15, color: Colors.white70),
             label: const Text('Logout',
                 style: TextStyle(color: Colors.white70, fontSize: 13)),
@@ -281,7 +355,7 @@ class ProfileScreen extends StatelessWidget {
                 color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
         actions: [
           TextButton.icon(
-            onPressed: onLogout,
+            onPressed: () => _confirmLogout(context, onLogout),
             icon: const Icon(Icons.logout_rounded, size: 16, color: Colors.white70),
             label: const Text('Logout',
                 style: TextStyle(color: Colors.white70, fontSize: 13)),

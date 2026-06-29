@@ -21,4 +21,4 @@ module.exports = sequelize.define('TechnicianLocationLog', {
   source:          DataTypes.STRING(50),
   device_timestamp: DataTypes.DATE,
   created_at:      DataTypes.DATE,
-}, { tableName: 'technician_location_log', timestamps: false });
+}, { tableName: 'ip_technician_location_log', timestamps: false });

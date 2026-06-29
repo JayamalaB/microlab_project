@@ -13,10 +13,9 @@ import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/constants/app_constants.dart';
-import 'technician_dashboard_screen.dart';
 import 'technician_booking_detail_screen.dart';
 
-enum _JobStatus { assigned, enRoute, arrived, completed }
+enum _JobStatus { assigned, enRoute, arrived, handedOver }
 
 class TechnicianActiveJobScreen extends StatefulWidget {
   final int bookingId;
@@ -64,7 +63,8 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
   BitmapDescriptor? _patientIcon;
   late AnimationController _pulseController;
 
-  double? _distKm;
+  double? _distKm;     // haversine straight-line — used for progress bar ratio
+  double? _roadDistKm; // road distance from Directions API — used for display only
   int? _etaMin;
   double? _initialDistKm;
   double? _speedKmh;
@@ -458,9 +458,11 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
         final durS = (legs['duration'] as Map?)?['value'] as int?;
         if (distM != null && durS != null && mounted && !_isDisposing) {
           final newDist = distM / 1000;
-          _initialDistKm ??= newDist;
+          // Road distance → display only. Progress bar uses haversine (_distKm)
+          // so both numerator and denominator are straight-line, preventing the
+          // road/haversine mismatch that clamped _journeyProgress to 0.
           setState(() {
-            _distKm = newDist;
+            _roadDistKm = newDist;
             _etaMin = (durS / 60).ceil();
           });
         }
@@ -533,13 +535,14 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
   }
 
   String get _distText {
-    if (_distKm == null) return '—';
-    if (_distKm! < 1.0) return '${(_distKm! * 1000).round()} m';
-    return '${_distKm!.toStringAsFixed(1)} km';
+    final d = _roadDistKm ?? _distKm;
+    if (d == null) return '—';
+    if (d < 1.0) return '${(d * 1000).round()} m';
+    return '${d.toStringAsFixed(1)} km';
   }
 
   double get _journeyProgress {
-    if (_status == _JobStatus.arrived || _status == _JobStatus.completed) {
+    if (_status == _JobStatus.arrived || _status == _JobStatus.handedOver) {
       return 1.0;
     }
     if (_initialDistKm == null || _initialDistKm! == 0 || _distKm == null) {
@@ -565,6 +568,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       _status = _JobStatus.enRoute;
       _lastRouteFetchPos = null;
       _initialDistKm = null;
+      _roadDistKm = null;
     });
     SocketService.instance.emitEnRoute(bookingId: widget.bookingId);
     HapticFeedback.mediumImpact();
@@ -580,6 +584,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
     setState(() {
       _status = _JobStatus.arrived;
       _distKm = null;
+      _roadDistKm = null;
       _etaMin = null;
       _polylines.clear();
       _initialDistKm = null;
@@ -588,78 +593,44 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
     HapticFeedback.mediumImpact();
   }
 
-  void _completeJob() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Complete Collection?',
-            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
-        content: Text(
-          'Confirm sample collected from ${widget.patientName}.',
-          style: const TextStyle(fontSize: 14, color: AppColors.textSecondary),
+  void _startCollection() {
+    SocketService.instance.emitCollectionStarted(bookingId: widget.bookingId);
+    HapticFeedback.mediumImpact();
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => TechnicianBookingDetailScreen(
+          booking: TechnicianBooking(
+            id: widget.bookingId.toString(),
+            customerName: widget.patientName,
+            customerPhone: widget.patientMobile,
+            address: widget.patientAddress,
+            city: '',
+            pincode: '',
+            date: DateTime.now(),
+            timeSlot: '',
+            testNames: const [],
+            mode: 'Home Collection',
+            status: 'Collection Started',
+            isVip: false,
+            docRequired: false,
+            docVerified: false,
+            serviceChargePaid: 0,
+            testsTotal: 0,
+            assignedAt: DateTime.now(),
+          ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel',
-                style: TextStyle(color: AppColors.textSecondary)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              setState(() {
-                _status = _JobStatus.completed;
-              });
-              HapticFeedback.heavyImpact();
-              
-              // Navigate to detail screen after completion
-              Future.delayed(const Duration(milliseconds: 500), () {
-                if (!mounted) return;
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => TechnicianBookingDetailScreen(
-                      booking: TechnicianBooking(
-                        id: widget.bookingId.toString(),
-                        customerName: widget.patientName,
-                        customerPhone: widget.patientMobile,
-                        address: widget.patientAddress,
-                        city: '',
-                        pincode: '',
-                        date: DateTime.now(),
-                        timeSlot: '',
-                        testNames: const [],
-                        mode: 'Home Collection',
-                        status: 'Collection Started',
-                        isVip: false,
-                        docRequired: false,
-                        docVerified: false,
-                        serviceChargePaid: 0,
-                        testsTotal: 0,
-                        assignedAt: DateTime.now(),
-                      ),
-                    ),
-                  ),
-                ).then((wasCompleted) {
-                  if (wasCompleted == true && mounted) {
-                    Navigator.of(context).pop(true);
-                  }
-                });
-              });
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.brandGreen,
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('Confirm', style: TextStyle(color: Colors.white)),
-          ),
-        ],
       ),
-    );
+    ).then((wasCompleted) {
+      if (wasCompleted == true && mounted) {
+        setState(() => _status = _JobStatus.handedOver);
+        HapticFeedback.heavyImpact();
+        Future.delayed(const Duration(milliseconds: 1500), () {
+          if (!mounted) return;
+          Navigator.of(context).pop(true);
+        });
+      }
+    });
   }
 
   void _openInMaps() {
@@ -911,7 +882,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                   ),
 
                   // Completed banner
-                  if (_status == _JobStatus.completed)
+                  if (_status == _JobStatus.handedOver)
                     Positioned.fill(
                       child: Container(
                         color: Colors.black38,
@@ -941,11 +912,11 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                                       color: AppColors.brandGreen, size: 40),
                                 ),
                                 const SizedBox(height: 16),
-                                const Text('Collection Complete!',
+                                const Text('Sample Handed to Lab!',
                                     style: TextStyle(
                                         fontSize: 20, fontWeight: FontWeight.w700)),
                                 const SizedBox(height: 6),
-                                const Text('Redirecting to details…',
+                                const Text('All done for this booking.',
                                     style: TextStyle(
                                         color: AppColors.textSecondary,
                                         fontSize: 13)),
@@ -957,7 +928,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                     ),
 
                   // Bottom card
-                  if (_status != _JobStatus.completed)
+                  if (_status != _JobStatus.handedOver)
                     Positioned(
                       bottom: 0,
                       left: 0,
@@ -1303,8 +1274,8 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       case _JobStatus.enRoute:
         return _setArrived;
       case _JobStatus.arrived:
-        return _completeJob;
-      case _JobStatus.completed:
+        return _startCollection;
+      case _JobStatus.handedOver:
         return null;
     }
   }
@@ -1316,8 +1287,8 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       case _JobStatus.enRoute:
         return 'Mark Arrived';
       case _JobStatus.arrived:
-        return 'Complete';
-      case _JobStatus.completed:
+        return 'Start Collection';
+      case _JobStatus.handedOver:
         return 'Done';
     }
   }
@@ -1330,7 +1301,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
         return Icons.location_on_rounded;
       case _JobStatus.arrived:
         return Icons.science_rounded;
-      case _JobStatus.completed:
+      case _JobStatus.handedOver:
         return Icons.check_circle_outline;
     }
   }
@@ -1343,7 +1314,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
         return const Color(0xFFF57C00);
       case _JobStatus.arrived:
         return AppColors.brandGreen;
-      case _JobStatus.completed:
+      case _JobStatus.handedOver:
         return AppColors.brandGreen;
     }
   }

@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
+const path = require('path');
 const { Server } = require('socket.io');
 const bookingSocket = require('./socket/bookingSocket');
 const bookingController = require('./controllers/bookingController');
@@ -29,6 +30,9 @@ app.use('/api/tests',        require('./routes/tests'));
 app.use('/api/bookings',     require('./routes/bookings'));
 app.use('/api/technicians',  require('./routes/technicians'));
 app.use('/api/branches',     require('./routes/branches'));
+
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 
 app.get('/', (req, res) => {
   res.json({ success: true, message: 'MediCollect API running' });

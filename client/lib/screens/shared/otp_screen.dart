@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/auth_service.dart';
 import 'package:microlab/services/socket_service.dart';
 import '../customer/customer_home_screen.dart';
 import '../technician/technician_dashboard_screen.dart';
@@ -9,8 +10,9 @@ import '../technician/technician_dashboard_screen.dart';
 class OtpScreen extends StatefulWidget {
   final String mobile;
   final String userRole;
+  final String? devOtp; // dev only — remove before production
 
-  const OtpScreen({super.key, required this.mobile, required this.userRole});
+  const OtpScreen({super.key, required this.mobile, required this.userRole, this.devOtp});
 
   @override
   State<OtpScreen> createState() => _OtpScreenState();
@@ -59,12 +61,8 @@ class _OtpScreenState extends State<OtpScreen> {
     });
   }
 
-  // Simulates SMS autofill (on Android, use sms_autofill package)
   void _listenForAutoFill() {
-    Future.delayed(const Duration(seconds: 2), () {
-      if (!mounted) return;
-      _fillOtp('8351'); // mock autofill
-    });
+    // Reserved for real SMS autofill integration (e.g. sms_autofill package)
   }
 
   void _fillOtp(String otp) {
@@ -112,78 +110,68 @@ class _OtpScreenState extends State<OtpScreen> {
   Future<void> _verify() async {
     if (!_isComplete) return;
     FocusScope.of(context).unfocus();
-    setState(() {
-      _isVerifying = true;
-      _hasError = false;
-    });
+    setState(() { _isVerifying = true; _hasError = false; });
 
-    // TODO: Replace with real API call
-    // POST /api/auth/verify-otp { mobile, otp: _currentOtp, role: widget.userRole }
-    await Future.delayed(const Duration(milliseconds: 1200));
+    final result = await AuthService.verifyOtp(
+      widget.mobile, _currentOtp, widget.userRole,
+    );
 
     if (!mounted) return;
 
-    // Mock: '0000' = wrong, anything else = success
-    if (_currentOtp == '0000') {
+    if (result['success'] != true) {
+      final msg = result['message'] as String? ?? 'Incorrect OTP. Please try again.';
       setState(() {
         _isVerifying = false;
-        _hasError = true;
-        _errorMsg = 'Incorrect OTP. Please try again.';
+        _hasError    = true;
+        _errorMsg    = msg;
         for (final c in _controllers) c.clear();
       });
       FocusScope.of(context).requestFocus(_focusNodes[0]);
+      return;
+    }
+
+    setState(() => _isVerifying = false);
+
+    final data = result['data'] as Map<String, dynamic>? ?? {};
+    final user = data['user']  as Map<String, dynamic>? ?? {};
+
+    if (widget.userRole == 'technician') {
+      final techId   = user['technician_id'] as int? ?? 0;
+      final branchId = user['branch_id']     as int? ?? 0;
+      final name     = user['user_name']     as String? ?? widget.mobile;
+      _connectSocket(techId, branchId, name);
+      _navigateTechnician();
     } else {
-      setState(() => _isVerifying = false);
-      const technicianIds = {
-        '8056535850': 1,
-        '7339535472': 2,
-        '6374500771': 3,
-      };
-      // branch_id per technician — matches users.branch_id in DB
-      // TODO: replace with real value from API login response
-      const technicianBranchIds = {
-        '8056535850': 7,  // Microlab Peelamedu (branch 7)
-        '7339535472': 7,
-        '6374500771': 7,
-      };
-      final int apiUserId = widget.userRole == 'technician'
-          ? (technicianIds[widget.mobile] ?? 1)
-          : 1;
-      final int? apiBranchId = widget.userRole == 'technician'
-          ? technicianBranchIds[widget.mobile]
-          : null;
-      _connectSocket(apiUserId, apiBranchId);
-      _showSuccess();
+      final patientId = user['patient_id'] as int? ?? 0;
+      final name      = user['patient_name'] as String? ?? widget.mobile;
+      _connectSocket(patientId, null, name);
+      _navigateCustomer();
     }
   }
 
-  void _connectSocket(int userId, int? branchId) {
+  void _connectSocket(int userId, int? branchId, String name) {
     SocketService.instance.connect(
       userId:   userId,
       role:     widget.userRole == 'technician' ? 'technician' : 'customer',
-      name:     widget.mobile, // TODO: replace with real name from API
+      name:     name,
       branchId: branchId,
     );
   }
 
-  void _showSuccess() {
-    if (widget.userRole == 'customer' || widget.userRole == 'vip_customer') {
-      // TODO: replace mock with real API response
-      // final apiResponse = await http.post('/api/auth/verify-otp', ...);
-      // final isVip = apiResponse['customer_type'] == 'vip';
-      final isVip = widget.userRole == 'vip_customer'; // mock detection
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(
-          builder: (_) => CustomerHomeScreen(
-            mobile: widget.mobile,
-            isVip: isVip,
-          ),
+  void _navigateCustomer() {
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CustomerHomeScreen(
+          mobile: widget.mobile,
+          isVip:  widget.userRole == 'vip_customer',
         ),
-        (route) => false,
-      );
-      return;
-    }
+      ),
+      (route) => false,
+    );
+  }
+
+  void _navigateTechnician() {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: const Row(
@@ -199,38 +187,37 @@ class _OtpScreenState extends State<OtpScreen> {
         duration: const Duration(seconds: 2),
       ),
     );
-
-    // TODO: Navigate to home
-    if (widget.userRole == 'technician') {
-      Navigator.pushAndRemoveUntil(
-        context,
-        PageRouteBuilder(
-          pageBuilder: (_, __, ___) => TechnicianDashboardScreen(mobile: widget.mobile),
-          transitionsBuilder: (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
-          transitionDuration: const Duration(milliseconds: 400),
-        ),
-        (route) => false,
-      );
-      return;
-    }
+    Navigator.pushAndRemoveUntil(
+      context,
+      PageRouteBuilder(
+        pageBuilder:        (_, __, ___) => TechnicianDashboardScreen(mobile: widget.mobile),
+        transitionsBuilder: (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
+        transitionDuration: const Duration(milliseconds: 400),
+      ),
+      (route) => false,
+    );
   }
 
   Future<void> _resend() async {
     if (!_canResend) return;
     for (final c in _controllers) c.clear();
-    setState(() {
-      _hasError = false;
-      _isAutoFilled = false;
-    });
+    setState(() { _hasError = false; _isAutoFilled = false; });
     FocusScope.of(context).requestFocus(_focusNodes[0]);
     _startTimer();
 
-    // TODO: POST /api/auth/send-otp { mobile: widget.mobile }
+    final result = await AuthService.sendOtp(widget.mobile, widget.userRole);
+    if (!mounted) return;
+
+    final msg = result['success'] == true
+        ? 'OTP resent to +91 ${widget.mobile}'
+        : (result['message'] as String? ?? 'Failed to resend OTP');
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('OTP resent to +91 ${widget.mobile}'),
-        backgroundColor: AppColors.brandGreen,
+        content: Text(msg),
+        backgroundColor: result['success'] == true
+            ? AppColors.brandGreen
+            : const Color(0xFFD32F2F),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         duration: const Duration(seconds: 2),
@@ -356,6 +343,38 @@ class _OtpScreenState extends State<OtpScreen> {
                 ),
 
                 const SizedBox(height: 32),
+
+                // ── Dev OTP banner (remove before production) ─────────
+                if (widget.devOtp != null)
+                  GestureDetector(
+                    onTap: () => _fillOtp(widget.devOtp!),
+                    child: Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF8E1),
+                        border: Border.all(color: const Color(0xFFFFB300)),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.developer_mode_rounded,
+                              size: 15, color: Color(0xFFE65100)),
+                          const SizedBox(width: 8),
+                          Text(
+                            'DEV — OTP: ${widget.devOtp}  (tap to fill)',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFFE65100),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
 
                 // Autofill banner
                 AnimatedSwitcher(

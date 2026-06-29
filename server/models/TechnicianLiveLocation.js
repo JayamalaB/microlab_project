@@ -8,7 +8,7 @@ module.exports = sequelize.define('TechnicianLiveLocation', {
   technician_id:      { type: DataTypes.INTEGER, allowNull: false, unique: true },
   socket_id:          DataTypes.STRING(100),
   session_id:         DataTypes.INTEGER,
-  current_booking_id: DataTypes.INTEGER,
+  booking_id:         DataTypes.INTEGER,
   latitude:           DataTypes.DECIMAL(10, 7),
   longitude:          DataTypes.DECIMAL(10, 7),
   accuracy_meters:    DataTypes.FLOAT,
@@ -20,4 +20,4 @@ module.exports = sequelize.define('TechnicianLiveLocation', {
   task_status:        DataTypes.STRING(50),
   battery_level:      DataTypes.TINYINT,
   updated_at:         DataTypes.DATE,
-}, { tableName: 'technician_live_location', timestamps: false });
+}, { tableName: 'ip_technician_live_location', timestamps: false });

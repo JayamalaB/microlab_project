@@ -262,9 +262,12 @@ class SocketService {
   final _locationUpdateCtrl      = StreamController<LocationUpdate>.broadcast();
   final _techEnRouteCtrl         = StreamController<int>.broadcast();
   final _techArrivedCtrl         = StreamController<int>.broadcast();
-  final _collectionCompletedCtrl = StreamController<int>.broadcast();
-  final _sampleReceivedCtrl      = StreamController<int>.broadcast();
-  final _testInProgressCtrl      = StreamController<int>.broadcast();
+  final _collectionCompletedCtrl  = StreamController<int>.broadcast();
+  final _collectionStartedCtrl    = StreamController<int>.broadcast();
+  final _sampleCollectedCtrl      = StreamController<int>.broadcast();
+  final _handedToLabCtrl          = StreamController<int>.broadcast();
+  final _sampleReceivedCtrl       = StreamController<int>.broadcast();
+  final _testInProgressCtrl       = StreamController<int>.broadcast();
   final _reportReadyCtrl         = StreamController<ReportReadyEvent>.broadcast();
   // transport
   final _driverArrivedCtrl       = StreamController<int>.broadcast();
@@ -282,6 +285,9 @@ class SocketService {
   Stream<int>                  get onTechnicianEnRoute    => _techEnRouteCtrl.stream;
   Stream<int>                  get onTechnicianArrived    => _techArrivedCtrl.stream;
   Stream<int>                  get onCollectionCompleted  => _collectionCompletedCtrl.stream;
+  Stream<int>                  get onCollectionStarted    => _collectionStartedCtrl.stream;
+  Stream<int>                  get onSampleCollected      => _sampleCollectedCtrl.stream;
+  Stream<int>                  get onHandedToLab          => _handedToLabCtrl.stream;
   Stream<int>                  get onSampleReceived       => _sampleReceivedCtrl.stream;
   Stream<int>                  get onTestInProgress       => _testInProgressCtrl.stream;
   Stream<ReportReadyEvent>     get onReportReady          => _reportReadyCtrl.stream;
@@ -496,6 +502,28 @@ class SocketService {
       }
     });
 
+    _socket!.on('collection_started', (data) {
+      final id = _parseId((data as Map)['bookingId']);
+      _log('EVENT', 'collection_started  id=$id');
+      _collectionStartedCtrl.add(id);
+    });
+
+    _socket!.on('sample_collected', (data) {
+      final id = _parseId((data as Map)['bookingId']);
+      _log('EVENT', 'sample_collected  id=$id');
+      _sampleCollectedCtrl.add(id);
+    });
+
+    _socket!.on('handed_to_lab', (data) {
+      final id = _parseId((data as Map)['bookingId']);
+      _log('EVENT', 'handed_to_lab  id=$id');
+      _handedToLabCtrl.add(id);
+      final current = activeLabBooking.value;
+      if (current != null && current.bookingId == id) {
+        activeLabBooking.value = current.copyWith(collected: true);
+      }
+    });
+
     _socket!.on('sample_received_at_lab', (data) {
       final id = _parseId((data as Map)['bookingId']);
       _sampleReceivedCtrl.add(id);
@@ -697,6 +725,9 @@ class SocketService {
     _techEnRouteCtrl.close();
     _techArrivedCtrl.close();
     _collectionCompletedCtrl.close();
+    _collectionStartedCtrl.close();
+    _sampleCollectedCtrl.close();
+    _handedToLabCtrl.close();
     _sampleReceivedCtrl.close();
     _testInProgressCtrl.close();
     _reportReadyCtrl.close();
@@ -825,8 +856,7 @@ class SocketService {
     });
   }
 
-  /// Complete a booking.  Clears [_isBusy] and re-emits [technician_online]
-  /// if the tech is still toggled Online (handles reconnect-while-busy case).
+  /// Complete a booking (legacy — kept for backward compatibility with old app builds).
   void emitCollectionCompleted({required int bookingId}) {
     _isBusy          = false;
     _activeBookingId = null;
@@ -840,6 +870,40 @@ class SocketService {
     if (_isAvailable && isConnected && _lastLat != null) {
       _emitTechnicianOnline();
       _log('BOOKING_COMPLETED', 're-emitted technician_online');
+    }
+    _availabilityCtrl.add(_isAvailable);
+  }
+
+  void emitCollectionStarted({required int bookingId}) {
+    _socket?.emit('collection_started', {
+      'bookingId':    bookingId,
+      'technicianId': userId,
+    });
+    _log('EMIT', 'collection_started  id=$bookingId');
+  }
+
+  void emitSampleCollected({required int bookingId}) {
+    _socket?.emit('sample_collected', {
+      'bookingId':    bookingId,
+      'technicianId': userId,
+    });
+    _log('EMIT', 'sample_collected  id=$bookingId');
+  }
+
+  /// Final technician step.  Stores [completed_at] in DB, frees the technician.
+  void emitHandedToLab({required int bookingId}) {
+    _isBusy          = false;
+    _activeBookingId = null;
+    _log('HANDED_TO_LAB', 'id=$bookingId — marked AVAILABLE');
+
+    _socket?.emit('handed_to_lab', {
+      'bookingId':    bookingId,
+      'technicianId': userId,
+    });
+
+    if (_isAvailable && isConnected && _lastLat != null) {
+      _emitTechnicianOnline();
+      _log('HANDED_TO_LAB', 're-emitted technician_online');
     }
     _availabilityCtrl.add(_isAvailable);
   }

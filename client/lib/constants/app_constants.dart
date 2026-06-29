@@ -1,6 +1,7 @@
 class AppConstants {
-  static const String serverUrl = 'https://chat.neuralarc.com';
-  static const String socketUrl = serverUrl;
+  static const String serverUrl    = 'https://chat.neuralarc.com';   // Node.js — booking, socket, OTP
+  static const String phpServerUrl = 'https://jayamala.neuralarc.com'; // PHP — user registry
+  static const String socketUrl    = serverUrl;
   static const String googleMapsApiKey = 'AIzaSyBIGPfna9mxSXpAJOhp0xigKhyZeeU0L0I';
 
   // How often the technician pings location while on an active job

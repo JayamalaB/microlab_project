@@ -1,6 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/constants/app_constants.dart';
+import 'package:microlab/services/auth_service.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'technician_booking_detail_screen.dart';
 import 'technician_history_screen.dart';
@@ -13,6 +17,7 @@ import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/screens/customer/support_chatbot.dart';
+import 'package:microlab/screens/shared/onboarding_screen.dart';
 
 // ─── Technician Dashboard Screen ──────────────────────────────────────────────
 
@@ -33,11 +38,15 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
 
   StreamSubscription<SocketBooking>? _bookingRequestSub;
   bool _overlayOpen = false;
+  int  _sessionRequestCount = 0;
 
   // Availability — technician starts Offline after login
   bool _isOnline = false;
   bool _isTogglingOnline = false;
   Timer? _idlePingTimer;
+  
+  // ✅ FIXED: Cache pending bookings to avoid rebuilding on every access
+  List<TechnicianBooking>? _cachedPending;
 
   @override
   void initState() {
@@ -57,10 +66,13 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
         SocketService.instance.onBookingRequest.listen((booking) {
       if (!mounted || _overlayOpen || !_isOnline) return;
       _overlayOpen = true;
-      showBookingRequestOverlay(context, booking).then((accepted) {
+      _sessionRequestCount++;
+      showBookingRequestOverlay(context, booking, _sessionRequestCount).then((accepted) {
         _overlayOpen = false;
         if (!accepted || !mounted) return;
-        // Add to dashboard as a pending task — technician starts when ready
+        // Add to dashboard — skip if already loaded from DB (dedup by bookingId)
+        final alreadyLoaded = _bookings.any((b) => b.id == booking.bookingId.toString());
+        if (alreadyLoaded) return;
         setState(() {
           _bookings.insert(0, TechnicianBooking(
             id: booking.bookingId.toString(),
@@ -84,6 +96,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
             patientLng: booking.patientLng,
             hospital: booking.hospital,
           ));
+          _cachedPending = null; // ✅ Invalidate cache
         });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('Booking #${booking.bookingId} added — start when ready'),
@@ -101,7 +114,93 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
   }
 
   void _loadMockData() {
-    _bookings = []; // Real bookings arrive via socket (booking_request events)
+    _bookings = [];
+    _loadActiveBookings();
+  }
+
+  Future<void> _loadActiveBookings() async {
+    debugPrint('\n🔵 [ACTIVE-BOOKINGS] ── starting load ──');
+    try {
+      final prefs  = await SharedPreferences.getInstance();
+      final techId = prefs.getInt('user_id') ?? 0;
+      final token  = prefs.getString('auth_token') ?? '';
+      debugPrint('   techId=$techId  token=${token.isEmpty ? "EMPTY" : token.substring(0, token.length.clamp(0, 12))}...');
+
+      if (techId == 0) {
+        debugPrint('🔴 [ACTIVE-BOOKINGS] techId=0 — session missing, aborting');
+        return;
+      }
+
+      final baseUrl = AppConstants.serverUrl.endsWith('/')
+          ? AppConstants.serverUrl.substring(0, AppConstants.serverUrl.length - 1)
+          : AppConstants.serverUrl;
+      final url = '$baseUrl/api/technicians/$techId/active-bookings';
+      debugPrint('   GET $url');
+
+      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
+
+      debugPrint('   status=${res.statusCode}  bodyLen=${res.body.length}');
+      debugPrint('   body=${res.body.substring(0, res.body.length.clamp(0, 400))}');
+
+      if (!mounted) {
+        debugPrint('🔴 [ACTIVE-BOOKINGS] widget unmounted — skipping setState');
+        return;
+      }
+      if (res.statusCode != 200) {
+        debugPrint('🔴 [ACTIVE-BOOKINGS] non-200 status=${res.statusCode} — route may not exist on VPS yet');
+        return;
+      }
+
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      final rows = body['data'] as List<dynamic>? ?? [];
+      debugPrint('   parsed rows=${rows.length}');
+
+      if (rows.isEmpty) {
+        debugPrint('   ℹ️  0 active bookings in DB for techId=$techId');
+        return;
+      }
+
+      setState(() {
+        _bookings = rows.map((r) {
+          final map = r as Map<String, dynamic>;
+          final dateStr = map['collection_date'] as String?;
+          final date = dateStr != null
+              ? (DateTime.tryParse(dateStr)?.toLocal() ?? DateTime.now())
+              : DateTime.now();
+          final cs = map['collection_status'] as String? ?? '';
+          final status = cs == 'en_route'             ? 'En Route'
+              : cs == 'arrived'             ? 'Arrived'
+              : cs == 'collection_started'  ? 'Collection Started'
+              : cs == 'sample_collected'    ? 'Sample Collected'
+              : cs == 'otp_verified'        ? 'OTP Verified'
+              : 'Confirmed';
+          debugPrint('   → booking_id=${map['booking_id']} status=$cs → $status  patient=${map['patient_name']}');
+          return TechnicianBooking(
+            id:                map['booking_id']?.toString() ?? '',
+            customerName:      map['patient_name']       as String? ?? 'Patient',
+            customerPhone:     map['patient_mobile']     as String? ?? '',
+            address:           map['collection_address'] as String? ?? '',
+            city:              map['city']               as String? ?? '',
+            pincode:           map['postal_code']        as String? ?? '',
+            date:              date,
+            timeSlot:          map['slot_label']         as String? ?? 'ASAP',
+            testNames:         const ['Home Collection'],
+            mode:              'Home Collection',
+            status:            status,
+            serviceChargePaid: 0,
+            testsTotal:        double.tryParse(map['amount_paid']?.toString() ?? '') ?? 0,
+            assignedAt:        date,
+            patientLat:        double.tryParse(map['patient_lat']?.toString() ?? ''),
+            patientLng:        double.tryParse(map['patient_lng']?.toString() ?? ''),
+          );
+        }).toList();
+        _cachedPending = null;
+      });
+      debugPrint('✅ [ACTIVE-BOOKINGS] _bookings=${_bookings.length}  _pending=${_pending.length}');
+    } catch (e, st) {
+      debugPrint('🔴 [ACTIVE-BOOKINGS] EXCEPTION type=${e.runtimeType}  msg=$e');
+      debugPrint('   stacktrace: ${st.toString().split('\n').take(4).join(' | ')}');
+    }
   }
 
   // ── Online / Offline toggle ────────────────────────────────────────────────
@@ -134,14 +233,14 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
           return;
         }
 
-        // Fetch position — fall back to last-known on timeout
+        // Fetch position — fall back to last-known on timeout (last-known unsupported on web)
         Position? pos;
         try {
           pos = await Geolocator.getCurrentPosition(
             locationSettings: const LocationSettings(accuracy: LocationAccuracy.medium),
           ).timeout(const Duration(seconds: 10));
         } catch (_) {
-          pos = await Geolocator.getLastKnownPosition();
+          try { pos = await Geolocator.getLastKnownPosition(); } catch (_) {}
         }
 
         SocketService.instance.goOnline(
@@ -180,6 +279,48 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
     _idlePingTimer = null;
   }
 
+  Future<void> _handleLogout() async {
+    // 1. Go offline — stops ping timer + socket
+    if (_isOnline) {
+      _stopIdlePing();
+      SocketService.instance.goOffline();
+    }
+
+    // 2. Read IDs before clearing prefs
+    final prefs  = await SharedPreferences.getInstance();
+    final techId = prefs.getInt('user_id')      ?? 0;
+    final token  = prefs.getString('auth_token') ?? '';
+
+    // 3. Call logout API — closes session + clears DB token
+    if (techId > 0) {
+      try {
+        // ✅ FIXED: Ensure no double slash in URL
+        final baseUrl = AppConstants.serverUrl.endsWith('/') 
+            ? AppConstants.serverUrl.substring(0, AppConstants.serverUrl.length - 1)
+            : AppConstants.serverUrl;
+        
+        await http.post(
+          Uri.parse('$baseUrl/api/technicians/$techId/logout'),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+        ).timeout(const Duration(seconds: 5));
+      } catch (_) {}
+    }
+
+    // 4. Clear SharedPreferences
+    await AuthService.logout();
+
+    // 5. Navigate to login — dashboard is root so popUntil does nothing; replace instead
+    if (mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+        (route) => false,
+      );
+    }
+  }
+
   void _startJourney(TechnicianBooking booking) {
     final bookingId = int.tryParse(booking.id) ?? 0;
 
@@ -207,7 +348,10 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
       if (!mounted) return;
       if (wasCompleted == true) {
         // OTP verified → collection complete → remove card from dashboard
-        setState(() => _bookings.removeWhere((b) => b.id == booking.id));
+        setState(() {
+          _bookings.removeWhere((b) => b.id == booking.id);
+          _cachedPending = null; // ✅ Invalidate cache
+        });
         return;
       }
       // Tech exited mid-journey — keep card visible as "Journey Started"
@@ -236,6 +380,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
             patientLng: booking.patientLng,
             hospital: booking.hospital,
           );
+          _cachedPending = null; // ✅ Invalidate cache
         });
       }
     });
@@ -260,15 +405,23 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
       ),
     ).then((wasCompleted) {
       if (wasCompleted == true && mounted) {
-        setState(() => _bookings.removeWhere((b) => b.id == booking.id));
+        setState(() {
+          _bookings.removeWhere((b) => b.id == booking.id);
+          _cachedPending = null; // ✅ Invalidate cache
+        });
       }
     });
   }
 
-  List<TechnicianBooking> get _pending => _bookings
-      .where((b) => !['Completed','Cancelled'].contains(b.status))
-      .toList()
-    ..sort((a, b) => a.date.compareTo(b.date));
+  // ✅ FIXED: Cached getter to avoid rebuilding list on every access
+  List<TechnicianBooking> get _pending {
+    if (_cachedPending != null) return _cachedPending!;
+    _cachedPending = _bookings
+        .where((b) => !['Completed','Cancelled'].contains(b.status))
+        .toList()
+      ..sort((a, b) => a.date.compareTo(b.date));
+    return _cachedPending!;
+  }
 
   void _callCustomer(String phone) {
     // TODO: url_launcher → launch('tel:+91$phone')
@@ -286,7 +439,9 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
   void dispose() {
     _bookingRequestSub?.cancel();
     _stopIdlePing();
-    if (_isOnline) SocketService.instance.goOffline();
+    if (_isOnline) {
+      SocketService.instance.goOffline();
+    }
     super.dispose();
   }
 
@@ -311,8 +466,9 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
                             fontSize: 16,
                             fontWeight: FontWeight.w600)),
                     Text('Technician · +91 ${widget.mobile}',
+                        // ✅ FIXED: withValues → withOpacity
                         style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.75), fontSize: 11)),
+                            color: Colors.white.withOpacity(0.75), fontSize: 11)),
                   ],
                 ),
                 actions: [
@@ -360,8 +516,9 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
                                       ? null
                                       : (_) => _toggleAvailability(),
                                   activeThumbColor: Colors.greenAccent,
+                                  // ✅ FIXED: withValues → withOpacity
                                   activeTrackColor:
-                                      Colors.greenAccent.withValues(alpha: 0.35),
+                                      Colors.greenAccent.withOpacity(0.35),
                                   inactiveThumbColor: Colors.white54,
                                   inactiveTrackColor: Colors.white24,
                                 ),
@@ -377,34 +534,50 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
             IndexedStack(
               index: _selectedIndex,
               children: [
-                !_isOnline
+                // Show offline wall only when there are no pending jobs.
+              // If the technician has pre-assigned bookings, show them with a
+              // slim banner — new requests are still blocked while offline.
+              !_isOnline && _pending.isEmpty
                     ? _offlineState()
-                    : _pending.isEmpty
-                        ? _emptyState('No pending bookings', Icons.calendar_today_outlined)
-                        : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-                        itemCount: _pending.length,
-                        itemBuilder: (_, i) => _PendingBookingCard(
-                          booking: _pending[i],
-                          onCall: () => _callCustomer(_pending[i].customerPhone),
-                          onStartCollection: () => _startJourney(_pending[i]),
-                          onResume: () => _resumeJourney(_pending[i]),
-                          onManage: () {
-                            final b = _pending[i];
-                            Navigator.push(context, MaterialPageRoute(
-                              builder: (_) => TechnicianBookingDetailScreen(
-                                booking: b,
-                                onNewBooking: (newBooking) {
-                                  setState(() => _bookings.insert(0, newBooking));
-                                },
-                              ),
-                            )).then((wasCompleted) {
-                              if (wasCompleted == true && mounted) {
-                                setState(() => _bookings.removeWhere((bk) => bk.id == b.id));
-                              }
-                            });
-                          },
-                        ),
+                    : Column(
+                        children: [
+                          if (!_isOnline) _offlineBanner(),
+                          Expanded(
+                            child: _pending.isEmpty
+                                ? _emptyState('No pending bookings', Icons.calendar_today_outlined)
+                                : ListView.builder(
+                                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+                                    itemCount: _pending.length,
+                                    itemBuilder: (_, i) => _PendingBookingCard(
+                                      booking: _pending[i],
+                                      onCall: () => _callCustomer(_pending[i].customerPhone),
+                                      onStartCollection: () => _startJourney(_pending[i]),
+                                      onResume: () => _resumeJourney(_pending[i]),
+                                      onManage: () {
+                                        final b = _pending[i];
+                                        Navigator.push(context, MaterialPageRoute(
+                                          builder: (_) => TechnicianBookingDetailScreen(
+                                            booking: b,
+                                            onNewBooking: (newBooking) {
+                                              setState(() {
+                                                _bookings.insert(0, newBooking);
+                                                _cachedPending = null; // ✅ Invalidate cache
+                                              });
+                                            },
+                                          ),
+                                        )).then((wasCompleted) {
+                                          if (wasCompleted == true && mounted) {
+                                            setState(() {
+                                              _bookings.removeWhere((bk) => bk.id == b.id);
+                                              _cachedPending = null; // ✅ Invalidate cache
+                                            });
+                                          }
+                                        });
+                                      },
+                                    ),
+                                  ),
+                          ),
+                        ],
                       ),
                 SafeArea(
                     top: false,
@@ -420,7 +593,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
                     child: TechnicianProfileScreen(
                       embedded: true,
                       mobile: widget.mobile,
-                      onLogout: () => Navigator.of(context).popUntil((r) => r.isFirst),
+                      onLogout: () => _handleLogout(),
                     )),
               ],
             ),
@@ -545,6 +718,32 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
           ],
         ),
       );
+
+  Widget _offlineBanner() => Container(
+        width: double.infinity,
+        color: const Color(0xFFFFF3CD),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          children: [
+            const Icon(Icons.wifi_off_rounded, size: 15, color: Color(0xFF856404)),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text(
+                'You are offline — new bookings paused. Toggle Online to receive requests.',
+                style: TextStyle(fontSize: 12, color: Color(0xFF856404)),
+              ),
+            ),
+            GestureDetector(
+              onTap: _toggleAvailability,
+              child: const Text('Go Online',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF856404))),
+            ),
+          ],
+        ),
+      );
 }
 
 // ─── Pending Booking Card ─────────────────────────────────────────────────────
@@ -613,8 +812,9 @@ class _PendingBookingCard extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
+          // ✅ FIXED: withValues → withOpacity
           color: isInProgress
-              ? const Color(0xFF1565C0).withValues(alpha: 0.4)
+              ? const Color(0xFF1565C0).withOpacity(0.4)
               : AppColors.divider,
           width: isInProgress ? 1.5 : 1,
         ),
@@ -625,8 +825,9 @@ class _PendingBookingCard extends StatelessWidget {
           children: [
             // Status strip
             Container(
+              // ✅ FIXED: withValues → withOpacity
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              color: _statusColor.withValues(alpha: 0.08),
+              color: _statusColor.withOpacity(0.08),
               child: Row(
                 children: [
                   Icon(_statusIcon, size: 13, color: _statusColor),

@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/auth_service.dart';
+import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/screens/shared/onboarding_screen.dart';
 import 'add_member_screen.dart';
 import 'my_bookings_screen.dart';
 import 'customer_dashboard_screen.dart';
@@ -52,6 +55,17 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
       dob: DateTime(1988, 3, 22),
     ),
   ];
+
+  Future<void> _handleLogout() async {
+    SocketService.instance.disconnect();
+    await AuthService.logout();
+    if (mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+        (route) => false,
+      );
+    }
+  }
 
   void _openAddMember() async {
     final result = await Navigator.push<MemberModel>(
@@ -211,7 +225,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                   embedded: true,
                   onAddMember: _openAddMember,
                   onEditMember: _openEditMember,
-                  onLogout: () => Navigator.of(context).popUntil((r) => r.isFirst),
+                  onLogout: _handleLogout,
                 ),
               ),
             ],

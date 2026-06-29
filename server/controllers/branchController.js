@@ -13,16 +13,10 @@ function haversineKm(lat1, lng1, lat2, lng2) {
 }
 
 // ── GET /api/branches/lookup?pincode=&place=&lat=&lng= ───────────────────────
-// Lookup order:
-//  1. Exact match on branches.pincode
-//  2. Nearest branch by Haversine distance   (requires lat + lng params)
-//  3. LIKE match on branches.location        (city name fallback)
-//  4. LIKE match on branches.name
-//  5. branch_service_areas                   (extended service area)
 exports.lookupBranch = async (req, res) => {
   const { pincode, place } = req.query;
-  const patientLat = req.query.lat  ? parseFloat(req.query.lat)  : null;
-  const patientLng = req.query.lng  ? parseFloat(req.query.lng)  : null;
+  const patientLat = req.query.lat ? parseFloat(req.query.lat) : null;
+  const patientLng = req.query.lng ? parseFloat(req.query.lng) : null;
 
   if (!pincode && !place && patientLat == null) {
     return res.status(400).json({
@@ -42,11 +36,13 @@ exports.lookupBranch = async (req, res) => {
     // ── 1. Exact pincode match ───────────────────────────────────────────────
     if (pincode) {
       [rows] = await db.execute(
-        `SELECT branch_id, name, address, location,
-                pincode, telephone_no, mobile_no, email,
-                latitude, longitude
-         FROM branches
-         WHERE pincode = ?
+        `SELECT branch_id, branch_name AS name, branch_address AS address,
+                branch_city AS location, branch_pincode AS pincode,
+                branch_phone AS telephone_no, branch_mobile AS mobile_no,
+                branch_email AS email, branch_latitude AS latitude,
+                branch_longitude AS longitude
+         FROM ip_branches
+         WHERE branch_pincode = ? AND deleted_at IS NULL
          LIMIT 1`,
         [pincode.trim()]
       );
@@ -56,21 +52,22 @@ exports.lookupBranch = async (req, res) => {
     // ── 2. Nearest branch by Haversine distance ──────────────────────────────
     if (rows.length === 0 && patientLat != null && patientLng != null) {
       const [allBranches] = await db.execute(
-        `SELECT branch_id, name, address, location,
-                pincode, telephone_no, mobile_no, email,
-                latitude, longitude
-         FROM branches
-         WHERE latitude IS NOT NULL AND longitude IS NOT NULL`
+        `SELECT branch_id, branch_name AS name, branch_address AS address,
+                branch_city AS location, branch_pincode AS pincode,
+                branch_phone AS telephone_no, branch_mobile AS mobile_no,
+                branch_email AS email, branch_latitude AS latitude,
+                branch_longitude AS longitude
+         FROM ip_branches
+         WHERE branch_latitude IS NOT NULL AND branch_longitude IS NOT NULL
+           AND deleted_at IS NULL`
       );
 
       if (allBranches.length > 0) {
-        // Calculate distance to every branch and sort ascending
         const withDist = allBranches.map(b => ({
           ...b,
           distKm: haversineKm(patientLat, patientLng, b.latitude, b.longitude),
         }));
         withDist.sort((a, b) => a.distKm - b.distKm);
-
         rows = [withDist[0]];
         console.log(
           `   ✅ matched by nearest distance — ${withDist[0].name}` +
@@ -79,72 +76,36 @@ exports.lookupBranch = async (req, res) => {
       }
     }
 
-    // ── 3. Location LIKE fallback (city name) ────────────────────────────────
+    // ── 3. City LIKE fallback ────────────────────────────────────────────────
     if (rows.length === 0 && place) {
       [rows] = await db.execute(
-        `SELECT branch_id, name, address, location,
-                pincode, telephone_no, mobile_no, email,
-                latitude, longitude
-         FROM branches
-         WHERE LOWER(location) LIKE LOWER(?)
+        `SELECT branch_id, branch_name AS name, branch_address AS address,
+                branch_city AS location, branch_pincode AS pincode,
+                branch_phone AS telephone_no, branch_mobile AS mobile_no,
+                branch_email AS email, branch_latitude AS latitude,
+                branch_longitude AS longitude
+         FROM ip_branches
+         WHERE LOWER(branch_city) LIKE LOWER(?) AND deleted_at IS NULL
          LIMIT 1`,
         [`%${place.trim()}%`]
       );
-      if (rows.length) console.log(`   ✅ matched by location LIKE`);
+      if (rows.length) console.log(`   ✅ matched by city LIKE`);
     }
 
     // ── 4. Name LIKE fallback ────────────────────────────────────────────────
     if (rows.length === 0 && place) {
       [rows] = await db.execute(
-        `SELECT branch_id, name, address, location,
-                pincode, telephone_no, mobile_no, email,
-                latitude, longitude
-         FROM branches
-         WHERE LOWER(name) LIKE LOWER(?)
+        `SELECT branch_id, branch_name AS name, branch_address AS address,
+                branch_city AS location, branch_pincode AS pincode,
+                branch_phone AS telephone_no, branch_mobile AS mobile_no,
+                branch_email AS email, branch_latitude AS latitude,
+                branch_longitude AS longitude
+         FROM ip_branches
+         WHERE LOWER(branch_name) LIKE LOWER(?) AND deleted_at IS NULL
          LIMIT 1`,
         [`%${place.trim()}%`]
       );
       if (rows.length) console.log(`   ✅ matched by name LIKE`);
-    }
-
-    // ── 5. branch_service_areas fallback ────────────────────────────────────
-    if (rows.length === 0) {
-      const param  = pincode ? pincode.trim()           : null;
-      const placeP = place   ? `%${place.trim()}%`      : null;
-
-      if (param) {
-        const [saRows] = await db.execute(
-          `SELECT b.branch_id, b.name, b.address, b.location,
-                  b.pincode, b.telephone_no, b.mobile_no, b.email,
-                  b.latitude, b.longitude
-           FROM branch_service_areas bsa
-           JOIN branches b ON b.branch_id = bsa.branch_id
-           WHERE bsa.pincode = ?
-           LIMIT 1`,
-          [param]
-        );
-        if (saRows.length) {
-          rows = saRows;
-          console.log(`   ✅ matched via branch_service_areas (pincode)`);
-        }
-      }
-
-      if (rows.length === 0 && placeP) {
-        const [saRows] = await db.execute(
-          `SELECT b.branch_id, b.name, b.address, b.location,
-                  b.pincode, b.telephone_no, b.mobile_no, b.email,
-                  b.latitude, b.longitude
-           FROM branch_service_areas bsa
-           JOIN branches b ON b.branch_id = bsa.branch_id
-           WHERE LOWER(bsa.place_name) LIKE LOWER(?)
-           LIMIT 1`,
-          [placeP]
-        );
-        if (saRows.length) {
-          rows = saRows;
-          console.log(`   ✅ matched via branch_service_areas (place)`);
-        }
-      }
     }
 
     if (rows.length === 0) {
@@ -180,7 +141,6 @@ exports.lookupBranch = async (req, res) => {
 };
 
 // ── GET /api/branches/slots?branchId=&date= ──────────────────────────────────
-// Returns available home-collection slots for a branch on a given date.
 exports.getAvailableSlots = async (req, res) => {
   const { branchId, date } = req.query;
 
@@ -196,24 +156,24 @@ exports.getAvailableSlots = async (req, res) => {
   try {
     const [rows] = await db.execute(
       `SELECT
-         ats.time_slot_id,
-         ats.slot_id,
-         s.slot_time   AS slot_label,
-         s.start_time,
-         s.end_time,
-         ats.slot_time AS slot_time_value,
-         ats.max_users,
-         ats.booked_count,
-         ats.is_available,
-         (ats.max_users - ats.booked_count) AS remaining
-       FROM available_time_slots ats
-       JOIN slot s ON s.slot_id = ats.slot_id
-       WHERE ats.branch_id    = ?
-         AND ats.date         = ?
-         AND ats.slot_type    = 'home_collection'
-         AND ats.is_available = 1
-         AND s.deleted_at IS NULL
-       ORDER BY s.start_time ASC`,
+         ts.tech_slot_id  AS time_slot_id,
+         ts.slot_id,
+         ts.technician_id,
+         s.slot_label,
+         s.slot_start     AS start_time,
+         s.slot_end       AS end_time,
+         ts.max_bookings  AS max_users,
+         ts.booked_count,
+         ts.is_available,
+         (ts.max_bookings - ts.booked_count) AS remaining
+       FROM ip_technician_slots ts
+       JOIN ip_slots s ON s.slot_id = ts.slot_id
+       WHERE ts.branch_id    = ?
+         AND ts.slot_date    = ?
+         AND ts.is_available = 1
+         AND ts.booked_count < ts.max_bookings
+         AND s.slot_active   = 1
+       ORDER BY s.slot_start ASC`,
       [branchId, date]
     );
 
@@ -224,15 +184,16 @@ exports.getAvailableSlots = async (req, res) => {
       date,
       branchId: Number(branchId),
       slots:    rows.map(r => ({
-        timeSlotId:  r.time_slot_id,
-        slotId:      r.slot_id,
-        label:       r.slot_label,
-        startTime:   r.start_time,
-        endTime:     r.end_time,
-        maxUsers:    r.max_users,
-        bookedCount: r.booked_count,
-        remaining:   r.remaining,
-        isAvailable: r.is_available === 1,
+        timeSlotId:   r.time_slot_id,
+        slotId:       r.slot_id,
+        technicianId: r.technician_id,
+        label:        r.slot_label,
+        startTime:    r.start_time,
+        endTime:      r.end_time,
+        maxUsers:     r.max_users,
+        bookedCount:  r.booked_count,
+        remaining:    r.remaining,
+        isAvailable:  r.is_available === 1,
       })),
     });
   } catch (err) {

@@ -62,7 +62,7 @@ class SupportChatbotButton extends StatelessWidget {
             children: [
               Icon(Icons.support_agent_rounded, color: Colors.white, size: 20),
               SizedBox(width: 7),
-              Text('Help',
+              Text('',
                   style: TextStyle(
                       color: Colors.white,
                       fontSize: 13,

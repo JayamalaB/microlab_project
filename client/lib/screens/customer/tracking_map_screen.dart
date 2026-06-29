@@ -225,8 +225,68 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
           debugPrint('   → State: no change (status=$status)');
         }
       });
+      // Place tech marker immediately from DB — no waiting for next socket ping
+      if (status == 'en_route') _fetchTechInitialLocation();
     } catch (e) {
       debugPrint('   ❌ _fetchBookingStatus error: $e');
+    }
+  }
+
+  // Fetches the technician's last-known GPS from the server and places the
+  // marker on the map right away, so the patient sees the tech's position
+  // the moment they open the tracking screen mid-journey.
+  Future<void> _fetchTechInitialLocation() async {
+    if (_techLocation != null) return; // already have a position from socket
+    try {
+      final url = Uri.parse(
+          '${AppConstants.serverUrl}/api/bookings/${widget.bookingId}/tech-location');
+      final res = await http.get(url).timeout(const Duration(seconds: 6));
+      if (!mounted || res.statusCode != 200) return;
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final lat = (data['lat'] as num?)?.toDouble();
+      final lng = (data['lng'] as num?)?.toDouble();
+      if (lat == null || lng == null) return;
+
+      final techPos = LatLng(lat, lng);
+      debugPrint('📍 [TRACKING] initial tech location from DB: $lat,$lng');
+
+      // Seed distance tracking
+      if (widget.patientLat != null && !_arrived) {
+        final patientPos = LatLng(widget.patientLat!, widget.patientLng!);
+        final d = _haversineKm(techPos, patientPos);
+        _initialDistKm ??= d;
+        if (!mounted) return;
+        setState(() => _distKm = d);
+      }
+
+      // Place marker and pan camera
+      _animateTechTo(techPos, techPos);
+      if (!mounted) return;
+      _mapController?.animateCamera(
+        widget.patientLat != null
+            ? CameraUpdate.newLatLngBounds(
+                LatLngBounds(
+                  southwest: LatLng(
+                    lat < widget.patientLat! ? lat : widget.patientLat!,
+                    lng < widget.patientLng! ? lng : widget.patientLng!,
+                  ),
+                  northeast: LatLng(
+                    lat > widget.patientLat! ? lat : widget.patientLat!,
+                    lng > widget.patientLng! ? lng : widget.patientLng!,
+                  ),
+                ),
+                80,
+              )
+            : CameraUpdate.newLatLng(techPos),
+      );
+
+      // Draw route from tech to patient
+      if (widget.patientLat != null) {
+        _fetchRoute(techPos, LatLng(widget.patientLat!, widget.patientLng!));
+        _lastRouteFetchPos = techPos;
+      }
+    } catch (e) {
+      debugPrint('⚠️ [TRACKING] _fetchTechInitialLocation error: $e');
     }
   }
 

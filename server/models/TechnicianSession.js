@@ -14,4 +14,4 @@ module.exports = sequelize.define('TechnicianSession', {
   total_pings:               { type: DataTypes.INTEGER, defaultValue: 0 },
   created_at:                DataTypes.DATE,
   updated_at:                DataTypes.DATE,
-}, { tableName: 'technician_session', timestamps: false });
+}, { tableName: 'ip_technician_sessions', timestamps: false });

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:microlab/services/auth_service.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'otp_screen.dart';
 
@@ -40,22 +41,38 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = true);
     FocusScope.of(context).unfocus();
 
-    // TODO: Call API — POST /api/auth/send-otp
-    // { mobile: _mobileController.text, role: _selectedRole }
-    await Future.delayed(const Duration(milliseconds: 800));
+    final mobile = _mobileController.text.trim();
+    final result = await AuthService.sendOtp(mobile, _selectedRole);
 
-    if (mounted) {
-      setState(() => _isLoading = false);
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => OtpScreen(
-            mobile: _mobileController.text.trim(),
-            userRole: _selectedRole,
-          ),
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    if (result['success'] != true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result['message'] as String? ?? 'Failed to send OTP'),
+          backgroundColor: const Color(0xFFD32F2F),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
       );
+      return;
     }
+
+    // Extract dev OTP from response (remove before production)
+    final data   = result['data'] as Map<String, dynamic>? ?? {};
+    final devOtp = data['otp'] as String?;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OtpScreen(
+          mobile:   mobile,
+          userRole: _selectedRole,
+          devOtp:   devOtp,
+        ),
+      ),
+    );
   }
 
   @override
