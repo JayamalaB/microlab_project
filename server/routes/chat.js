@@ -15,7 +15,7 @@ const VALID_LAYERS = new Set(['all', 'static', 'db', 'web']);
  */
 router.post('/ask', async (req, res) => {
     try {
-        const { question, session_id, layer = 'all' } = req.body;
+        const { question, session_id, layer = 'all', patient_id } = req.body;
 
         if (!question) {
             return res.status(400).json({ error: 'Question is required' });
@@ -23,8 +23,9 @@ router.post('/ask', async (req, res) => {
 
         const sessionId   = session_id || req.ip || 'default';
         const searchLayer = VALID_LAYERS.has(layer) ? layer : 'all';
+        const patientId   = patient_id || null;
 
-        console.log(`🤖 [${sessionId}] Layer: "${searchLayer}" | Q: "${question}"`);
+        console.log(`🤖 [${sessionId}] Layer: "${searchLayer}" | Patient: ${patientId || 'guest'} | Q: "${question}"`);
 
         let result;
 
@@ -35,13 +36,13 @@ router.post('/ask', async (req, res) => {
                 : { question, answer: "ℹ️ No static Q&A match found. Try a different question or call 1800-XXX-XXXX.", context_used: { intent: 'no_match', source: 'default_qa', session_id: sessionId } };
 
         } else if (searchLayer === 'db') {
-            result = await llmRetriever.answerWithLLM(question, sessionId, { skipKnowledge: true });
+            result = await llmRetriever.answerWithLLM(question, sessionId, { skipKnowledge: true, patientId });
 
         } else if (searchLayer === 'web') {
             result = await handleWebsiteOnlyQuery(question, sessionId);
 
         } else {
-            result = await llmRetriever.answerWithLLM(question, sessionId);
+            result = await llmRetriever.answerWithLLM(question, sessionId, { patientId });
         }
 
         res.json({ success: true, data: result, layer: searchLayer });

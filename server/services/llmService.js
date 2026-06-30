@@ -91,30 +91,35 @@ Try asking:
         try {
             const prompt = `You are a database query assistant for MicroLab, a diagnostic laboratory. Be precise and concise.
 
-Database Schema (ONLY these two tables exist — never reference any other table):
+Database Schema (ONLY these tables exist — never reference any other table):
 - ip_products: product_name, product_description, product_price, pre_instructions
-  (ALL diagnostic tests AND health packages. "packages", "tests", "health checkup", "panel", "available tests", "what packages", "list tests" ALL refer to this table — always use test_query for these)
+  (ALL diagnostic tests AND health packages. "packages", "tests", "health checkup", "panel", "available tests", "what packages", "list tests" ALL refer to this table)
 - ip_branches: branch_name, branch_address, branch_city, branch_state, branch_pincode, branch_mobile, branch_email
   (lab branch locations and contact info)
+- ip_sample_tracking: sample_id, sample_barcode, booking_id, sample_type, sample_status, collected_at, results_ready_at, reported_at, notes
+  (patient's own sample/report status — ONLY use when patient asks about THEIR OWN sample/report/result status)
 
-IMPORTANT keyword rules:
-- For generic listing ("show all tests", "list all tests", "available tests", "what tests do you have", "show all available tests", "list all packages") → intent: test_query, keyword: null, product_name: null (list everything)
-- For specific tests ("price of CBC", "Lipid Profile test") → extract the test name into product_name
-- For category searches ("blood tests", "thyroid tests") → extract the category into keyword
-- NEVER set keyword to phrases like "available tests", "all tests", "show all" — those mean list everything
+Intent rules:
+- "show all tests", "list tests", "available tests", "what tests do you have" → test_query, keyword: null (list all)
+- "price of CBC", "Lipid Profile test" → test_query, product_name: extracted name
+- "thyroid tests", "blood tests" → test_query, keyword: category word only
+- "where is branch", "Coimbatore location" → branch_query
+- "my sample status", "where is my report", "track my test", "my result", "has my sample been collected" → sample_status_query
+- NEVER set keyword to "available tests", "all tests", "show all" — those mean list everything
 
 User Question: "${question}"
 
 Respond with ONLY a JSON object (no extra text):
 {
-    "intent": "test_query|branch_query|general",
+    "intent": "test_query|branch_query|sample_status_query|general",
     "entities": {
-        "product_name": "specific test or package name extracted, or null",
-        "keyword": "category/type keyword to search by (e.g. thyroid, blood, vitamin), or null",
-        "branch_name": "specific branch name extracted, or null",
-        "city": "city name extracted (e.g. Coimbatore, Trichy), or null",
+        "product_name": "specific test or package name, or null",
+        "keyword": "category/type to search (e.g. thyroid, blood, vitamin), or null",
+        "branch_name": "specific branch name, or null",
+        "city": "city name (e.g. Coimbatore, Trichy), or null",
         "price_query": true/false,
-        "fasting_query": true/false
+        "fasting_query": true/false,
+        "booking_id": "booking ID if patient mentions one, or null"
     },
     "is_general": true/false
 }`;

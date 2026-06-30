@@ -68,11 +68,13 @@ class LLMRetriever {
 
     async answerWithLLM(question, sessionId, opts = {}) {
         console.log(`🤖 [${sessionId}] Processing: "${question}"`);
-        const isPronoun    = PRONOUN_PATTERN.test(question);
+        const isPronoun     = PRONOUN_PATTERN.test(question);
         const skipKnowledge = opts.skipKnowledge === true;
+        const patientId     = opts.patientId || null;
 
-        // ── 1. LLM answer cache (skip for pronoun questions) ──────────────────
-        if (!isPronoun) {
+        // ── 1. LLM answer cache — skip for patient-specific sample queries ─────
+        const isSampleQuestion = /\b(my sample|my report|my result|track my|sample status|where is my)\b/i.test(question);
+        if (!isPronoun && !isSampleQuestion) {
             const hit = await cache.getLLMAnswer(question);
             if (hit) {
                 console.log(`🎯 Cache HIT: "${question}"`);
@@ -83,7 +85,7 @@ class LLMRetriever {
 
         // ── 2. Parse intent ────────────────────────────────────────────────────
         const intentData = !isPronoun ? await llmService.parseIntent(question) : null;
-        const DB_INTENTS = new Set(['test_query', 'branch_query']);
+        const DB_INTENTS = new Set(['test_query', 'branch_query', 'sample_status_query']);
         const isDBIntent = intentData && DB_INTENTS.has(intentData.intent);
 
         // ── 3. Quick return for general greeting/chitchat ─────────────────────
@@ -113,22 +115,21 @@ class LLMRetriever {
 
         const entities  = this._resolveContext(sessionId, question, intentData?.entities || {});
 
-        // Keyword safety-net: "package/packages/tests/panel/checkup" always → test_query
-        // "branch/location/city" always → branch_query
-        // Prevents LLM from misclassifying these as general.
+        // ── Intent safety-nets ─────────────────────────────────────────────────
         const qLow   = question.toLowerCase();
         let intent   = intentData?.intent || 'test_query';
+
         if (intent === 'general') {
-            if (/\b(package[s]?|test[s]?|panel|checkup|health screen)\b/.test(qLow)) {
+            if (/\b(my sample|my report|my result|track my|sample status|where is my (report|result|sample))\b/i.test(question)) {
+                intent = 'sample_status_query';
+            } else if (/\b(package[s]?|test[s]?|panel|checkup|health screen)\b/.test(qLow)) {
                 intent = 'test_query';
             } else if (/\b(branch|location|centre|center|address|coimbatore|trichy)\b/.test(qLow)) {
                 intent = 'branch_query';
             }
         }
 
-        // Generic-listing safety-net: if question means "list all tests/packages",
-        // clear any keyword the LLM incorrectly extracted (e.g. "available tests", "all tests")
-        // so buildTestQuery returns all products without a useless LIKE filter.
+        // Generic-listing safety-net: clear bad keywords like "available tests", "show all"
         const GENERIC_LIST_TESTS = /\b(show|list|display|what|all)\b.*\b(tests?|packages?|available)\b|\b(tests?|packages?)\b.*(available|all)\b/i;
         const BAD_KEYWORDS       = /^(available\s*tests?|all\s*tests?|show\s*all|list\s*all|tests?|packages?)$/i;
         if (intent === 'test_query' && entities.keyword && BAD_KEYWORDS.test(entities.keyword.trim())) {
@@ -138,9 +139,20 @@ class LLMRetriever {
             entities.keyword = null;
         }
 
-        const sql       = intent === 'branch_query'
+        // Sample status requires a patient — reject without patientId
+        if (intent === 'sample_status_query' && !patientId) {
+            return {
+                question,
+                answer: '🔐 To check your sample status, please make sure you are logged in. Your patient account is needed to retrieve personal test results.',
+                context_used: { intent: 'sample_status_query', error: 'no_patient_id', from_cache: false, session_id: sessionId }
+            };
+        }
+
+        const sql = intent === 'branch_query'
             ? this.buildBranchQuery(entities)
-            : this.buildTestQuery(entities);
+            : intent === 'sample_status_query'
+                ? this.buildSampleQuery(entities, patientId)
+                : this.buildTestQuery(entities);
         const queryType = intent;
 
         let data  = [];
@@ -165,7 +177,10 @@ class LLMRetriever {
             }
         }
 
-        const formattedResponse = await llmService.formatResponse(question, intent, entities, data, error);
+        // Sample status gets a dedicated formatter — no LLM needed, avoids noisy date dumps.
+        const formattedResponse = (intent === 'sample_status_query')
+            ? this.formatSampleStatus(data, error)
+            : await llmService.formatResponse(question, intent, entities, data, error);
 
         this._updateSession(sessionId, intent, entities);
         llmService.saveToMemory(sessionId, question, formattedResponse);
@@ -219,6 +234,77 @@ class LLMRetriever {
         }
         return `SELECT ${BRANCH_COLS} FROM ip_branches WHERE branch_active = 1 ORDER BY branch_name`;
     }
+
+    buildSampleQuery(entities, patientId) {
+        if (!patientId) return null;
+        const pid  = String(patientId).replace(/'/g, "''");
+        const cols = 'sample_id, sample_barcode, booking_id, sample_type, sample_status, ' +
+                     'collected_at, submitted_at, received_at, processing_at, ' +
+                     'results_ready_at, reported_at, notes';
+
+        if (entities.booking_id) {
+            const bid = String(entities.booking_id).replace(/'/g, "''");
+            return `SELECT ${cols} FROM ip_sample_tracking WHERE patient_id = '${pid}' AND booking_id = '${bid}' ORDER BY collected_at DESC LIMIT 5`;
+        }
+        return `SELECT ${cols} FROM ip_sample_tracking WHERE patient_id = '${pid}' ORDER BY collected_at DESC LIMIT 10`;
+    }
+
+    // Maps each sample_status to the date column that is most meaningful for it.
+    // Only that date is shown to the patient — avoids dumping all timestamps.
+    _statusDateField(status = '') {
+        const s = status.toLowerCase();
+        if (s.includes('report'))               return 'reported_at';
+        if (s.includes('result') || s.includes('ready')) return 'results_ready_at';
+        if (s.includes('process'))              return 'processing_at';
+        if (s.includes('receiv'))               return 'received_at';
+        if (s.includes('submit'))               return 'submitted_at';
+        return null; // "Collected" and unknown → no extra date needed
+    }
+
+    _fmtDate(val) {
+        if (!val) return null;
+        const d = new Date(val);
+        if (isNaN(d)) return null;
+        return d.toLocaleString('en-IN', {
+            day: '2-digit', month: 'short', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', hour12: true
+        });
+    }
+
+    formatSampleStatus(data, error) {
+        if (error) return `⚠️ Could not fetch sample status. Please try again or call 0422 4354242.`;
+        if (!data || data.length === 0) {
+            return `🔍 No sample records found for your account. If you recently gave a sample, please check again in a few hours or contact us at 0422 4354242.`;
+        }
+
+        const lines = data.map((row, i) => {
+            const status      = row.sample_status || 'Unknown';
+            const dateField   = this._statusDateField(status);
+            const statusDate  = dateField ? this._fmtDate(row[dateField]) : null;
+            const collectedOn = this._fmtDate(row.collected_at);
+
+            let line = `Sample ${i + 1}`;
+            line += `\n• Type: ${row.sample_type || 'N/A'}`;
+            line += `\n• Status: ${status}`;
+            if (collectedOn)  line += `\n• Collected: ${collectedOn}`;
+            if (statusDate)   line += `\n• ${this._statusLabel(status)}: ${statusDate}`;
+            if (row.notes)    line += `\n• Note: ${row.notes}`;
+            return line;
+        });
+
+        return `🧪 Your sample status:\n\n${lines.join('\n\n')}`;
+    }
+
+    _statusLabel(status = '') {
+        const s = status.toLowerCase();
+        if (s.includes('report'))               return 'Reported on';
+        if (s.includes('result') || s.includes('ready')) return 'Results ready at';
+        if (s.includes('process'))              return 'Processing started';
+        if (s.includes('receiv'))               return 'Received at lab';
+        if (s.includes('submit'))               return 'Submitted on';
+        return 'Updated on';
+    }
 }
 
 module.exports = new LLMRetriever();
+   

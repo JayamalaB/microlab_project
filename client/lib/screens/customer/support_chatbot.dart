@@ -184,6 +184,7 @@ const _kLayerQs = <_Layer, List<String>>{
     'Show all available tests', 'What is the price of CBC test?',
     'List all branch locations', 'What tests are available for thyroid?',
     'Show Coimbatore branch details', 'Which tests require fasting?',
+    'Track my sample status', 'Where is my report?',
   ],
   _Layer.web: [
     'What is Microbiological Laboratory (MBL)?',
@@ -240,13 +241,16 @@ class _Msg {
 
 // ── FAB ───────────────────────────────────────────────────────────────────────
 class SupportChatbotButton extends StatelessWidget {
-  const SupportChatbotButton({super.key});
+  /// Pass the logged-in patient's mobile / patient ID so the chatbot can
+  /// filter sample-status queries to only this patient's records.
+  final String? patientId;
+  const SupportChatbotButton({super.key, this.patientId});
 
   void _open(BuildContext context) => showModalBottomSheet(
         context: context,
         isScrollControlled: true,
         backgroundColor: Colors.transparent,
-        builder: (_) => const _ChatbotSheet(),
+        builder: (_) => _ChatbotSheet(patientId: patientId),
       );
 
   @override
@@ -278,7 +282,7 @@ class SupportChatbotButton extends StatelessWidget {
               Text('Help',
                   style: TextStyle(
                       color: Colors.white,
-                      fontSize: 13,
+                      fontSize: 15,
                       fontWeight: FontWeight.w600,
                       letterSpacing: 0.2)),
             ],
@@ -291,7 +295,8 @@ class SupportChatbotButton extends StatelessWidget {
 
 // ── Chatbot sheet ─────────────────────────────────────────────────────────────
 class _ChatbotSheet extends StatefulWidget {
-  const _ChatbotSheet();
+  final String? patientId;
+  const _ChatbotSheet({this.patientId});
   @override
   State<_ChatbotSheet> createState() => _ChatbotSheetState();
 }
@@ -742,6 +747,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               'question': text,
               'session_id': _sid,
               'layer': _layer.apiKey,
+              if (widget.patientId != null) 'patient_id': widget.patientId,
             }),
           )
           .timeout(const Duration(seconds: 20));

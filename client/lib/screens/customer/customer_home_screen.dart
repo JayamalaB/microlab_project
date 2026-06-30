@@ -216,11 +216,11 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
               ),
             ],
           ),
-          // Chatbot FAB — sits above the cart bar when visible (cart bar top ≈ 96px)
+          // Chatbot FAB — patient_id=1 for testing; replace with real ID from auth API
           const Positioned(
             right: 16,
             bottom: 110,
-            child: SupportChatbotButton(),
+            child: SupportChatbotButton(patientId: '1'),
           ),
         ],
       ),

@@ -8,7 +8,7 @@ const SARVAM_STT_URL  = 'api.sarvam.ai';
 const SARVAM_TTS_PATH = '/text-to-speech';
 const SARVAM_STT_PATH = '/speech-to-text';
 
-const TTS_SPEAKER      = 'meera';
+const TTS_SPEAKER      = 'anushka';
 const TTS_MODEL        = 'bulbul:v2';
 const TTS_DEFAULT_LANG = 'en-IN';
 const TTS_TAMIL_LANG   = 'ta-IN';
@@ -22,7 +22,7 @@ const TAMIL_RE = /[஀-௿]/;
 // Prepend N ms of PCM silence to a WAV base64 string.
 // Android's AudioTrack needs time to initialise; the silence plays inaudibly
 // while the hardware opens, so the first real word is never clipped.
-function prependWavSilence(base64Audio, silenceMs = 500) {
+function prependWavSilence(base64Audio, silenceMs = 250) {
   try {
     const buf = Buffer.from(base64Audio, 'base64');
     if (buf.length < 44) return base64Audio;               // guard: malformed WAV
