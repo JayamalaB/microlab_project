@@ -745,6 +745,23 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
     )));
     _scrollBottom();
 
+    // Thank-you intercept — works from any layer, no server call needed.
+    if (RegExp(r'^(thank\s*you|thanks|thank\s*u|ty|thx|great|awesome|perfect|wonderful)\b',
+            caseSensitive: false)
+        .hasMatch(text.trim())) {
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (!mounted) return;
+      setState(() => _msgs.add(const _Msg(
+        text: "You're welcome! 😊 Let me know if there's anything else I can help you with.",
+        isBot: true,
+        layer: _Layer.all,
+        chips: ['Show all available tests', 'Book a test', 'Find branch near me', 'Contact support'],
+      )));
+      _scrollBottom();
+      setState(() => _loading = false);
+      return;
+    }
+
     if (_layer == _Layer.book) {
       await Future.delayed(const Duration(milliseconds: 300));
       if (!mounted) return;
@@ -1205,7 +1222,18 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                     ),
                     boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)],
                   ),
-                  child: const _BookingForm(apiBase: _kChatApiBase),
+                  child: _BookingForm(
+                    apiBase: _kChatApiBase,
+                    onBooked: () {
+                      setState(() => _msgs.add(const _Msg(
+                        text: 'Your booking has been received! Is there anything else I can help you with?',
+                        isBot: true,
+                        layer: _Layer.book,
+                        chips: ['Show all available tests', 'Find branch near me', 'Contact support', 'Book another test'],
+                      )));
+                      _scrollBottom();
+                    },
+                  ),
                 ),
               ],
             ),
@@ -2204,7 +2232,8 @@ class _BannerCarouselState extends State<_BannerCarousel> {
 // ── Booking form ──────────────────────────────────────────────────────────────
 class _BookingForm extends StatefulWidget {
   final String apiBase;
-  const _BookingForm({required this.apiBase});
+  final VoidCallback? onBooked;
+  const _BookingForm({required this.apiBase, this.onBooked});
   @override
   State<_BookingForm> createState() => _BookingFormState();
 }
@@ -2217,6 +2246,32 @@ class _BookingFormState extends State<_BookingForm> {
   bool    _loading = false;
   bool    _success = false;
   String? _error;
+  List<String> _packages = [];
+  bool _packagesLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPackages();
+  }
+
+  Future<void> _loadPackages() async {
+    try {
+      final res = await http.get(
+        Uri.parse('${widget.apiBase}/api/chat/products'),
+      ).timeout(const Duration(seconds: 10));
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        final list = (body['data'] as List).cast<String>();
+        setState(() { _packages = list; _packagesLoading = false; });
+      } else {
+        setState(() { _packages = _kTestPackages; _packagesLoading = false; });
+      }
+    } catch (_) {
+      if (mounted) setState(() { _packages = _kTestPackages; _packagesLoading = false; });
+    }
+  }
 
   @override
   void dispose() {
@@ -2247,6 +2302,7 @@ class _BookingFormState extends State<_BookingForm> {
       if (!mounted) return;
       if (res.statusCode >= 200 && res.statusCode < 300) {
         setState(() => _success = true);
+        widget.onBooked?.call();
       } else {
         final body = jsonDecode(res.body) as Map<String, dynamic>?;
         setState(() => _error = body?['error'] as String? ?? 'Server error (${res.statusCode}).');
@@ -2302,24 +2358,36 @@ class _BookingFormState extends State<_BookingForm> {
         const Text('Test Package',
             style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
         const SizedBox(height: 4),
-        DropdownButtonFormField<String>(
-          initialValue: _pkg,
-          hint: const Text('— Select a package —',
-              style: TextStyle(fontSize: 12.5, color: AppColors.textHint)),
-          isExpanded: true,
-          decoration: InputDecoration(
-            filled: true, fillColor: AppColors.background,
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
-                borderSide: const BorderSide(color: AppColors.divider, width: 1.5)),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
-                borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(9)),
-          ),
-          items: _kTestPackages.map((p) =>
-              DropdownMenuItem(value: p, child: Text(p, style: const TextStyle(fontSize: 12.5)))).toList(),
-          onChanged: (v) => setState(() => _pkg = v),
-        ),
+        _packagesLoading
+            ? const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Row(children: [
+                  SizedBox(width: 14, height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2,
+                          color: AppColors.brandGreen)),
+                  SizedBox(width: 10),
+                  Text('Loading packages…',
+                      style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ]),
+              )
+            : DropdownButtonFormField<String>(
+                value: _pkg,
+                hint: const Text('— Select a package —',
+                    style: TextStyle(fontSize: 12.5, color: AppColors.textHint)),
+                isExpanded: true,
+                decoration: InputDecoration(
+                  filled: true, fillColor: AppColors.background,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
+                      borderSide: const BorderSide(color: AppColors.divider, width: 1.5)),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
+                      borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(9)),
+                ),
+                items: _packages.map((p) =>
+                    DropdownMenuItem(value: p, child: Text(p, style: const TextStyle(fontSize: 12.5)))).toList(),
+                onChanged: (v) => setState(() => _pkg = v),
+              ),
         if (_error != null) ...[
           const SizedBox(height: 10),
           Container(

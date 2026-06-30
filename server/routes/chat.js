@@ -147,6 +147,17 @@ router.post('/verify-patient', async (req, res) => {
     }
 });
 
+router.get('/products', async (req, res) => {
+    try {
+        const [rows] = await db.pool.execute(
+            'SELECT product_name FROM ip_products WHERE product_active = 1 ORDER BY product_name ASC'
+        );
+        res.json({ success: true, data: rows.map(r => r.product_name) });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 router.post('/book-test', async (req, res) => {
     try {
         const { name, age, phone, package: pkg } = req.body;
