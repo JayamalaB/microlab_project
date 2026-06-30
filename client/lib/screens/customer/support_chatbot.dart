@@ -766,9 +766,10 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
       await Future.delayed(const Duration(milliseconds: 300));
       if (!mounted) return;
       setState(() => _msgs.add(const _Msg(
-        text: "You're in Book Test mode. Please use the form above, or switch layers using the toolbar.",
+        text: 'That question is better answered in a different section. Switch to the right layer:',
         isBot: true,
         layer: _Layer.book,
+        kind: _MsgKind.layerSuggestion,
       )));
       _scrollBottom();
       return;
@@ -1225,12 +1226,24 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                   child: _BookingForm(
                     apiBase: _kChatApiBase,
                     onBooked: () {
-                      setState(() => _msgs.add(const _Msg(
-                        text: 'Your booking has been received! Is there anything else I can help you with?',
-                        isBot: true,
-                        layer: _Layer.book,
-                        chips: ['Show all available tests', 'Find branch near me', 'Contact support', 'Book another test'],
-                      )));
+                      setState(() {
+                        // Remove the form from chat — replace with a compact confirmation.
+                        final idx = _msgs.indexWhere(
+                            (m) => m.kind == _MsgKind.bookingForm);
+                        if (idx != -1) {
+                          _msgs[idx] = const _Msg(
+                            text: '✓ Booking submitted successfully.',
+                            isBot: true,
+                            layer: _Layer.book,
+                          );
+                        }
+                        _msgs.add(const _Msg(
+                          text: 'What would you like to do next? Switch to a layer:',
+                          isBot: true,
+                          layer: _Layer.book,
+                          kind: _MsgKind.layerSuggestion,
+                        ));
+                      });
                       _scrollBottom();
                     },
                   ),
@@ -1844,9 +1857,9 @@ class _LayerMenu extends StatelessWidget {
       offset: const Offset(0, 8),
       onSelected: onLayerSelected,
       itemBuilder: (_) => [
-        _item(_Layer.staticInfo, '1. Info You Need'),
-        _item(_Layer.db,         '2. My Orders'),
-        _item(_Layer.web,        '3. About Us'),
+        _item(_Layer.staticInfo, '1. Help & FAQ'),
+        _item(_Layer.db,         '2. Tests & Prices'),
+        _item(_Layer.web,        '3. About Lab'),
         _item(_Layer.book,       '4. Book Test'),
       ],
     );
@@ -2263,7 +2276,7 @@ class _BookingFormState extends State<_BookingForm> {
       if (!mounted) return;
       if (res.statusCode == 200) {
         final body = jsonDecode(res.body) as Map<String, dynamic>;
-        final list = (body['data'] as List).cast<String>();
+        final list = (body['data'] as List).cast<String>().toSet().toList();
         setState(() { _packages = list; _packagesLoading = false; });
       } else {
         setState(() { _packages = _kTestPackages; _packagesLoading = false; });
@@ -2375,6 +2388,7 @@ class _BookingFormState extends State<_BookingForm> {
                 hint: const Text('— Select a package —',
                     style: TextStyle(fontSize: 12.5, color: AppColors.textHint)),
                 isExpanded: true,
+                menuMaxHeight: 240, // shows ~5 items; remaining scroll inside menu
                 decoration: InputDecoration(
                   filled: true, fillColor: AppColors.background,
                   contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
