@@ -20,6 +20,7 @@ dependencies:
   http: ^1.2.0
   webview_flutter: ^4.9.0         # YouTube inline player
   webview_flutter_android: ^4.0.0  # AndroidWebViewController.setMediaPlaybackRequiresUserGesture
+  webview_flutter_web: ^0.2.3+4    # WebView support on Flutter web (Chrome)
   record: ^7.0.0              # microphone STT recording
   audioplayers: ^6.1.0        # TTS WAV playback
   path_provider: ^2.1.0       # temp directory for audio files

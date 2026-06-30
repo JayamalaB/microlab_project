@@ -12,6 +12,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'yt_web_stub.dart' if (dart.library.html) 'yt_web_impl.dart';
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
 const _kChatApiBase  = 'https://ai.neuralarc.com';
@@ -95,6 +96,8 @@ const _kLocalChips = {
   'What payment methods do you accept?', 'How can I track my report?',
   'Are you NABL accredited?', 'Do you offer corporate packages?',
   'What are home collection charges?', 'Can I cancel my booking?', 'How do I reach support?',
+  // Sample follow-up chips — answered locally
+  'When will my report be ready?', 'How do I download my report?', 'Contact support',
 };
 
 // ── Local answers for static-info chips ─────────────────────────────────────
@@ -202,9 +205,25 @@ const _kFollowUps = <_Layer, List<String>>{
   _Layer.web:        ['Tell me about the Cytogenetics department', "What are MicroLab's accreditations?", 'How do I book a home collection?'],
 };
 
+// Follow-ups by server intent — used when layer is "all"
+const _kIntentFollowUps = <String, List<String>>{
+  'test_query':    ['Which tests require fasting?', 'Show all branch locations', 'What is the price of CBC test?'],
+  'branch_query':  ['Show Coimbatore branch details', 'What are your working hours?', 'How do I book a home collection?'],
+  'default_qa':    ['What are home collection charges?', 'How can I track my report?', 'Can I cancel my booking?'],
+  'website_live':  ["What are MicroLab's accreditations?", 'Tell me about home collection', 'Contact support'],
+  'general':       ['What tests do you offer?', 'Show all branch locations', 'Book Test'],
+};
+
+const _kSampleFollowUps = [
+  'When will my report be ready?',
+  'How do I download my report?',
+  'Contact support',
+  'Show all available tests',
+];
+
 const _kTestPackages = [
   'Complete Blood Count (CBC)',
-  'Lipid Profile',
+  'Lipid Profil e',
   'Liver Function Test (LFT)',
   'Kidney Function Test (KFT)',
   'Thyroid Profile (T3 / T4 / TSH)',
@@ -218,7 +237,7 @@ const _kTestPackages = [
 ];
 
 // ── Message model ─────────────────────────────────────────────────────────────
-enum _MsgKind { normal, divider, bookingForm, layerSuggestion, promo }
+enum _MsgKind { normal, divider, bookingForm, patientLoginForm, layerSuggestion, promo }
 enum _MicState { idle, recording, processing }
 
 class _Msg {
@@ -309,6 +328,17 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   _Layer _layer   = _Layer.all;
   final String _sid = 'ml_${DateTime.now().millisecondsSinceEpoch}';
 
+  // Patient auth — set from widget.patientId (app login) or from inline form
+  String? _verifiedPatientId;
+
+  // Only matches questions specifically asking to TRACK/CHECK personal sample data.
+  // Deliberately excludes "my report" alone to avoid catching FAQ follow-ups like
+  // "When will my report be ready?" or "How do I download my report?".
+  static bool _isSampleQuery(String text) => RegExp(
+    r'\b(track my (sample|test|report)|sample status|check my sample|my sample status|where is my (sample|result)|my test result)\b',
+    caseSensitive: false,
+  ).hasMatch(text);
+
   // ── Mic / STT ──────────────────────────────────────────────────────────────
   late final AudioRecorder _recorder;
   _MicState _micState = _MicState.idle;
@@ -327,6 +357,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   @override
   void initState() {
     super.initState();
+    _verifiedPatientId = widget.patientId; // use app-level patient ID if available
     _recorder  = AudioRecorder();
     _ttsPlayer = AudioPlayer();
     _msgs.add(const _Msg(
@@ -706,7 +737,6 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   Future<void> _send(String text, {String? voiceTranscript}) async {
     if (text.trim().isEmpty) return;
     _stopTts();
-
     setState(() => _msgs.add(_Msg(
       text: text,
       isBot: false,
@@ -735,6 +765,20 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
       return;
     }
 
+    // If asking about personal sample/report and not yet authenticated, show login form
+    if (_isSampleQuery(text) && _verifiedPatientId == null) {
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (!mounted) return;
+      setState(() => _msgs.add(_Msg(
+        kind: _MsgKind.patientLoginForm,
+        text: text, // stored so the form can retry the same question after auth
+        isBot: true,
+        layer: _Layer.db,
+      )));
+      _scrollBottom();
+      return;
+    }
+
     setState(() => _loading = true);
     _scrollBottom();
 
@@ -747,7 +791,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               'question': text,
               'session_id': _sid,
               'layer': _layer.apiKey,
-              if (widget.patientId != null) 'patient_id': widget.patientId,
+              if (_verifiedPatientId != null) 'patient_id': _verifiedPatientId,
             }),
           )
           .timeout(const Duration(seconds: 20));
@@ -784,9 +828,20 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               || answer.contains("Please call us")
               || answer.contains("Please visit our website");
 
-          final fus = (!isNoMatch && _layer != _Layer.all)
-              ? (List<String>.from(_kFollowUps[_layer] ?? [])..shuffle()).take(3).toList()
-              : <String>[];
+          // Exclude the question that was just asked from its own answer's chips.
+          final askedLower = text.trim().toLowerCase();
+          List<String> _filterChips(List<String> pool) => (pool..shuffle())
+              .where((c) => c.trim().toLowerCase() != askedLower)
+              .take(3)
+              .toList();
+
+          final fus = isNoMatch
+              ? <String>[]
+              : intent == 'sample_status_query'
+                  ? _filterChips(List<String>.from(_kSampleFollowUps))
+                  : _layer != _Layer.all
+                      ? _filterChips(List<String>.from(_kFollowUps[_layer] ?? []))
+                      : _filterChips(List<String>.from(_kIntentFollowUps[intent] ?? []));
 
           final newMsgIdx = _msgs.length;
 
@@ -883,6 +938,39 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
         return const _Msg(text: 'To reschedule, cancel your existing booking and create a new one with your preferred slot.\n\nFor assistance, call 0422 4354242 or WhatsApp 7904986636.', isBot: true, layer: _Layer.staticInfo, chips: ['Contact Us', '← Back']);
       case 'Payment issue?':
         return const _Msg(text: 'If payment was deducted but booking wasn\'t confirmed:\n\n1. Note your transaction ID\n2. Email microlabcbe@microlabindia.com with your booking ID and payment screenshot\n3. Or call 0422 4354242\n\nWe\'ll resolve it within 24 hours.', isBot: true, layer: _Layer.staticInfo, chips: ['Contact Us', '← Back']);
+      case 'When will my report be ready?':
+        return const _Msg(
+          text: '⏱ Typical report turnaround times:\n\n'
+              '• Routine tests (CBC, Blood Sugar) — Same day / within 24 hrs\n'
+              '• Thyroid, LFT, KFT — 24 hrs\n'
+              '• HbA1c, Vitamins — 24–48 hrs\n'
+              '• Molecular Biology, Cytogenetics — 48–72 hrs\n\n'
+              'You will receive an SMS once your report is ready.',
+          isBot: true, layer: _Layer.staticInfo,
+          chips: ['How do I download my report?', 'Track my sample status', 'Contact support'],
+        );
+      case 'How do I download my report?':
+        return const _Msg(
+          text: '📱 Downloading your report:\n\n'
+              '1. Visit microlabindiaonline.com → Patient Portal\n'
+              '2. Log in with your patient credentials\n'
+              '3. Select your test from the dashboard\n'
+              '4. Tap "Download Report" to save as PDF\n\n'
+              'You can also collect a physical copy at any branch.',
+          isBot: true, layer: _Layer.staticInfo,
+          chips: ['When will my report be ready?', 'Track my sample status', 'Contact support'],
+        );
+      case 'Contact support':
+        return const _Msg(
+          text: '📞 MicroLab Support:\n\n'
+              '• Coimbatore: 0422 4354242 / 4354212\n'
+              '• Trichy (Toll-free): 1800 425 1316\n'
+              '• WhatsApp: 7904986636\n'
+              '• Email: microlabcbe@microlabindia.com\n\n'
+              '🕐 Support hours: Mon–Sat 7:00 AM – 8:00 PM',
+          isBot: true, layer: _Layer.staticInfo,
+          chips: ['Track my sample status', 'Show all available tests', '← Back'],
+        );
       case '← Back':
         return const _Msg(text: 'Sure! What else can I help you with?', isBot: true, layer: _Layer.all, chips: ['Branch Info', 'Test FAQs', 'Booking Help', 'Contact Us']);
       default:
@@ -992,11 +1080,12 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
         if (_loading && i == _msgs.length) return _buildTypingIndicator();
         final msg = _msgs[i];
         return switch (msg.kind) {
-          _MsgKind.divider         => _buildDivider(msg.text),
-          _MsgKind.promo           => _buildPromoBlock(),
-          _MsgKind.bookingForm     => _buildBookingFormMsg(),
-          _MsgKind.layerSuggestion => _buildLayerSuggestionMsg(msg, i),
-          _MsgKind.normal          => _buildBubble(msg, i),
+          _MsgKind.divider          => _buildDivider(msg.text),
+          _MsgKind.promo            => _buildPromoBlock(),
+          _MsgKind.bookingForm      => _buildBookingFormMsg(),
+          _MsgKind.patientLoginForm => _buildPatientLoginForm(msg),
+          _MsgKind.layerSuggestion  => _buildLayerSuggestionMsg(msg, i),
+          _MsgKind.normal           => _buildBubble(msg, i),
         };
       },
     );
@@ -1052,6 +1141,40 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           _YoutubeCard(),
           SizedBox(height: 10),
           _BannerCarousel(imageUrls: _kBannerUrls),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPatientLoginForm(_Msg msg) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _BotAvatar(),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _PatientLoginForm(
+              originalQuestion: msg.text,
+              onVerified: (pid) {
+                setState(() {
+                  _verifiedPatientId = pid;
+                  // Replace the form message with a compact verified badge
+                  // so the form never re-renders in this session.
+                  final idx = _msgs.indexOf(msg);
+                  if (idx != -1) {
+                    _msgs[idx] = const _Msg(
+                      text: '🔐 Identity verified',
+                      isBot: true,
+                      layer: _Layer.db,
+                    );
+                  }
+                });
+                _send(msg.text);
+              },
+            ),
+          ),
         ],
       ),
     );
@@ -1773,6 +1896,13 @@ class _YoutubeCardState extends State<_YoutubeCard> {
   WebViewController? _ctrl;
 
   void _startPlaying() {
+    // On web we render an <iframe> directly (see yt_web_impl.dart) so the
+    // allow="autoplay" attribute is set — no WebViewController needed.
+    if (kIsWeb) {
+      setState(() => _playing = true);
+      return;
+    }
+
     final ctrl = WebViewController();
 
     final platform = ctrl.platform;
@@ -1780,13 +1910,32 @@ class _YoutubeCardState extends State<_YoutubeCard> {
       platform.setMediaPlaybackRequiresUserGesture(false);
     }
 
+    // Load a local HTML page that hosts the YouTube <iframe>.
+    // YouTube checks the Referer header — loading embed/ directly from a WebView
+    // exposes the package origin and triggers Error 153. Serving via loadHtmlString
+    // with a real domain as baseUrl makes YouTube see a proper website referrer.
+    final embedHtml = '''<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#000;overflow:hidden}
+  iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:none}
+</style>
+</head>
+<body>
+<iframe
+  src="https://www.youtube.com/embed/$_videoId?autoplay=1&rel=0&playsinline=1"
+  allow="autoplay;fullscreen;encrypted-media;picture-in-picture"
+  allowfullscreen>
+</iframe>
+</body>
+</html>''';
+
     ctrl
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(Colors.black)
-      ..setUserAgent(
-          'Mozilla/5.0 (Linux; Android 14; Pixel 8) '
-          'AppleWebKit/537.36 (KHTML, like Gecko) '
-          'Chrome/124.0.0.0 Mobile Safari/537.36')
       ..setNavigationDelegate(NavigationDelegate(
         onNavigationRequest: (req) {
           if (req.isMainFrame && !req.url.contains('youtube.com')) {
@@ -1794,52 +1943,8 @@ class _YoutubeCardState extends State<_YoutubeCard> {
           }
           return NavigationDecision.navigate;
         },
-        onPageFinished: (_) async {
-          await ctrl.runJavaScript(
-            '(function(){'
-            'var s=document.createElement("style");'
-            's.textContent="'
-            'html,body{margin:0!important;padding:0!important;'
-            'overflow:hidden!important;background:#000!important;}'
-            'ytm-mobile-topbar-renderer,ytm-watch-metadata-renderer,'
-            'ytm-slim-video-metadata-renderer,ytm-slim-video-information-renderer,'
-            'ytm-slim-video-action-bar-renderer,ytm-section-list-renderer,'
-            'ytm-single-column-watch-next-results-renderer,ytm-compact-video-renderer,'
-            'ytm-carousel-ads-renderer,ytm-item-section-renderer,'
-            'ytm-structured-description-content-renderer,'
-            '.slim-video-information-renderer,.watch-below-the-player,'
-            '#below,.player-action-bar{display:none!important;}'
-            'ytm-app,ytm-watch,ytm-watch-flexy,.watch-content,'
-            '.player-container,ytm-player-block,.player-container-outer{'
-            'margin:0!important;padding:0!important;background:#000!important;}'
-            '#movie_player,.html5-video-player{'
-            'position:fixed!important;top:0!important;left:0!important;'
-            'width:100%!important;height:100%!important;}";'
-            'document.head.appendChild(s);'
-            'function fix(){'
-            'var sel="ytm-mobile-topbar-renderer,ytm-watch-metadata-renderer,'
-            'ytm-slim-video-information-renderer,ytm-slim-video-action-bar-renderer,'
-            'ytm-section-list-renderer,ytm-single-column-watch-next-results-renderer,'
-            'ytm-item-section-renderer,.slim-video-information-renderer,'
-            '.watch-below-the-player,#below";'
-            'document.querySelectorAll(sel).forEach(function(e){'
-            'e.style.setProperty("display","none","important");});}'
-            'fix();'
-            'new MutationObserver(fix).observe(document.body,{childList:true,subtree:true});'
-            'function go(){'
-            'var v=document.querySelector("video");'
-            'if(!v)return false;'
-            'v.muted=false;v.volume=1;'
-            'var p=v.play();if(p)p.catch(function(){});'
-            'return true;}'
-            'if(!go()){var n=0,t=setInterval(function(){'
-            'if(go()||++n>40)clearInterval(t);},250);}'
-            '})();',
-          );
-        },
       ))
-      ..loadRequest(
-          Uri.parse('https://m.youtube.com/watch?v=$_videoId&autoplay=1'));
+      ..loadHtmlString(embedHtml, baseUrl: 'https://www.microlabindia.com');
 
     setState(() {
       _ctrl = ctrl;
@@ -1866,8 +1971,10 @@ class _YoutubeCardState extends State<_YoutubeCard> {
             child: SizedBox(
               height: 210,
               width: double.infinity,
-              child: _playing && _ctrl != null
-                  ? WebViewWidget(controller: _ctrl!)
+              child: _playing
+                  ? (kIsWeb
+                      ? buildYtWebPlayer(_videoId)
+                      : WebViewWidget(controller: _ctrl!))
                   : GestureDetector(
                       onTap: _startPlaying,
                       child: Stack(
@@ -1919,13 +2026,13 @@ class _YoutubeCardState extends State<_YoutubeCard> {
                       Text(_kYoutubeTitle,
                           style: TextStyle(fontSize: 13,
                               fontWeight: FontWeight.w700,
-                              color: AppColors.textPrimary),
+                              color: Colors.white),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis),
                       SizedBox(height: 2),
                       Text('$_kYoutubeChannel · $_kYoutubeSub',
                           style: TextStyle(fontSize: 10.5,
-                              color: AppColors.textSecondary),
+                              color: Colors.white70),
                           maxLines: 2),
                     ],
                   ),
@@ -2278,6 +2385,185 @@ class _BookingFormState extends State<_BookingForm> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ── Patient login form (inline in chat) ───────────────────────────────────────
+class _PatientLoginForm extends StatefulWidget {
+  final String originalQuestion;
+  final void Function(String patientId) onVerified;
+
+  const _PatientLoginForm({
+    required this.originalQuestion,
+    required this.onVerified,
+  });
+
+  @override
+  State<_PatientLoginForm> createState() => _PatientLoginFormState();
+}
+
+class _PatientLoginFormState extends State<_PatientLoginForm> {
+  final _idCtrl  = TextEditingController();
+  final _pwCtrl  = TextEditingController();
+  bool _loading  = false;
+  bool _obscure  = true;
+  bool _verified = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _idCtrl.dispose();
+    _pwCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _verify() async {
+    final pid = _idCtrl.text.trim();
+    final pwd = _pwCtrl.text.trim();
+    if (pid.isEmpty || pwd.isEmpty) {
+      setState(() => _error = 'Please enter both Patient ID and password.');
+      return;
+    }
+    setState(() { _loading = true; _error = null; });
+    try {
+      final res = await http.post(
+        Uri.parse('$_kChatApiBase/api/chat/verify-patient'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'patient_id': pid, 'password': pwd}),
+      ).timeout(const Duration(seconds: 15));
+
+      if (!mounted) return;
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (res.statusCode == 200 && body['success'] == true) {
+        setState(() { _verified = true; _loading = false; });
+        await Future.delayed(const Duration(milliseconds: 600));
+        widget.onVerified(body['patient_id'].toString());
+      } else {
+        setState(() {
+          _loading = false;
+          _error = body['error'] as String? ?? 'Invalid credentials. Please try again.';
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() { _loading = false; _error = 'Connection error. Please try again.'; });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_verified) {
+      return Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: AppColors.brandGreenSurface,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: AppColors.brandGreenLight),
+        ),
+        child: const Row(
+          children: [
+            Icon(Icons.check_circle_rounded, color: AppColors.brandGreen, size: 18),
+            SizedBox(width: 8),
+            Flexible(child: Text('Verified! Fetching your sample status…',
+                style: TextStyle(color: AppColors.brandGreen, fontSize: 13, fontWeight: FontWeight.w500))),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.divider),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 2))],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.lock_outline_rounded, size: 16, color: AppColors.brandGreen),
+              SizedBox(width: 6),
+              Flexible(child: Text('Patient Login', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: AppColors.textPrimary))),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text('Enter your Patient ID and password to continue.',
+              style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+          const SizedBox(height: 14),
+          // Patient ID
+          TextField(
+            controller: _idCtrl,
+            keyboardType: TextInputType.number,
+            style: const TextStyle(fontSize: 14),
+            decoration: InputDecoration(
+              labelText: 'Patient ID',
+              labelStyle: const TextStyle(fontSize: 13),
+              prefixIcon: const Icon(Icons.badge_outlined, size: 18),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.brandGreen),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          // Password
+          TextField(
+            controller: _pwCtrl,
+            obscureText: _obscure,
+            keyboardType: TextInputType.text,
+            style: const TextStyle(fontSize: 14),
+            onSubmitted: (_) => _verify(),
+            decoration: InputDecoration(
+              labelText: 'Password',
+              labelStyle: const TextStyle(fontSize: 13),
+              prefixIcon: const Icon(Icons.lock_outline, size: 18),
+              suffixIcon: IconButton(
+                icon: Icon(_obscure ? Icons.visibility_outlined : Icons.visibility_off_outlined, size: 18),
+                onPressed: () => setState(() => _obscure = !_obscure),
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.brandGreen),
+              ),
+            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                const Icon(Icons.error_outline, size: 14, color: Color(0xFFD32F2F)),
+                const SizedBox(width: 5),
+                Flexible(child: Text(_error!, style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)))),
+              ],
+            ),
+          ],
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            height: 42,
+            child: ElevatedButton(
+              onPressed: _loading ? null : _verify,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.brandGreen,
+                disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.4),
+                elevation: 0,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              child: _loading
+                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Text('Verify & Continue', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -216,11 +216,12 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
               ),
             ],
           ),
-          // Chatbot FAB — patient_id=1 for testing; replace with real ID from auth API
+          // Chatbot FAB — patientId comes from auth API after real login integration;
+          // null means the inline form will ask for credentials on sample queries.
           const Positioned(
             right: 16,
             bottom: 110,
-            child: SupportChatbotButton(patientId: '1'),
+            child: SupportChatbotButton(),
           ),
         ],
       ),

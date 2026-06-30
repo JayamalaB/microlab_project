@@ -109,6 +109,44 @@ ${context}`
     }
 }
 
+/**
+ * POST /api/chat/verify-patient
+ * Verifies patient credentials before exposing personal sample-tracking data.
+ * Body: { patient_id, password }
+ *
+ * NOTE: Update the table name (ip_patients) and column names below to match
+ *       your actual adminmicro schema. Common alternatives:
+ *       - table:    ip_user, ip_patients, ip_accounts
+ *       - id col:   patient_id, user_id, id
+ *       - pwd col:  password, patient_password, mobile (if mobile is used as pwd)
+ */
+router.post('/verify-patient', async (req, res) => {
+    try {
+        const { patient_id, password } = req.body;
+        if (!patient_id || !password) {
+            return res.status(400).json({ success: false, error: 'Patient ID and password are required.' });
+        }
+
+        const [rows] = await db.pool.execute(
+            `SELECT patient_id FROM ip_patients
+             WHERE patient_id = ? AND patient_mobile = ? LIMIT 1`,
+            [patient_id, password]
+        );
+
+        if (rows.length > 0) {
+            console.log(`✅ Patient verified: ${patient_id}`);
+            return res.json({ success: true, patient_id: rows[0].patient_id.toString() });
+        }
+
+        console.log(`❌ Patient verify failed for id: ${patient_id}`);
+        res.status(401).json({ success: false, error: 'Invalid Patient ID or password. Please try again.' });
+
+    } catch (error) {
+        console.error('Patient verify error:', error.message);
+        res.status(500).json({ success: false, error: 'Verification failed. Please try again later.' });
+    }
+});
+
 router.post('/book-test', async (req, res) => {
     try {
         const { name, age, phone, package: pkg } = req.body;
