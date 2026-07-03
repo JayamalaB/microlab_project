@@ -2,24 +2,24 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
-import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/auth_service.dart';
 import 'package:microlab/services/socket_service.dart';
-import 'package:microlab/models.dart';
-import 'package:sms_autofill/sms_autofill.dart';
 import '../customer/customer_home_screen.dart';
 import '../technician/technician_dashboard_screen.dart';
 
 class OtpScreen extends StatefulWidget {
   final String mobile;
   final String userRole;
+  final String? devOtp; // dev only — remove before production
 
-  const OtpScreen({super.key, required this.mobile, required this.userRole});
+  const OtpScreen({super.key, required this.mobile, required this.userRole, this.devOtp});
 
   @override
   State<OtpScreen> createState() => _OtpScreenState();
 }
 
-class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
+class _OtpScreenState extends State<OtpScreen> {
+  // 4 individual controllers + focus nodes
   final List<TextEditingController> _controllers =
       List.generate(4, (_) => TextEditingController());
   final List<FocusNode> _focusNodes = List.generate(4, (_) => FocusNode());
@@ -29,7 +29,8 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
   bool _hasError = false;
   String _errorMsg = '';
 
-  int _secondsLeft = 60;
+  // Countdown
+  int _secondsLeft = 30;
   Timer? _timer;
   bool _canResend = false;
 
@@ -37,21 +38,14 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
   void initState() {
     super.initState();
     _startTimer();
-    listenForCode();
-    _printAppHash();
+    _listenForAutoFill();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       FocusScope.of(context).requestFocus(_focusNodes[0]);
     });
   }
 
-  Future<void> _printAppHash() async {
-    final hash = await SmsAutoFill().getAppSignature;
-    // ignore: avoid_print
-    print('APP HASH FOR SMS: [$hash]');
-  }
-
   void _startTimer() {
-    _secondsLeft = 60;
+    _secondsLeft = 30;
     _canResend = false;
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (t) {
@@ -67,11 +61,8 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
     });
   }
 
-  @override
-  void codeUpdated() {
-    if (code != null && code!.length == 4) {
-      _fillOtp(code!);
-    }
+  void _listenForAutoFill() {
+    // Reserved for real SMS autofill integration (e.g. sms_autofill package)
   }
 
   void _fillOtp(String otp) {
@@ -119,74 +110,68 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
   Future<void> _verify() async {
     if (!_isComplete) return;
     FocusScope.of(context).unfocus();
-    setState(() {
-      _isVerifying = true;
-      _hasError = false;
-    });
+    setState(() { _isVerifying = true; _hasError = false; });
 
-    try {
-      final result = await ApiService.verifyOtp(widget.mobile, _currentOtp);
-      if (!mounted) return;
-      if (result['success'] == true) {
-        final token = result['data']?['token'];
-        if (token != null) await ApiService.saveToken(token);
-        await ApiService.saveUserInfo(widget.mobile, widget.userRole);
-        final rawPatients = result['data']?['patients'] as List<dynamic>? ?? [];
-        final patients = rawPatients
-            .map((p) => PatientModel.fromJson(p as Map<String, dynamic>))
-            .toList();
-        setState(() => _isVerifying = false);
-        const technicianIds = {'8056535850': 1, '7339535472': 2};
-        final int userId = widget.userRole == 'technician'
-            ? (technicianIds[widget.mobile] ?? 1)
-            : 1;
-        _connectSocket(userId);
-        _showSuccess(patients);
-      } else {
-        setState(() {
-          _isVerifying = false;
-          _hasError = true;
-          _errorMsg = result['message'] ?? 'Incorrect OTP. Please try again.';
-          for (final c in _controllers) {
-            c.clear();
-          }
-        });
-        FocusScope.of(context).requestFocus(_focusNodes[0]);
-      }
-    } catch (_) {
-      if (!mounted) return;
+    final result = await AuthService.verifyOtp(
+      widget.mobile, _currentOtp, widget.userRole,
+    );
+
+    if (!mounted) return;
+
+    if (result['success'] != true) {
+      final msg = result['message'] as String? ?? 'Incorrect OTP. Please try again.';
       setState(() {
         _isVerifying = false;
-        _hasError = true;
-        _errorMsg = 'Network error. Please try again.';
+        _hasError    = true;
+        _errorMsg    = msg;
+        for (final c in _controllers) c.clear();
       });
       FocusScope.of(context).requestFocus(_focusNodes[0]);
+      return;
+    }
+
+    setState(() => _isVerifying = false);
+
+    final data = result['data'] as Map<String, dynamic>? ?? {};
+    final user = data['user']  as Map<String, dynamic>? ?? {};
+
+    if (widget.userRole == 'technician') {
+      final techId   = user['technician_id'] as int? ?? 0;
+      final branchId = user['branch_id']     as int? ?? 0;
+      final name     = user['user_name']     as String? ?? widget.mobile;
+      _connectSocket(techId, branchId, name);
+      _navigateTechnician();
+    } else {
+      final patientId = user['patient_id'] as int? ?? 0;
+      final name      = user['patient_name'] as String? ?? widget.mobile;
+      _connectSocket(patientId, null, name);
+      _navigateCustomer();
     }
   }
 
-  void _connectSocket(int userId) {
+  void _connectSocket(int userId, int? branchId, String name) {
     SocketService.instance.connect(
-      userId: userId,
-      role:   widget.userRole == 'technician' ? 'technician' : 'customer',
-      name:   widget.mobile, // TODO: replace with real name from API
+      userId:   userId,
+      role:     widget.userRole == 'technician' ? 'technician' : 'customer',
+      name:     name,
+      branchId: branchId,
     );
   }
 
-  void _showSuccess(List<PatientModel> patients) {
-    if (widget.userRole == 'customer') {
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(
-          builder: (_) => CustomerHomeScreen(
-            mobile: widget.mobile,
-            isVip: false,
-            patients: patients,
-          ),
+  void _navigateCustomer() {
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CustomerHomeScreen(
+          mobile: widget.mobile,
+          isVip:  widget.userRole == 'vip_customer',
         ),
-        (route) => false,
-      );
-      return;
-    }
+      ),
+      (route) => false,
+    );
+  }
+
+  void _navigateTechnician() {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: const Row(
@@ -202,42 +187,37 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         duration: const Duration(seconds: 2),
       ),
     );
-
-    if (widget.userRole == 'technician') {
-      Navigator.pushAndRemoveUntil(
-        context,
-        PageRouteBuilder(
-          pageBuilder: (_, __, ___) => TechnicianDashboardScreen(mobile: widget.mobile),
-          transitionsBuilder: (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
-          transitionDuration: const Duration(milliseconds: 400),
-        ),
-        (route) => false,
-      );
-      return;
-    }
+    Navigator.pushAndRemoveUntil(
+      context,
+      PageRouteBuilder(
+        pageBuilder:        (_, __, ___) => TechnicianDashboardScreen(mobile: widget.mobile),
+        transitionsBuilder: (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
+        transitionDuration: const Duration(milliseconds: 400),
+      ),
+      (route) => false,
+    );
   }
 
   Future<void> _resend() async {
     if (!_canResend) return;
-    for (final c in _controllers) {
-      c.clear();
-    }
-    setState(() {
-      _hasError = false;
-      _isAutoFilled = false;
-    });
+    for (final c in _controllers) c.clear();
+    setState(() { _hasError = false; _isAutoFilled = false; });
     FocusScope.of(context).requestFocus(_focusNodes[0]);
     _startTimer();
 
-    try {
-      await ApiService.sendOtp(widget.mobile, widget.userRole);
-    } catch (_) {}
-
+    final result = await AuthService.sendOtp(widget.mobile, widget.userRole);
     if (!mounted) return;
+
+    final msg = result['success'] == true
+        ? 'OTP resent to +91 ${widget.mobile}'
+        : (result['message'] as String? ?? 'Failed to resend OTP');
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('OTP resent to +91 ${widget.mobile}'),
-        backgroundColor: AppColors.brandGreen,
+        content: Text(msg),
+        backgroundColor: result['success'] == true
+            ? AppColors.brandGreen
+            : const Color(0xFFD32F2F),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         duration: const Duration(seconds: 2),
@@ -247,7 +227,6 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
 
   @override
   void dispose() {
-    cancel();
     _timer?.cancel();
     for (final c in _controllers) c.dispose();
     for (final f in _focusNodes) f.dispose();
@@ -364,6 +343,38 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
                 ),
 
                 const SizedBox(height: 32),
+
+                // ── Dev OTP banner (remove before production) ─────────
+                if (widget.devOtp != null)
+                  GestureDetector(
+                    onTap: () => _fillOtp(widget.devOtp!),
+                    child: Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF8E1),
+                        border: Border.all(color: const Color(0xFFFFB300)),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.developer_mode_rounded,
+                              size: 15, color: Color(0xFFE65100)),
+                          const SizedBox(width: 8),
+                          Text(
+                            'DEV — OTP: ${widget.devOtp}  (tap to fill)',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFFE65100),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
 
                 // Autofill banner
                 AnimatedSwitcher(

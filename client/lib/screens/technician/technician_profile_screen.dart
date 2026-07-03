@@ -1,4 +1,8 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
 
 class TechnicianProfileScreen extends StatefulWidget {
@@ -19,21 +23,28 @@ class TechnicianProfileScreen extends StatefulWidget {
 }
 
 class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
-  bool _isEditing = false;
+  bool _isEditing    = false;
+  bool _statsLoading = true;
 
-  // ── Editable profile data (TODO: load from GET /api/technician/profile) ──────
-  String _name = 'Arjun Sharma';
-  String _email = 'arjun.sharma@microlab.in';
-  String _experience = '6 years';
-  List<String> _specializations = [
-    'Phlebotomy', 'Diabetes', 'Thyroid', 'General', 'Paediatric'
-  ];
+  // ── Profile fields (loaded from SharedPreferences + API) ─────────────────────
+  String _name           = '';
+  String _email          = '';
+  String _experience     = '';
+  String _technicianCode = '';
+  String _branchName     = '';
+  String _photoUrl       = '';
+  List<String> _specializations = [];
+
+  // ── Today's stats (loaded from API) ──────────────────────────────────────────
+  int _assignedToday  = 0;
+  int _completedToday = 0;
+  int _pendingToday   = 0;
+  int _totalDone      = 0;
 
   late TextEditingController _nameCtrl;
   late TextEditingController _emailCtrl;
   late TextEditingController _expCtrl;
 
-  // Temporary copies while editing (reverted on cancel)
   late List<String> _editingSpecs;
 
   static const _availableSpecs = [
@@ -44,10 +55,73 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
   @override
   void initState() {
     super.initState();
-    _nameCtrl = TextEditingController(text: _name);
-    _emailCtrl = TextEditingController(text: _email);
-    _expCtrl = TextEditingController(text: _experience);
-    _editingSpecs = List.from(_specializations);
+    _nameCtrl     = TextEditingController();
+    _emailCtrl    = TextEditingController();
+    _expCtrl      = TextEditingController();
+    _editingSpecs = [];
+    _loadProfile();
+  }
+
+  Future<void> _loadProfile() async {
+    // ── Step 1: SharedPreferences (instant, no network) ───────────────────────
+    final prefs = await SharedPreferences.getInstance();
+
+    final name    = prefs.getString('user_name')       ?? '';
+    final email   = prefs.getString('user_email')      ?? '';
+    final code    = prefs.getString('technician_code') ?? '';
+    final city    = prefs.getString('tech_city')       ?? '';
+    final photo   = prefs.getString('tech_photo')      ?? '';
+    final specStr = prefs.getString('specialization')  ?? '';
+    final techId  = prefs.getInt('user_id')            ?? 0;
+
+    final specs = specStr.isNotEmpty
+        ? specStr.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList()
+        : <String>[];
+
+    if (mounted) {
+      setState(() {
+        _name           = name;
+        _email          = email;
+        _technicianCode = code;
+        _branchName     = city;
+        _photoUrl       = photo;
+        _specializations = specs;
+        _nameCtrl.text  = name;
+        _emailCtrl.text = email;
+        _editingSpecs   = List.from(specs);
+      });
+    }
+
+    // ── Step 2: API call for branch name + today's stats ──────────────────────
+    if (techId > 0) await _loadStats(techId);
+  }
+
+  Future<void> _loadStats(int techId) async {
+    try {
+      final res = await http
+          .get(Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/profile'))
+          .timeout(const Duration(seconds: 8));
+
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        final body    = jsonDecode(res.body) as Map<String, dynamic>;
+        final profile = body['profile'] as Map<String, dynamic>? ?? {};
+        final stats   = body['stats']   as Map<String, dynamic>? ?? {};
+
+        setState(() {
+          if ((profile['branch_name'] as String? ?? '').isNotEmpty) {
+            _branchName = profile['branch_name'] as String;
+          }
+          _assignedToday  = int.tryParse(stats['assigned_today'].toString())  ?? 0;
+          _completedToday = int.tryParse(stats['completed_today'].toString()) ?? 0;
+          _pendingToday   = int.tryParse(stats['pending_today'].toString())   ?? 0;
+          _totalDone      = int.tryParse(stats['total_done'].toString())      ?? 0;
+          _statsLoading   = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _statsLoading = false);
+    }
   }
 
   @override
@@ -57,6 +131,22 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
     _expCtrl.dispose();
     super.dispose();
   }
+
+  Widget _buildInitials() => Container(
+        width: 60,
+        height: 60,
+        color: AppColors.brandGreenSurface,
+        child: Center(
+          child: Text(
+            _name.trim().split(' ').take(2)
+                .map((w) => w.isNotEmpty ? w[0] : '').join().toUpperCase(),
+            style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: AppColors.brandGreen),
+          ),
+        ),
+      );
 
   void _startEdit() {
     _editingSpecs = List.from(_specializations);
@@ -68,6 +158,80 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
     _emailCtrl.text = _email;
     _expCtrl.text = _experience;
     setState(() => _isEditing = false);
+  }
+
+  Future<void> _confirmLogout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        contentPadding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFEBEE),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.logout_rounded,
+                  size: 26, color: Color(0xFFD32F2F)),
+            ),
+            const SizedBox(height: 16),
+            const Text('Logout?',
+                style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary)),
+            const SizedBox(height: 8),
+            const Text(
+              'Are you sure you want to logout from MicroLab?',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.textSecondary,
+                      side: const BorderSide(color: AppColors.divider),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    child: const Text('Cancel',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFD32F2F),
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    child: const Text('Logout',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed == true) widget.onLogout();
   }
 
   void _save() {
@@ -166,7 +330,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
           const Spacer(),
           if (!_isEditing)
             TextButton.icon(
-              onPressed: widget.onLogout,
+              onPressed: _confirmLogout,
               icon: const Icon(Icons.logout_rounded,
                   size: 15, color: Colors.white70),
               label: const Text('Logout',
@@ -228,28 +392,16 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
               // ── Avatar row ────────────────────────────────
               Row(
                 children: [
-                  Container(
-                    width: 60,
-                    height: 60,
-                    decoration: const BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Center(
-                      child: Text(
-                        _name
-                            .trim()
-                            .split(' ')
-                            .take(2)
-                            .map((w) => w.isNotEmpty ? w[0] : '')
-                            .join()
-                            .toUpperCase(),
-                        style: const TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.brandGreen),
-                      ),
-                    ),
+                  ClipOval(
+                    child: _photoUrl.isNotEmpty
+                        ? Image.network(
+                            _photoUrl,
+                            width: 60,
+                            height: 60,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => _buildInitials(),
+                          )
+                        : _buildInitials(),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
@@ -296,17 +448,17 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
               const _HDivider(),
 
               // ── Employee ID (locked) ──────────────────────
-              const _LockedRow(
+              _LockedRow(
                   icon: Icons.badge_outlined,
                   label: 'Employee ID',
-                  value: 'ML-TECH-0042'),
+                  value: _technicianCode.isNotEmpty ? _technicianCode : '—'),
               const _HDivider(),
 
               // ── Branch (locked) ───────────────────────────
-              const _LockedRow(
+              _LockedRow(
                   icon: Icons.location_on_outlined,
                   label: 'Branch',
-                  value: 'T Nagar, Chennai'),
+                  value: _branchName.isNotEmpty ? _branchName : '—'),
               const _HDivider(),
 
               // ── Email (editable) ──────────────────────────
@@ -432,60 +584,63 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
         // ── Today's summary ──────────────────────────────────
         const _SectionTitle("Today's Summary"),
         const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: _StatCard(
-                label: 'Assigned',
-                value: '3',
-                icon: Icons.calendar_today_outlined,
-                color: AppColors.brandGreen,
-              ),
+        if (_statsLoading)
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: CircularProgressIndicator(strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(AppColors.brandGreen)),
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _StatCard(
-                label: 'Completed',
-                value: '1',
-                icon: Icons.check_circle_outline,
-                color: const Color(0xFF1565C0),
+          )
+        else ...[
+          Row(
+            children: [
+              Expanded(
+                child: _StatCard(
+                  label: 'Assigned',
+                  value: '$_assignedToday',
+                  icon: Icons.calendar_today_outlined,
+                  color: AppColors.brandGreen,
+                ),
               ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _StatCard(
-                label: 'Pending',
-                value: '2',
-                icon: Icons.pending_outlined,
-                color: const Color(0xFFE65100),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _StatCard(
+                  label: 'Completed',
+                  value: '$_completedToday',
+                  icon: Icons.check_circle_outline,
+                  color: const Color(0xFF1565C0),
+                ),
               ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: _StatCard(
-                label: 'Total Done',
-                value: '248',
-                icon: Icons.star_outline_rounded,
-                color: const Color(0xFF6A1B9A),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _StatCard(
+                  label: 'Pending',
+                  value: '$_pendingToday',
+                  icon: Icons.pending_outlined,
+                  color: const Color(0xFFE65100),
+                ),
               ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _StatCard(
-                label: 'Avg. Rating',
-                value: '4.9 ★',
-                icon: Icons.thumb_up_alt_outlined,
-                color: const Color(0xFFFFB300),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _StatCard(
+                  label: 'Total Done',
+                  value: '$_totalDone',
+                  icon: Icons.star_outline_rounded,
+                  color: const Color(0xFF6A1B9A),
+                ),
               ),
-            ),
-            const SizedBox(width: 10),
-            const Expanded(child: SizedBox()),
-          ],
-        ),
+              const SizedBox(width: 10),
+              const Expanded(child: SizedBox()),
+              const SizedBox(width: 10),
+              const Expanded(child: SizedBox()),
+            ],
+          ),
+        ],
       ],
     );
 
@@ -514,7 +669,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
         actions: [
           if (!_isEditing)
             TextButton.icon(
-              onPressed: widget.onLogout,
+              onPressed: _confirmLogout,
               icon: const Icon(Icons.logout_rounded,
                   size: 16, color: Colors.white70),
               label: const Text('Logout',

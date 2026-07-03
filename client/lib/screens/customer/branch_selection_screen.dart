@@ -1,18 +1,32 @@
+// branch_selection_screen.dart
+//
+// Step 1 of the branch-based booking flow.
+//
+// Flow:
+//  1. Patient types their pincode OR area/place name.
+//  2. Taps "Find Branch" → GET /api/branches/lookup.
+//  3. Matched branch is shown in a detail card.
+//  4. "Continue to Book" → navigates to CheckoutScreen with branch pre-filled.
+//     CheckoutScreen loads real slots from the API when branchId is set.
+//
+// Existing features are untouched. This screen is only reached via
+// the new "Schedule Collection" entry point on the home screen.
+
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/models.dart';
 import 'package:microlab/theme/app_theme.dart';
-import 'package:microlab/services/api_service.dart';
 import 'package:http/http.dart' as http;
-import 'slot_selection_screen.dart';
+import 'checkout_screen.dart';
 
 class BranchSelectionScreen extends StatefulWidget {
-  final MemberModel     member;
-  final List<TestModel> cart;
-  final int             patientId;
-  final double?         patientLat;
-  final double?         patientLng;
+  final MemberModel      member;
+  final List<TestModel>  cart;
+  final int              patientId;
+  final double?          patientLat;
+  final double?          patientLng;
 
   const BranchSelectionScreen({
     super.key,
@@ -30,14 +44,54 @@ class BranchSelectionScreen extends StatefulWidget {
 enum _LookupState { idle, loading, found, notFound, error }
 
 class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
-  final _pincodeCtrl  = TextEditingController();
-  final _placeCtrl    = TextEditingController();
+  final _pincodeCtrl = TextEditingController();
+  final _placeCtrl   = TextEditingController();
   final _pincodeFocus = FocusNode();
   final _placeFocus   = FocusNode();
 
-  _LookupState _state    = _LookupState.idle;
+  _LookupState _state   = _LookupState.idle;
   BranchModel? _branch;
   String       _errorMsg = '';
+
+  @override
+  void initState() {
+    super.initState();
+    // If patient GPS is known, auto-detect the nearest branch on screen open.
+    if (widget.patientLat != null && widget.patientLng != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _autoDetect());
+    }
+  }
+
+  Future<void> _autoDetect() async {
+    setState(() { _state = _LookupState.loading; _branch = null; _errorMsg = ''; });
+    try {
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/branches/lookup')
+          .replace(queryParameters: {
+            'lat': widget.patientLat.toString(),
+            'lng': widget.patientLng.toString(),
+          });
+      final res  = await http.get(uri).timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      Map<String, dynamic>? body;
+      try { body = jsonDecode(res.body) as Map<String, dynamic>; } catch (_) {
+        setState(() { _state = _LookupState.idle; });
+        return;
+      }
+      if (res.statusCode == 200 && body['success'] == true) {
+        final b = body;
+        setState(() {
+          _branch = BranchModel.fromJson(b['branch'] as Map<String, dynamic>);
+          _state  = _LookupState.found;
+        });
+      } else {
+        // GPS auto-detect failed silently — user can still type pincode/place.
+        setState(() { _state = _LookupState.idle; });
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() { _state = _LookupState.idle; });
+    }
+  }
 
   @override
   void dispose() {
@@ -47,6 +101,8 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
     _placeFocus.dispose();
     super.dispose();
   }
+
+  // ── API call ───────────────────────────────────────────────────────────────
 
   Future<void> _lookup() async {
     final pincode = _pincodeCtrl.text.trim();
@@ -59,8 +115,8 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
 
     FocusScope.of(context).unfocus();
     setState(() {
-      _state    = _LookupState.loading;
-      _branch   = null;
+      _state   = _LookupState.loading;
+      _branch  = null;
       _errorMsg = '';
     });
 
@@ -68,10 +124,8 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
       final params = <String, String>{};
       if (pincode.isNotEmpty) params['pincode'] = pincode;
       if (place.isNotEmpty)   params['place']   = place;
-      if (widget.patientLat != null) params['lat'] = widget.patientLat.toString();
-      if (widget.patientLng != null) params['lng'] = widget.patientLng.toString();
 
-      final uri = Uri.parse('${ApiService.baseUrl}/api/branches/lookup')
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/branches/lookup')
           .replace(queryParameters: params);
 
       final res = await http.get(uri).timeout(const Duration(seconds: 15));
@@ -82,6 +136,7 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
       try {
         body = jsonDecode(res.body) as Map<String, dynamic>;
       } catch (_) {
+        // Server returned non-JSON (unexpected HTML error page etc.)
         setState(() {
           _state    = _LookupState.error;
           _errorMsg = 'Server returned an unexpected response (${res.statusCode}).';
@@ -91,13 +146,15 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
 
       if (res.statusCode == 200 && body['success'] == true) {
         setState(() {
-          _branch = BranchModel.fromJson(body!['branch'] as Map<String, dynamic>);
-          _state  = _LookupState.found;
+          _branch = BranchModel.fromJson(
+              body!['branch'] as Map<String, dynamic>);
+          _state = _LookupState.found;
         });
       } else if (res.statusCode == 404) {
         setState(() {
           _state    = _LookupState.notFound;
-          _errorMsg = body!['message'] as String? ?? 'No branch found for this location.';
+          _errorMsg = body!['message'] as String? ??
+              'No branch found for this location.';
         });
       } else {
         setState(() {
@@ -114,18 +171,22 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
     }
   }
 
+  // ── Continue to checkout (slot selection happens there) ───────────────────
+
   void _continue() {
     if (_branch == null) return;
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => SlotSelectionScreen(
+        builder: (_) => CheckoutScreen(
           member:     widget.member,
           cart:       widget.cart,
+          mode:       'Home Collection',
           patientId:  widget.patientId,
           patientLat: widget.patientLat,
           patientLng: widget.patientLng,
           branch:     _branch!,
+          branchId:   int.tryParse(_branch!.id),
         ),
       ),
     );
@@ -147,10 +208,13 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
     ));
   }
 
+  // ── Build ──────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     return AnnotatedRegion<SystemUiOverlayStyle>(
-      value: SystemUiOverlayStyle.dark.copyWith(statusBarColor: Colors.transparent),
+      value: SystemUiOverlayStyle.dark
+          .copyWith(statusBarColor: Colors.transparent),
       child: Scaffold(
         backgroundColor: AppColors.background,
         appBar: AppBar(
@@ -172,38 +236,54 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+
+              // ── Header info ──────────────────────────────────────────────
               _InfoBanner(
-                icon:  Icons.location_on_rounded,
+                icon: Icons.location_on_rounded,
                 color: AppColors.brandGreen,
-                text:  'Enter your pincode or area name to find the nearest '
-                       'branch that serves your location.',
+                text: 'Enter your pincode or area name to find the nearest '
+                    'branch that serves your location.',
               ),
 
               const SizedBox(height: 24),
 
+              // ── Input card ───────────────────────────────────────────────
               _Card(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _FieldLabel('Pincode', Icons.pin_drop_outlined, AppColors.brandGreen),
+
+                    // Pincode field
+                    _FieldLabel(
+                      'Pincode',
+                      Icons.pin_drop_outlined,
+                      AppColors.brandGreen,
+                    ),
                     const SizedBox(height: 8),
                     TextField(
-                      controller:      _pincodeCtrl,
-                      focusNode:       _pincodeFocus,
-                      keyboardType:    TextInputType.number,
-                      maxLength:       6,
-                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      controller:    _pincodeCtrl,
+                      focusNode:     _pincodeFocus,
+                      keyboardType:  TextInputType.number,
+                      maxLength:     6,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.digitsOnly,
+                      ],
                       onChanged: (_) {
-                        if (_pincodeCtrl.text.isNotEmpty) _placeCtrl.clear();
+                        if (_pincodeCtrl.text.isNotEmpty) {
+                          _placeCtrl.clear();
+                        }
                         if (_state != _LookupState.idle) _reset();
                       },
                       onSubmitted: (_) => _lookup(),
                       decoration: _inputDecoration(
-                          hint: 'e.g. 600042', icon: Icons.dialpad_rounded),
+                        hint: 'e.g. 600042',
+                        icon: Icons.dialpad_rounded,
+                      ),
                     ),
 
                     const SizedBox(height: 16),
 
+                    // Divider with OR
                     Row(children: [
                       const Expanded(child: Divider(color: AppColors.divider)),
                       Padding(
@@ -219,36 +299,52 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
 
                     const SizedBox(height: 16),
 
-                    _FieldLabel('Area / Place Name', Icons.place_outlined, AppColors.blue),
+                    // Place name field
+                    _FieldLabel(
+                      'Area / Place Name',
+                      Icons.place_outlined,
+                      AppColors.blue,
+                    ),
                     const SizedBox(height: 8),
                     TextField(
-                      controller:         _placeCtrl,
-                      focusNode:          _placeFocus,
+                      controller:  _placeCtrl,
+                      focusNode:   _placeFocus,
                       textCapitalization: TextCapitalization.words,
                       onChanged: (_) {
-                        if (_placeCtrl.text.isNotEmpty) _pincodeCtrl.clear();
+                        if (_placeCtrl.text.isNotEmpty) {
+                          _pincodeCtrl.clear();
+                        }
                         if (_state != _LookupState.idle) _reset();
                       },
                       onSubmitted: (_) => _lookup(),
                       decoration: _inputDecoration(
-                          hint: 'e.g. Anna Nagar, Velachery…',
-                          icon: Icons.location_city_rounded),
+                        hint: 'e.g. Anna Nagar, Velachery…',
+                        icon: Icons.location_city_rounded,
+                      ),
                     ),
 
                     const SizedBox(height: 20),
 
+                    // Find button
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton.icon(
-                        onPressed: _state == _LookupState.loading ? null : _lookup,
+                        onPressed: _state == _LookupState.loading
+                            ? null
+                            : _lookup,
                         icon: _state == _LookupState.loading
                             ? const SizedBox(
-                                width: 18, height: 18,
+                                width: 18,
+                                height: 18,
                                 child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: Colors.white))
+                                    strokeWidth: 2,
+                                    color: Colors.white),
+                              )
                             : const Icon(Icons.search_rounded, size: 20),
                         label: Text(
-                          _state == _LookupState.loading ? 'Searching…' : 'Find My Branch',
+                          _state == _LookupState.loading
+                              ? 'Searching…'
+                              : 'Find My Branch',
                           style: const TextStyle(
                               fontSize: 15, fontWeight: FontWeight.w700),
                         ),
@@ -257,7 +353,8 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
                           foregroundColor: Colors.white,
                           disabledBackgroundColor:
                               AppColors.brandGreen.withValues(alpha: 0.4),
-                          padding: const EdgeInsets.symmetric(vertical: 15),
+                          padding:
+                              const EdgeInsets.symmetric(vertical: 15),
                           elevation: 0,
                           shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(14)),
@@ -270,38 +367,41 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
 
               const SizedBox(height: 20),
 
+              // ── Result area ──────────────────────────────────────────────
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
                 switchInCurve:  Curves.easeOut,
                 switchOutCurve: Curves.easeIn,
                 child: switch (_state) {
-                  _LookupState.found => _BranchCard(
-                      key:        const ValueKey('found'),
-                      branch:     _branch!,
-                      onReset:    _reset,
+                  _LookupState.found    => _BranchCard(
+                      key:      const ValueKey('found'),
+                      branch:   _branch!,
+                      onReset:  _reset,
                       onContinue: _continue,
                     ),
                   _LookupState.notFound => _StatusBanner(
-                      key:         const ValueKey('notFound'),
-                      icon:        Icons.location_off_rounded,
-                      color:       AppColors.amber,
-                      bg:          AppColors.amberSurface,
-                      title:       'No Branch Found',
-                      body:        _errorMsg,
+                      key:   const ValueKey('notFound'),
+                      icon:  Icons.location_off_rounded,
+                      color: AppColors.amber,
+                      bg:    AppColors.amberSurface,
+                      title: 'No Branch Found',
+                      body:  _errorMsg,
                       actionLabel: 'Try Different Location',
-                      onAction:    _reset,
+                      onAction: _reset,
                     ),
-                  _LookupState.error => _StatusBanner(
-                      key:         const ValueKey('error'),
-                      icon:        Icons.error_outline_rounded,
-                      color:       const Color(0xFFD32F2F),
-                      bg:          const Color(0xFFFEF2F2),
-                      title:       'Something Went Wrong',
-                      body:        _errorMsg,
+                  _LookupState.error    => _StatusBanner(
+                      key:   const ValueKey('error'),
+                      icon:  Icons.error_outline_rounded,
+                      color: const Color(0xFFD32F2F),
+                      bg:    const Color(0xFFFEF2F2),
+                      title: 'Something Went Wrong',
+                      body:  _errorMsg,
                       actionLabel: 'Try Again',
-                      onAction:    _reset,
+                      onAction: _reset,
                     ),
-                  _ => const SizedBox.shrink(key: ValueKey('idle')),
+                  _               => const SizedBox.shrink(
+                      key: ValueKey('idle'),
+                    ),
                 },
               ),
             ],
@@ -311,15 +411,22 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
     );
   }
 
-  InputDecoration _inputDecoration({required String hint, required IconData icon}) =>
+  // ── Input decoration helper ────────────────────────────────────────────────
+
+  InputDecoration _inputDecoration({
+    required String hint,
+    required IconData icon,
+  }) =>
       InputDecoration(
-        hintText:    hint,
-        hintStyle:   const TextStyle(fontSize: 14, color: AppColors.textHint),
-        prefixIcon:  Icon(icon, size: 20, color: AppColors.textHint),
+        hintText: hint,
+        hintStyle:
+            const TextStyle(fontSize: 14, color: AppColors.textHint),
+        prefixIcon: Icon(icon, size: 20, color: AppColors.textHint),
         counterText: '',
-        contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
-        filled:      true,
-        fillColor:   AppColors.background,
+        contentPadding:
+            const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+        filled: true,
+        fillColor: AppColors.background,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
           borderSide: const BorderSide(color: AppColors.divider),
@@ -330,7 +437,8 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: AppColors.brandGreen, width: 2),
+          borderSide:
+              const BorderSide(color: AppColors.brandGreen, width: 2),
         ),
       );
 }
@@ -338,7 +446,7 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
 // ── Branch result card ─────────────────────────────────────────────────────────
 
 class _BranchCard extends StatelessWidget {
-  final BranchModel  branch;
+  final BranchModel branch;
   final VoidCallback onReset;
   final VoidCallback onContinue;
 
@@ -350,107 +458,123 @@ class _BranchCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => _Card(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Container(
-                width: 44, height: 44,
-                decoration: const BoxDecoration(
-                  color: AppColors.brandGreenSurface,
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.local_hospital_rounded,
-                    color: AppColors.brandGreen, size: 22),
+  Widget build(BuildContext context) {
+    return _Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+
+          // Header row
+          Row(children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: const BoxDecoration(
+                color: AppColors.brandGreenSurface,
+                shape: BoxShape.circle,
               ),
-              const SizedBox(width: 12),
+              child: const Icon(Icons.local_hospital_rounded,
+                  color: AppColors.brandGreen, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Branch Found',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.brandGreen,
+                          letterSpacing: 0.4)),
+                  const SizedBox(height: 2),
+                  Text(branch.name,
+                      style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary)),
+                ],
+              ),
+            ),
+            GestureDetector(
+              onTap: onReset,
+              child: const Icon(Icons.close_rounded,
+                  size: 20, color: AppColors.textHint),
+            ),
+          ]),
+
+          const SizedBox(height: 14),
+          const Divider(color: AppColors.divider, height: 1),
+          const SizedBox(height: 14),
+
+          // Details
+          if (branch.address.isNotEmpty)
+            _DetailRow(
+              Icons.location_on_outlined,
+              branch.address,
+            ),
+          if (branch.location != null && branch.location!.isNotEmpty)
+            _DetailRow(Icons.map_outlined, branch.location!),
+          if (branch.pincode != null && branch.pincode!.isNotEmpty)
+            _DetailRow(Icons.pin_drop_outlined, branch.pincode!),
+          if (branch.mobileNo != null && branch.mobileNo!.isNotEmpty)
+            _DetailRow(Icons.phone_outlined, branch.mobileNo!),
+
+          const SizedBox(height: 18),
+
+          // Success badge
+          Container(
+            width: double.infinity,
+            padding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.brandGreenSurface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.brandGreenLight),
+            ),
+            child: const Row(children: [
+              Icon(Icons.check_circle_rounded,
+                  size: 16, color: AppColors.brandGreen),
+              SizedBox(width: 8),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('Branch Found',
-                        style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.brandGreen,
-                            letterSpacing: 0.4)),
-                    const SizedBox(height: 2),
-                    Text(branch.name,
-                        style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.textPrimary)),
-                  ],
+                child: Text(
+                  'This branch will handle your home collection',
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: AppColors.brandGreen,
+                      fontWeight: FontWeight.w500),
                 ),
-              ),
-              GestureDetector(
-                onTap: onReset,
-                child: const Icon(Icons.close_rounded,
-                    size: 20, color: AppColors.textHint),
               ),
             ]),
+          ),
 
-            const SizedBox(height: 14),
-            const Divider(color: AppColors.divider, height: 1),
-            const SizedBox(height: 14),
+          const SizedBox(height: 16),
 
-            if (branch.address.isNotEmpty)
-              _DetailRow(Icons.location_on_outlined, branch.address),
-            if (branch.location != null && branch.location!.isNotEmpty)
-              _DetailRow(Icons.map_outlined, branch.location!),
-            if (branch.pincode != null && branch.pincode!.isNotEmpty)
-              _DetailRow(Icons.pin_drop_outlined, branch.pincode!),
-            if (branch.mobileNo != null && branch.mobileNo!.isNotEmpty)
-              _DetailRow(Icons.phone_outlined, branch.mobileNo!),
-
-            const SizedBox(height: 18),
-
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: AppColors.brandGreenSurface,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.brandGreenLight),
+          // Continue button
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: onContinue,
+              icon: const Icon(Icons.arrow_forward_rounded, size: 18),
+              label: const Text(
+                'Continue to Book',
+                style: TextStyle(
+                    fontSize: 15, fontWeight: FontWeight.w700),
               ),
-              child: const Row(children: [
-                Icon(Icons.check_circle_rounded, size: 16, color: AppColors.brandGreen),
-                SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'This branch will handle your home collection',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: AppColors.brandGreen,
-                        fontWeight: FontWeight.w500),
-                  ),
-                ),
-              ]),
-            ),
-
-            const SizedBox(height: 16),
-
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: onContinue,
-                icon:  const Icon(Icons.arrow_forward_rounded, size: 18),
-                label: const Text('Select Date & Slot',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.brandGreen,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 15),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.brandGreen,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 15),
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14)),
               ),
             ),
-          ],
-        ),
-      );
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ── Shared small widgets ───────────────────────────────────────────────────────
@@ -479,9 +603,9 @@ class _Card extends StatelessWidget {
 }
 
 class _FieldLabel extends StatelessWidget {
-  final String   label;
+  final String label;
   final IconData icon;
-  final Color    color;
+  final Color color;
   const _FieldLabel(this.label, this.icon, this.color);
 
   @override
@@ -490,7 +614,9 @@ class _FieldLabel extends StatelessWidget {
         const SizedBox(width: 6),
         Text(label,
             style: TextStyle(
-                fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: color)),
       ]);
 }
 
@@ -521,11 +647,13 @@ class _InfoBanner extends StatelessWidget {
   final IconData icon;
   final Color    color;
   final String   text;
-  const _InfoBanner({required this.icon, required this.color, required this.text});
+  const _InfoBanner(
+      {required this.icon, required this.color, required this.text});
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
           color: AppColors.brandGreenSurface,
           borderRadius: BorderRadius.circular(12),
@@ -539,7 +667,9 @@ class _InfoBanner extends StatelessWidget {
             Expanded(
               child: Text(text,
                   style: const TextStyle(
-                      fontSize: 13, color: AppColors.brandGreen, height: 1.4)),
+                      fontSize: 13,
+                      color: AppColors.brandGreen,
+                      height: 1.4)),
             ),
           ],
         ),
@@ -582,12 +712,16 @@ class _StatusBanner extends StatelessWidget {
               const SizedBox(width: 10),
               Text(title,
                   style: TextStyle(
-                      fontSize: 15, fontWeight: FontWeight.w700, color: color)),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: color)),
             ]),
             const SizedBox(height: 8),
             Text(body,
                 style: const TextStyle(
-                    fontSize: 13, color: AppColors.textSecondary, height: 1.4)),
+                    fontSize: 13,
+                    color: AppColors.textSecondary,
+                    height: 1.4)),
             const SizedBox(height: 14),
             GestureDetector(
               onTap: onAction,

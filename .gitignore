@@ -9,3 +9,7 @@ client/build/
 
 # Environment — never commit secrets
 server/.env
+
+# Firebase credentials — contain API keys / admin access
+server/firebase-service-account.json
+client/android/app/google-services.json

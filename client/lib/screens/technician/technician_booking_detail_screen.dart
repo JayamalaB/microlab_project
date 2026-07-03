@@ -77,10 +77,24 @@ const List<_JourneyStep> _journeySteps = [
     color: Color(0xFFE65100),
   ),
   _JourneyStep(
-    status: 'Completed',
-    label: 'Completed',
-    description: 'Collection done — OTP verified',
-    icon: Icons.task_alt_rounded,
+    status: 'Sample Collected',
+    label: 'Sample Collected',
+    description: 'Sample successfully collected',
+    icon: Icons.biotech_rounded,
+    color: Color(0xFF6A1B9A),
+  ),
+  _JourneyStep(
+    status: 'OTP Verified',
+    label: 'OTP Verified',
+    description: 'Identity verified by patient',
+    icon: Icons.verified_user_outlined,
+    color: Color(0xFF1565C0),
+  ),
+  _JourneyStep(
+    status: 'Handed to Lab',
+    label: 'Handed to Lab',
+    description: 'Sample handed over to laboratory',
+    icon: Icons.local_hospital_rounded,
     color: AppColors.brandGreen,
   ),
 ];
@@ -157,7 +171,7 @@ class _TechnicianBookingDetailScreenState
   int get _currentStepIndex =>
       _journeySteps.indexWhere((s) => s.status == _currentStatus);
 
-  bool get _isCompleted => _currentStatus == 'Completed';
+  bool get _isCompleted => _currentStatus == 'Handed to Lab';
   bool get _canAdvance => !_isCompleted;
 
   String? get _nextStatus {
@@ -288,9 +302,7 @@ class _TechnicianBookingDetailScreenState
 // ── Journey advance ───────────────────────────────────────
 
 void _advanceStatus() {
-  // If already completed, don't allow any further actions
-  if (_currentStatus == 'Completed') {
-    // Just pop the screen if it's completed
+  if (_currentStatus == 'Handed to Lab') {
     Navigator.of(context).pop(true);
     return;
   }
@@ -298,20 +310,27 @@ void _advanceStatus() {
   final next = _nextStatus;
   if (next == null) return;
 
-  // Check if we're already in progress and trying to start again
   if (next == 'Journey Started' && _currentStatus == 'Journey Started') {
-    // Resume the journey instead of starting a new one
     _resumeJourney();
     return;
   }
 
-  // Completed: payment check → OTP dialog
-  if (next == 'Completed') {
+  // OTP step: payment check first, then OTP dialog
+  if (next == 'OTP Verified') {
     if (!_paymentDone && _amountDue > 0) {
       _showCompleteSheet();
     } else {
       _showOtpDialog();
     }
+    return;
+  }
+
+  // Final step: emit handed_to_lab and close screen
+  if (next == 'Handed to Lab') {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    SocketService.instance.emitHandedToLab(bookingId: bookingId);
+    setState(() => _currentStatus = 'Handed to Lab');
+    Navigator.of(context).pop(true);
     return;
   }
 
@@ -377,7 +396,7 @@ void _handleStatusTransition(String next) {
         // whoever opened this Manage Booking screen (e.g. the dashboard).
         if (wasCompleted == true && mounted) {
           // CRITICAL: Set status to Completed before popping
-          setState(() => _currentStatus = 'Completed');
+          setState(() => _currentStatus = 'Handed to Lab');
           // Pop with true to signal completion to parent
           Navigator.of(context).pop(true);
         } else if (wasCompleted == false && mounted) {
@@ -393,8 +412,12 @@ void _handleStatusTransition(String next) {
       if (bookingId > 0) SocketService.instance.emitArrived(bookingId: bookingId);
       break;
 
+    case 'Sample Collected':
+      setState(() => _currentStatus = 'Sample Collected');
+      if (bookingId > 0) SocketService.instance.emitSampleCollected(bookingId: bookingId);
+      break;
+
     default:
-      // Collection Started and any future intermediate steps — local state only
       setState(() => _currentStatus = next);
   }
 }
@@ -594,23 +617,17 @@ void _resumeJourney() {
     } else {
       setState(() {
         _isVerifyingOtp = false;
-        _currentStatus = 'Completed';
+        _currentStatus = 'OTP Verified';
       });
-      SocketService.instance.emitCollectionCompleted(
-        bookingId: int.tryParse(widget.booking.id) ?? 0,
-      );
       Navigator.pop(ctx);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text('OTP verified — booking marked as Completed!'),
+          content: const Text('OTP verified — tap "Hand Over to Lab" to complete'),
           backgroundColor: AppColors.brandGreen,
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          duration: const Duration(seconds: 2),
+          duration: const Duration(seconds: 3),
         ));
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted) Navigator.of(context).pop(true); // signals completion to caller
-        });
       }
     }
   }
@@ -879,7 +896,7 @@ void _resumeJourney() {
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
-          onPressed: () => Navigator.pop(context, _isCompleted ? true : null),
+          onPressed: () => Navigator.pop(context, _isCompleted ? true : null),  // pops with true only when Handed to Lab
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1006,7 +1023,7 @@ void _resumeJourney() {
         ),
       ),
     )
-  else if (_currentStatus != 'Completed')
+  else if (_currentStatus != 'Handed to Lab' && _nextStatus != null)
     GestureDetector(
       onTap: _advanceStatus,
       child: Container(
@@ -1016,12 +1033,10 @@ void _resumeJourney() {
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
-          _nextStatus == 'Completed'
-              ? 'Complete ▸'
-              : '${_journeySteps[i + 1].label} ▸',
+          '${_journeySteps[i + 1].label} ▸',
           style: const TextStyle(
-            fontSize: 11, 
-            fontWeight: FontWeight.w700, 
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
             color: Colors.white
           ),
         ),
@@ -1714,7 +1729,7 @@ void _resumeJourney() {
         ],
       ),
 
-      bottomNavigationBar: _isCompleted
+      bottomNavigationBar: _isCompleted  // null when Handed to Lab — no further action needed
           ? null
           : Container(
               padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),

@@ -1,10 +1,28 @@
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:microlab/services/foreground_service.dart';
+import 'package:microlab/services/booking_notification_service.dart';
+import 'package:microlab/services/notification_service.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/screens/shared/splash_screen.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Firebase, foreground service, push notifications — Android only.
+  // flutter_foreground_task uses dart:isolate which is not available on Web.
+  if (!kIsWeb) {
+    FlutterForegroundTask.initCommunicationPort();
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+    await Firebase.initializeApp();
+    await NotificationService.instance.initialize();
+    BookingNotificationService.instance.init();
+    ForegroundService.instance.init();
+  }
 
   // Status bar style — transparent for splash
   SystemChrome.setSystemUIOverlayStyle(

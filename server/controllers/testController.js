@@ -1,30 +1,28 @@
 const db = require('../config/db');
 
-// GET /api/tests — list packages/tests from the packages table
+// GET /api/tests — list products/tests from ip_products
 exports.getCatalog = async (req, res) => {
   try {
-    const { type, category, search } = req.query;
+    const { type, search } = req.query;
 
-    let sql = `SELECT package_id AS id, name, type, category,
-                      despt AS description, original_price, discount_percent,
-                      final_price, doc_req, pre_instrs, report_sts
-               FROM packages
-               WHERE deleted_at IS NULL`;
+    let sql = `SELECT product_id AS id, product_name AS name, product_type AS type,
+                      product_description AS description, product_price AS original_price,
+                      offer_price AS final_price, document_required AS doc_req,
+                      pre_instructions AS pre_instrs, report_tat_hours AS report_sts,
+                      available_for_home, available_for_lab, package_type
+               FROM ip_products
+               WHERE product_active = 1`;
     const params = [];
 
     if (type) {
-      sql += ' AND type = ?';
+      sql += ' AND product_type = ?';
       params.push(type);
     }
-    if (category) {
-      sql += ' AND category = ?';
-      params.push(category);
-    }
     if (search) {
-      sql += ' AND (name LIKE ? OR despt LIKE ?)';
+      sql += ' AND (product_name LIKE ? OR product_description LIKE ?)';
       params.push(`%${search}%`, `%${search}%`);
     }
-    sql += ' ORDER BY category, name';
+    sql += ' ORDER BY product_name';
 
     const [rows] = await db.execute(sql, params);
     res.json({ success: true, packages: rows });
@@ -34,35 +32,21 @@ exports.getCatalog = async (req, res) => {
   }
 };
 
-// GET /api/tests/categories — distinct categories
-exports.getCategories = async (req, res) => {
-  try {
-    const [rows] = await db.execute(
-      `SELECT DISTINCT category
-       FROM packages
-       WHERE deleted_at IS NULL AND category IS NOT NULL
-       ORDER BY category`
-    );
-    res.json({ success: true, categories: rows.map(r => r.category) });
-  } catch (err) {
-    console.error('getCategories:', err.message);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-};
-
-// GET /api/tests/:id — single package/test
+// GET /api/tests/:id — single product/test
 exports.getTest = async (req, res) => {
   try {
     const [rows] = await db.execute(
-      `SELECT package_id AS id, name, type, category,
-              despt AS description, original_price, discount_percent,
-              final_price, doc_req, pre_instrs, report_sts
-       FROM packages
-       WHERE package_id = ? AND deleted_at IS NULL`,
+      `SELECT product_id AS id, product_name AS name, product_type AS type,
+              product_description AS description, product_price AS original_price,
+              offer_price AS final_price, document_required AS doc_req,
+              pre_instructions AS pre_instrs, report_tat_hours AS report_sts,
+              available_for_home, available_for_lab, package_type
+       FROM ip_products
+       WHERE product_id = ? AND product_active = 1`,
       [req.params.id]
     );
     if (!rows.length)
-      return res.status(404).json({ success: false, message: 'Package not found' });
+      return res.status(404).json({ success: false, message: 'Product not found' });
     res.json({ success: true, package: rows[0] });
   } catch (err) {
     console.error('getTest:', err.message);

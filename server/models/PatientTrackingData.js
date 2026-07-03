@@ -4,7 +4,7 @@ const { DataTypes } = require('sequelize');
 const sequelize = require('./sequelize');
 
 module.exports = sequelize.define('PatientTrackingData', {
-  patient_tracking_id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  tracking_id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
   booking_id:          { type: DataTypes.INTEGER, allowNull: false },
   tracked_entity_id:   DataTypes.INTEGER,
   latitude:            DataTypes.DECIMAL(10, 7),
@@ -18,4 +18,4 @@ module.exports = sequelize.define('PatientTrackingData', {
   source:              DataTypes.STRING(50),
   device_timestamp:    DataTypes.DATE,
   created_at:          DataTypes.DATE,
-}, { tableName: 'patient_tracking_data', timestamps: false });
+}, { tableName: 'ip_patient_tracking_data', timestamps: false });

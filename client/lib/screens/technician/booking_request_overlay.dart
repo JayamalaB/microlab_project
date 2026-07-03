@@ -16,12 +16,13 @@ import 'package:microlab/constants/app_constants.dart';
 Future<bool> showBookingRequestOverlay(
   BuildContext context,
   SocketBooking booking,
+  int requestNumber,
 ) {
   return Navigator.of(context).push<bool>(
     PageRouteBuilder(
       opaque: false,
       barrierColor: Colors.black87,
-      pageBuilder: (_, __, ___) => BookingRequestOverlay(booking: booking),
+      pageBuilder: (_, __, ___) => BookingRequestOverlay(booking: booking, requestNumber: requestNumber),
       transitionsBuilder: (_, anim, __, child) => SlideTransition(
         position: Tween<Offset>(begin: const Offset(0, 1), end: Offset.zero)
             .animate(CurvedAnimation(parent: anim, curve: Curves.easeOutCubic)),
@@ -36,7 +37,8 @@ Future<bool> showBookingRequestOverlay(
 
 class BookingRequestOverlay extends StatefulWidget {
   final SocketBooking booking;
-  const BookingRequestOverlay({super.key, required this.booking});
+  final int requestNumber;
+  const BookingRequestOverlay({super.key, required this.booking, required this.requestNumber});
 
   @override
   State<BookingRequestOverlay> createState() => _BookingRequestOverlayState();
@@ -379,18 +381,18 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                   ),
                 ),
                 const SizedBox(width: 14),
-                const Expanded(
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('New Booking Request',
+                      const Text('New Booking Request',
                           style: TextStyle(
                               color: Colors.white,
                               fontSize: 17,
                               fontWeight: FontWeight.w700)),
-                      SizedBox(height: 2),
-                      Text('Patient needs home collection',
-                          style: TextStyle(
+                      const SizedBox(height: 2),
+                      Text('Request #${widget.requestNumber}  ·  Home Collection',
+                          style: const TextStyle(
                               color: Colors.white70, fontSize: 12)),
                     ],
                   ),
@@ -699,6 +701,26 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                     ),
                     const SizedBox(height: 10),
                     _DetailRow(
+                      icon: Icons.location_city_rounded,
+                      label: 'Branch',
+                      value: widget.booking.branchName?.isNotEmpty == true
+                          ? widget.booking.branchName!
+                          : widget.booking.branchId != null
+                              ? 'Branch #${widget.booking.branchId}'
+                              : 'Unassigned',
+                      highlight: true,
+                    ),
+                    if (widget.booking.slotLabel?.isNotEmpty == true) ...[
+                      const SizedBox(height: 10),
+                      _DetailRow(
+                        icon: Icons.access_time_rounded,
+                        label: 'Slot',
+                        value: widget.booking.slotLabel!,
+                        highlight: true,
+                      ),
+                    ],
+                    const SizedBox(height: 10),
+                    _DetailRow(
                       icon: Icons.tag_rounded,
                       label: 'Booking ID',
                       value: '#${widget.booking.bookingId}',
@@ -774,9 +796,15 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
 
 class _DetailRow extends StatelessWidget {
   final IconData icon;
-  final String label;
-  final String value;
-  const _DetailRow({required this.icon, required this.label, required this.value});
+  final String   label;
+  final String   value;
+  final bool     highlight;
+  const _DetailRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.highlight = false,
+  });
 
   @override
   Widget build(BuildContext context) => Row(
@@ -785,11 +813,14 @@ class _DetailRow extends StatelessWidget {
           Container(
             width: 32,
             height: 32,
-            decoration: const BoxDecoration(
-              color: AppColors.brandGreenSurface,
+            decoration: BoxDecoration(
+              color: highlight
+                  ? AppColors.brandGreen.withValues(alpha: 0.12)
+                  : AppColors.brandGreenSurface,
               shape: BoxShape.circle,
             ),
-            child: Icon(icon, size: 16, color: AppColors.brandGreen),
+            child: Icon(icon, size: 16,
+                color: highlight ? AppColors.brandGreen : AppColors.brandGreen),
           ),
           const SizedBox(width: 12),
           SizedBox(
@@ -805,10 +836,12 @@ class _DetailRow extends StatelessWidget {
             child: Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(value,
-                  style: const TextStyle(
+                  style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary)),
+                      color: highlight
+                          ? AppColors.brandGreen
+                          : AppColors.textPrimary)),
             ),
           ),
         ],

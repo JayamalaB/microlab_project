@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
-import 'package:microlab/services/api_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:microlab/services/socket_service.dart';
 import 'onboarding_screen.dart';
 import '../customer/customer_home_screen.dart';
 import '../technician/technician_dashboard_screen.dart';
@@ -71,32 +72,50 @@ class _SplashScreenState extends State<SplashScreen>
 
     _dotController.repeat();
 
-    // Navigate after 2.5s — skip login if session is stored
-    Future.delayed(const Duration(milliseconds: 2500), () async {
-      if (!mounted) return;
-      final info = await ApiService.getUserInfo();
-      if (!mounted) return;
-      final Widget next;
-      if (info != null) {
-        final role = info['role']!;
-        final mobile = info['mobile']!;
-        if (role == 'technician') {
-          next = TechnicianDashboardScreen(mobile: mobile);
-        } else {
-          next = CustomerHomeScreen(mobile: mobile, isVip: false);
-        }
+    // Navigate after 2.5s — check saved session first
+    Future.delayed(const Duration(milliseconds: 2500), _navigateAfterSplash);
+  }
+
+  Future<void> _navigateAfterSplash() async {
+    if (!mounted) return;
+
+    final prefs  = await SharedPreferences.getInstance();
+    final token  = prefs.getString('auth_token') ?? '';
+    final role   = prefs.getString('user_role')  ?? '';
+    final mobile = prefs.getString('user_mobile') ?? '';
+
+    if (!mounted) return;
+
+    Widget destination;
+
+    if (token.isNotEmpty && role.isNotEmpty && mobile.isNotEmpty) {
+      final userId = prefs.getInt('user_id') ?? 0;
+      final name   = prefs.getString('user_name') ?? mobile;
+
+      if (role == 'technician') {
+        final branchId = prefs.getInt('branch_id') ?? 0;
+        SocketService.instance.connect(
+          userId: userId, role: 'technician', name: name, branchId: branchId,
+        );
+        destination = TechnicianDashboardScreen(mobile: mobile);
       } else {
-        next = const OnboardingScreen();
+        SocketService.instance.connect(
+          userId: userId, role: 'customer', name: name, branchId: null,
+        );
+        destination = CustomerHomeScreen(mobile: mobile, isVip: false);
       }
-      Navigator.of(context).pushReplacement(
-        PageRouteBuilder(
-          pageBuilder: (_, __, ___) => next,
-          transitionsBuilder: (_, anim, __, child) =>
-              FadeTransition(opacity: anim, child: child),
-          transitionDuration: const Duration(milliseconds: 400),
-        ),
-      );
-    });
+    } else {
+      destination = const OnboardingScreen();
+    }
+
+    Navigator.of(context).pushReplacement(
+      PageRouteBuilder(
+        pageBuilder:        (_, __, ___) => destination,
+        transitionsBuilder: (_, anim, __, child) =>
+            FadeTransition(opacity: anim, child: child),
+        transitionDuration: const Duration(milliseconds: 400),
+      ),
+    );
   }
 
   @override

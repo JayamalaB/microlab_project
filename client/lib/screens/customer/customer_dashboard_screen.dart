@@ -7,8 +7,8 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
-import 'package:microlab/services/api_service.dart';
 import 'package:microlab/constants/app_constants.dart';
+import '../shared/location_picker_screen.dart';
 import 'customer_home_screen.dart';
 import 'checkout_screen.dart';
 import 'my_bookings_screen.dart';
@@ -56,9 +56,14 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   String? _city;
   double? _lat;
   double? _lng;
+  // Silently auto-detected from pincode — patient never sees or selects this.
   BranchModel? _selectedBranch;
-  bool _loadingBranches = false;
-  int get _patientId => int.parse(widget.member.id);
+  bool _branchDetecting = false;
+  // Real patientId from auth session — falls back to 1 if socket not yet connected
+  int get _patientId {
+    final id = SocketService.instance.userId;
+    return id > 0 ? id : 1;
+  }
 
   // ── Cart ──────────────────────────────────────────────────
   final List<TestModel> _cart = [];
@@ -69,6 +74,9 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   String _searchQuery = '';
   String _selectedCategory = 'All';
   bool _showOffersOnly = false;
+
+  // Mock branches — replace with GET /api/branches
+  List<BranchModel> _branches = [];
 
   // Mock tests — replace with GET /api/tests
   List<TestModel> _allTests = [];
@@ -98,7 +106,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   @override
   void initState() {
     super.initState();
-    _loadData();
+    _loadMockData();
     // Pre-add tests from offers/other screens
     if (widget.initialCartTests.isNotEmpty) {
       _cart.addAll(widget.initialCartTests);
@@ -108,14 +116,79 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     });
   }
 
-  Future<void> _loadData() async {
+  void _loadMockData() {
     setState(() => _loadingTests = true);
-    try {
-      final tests = await ApiService.getPackages();
-      if (mounted) setState(() { _allTests = tests; _loadingTests = false; });
-    } catch (_) {
-      if (mounted) setState(() => _loadingTests = false);
-    }
+
+    // Mock API response — replace with:
+    // GET /api/tests → List<TestModel>
+    // GET /api/branches → List<BranchModel>
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (!mounted) return;
+      setState(() {
+        _branches = [
+          BranchModel(id: '1', name: 'Anna Nagar Branch', address: '14, 3rd Ave, Anna Nagar, Chennai'),
+          BranchModel(id: '2', name: 'T Nagar Branch', address: '8, Pondy Bazaar, T Nagar, Chennai'),
+          BranchModel(id: '3', name: 'Velachery Branch', address: '22, 100 Feet Rd, Velachery, Chennai'),
+          BranchModel(id: '4', name: 'Tambaram Branch', address: '5, GST Road, Tambaram, Chennai'),
+        ];
+
+        _allTests = [
+          TestModel.fromJson({
+            'id': '1', 'name': 'HbA1c', 'type': 'single', 'category': 'Diabetes',
+            'description': '3-month average blood sugar control indicator',
+            'offer': 'yes', 'original_price': '600', 'offer_pct': '10',
+            'final_price': '540', 'doc_req': 'no',
+            'start_date': '28-04-2026', 'end_date': '30-04-2026', 'report_sts': '48 hrs',
+          }),
+          TestModel.fromJson({
+            'id': '2', 'name': 'Complete Blood Count (CBC)', 'type': 'single', 'category': 'General',
+            'description': 'Full blood panel including RBC, WBC and platelets',
+            'offer': 'no', 'original_price': '350', 'final_price': '350',
+            'doc_req': 'no', 'report_sts': '24 hrs',
+          }),
+          TestModel.fromJson({
+            'id': '3', 'name': 'Thyroid Profile (T3, T4, TSH)', 'type': 'single', 'category': 'Thyroid',
+            'description': 'Complete thyroid function evaluation',
+            'offer': 'yes', 'original_price': '900', 'offer_pct': '15',
+            'final_price': '765', 'doc_req': 'no',
+            'start_date': '01-05-2026', 'end_date': '31-05-2026', 'report_sts': '24 hrs',
+          }),
+          TestModel.fromJson({
+            'id': '4', 'name': 'Lipid Profile', 'type': 'single', 'category': 'Heart',
+            'description': 'Cholesterol, HDL, LDL and triglycerides',
+            'offer': 'no', 'original_price': '500', 'final_price': '500',
+            'doc_req': 'no', 'report_sts': '24 hrs',
+          }),
+          TestModel.fromJson({
+            'id': '5', 'name': 'Diabetes Care Package', 'type': 'package', 'category': 'Diabetes',
+            'description': 'HbA1c + Fasting glucose + Insulin + Lipid Profile',
+            'offer': 'yes', 'original_price': '1800', 'offer_pct': '20',
+            'final_price': '1440', 'doc_req': 'no',
+            'start_date': '01-05-2026', 'end_date': '31-05-2026', 'report_sts': '48 hrs',
+          }),
+          TestModel.fromJson({
+            'id': '6', 'name': 'Full Body Checkup', 'type': 'package', 'category': 'General',
+            'description': '60+ parameters — CBC, liver, kidney, thyroid, vitamins & more',
+            'offer': 'yes', 'original_price': '3500', 'offer_pct': '25',
+            'final_price': '2625', 'doc_req': 'yes',
+            'start_date': '01-05-2026', 'end_date': '31-05-2026', 'report_sts': '72 hrs',
+          }),
+          TestModel.fromJson({
+            'id': '7', 'name': 'Vitamin Panel (B12, D3, Folate)', 'type': 'single', 'category': 'Vitamins',
+            'description': 'Essential vitamins for energy and immunity',
+            'offer': 'no', 'original_price': '1200', 'final_price': '1200',
+            'doc_req': 'no', 'report_sts': '48 hrs',
+          }),
+          TestModel.fromJson({
+            'id': '8', 'name': 'Kidney Function Test (KFT)', 'type': 'single', 'category': 'Kidney',
+            'description': 'Creatinine, urea, uric acid and eGFR',
+            'offer': 'no', 'original_price': '450', 'final_price': '450',
+            'doc_req': 'no', 'report_sts': '24 hrs',
+          }),
+        ];
+        _loadingTests = false;
+      });
+    });
   }
 
   void _toggleCart(TestModel test) {
@@ -141,6 +214,88 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     );
   }
 
+  // ── Branch auto-detection ─────────────────────────────────
+  // Called silently whenever a 6-digit pincode becomes available.
+  // Patient never sees this — branch is stored and forwarded to CheckoutScreen.
+  Future<void> _autoDetectBranch(String pincode, {String? place}) async {
+    if (!mounted) return;
+    final effectivePlace = place ?? _city;
+    debugPrint('\n🏥 [BRANCH AUTO-DETECT] ─────────────────────────────');
+    debugPrint('   pincode     : $pincode');
+    debugPrint('   place/city  : ${effectivePlace ?? '— (no fallback)'}');
+    debugPrint('   mode        : $_mode');
+    setState(() { _branchDetecting = true; _selectedBranch = null; });
+
+    try {
+      final params = <String, String>{'pincode': pincode};
+      if (effectivePlace != null && effectivePlace.isNotEmpty) {
+        params['place'] = effectivePlace;
+      }
+      if (_lat != null) params['lat'] = _lat!.toString();
+      if (_lng != null) params['lng'] = _lng!.toString();
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/branches/lookup')
+          .replace(queryParameters: params);
+      debugPrint('   → GET $uri');
+
+      final res = await http
+          .get(uri)
+          .timeout(const Duration(seconds: 10));
+
+      debugPrint('   ← status    : ${res.statusCode}');
+      debugPrint('   ← body      : ${res.body}');
+
+      if (!mounted) return;
+
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        if (body['success'] == true) {
+          final branch = BranchModel.fromJson(body['branch'] as Map<String, dynamic>);
+          setState(() { _selectedBranch = branch; _branchDetecting = false; });
+          debugPrint('   ✅ branch    : ${branch.name} (id=${branch.id})');
+          debugPrint('   📍 address   : ${branch.address}');
+        } else {
+          setState(() => _branchDetecting = false);
+          debugPrint('   ⚠️  no branch : ${body['message']}');
+        }
+      } else {
+        setState(() => _branchDetecting = false);
+        debugPrint('   ❌ HTTP ${res.statusCode} — branch detection skipped');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _branchDetecting = false);
+      debugPrint('   ❌ error     : $e');
+    }
+    debugPrint('────────────────────────────────────────────────────\n');
+  }
+
+  // Extracts a 6-digit Indian pincode from a GPS reverse-geocoded address string.
+  // e.g. "12 Gandhi St, T Nagar, Chennai, Tamil Nadu 600017, India" → "600017"
+  void _tryExtractPincodeFromAddress(String address) {
+    debugPrint('\n📍 [GPS ADDRESS → PINCODE]');
+    debugPrint('   raw address : $address');
+    final pinMatch = RegExp(r'\b(\d{6})\b').firstMatch(address);
+    if (pinMatch != null) {
+      final pin = pinMatch.group(1)!;
+      // Try to extract city: split by comma, take 2nd segment, strip digits/dashes
+      String? extractedCity;
+      final parts = address.split(',');
+      if (parts.length >= 2) {
+        final candidate = parts[1].trim().replaceAll(RegExp(r'[\d\-\s]+$'), '').trim();
+        if (candidate.length > 2) extractedCity = candidate;
+      }
+      debugPrint('   extracted   : pin=$pin  city=${extractedCity ?? '— using _city=$_city'}');
+      final cityToUse = extractedCity ?? _city;
+      if (extractedCity != null) {
+        setState(() { _pincode = pin; _city = extractedCity; });
+      } else {
+        setState(() => _pincode = pin);
+      }
+      _autoDetectBranch(pin, place: cityToUse);
+    } else {
+      debugPrint('   ⚠️  no 6-digit pincode found in address — branch not auto-detected');
+    }
+  }
+
   void _showLocationSheet() {
     showModalBottomSheet(
       context: context,
@@ -149,19 +304,69 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       builder: (_) => _LocationSheet(
         mode: _mode,
         modes: _modes,
+        branches: _branches,
         selectedBranch: _selectedBranch,
         pincode: _pincode,
         city: _city,
-        onModeChanged: (m) => setState(() {
-          _mode = m;
-          if (m == 'Home Collection') _selectedBranch = null;
-          if (m == 'Lab Test') { _pincode = null; _city = null; }
-        }),
-        onBranchChanged: (b) => setState(() => _selectedBranch = b),
-        onPincodeChanged: (p) => setState(() => _pincode = p),
+        onModeChanged: (m) {
+          final prev = _mode;
+          debugPrint('\n🔄 [MODE CHANGE] $prev → $m');
+          setState(() {
+            _mode = m;
+            // Only clear branch when SWITCHING from Lab Test → Home Collection.
+            // If mode hasn't changed (sheet re-confirmed same mode), keep state.
+            if (m == 'Home Collection' && prev == 'Lab Test') {
+              _selectedBranch = null;
+              debugPrint('   🏥 branch cleared (switched to Home Collection)');
+            }
+            if (m == 'Lab Test' && prev != 'Lab Test') {
+              _pincode = null;
+              _city    = null;
+              debugPrint('   🏥 pincode/city cleared (switched to Lab Test)');
+            }
+            if (m == prev) debugPrint('   ℹ️  mode unchanged — state preserved');
+          });
+        },
+        // Lab Test only — patient manually picks a branch.
+        onBranchChanged: (b) {
+          debugPrint('\n🏥 [BRANCH MANUAL SELECT] ${b?.name ?? 'cleared'} (Lab Test)');
+          setState(() => _selectedBranch = b);
+        },
+        // Home Collection — pincode set → trigger silent branch detection.
+        onPincodeChanged: (p) {
+          debugPrint('\n📮 [PINCODE SET] "$p"  mode=$_mode  (current pincode=$_pincode)');
+          // GPS flow sends null after address is confirmed.
+          // If we already extracted a pincode from the GPS address, keep it.
+          if (p == null && _pincode != null) {
+            debugPrint('   ℹ️  null received but keeping extracted pincode "$_pincode" — skipping override');
+            return;
+          }
+          setState(() {
+            _pincode        = p;
+            _selectedBranch = null;
+          });
+          if (p != null && p.length == 6 && _mode == 'Home Collection') {
+            debugPrint('   → 6 digits confirmed — starting branch auto-detect (city=$_city)');
+            _autoDetectBranch(p, place: _city);
+          } else {
+            debugPrint('   → skipped (length=${p?.length}, mode=$_mode)');
+          }
+        },
         onCityChanged: (c) => setState(() => _city = c),
-        onAddressChanged: (a) => setState(() => _address = a),
-        onLatLngChanged: (lat, lng) => setState(() { _lat = lat; _lng = lng; }),
+        // GPS / manual address — try to extract pincode from the address string.
+        onAddressChanged: (a) {
+          debugPrint('\n🏠 [ADDRESS SET] "$a"');
+          setState(() => _address = a);
+          if (a != null && a.isNotEmpty &&
+              _pincode == null && _mode == 'Home Collection') {
+            debugPrint('   → no pincode yet — scanning address for 6-digit code');
+            _tryExtractPincodeFromAddress(a);
+          }
+        },
+        onLatLngChanged: (lat, lng) {
+          debugPrint('\n📡 [GPS COORDS] lat=$lat  lng=$lng');
+          setState(() { _lat = lat; _lng = lng; });
+        },
       ),
     );
   }
@@ -175,90 +380,40 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         cart: _cart,
         onRemove: (t) => setState(() => _cart.removeWhere((x) => x.id == t.id)),
         onCheckout: () {
+          final branchId = _selectedBranch != null
+              ? int.tryParse(_selectedBranch!.id)
+              : null;
+          debugPrint('\n🛒 [CHECKOUT] ────────────────────────────────────');
+          debugPrint('   mode        : $_mode');
+          debugPrint('   pincode     : ${_pincode ?? '—'}');
+          debugPrint('   branch      : ${_selectedBranch?.name ?? '⚠️ none — slots will be static'}');
+          debugPrint('   branchId    : ${branchId ?? '⚠️ null'}');
+          debugPrint('   patientId   : $_patientId');
+          debugPrint('   cart items  : ${_cart.length}');
+          debugPrint('──────────────────────────────────────────────────\n');
           Navigator.pop(context);
-          if (_mode == 'Home Collection') {
-            _lookupBranchAndCheckout();
-          } else {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => CheckoutScreen(
-                  member:   widget.member,
-                  cart:     List.from(_cart),
-                  mode:     _mode,
-                  address:  _address,
-                  pincode:  _pincode,
-                  city:     _city,
-                  branch:   _selectedBranch,
-                  isVip:    widget.isVip,
-                  patientId: _patientId,
-                  patientLat: _lat,
-                  patientLng: _lng,
-                ),
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => CheckoutScreen(
+                member:     widget.member,
+                cart:       List.from(_cart),
+                mode:       _mode,
+                address:    _address,
+                pincode:    _pincode,
+                city:       _city,
+                branch:     _selectedBranch,
+                isVip:      widget.isVip,
+                patientId:  _patientId,
+                patientLat: _lat,
+                patientLng: _lng,
+                branchId:   branchId,
               ),
-            ).then((_) => setState(() => _cart.clear()));
-          }
+            ),
+          ).then((_) => setState(() => _cart.clear()));
         },
       ),
     );
-  }
-
-  Future<void> _lookupBranchAndCheckout() async {
-    if (_pincode == null && _lat == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Please update your address before booking a home collection.'),
-        behavior: SnackBarBehavior.floating,
-      ));
-      return;
-    }
-
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const AlertDialog(
-        content: Row(children: [
-          CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
-          SizedBox(width: 16),
-          Text('Finding nearest branch…'),
-        ]),
-      ),
-    );
-
-    final branch = await ApiService.lookupBranch(
-      pincode: _pincode,
-      place:   _city,
-      lat:     _lat,
-      lng:     _lng,
-    );
-
-    if (!mounted) return;
-    Navigator.pop(context); // close loading dialog
-
-    if (branch == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('No branch found for your area. Please contact support.'),
-        behavior: SnackBarBehavior.floating,
-      ));
-      return;
-    }
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => CheckoutScreen(
-          member:     widget.member,
-          cart:       List.from(_cart),
-          mode:       'Home Collection',
-          address:    _address,
-          pincode:    _pincode,
-          city:       _city,
-          patientId:  _patientId,
-          patientLat: _lat,
-          patientLng: _lng,
-          branch:     branch,
-        ),
-      ),
-    ).then((_) => setState(() => _cart.clear()));
   }
 
   void _showTestDetail(TestModel test) {
@@ -862,6 +1017,7 @@ class _LocationBar extends StatelessWidget {
 class _LocationSheet extends StatefulWidget {
   final String mode;
   final List<String> modes;
+  final List<BranchModel> branches;
   final BranchModel? selectedBranch;
   final String? pincode;
   final String? city;
@@ -875,6 +1031,7 @@ class _LocationSheet extends StatefulWidget {
   const _LocationSheet({
     required this.mode,
     required this.modes,
+    required this.branches,
     required this.selectedBranch,
     required this.pincode,
     required this.city,
@@ -899,9 +1056,9 @@ class _LocationSheetState extends State<_LocationSheet> {
   bool _locationError = false;
   bool _branchError = false;
 
+  // Branches filtered by pincode/city search
   List<BranchModel> _filteredBranches = [];
-  bool _loadingBranches = false;
-  Timer? _debounceTimer;
+  bool _searchingBranches = false;
 
   // Pincode auto-detection
   String? _detectedArea;
@@ -932,13 +1089,11 @@ class _LocationSheetState extends State<_LocationSheet> {
     _branch = widget.selectedBranch;
     _pincodeCtrl.text = widget.pincode ?? '';
     _cityCtrl.text = widget.city ?? '';
-    _addressCtrl.text = '';
+    _filteredBranches = widget.branches;
 
-    _pincodeCtrl.addListener(_scheduleFetch);
-    _cityCtrl.addListener(_scheduleFetch);
+    _pincodeCtrl.addListener(_filterBranches);
+    _cityCtrl.addListener(_filterBranches);
     _pincodeCtrl.addListener(_onPincodeChanged);
-
-    if (_mode == 'Lab Test') _fetchBranches();
   }
 
   Future<void> _getCurrentLocation() async {
@@ -947,6 +1102,7 @@ class _LocationSheetState extends State<_LocationSheet> {
       _gpsSelected = false;
       _manualSelected = false;
     });
+    
     try {
       LocationPermission perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied) {
@@ -961,14 +1117,28 @@ class _LocationSheetState extends State<_LocationSheet> {
         setState(() => _isGeocoding = false);
         return;
       }
+      
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
       ).timeout(const Duration(seconds: 10));
+      
       _gpsLat = pos.latitude;
       _gpsLng = pos.longitude;
+      
+      // Reverse geocode to get address
       final address = await _reverseGeocode(pos.latitude, pos.longitude);
-      setState(() { _gpsAddress = address; _gpsSelected = true; _isGeocoding = false; });
+      
+      setState(() {
+        _gpsAddress = address;
+        _gpsSelected = true;
+        _isGeocoding = false;
+      });
+      
+      debugPrint('[LocationSheet] GPS Location: ${pos.latitude}, ${pos.longitude}');
+      debugPrint('[LocationSheet] GPS Address: $address');
+      
     } catch (e) {
+      debugPrint('[LocationSheet] GPS error: $e');
       setState(() => _isGeocoding = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -977,34 +1147,54 @@ class _LocationSheetState extends State<_LocationSheet> {
       }
     }
   }
-
+  
   Future<String> _reverseGeocode(double lat, double lng) async {
     try {
       final apiKey = AppConstants.googleMapsApiKey;
       if (apiKey.isEmpty) return '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}';
+      
       final url = Uri.parse(
-        'https://maps.googleapis.com/maps/api/geocode/json?latlng=$lat,$lng&key=$apiKey',
+        'https://maps.googleapis.com/maps/api/geocode/json'
+        '?latlng=$lat,$lng'
+        '&key=$apiKey',
       );
+      
       final response = await http.get(url).timeout(const Duration(seconds: 8));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
         if (data['status'] == 'OK') {
           final results = data['results'] as List;
-          if (results.isNotEmpty) return results[0]['formatted_address'] as String;
+          if (results.isNotEmpty) {
+            return results[0]['formatted_address'] as String;
+          }
         }
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[LocationSheet] Reverse geocoding error: $e');
+    }
     return '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}';
   }
-
+  
   Future<void> _detectLocationFromPincode() async {
     final pincode = _pincodeCtrl.text.trim();
-    if (pincode.length != 6) { setState(() => _locationError = true); return; }
-    setState(() { _isGeocoding = true; _gpsSelected = false; _manualSelected = false; _locationError = false; });
+    if (pincode.length != 6) {
+      setState(() => _locationError = true);
+      return;
+    }
+    
+    setState(() {
+      _isGeocoding = true;
+      _gpsSelected = false;
+      _manualSelected = false;
+      _locationError = false;
+    });
+    
     try {
+      // First detect area from pincode API
       final res = await http
           .get(Uri.parse('https://api.postalpincode.in/pincode/$pincode'))
           .timeout(const Duration(seconds: 8));
+          
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body) as List;
         if (data.isNotEmpty && data[0]['Status'] == 'Success') {
@@ -1015,13 +1205,20 @@ class _LocationSheetState extends State<_LocationSheet> {
             final district = po['District'] as String;
             final state = po['State'] as String;
             final city = _cityCtrl.text.trim().isEmpty ? district : _cityCtrl.text.trim();
+            
             setState(() {
               _detectedArea = '$area, $district, $state';
               if (_cityCtrl.text.trim().isEmpty) _cityCtrl.text = district;
             });
-            final geoRes = await http.get(Uri.parse(
-              'https://maps.googleapis.com/maps/api/geocode/json?address=$pincode,India&key=${AppConstants.googleMapsApiKey}',
-            )).timeout(const Duration(seconds: 8));
+            
+            // Geocode to get coordinates
+            final geoUri = Uri.parse(
+              'https://maps.googleapis.com/maps/api/geocode/json'
+              '?address=$pincode,India'
+              '&key=${AppConstants.googleMapsApiKey}',
+            );
+            
+            final geoRes = await http.get(geoUri).timeout(const Duration(seconds: 8));
             if (geoRes.statusCode == 200) {
               final geoData = jsonDecode(geoRes.body) as Map<String, dynamic>;
               if (geoData['status'] == 'OK') {
@@ -1030,8 +1227,17 @@ class _LocationSheetState extends State<_LocationSheet> {
                   final loc = (results[0]['geometry'] as Map)['location'] as Map;
                   _manualLat = (loc['lat'] as num).toDouble();
                   _manualLng = (loc['lng'] as num).toDouble();
+                  
+                  // Build manual address
                   _manualAddress = '$area, $city, $state - $pincode';
-                  setState(() { _manualSelected = true; _isGeocoding = false; });
+                  
+                  setState(() {
+                    _manualSelected = true;
+                    _isGeocoding = false;
+                  });
+                  
+                  debugPrint('[LocationSheet] Pincode detected: $_manualAddress');
+                  debugPrint('[LocationSheet] Coordinates: $_manualLat, $_manualLng');
                   return;
                 }
               }
@@ -1039,44 +1245,82 @@ class _LocationSheetState extends State<_LocationSheet> {
           }
         }
       }
-      setState(() { _detectedArea = 'Not found'; _isGeocoding = false; _locationError = true; });
-    } catch (_) {
-      setState(() { _isGeocoding = false; _locationError = true; });
+      
+      // If pincode API fails, try direct geocoding
+      final geoUri = Uri.parse(
+        'https://maps.googleapis.com/maps/api/geocode/json'
+        '?address=$pincode,India'
+        '&key=${AppConstants.googleMapsApiKey}',
+      );
+      
+      final geoRes = await http.get(geoUri).timeout(const Duration(seconds: 8));
+      if (geoRes.statusCode == 200) {
+        final geoData = jsonDecode(geoRes.body) as Map<String, dynamic>;
+        if (geoData['status'] == 'OK') {
+          final results = geoData['results'] as List;
+          if (results.isNotEmpty) {
+            final loc = (results[0]['geometry'] as Map)['location'] as Map;
+            _manualLat = (loc['lat'] as num).toDouble();
+            _manualLng = (loc['lng'] as num).toDouble();
+            _manualAddress = results[0]['formatted_address'] as String;
+            
+            setState(() {
+              _manualSelected = true;
+              _isGeocoding = false;
+            });
+            
+            debugPrint('[LocationSheet] Geocoded pincode: $_manualAddress');
+            return;
+          }
+        }
+      }
+      
+      setState(() {
+        _detectedArea = 'Not found';
+        _isGeocoding = false;
+        _locationError = true;
+      });
+      
+    } catch (e) {
+      debugPrint('[LocationSheet] Pincode detection error: $e');
+      setState(() {
+        _isGeocoding = false;
+        _locationError = true;
+      });
     }
   }
-
+  
   void _onPincodeChanged() {
     final pin = _pincodeCtrl.text.trim();
     if (_mode != 'Home Collection') return;
     if (pin.length == 6) {
+      // Auto-detect when pincode length is 6
       _detectLocationFromPincode();
     } else {
       if (_detectedArea != null || _detecting) {
-        setState(() { _detectedArea = null; _detecting = false; _manualSelected = false; });
+        setState(() { 
+          _detectedArea = null; 
+          _detecting = false;
+          _manualSelected = false;
+        });
       }
     }
   }
 
-  void _scheduleFetch() {
+  void _filterBranches() {
     if (_mode != 'Lab Test') return;
-    _debounceTimer?.cancel();
-    setState(() => _branch = null);
-    _debounceTimer = Timer(const Duration(milliseconds: 600), _fetchBranches);
-  }
-
-  Future<void> _fetchBranches() async {
-    final pincode = _pincodeCtrl.text.trim();
-    final city = _cityCtrl.text.trim();
-    if (mounted) setState(() => _loadingBranches = true);
-    try {
-      final branches = await ApiService.getBranches(
-        pincode: pincode.isEmpty ? null : pincode,
-        city: city.isEmpty ? null : city,
-      );
-      if (mounted) setState(() { _filteredBranches = branches; _loadingBranches = false; });
-    } catch (_) {
-      if (mounted) setState(() { _filteredBranches = []; _loadingBranches = false; });
-    }
+    final query = (_pincodeCtrl.text + _cityCtrl.text).trim().toLowerCase();
+    setState(() {
+      _branch = null;
+      if (query.isEmpty) {
+        _filteredBranches = widget.branches;
+      } else {
+        _filteredBranches = widget.branches.where((b) =>
+          b.name.toLowerCase().contains(query) ||
+          b.address.toLowerCase().contains(query)
+        ).toList();
+      }
+    });
   }
 
   void _apply() {
@@ -1089,14 +1333,16 @@ class _LocationSheetState extends State<_LocationSheet> {
         widget.onCityChanged(null);
       } 
       else if (_manualSelected && _manualLat != null && _manualLng != null) {
-        // Use manual pincode-based location
-        final address = _addressCtrl.text.trim().isNotEmpty 
-            ? _addressCtrl.text.trim() 
+        // Use manual pincode-based location.
+        // city MUST fire before pincode so _city is ready when auto-detect triggers.
+        final address = _addressCtrl.text.trim().isNotEmpty
+            ? _addressCtrl.text.trim()
             : _manualAddress;
-        widget.onAddressChanged(address);
+        final city = _cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim();
+        widget.onCityChanged(city);                        // 1st — set city
+        widget.onAddressChanged(address);                  // 2nd
         widget.onLatLngChanged?.call(_manualLat, _manualLng);
-        widget.onPincodeChanged(_pincodeCtrl.text.trim());
-        widget.onCityChanged(_cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim());
+        widget.onPincodeChanged(_pincodeCtrl.text.trim()); // last — triggers auto-detect (city already set)
       }
       else {
         setState(() => _locationError = true);
@@ -1121,10 +1367,9 @@ class _LocationSheetState extends State<_LocationSheet> {
 
   @override
   void dispose() {
-    _pincodeCtrl.removeListener(_scheduleFetch);
-    _cityCtrl.removeListener(_scheduleFetch);
+    _pincodeCtrl.removeListener(_filterBranches);
+    _cityCtrl.removeListener(_filterBranches);
     _pincodeCtrl.removeListener(_onPincodeChanged);
-    _debounceTimer?.cancel();
     _pincodeCtrl.dispose();
     _cityCtrl.dispose();
     _addressCtrl.dispose();
@@ -1555,22 +1800,7 @@ class _LocationSheetState extends State<_LocationSheet> {
                 ),
               ),
               const SizedBox(height: 8),
-              if (_loadingBranches)
-                Container(
-                  padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 14),
-                  decoration: BoxDecoration(
-                    color: AppColors.background,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: AppColors.divider),
-                  ),
-                  child: const Row(children: [
-                    SizedBox(width: 16, height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
-                    SizedBox(width: 10),
-                    Text('Loading branches…', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                  ]),
-                )
-              else if (_filteredBranches.isEmpty)
+              if (_filteredBranches.isEmpty)
                 Container(
                   padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
                   decoration: BoxDecoration(
@@ -1600,20 +1830,13 @@ class _LocationSheetState extends State<_LocationSheet> {
                   dropdownColor: AppColors.white,
                   borderRadius: BorderRadius.circular(12),
                   isExpanded: true,
-                  items: _filteredBranches.map((b) {
-                    final sub = [
-                      if ((b.location ?? '').isNotEmpty) b.location!,
-                      if ((b.pincode ?? '').isNotEmpty) b.pincode!,
-                    ].join(', ');
-                    return DropdownMenuItem(
-                      value: b,
-                      child: Text(
-                        sub.isNotEmpty ? '${b.name} · $sub' : b.name,
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    );
-                  }).toList(),
+                  items: _filteredBranches.map((b) => DropdownMenuItem(
+                    value: b,
+                    child: Text(b.name,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  )).toList(),
                   onChanged: (b) => setState(() { _branch = b; _branchError = false; }),
                 ),
               if (_branchError) ...[

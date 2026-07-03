@@ -1,9 +1,14 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
-import 'package:microlab/services/api_service.dart';
+import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'my_bookings_screen.dart';
+import 'booking_widgets.dart';
+import 'booking_confirmation_screen.dart';
 import 'package:microlab/models.dart';
 
 // ─── Prescription doc model ───────────────────────────────────────────────────
@@ -29,6 +34,13 @@ class CheckoutScreen extends StatefulWidget {
   final int patientId;
   final double? patientLat;
   final double? patientLng;
+  // Branch-booking pre-fills (null = old flow, picker shown as usual)
+  final DateTime? preSelectedDate;
+  final String?   preSelectedSlotLabel;
+  final int?      branchId;
+  final String?   collectionDate;
+  final int?      timeSlotId;
+
   const CheckoutScreen({
     super.key,
     required this.member,
@@ -42,6 +54,11 @@ class CheckoutScreen extends StatefulWidget {
     this.patientId = 1,
     this.patientLat,
     this.patientLng,
+    this.preSelectedDate,
+    this.preSelectedSlotLabel,
+    this.branchId,
+    this.collectionDate,
+    this.timeSlotId,
   });
 
   @override
@@ -57,9 +74,39 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Date ─────────────────────────────────────────────────
   DateTime? _selectedDate;
 
-  // ── Available slots ───────────────────────────────────────
-  List<TimeSlot> _availableSlots = [];
-  bool _isLoadingSlots = false;
+  // ── Slots ─────────────────────────────────────────────────
+  // Hardcoded list used when no branchId is set (old flow).
+  static const List<TimeSlot> _staticSlots = [
+    TimeSlot(id: '1', label: '10:00 AM', time: '10:00'),
+    TimeSlot(id: '2', label: '12:00 PM', time: '12:00'),
+    TimeSlot(id: '3', label: '1:00 PM',  time: '13:00'),
+    TimeSlot(id: '4', label: '4:00 PM',  time: '16:00'),
+    TimeSlot(id: '5', label: '5:00 PM',  time: '17:00'),
+  ];
+  // API-loaded slots used when branchId is provided.
+  List<TimeSlot>              _branchSlots    = [];
+  List<Map<String, dynamic>>  _branchSlotsRaw = []; // includes timeIntervals
+  bool                        _loadingSlots   = false;
+  String                      _slotsError     = '';
+  TimeInterval?               _selectedAppointmentTime;
+
+  List<TimeSlot> get _availableSlots =>
+      widget.branchId != null ? _branchSlots : _staticSlots;
+
+  // Appointment times available for the currently selected slot (empty = no duration configured)
+  List<TimeInterval> get _currentSlotIntervals {
+    if (_selectedSlot == null) return [];
+    final raw = _branchSlotsRaw.firstWhere(
+      (s) => s['slotId']?.toString() == _selectedSlot!.id,
+      orElse: () => <String, dynamic>{},
+    );
+    final list = raw['timeIntervals'] as List? ?? [];
+    return list.map<TimeInterval>((t) => TimeInterval(
+      time:  t['time']  as String? ?? '',
+      label: t['label'] as String? ?? '',
+    )).toList();
+  }
+
   TimeSlot? _selectedSlot;
 
   // ── Prescription / Document — multi-image upload ─────────
@@ -87,27 +134,51 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   ];
 
   // ── Computed ──────────────────────────────────────────────
-  bool get _isHomeCollection => widget.mode == 'Home Collection';
   double get _testsTotal => widget.cart.fold(0, (s, t) => s + t.finalPrice);
   double get _serviceCharge => _estimatedServiceCharge;
-  double get _grandTotal => _isHomeCollection ? _testsTotal + _serviceCharge : _testsTotal;
+  double get _grandTotal => _testsTotal + _serviceCharge;
 
   bool get _anyDocRequired => widget.cart.any((t) => t.docRequired);
 
-  // Pay Full locked when a doc is required but not yet verified
+  // Pay Full locked when a doc is required but not yet verified by technician
   bool get _fullPaymentEnabled => !_anyDocRequired || _docVerified;
 
   double get _payableNow => _paymentType == 'full' ? _grandTotal : 0;
   double get _payableLater => _paymentType == 'full' ? 0 : _grandTotal;
 
-  bool get _canProceed => _selectedDate != null && _selectedSlot != null &&
-      (!_isHomeCollection || !widget.isVip || _selectedTechnician != null);
+  bool get _canProceed {
+    if (_selectedDate == null || _selectedSlot == null) return false;
+    // If this slot has specific appointment times, one must be selected
+    if (_currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null) return false;
+    if (widget.isVip && _selectedTechnician == null) return false;
+    return true;
+  }
 
   // ── Date picker (future only) ─────────────────────────────
   @override
   void initState() {
     super.initState();
     if (_anyDocRequired) _paymentType = 'pay_later';
+
+    debugPrint('\n🧾 [CHECKOUT INIT] ──────────────────────────────────');
+    debugPrint('   mode        : ${widget.mode}');
+    debugPrint('   patientId   : ${widget.patientId}');
+    debugPrint('   branchId    : ${widget.branchId ?? '⚠️ null — static slots will be used'}');
+    debugPrint('   branch name : ${widget.branch?.name ?? '—'}');
+    debugPrint('   cart items  : ${widget.cart.length}');
+    debugPrint('   slot mode   : ${widget.branchId != null ? 'API (branch slots)' : 'STATIC (hardcoded)'}');
+    debugPrint('   date range  : ${widget.branchId != null ? 'today onward' : 'tomorrow onward'}');
+
+    if (widget.preSelectedDate != null) {
+      _selectedDate = widget.preSelectedDate;
+      debugPrint('   pre-date    : $_selectedDate');
+    }
+    if (widget.preSelectedSlotLabel != null) {
+      final id = widget.timeSlotId?.toString() ?? '0';
+      _selectedSlot = TimeSlot(id: id, label: widget.preSelectedSlotLabel!, time: '');
+      debugPrint('   pre-slot    : ${widget.preSelectedSlotLabel}');
+    }
+    debugPrint('────────────────────────────────────────────────────\n');
   }
 
   @override
@@ -117,13 +188,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   Future<void> _pickDate() async {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
+    final now      = DateTime.now();
+    final tomorrow = now.add(const Duration(days: 1));
+    // Branch flow allows same-day booking; old flow starts from tomorrow
+    final firstDate = widget.branchId != null ? now : tomorrow;
+    debugPrint('\n📅 [DATE PICKER] branchId=${widget.branchId} → firstDate=${firstDate.toIso8601String().substring(0,10)} (${widget.branchId != null ? 'today allowed' : 'tomorrow earliest'})');
     final picked = await showDatePicker(
       context: context,
-      initialDate: _selectedDate ?? today,
-      firstDate: today,
-      lastDate: today.add(const Duration(days: 30)),
+      initialDate: _selectedDate ?? firstDate,
+      firstDate: firstDate,
+      lastDate: now.add(const Duration(days: 30)),
       helpText: 'SELECT APPOINTMENT DATE',
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
@@ -137,34 +211,145 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       ),
     );
     if (picked != null) {
+      debugPrint('   picked      : ${picked.toIso8601String().substring(0,10)}');
       setState(() {
-        _selectedDate = picked;
-        _selectedSlot = null;
-        _selectedTechnician = null;
+        _selectedDate            = picked;
+        _selectedSlot            = null;
+        _selectedAppointmentTime = null;
+        _selectedTechnician      = null;
+        _branchSlots             = [];
+        _branchSlotsRaw          = [];
+        _slotsError              = '';
       });
-      _fetchSlots(picked);
+      if (widget.branchId != null) {
+        debugPrint('   → branchId=${widget.branchId} — loading API slots');
+        _loadBranchSlots(picked);
+      } else {
+        debugPrint('   → no branchId — static slots shown (${_staticSlots.length} options)');
+      }
+    } else {
+      debugPrint('   picker dismissed — no date selected');
     }
   }
 
-  Future<void> _fetchSlots(DateTime date) async {
-    if (widget.branch == null) return;
+  String _toApiDate(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-'
+      '${d.day.toString().padLeft(2, '0')}';
 
-    setState(() {
-      _isLoadingSlots = true;
-      _availableSlots = [];
-    });
+  Future<void> _loadBranchSlots(DateTime date) async {
+    final dateStr = _toApiDate(date);
+    debugPrint('\n🕐 [LOAD SLOTS] ─────────────────────────────────────');
+    debugPrint('   branchId    : ${widget.branchId}');
+    debugPrint('   date        : $dateStr');
 
-    final slots = await ApiService.getSlots(
-      branchId: widget.branch!.id,
-      date:     date,
-      slotType: _isHomeCollection ? 'home_collection' : 'lab_visit',
+    setState(() { _loadingSlots = true; _slotsError = ''; });
+
+    try {
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/branches/slots')
+          .replace(queryParameters: {
+            'branchId': widget.branchId.toString(),
+            'date':     dateStr,
+          });
+      debugPrint('   → GET $uri');
+
+      final res  = await http.get(uri).timeout(const Duration(seconds: 10));
+      debugPrint('   ← status    : ${res.statusCode}');
+      debugPrint('   ← body      : ${res.body}');
+
+      if (!mounted) return;
+
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        if (body['success'] == true) {
+          final rawList = (body['slots'] as List).cast<Map<String, dynamic>>();
+          final list = rawList.map((m) => TimeSlot(
+            id:    m['slotId']?.toString() ?? '',
+            label: m['label']     as String? ?? '',
+            time:  m['startTime'] as String? ?? '',
+          )).toList();
+          debugPrint('   ✅ slots     : ${list.length} available');
+          for (final s in list) { debugPrint('      • [${s.id}] ${s.label} (${s.time})'); }
+          setState(() {
+            _branchSlotsRaw = rawList;
+            _branchSlots    = list;
+            _loadingSlots   = false;
+            _slotsError     = list.isEmpty ? 'No slots available for this date. Try another date.' : '';
+          });
+        } else {
+          debugPrint('   ⚠️  API returned success=false: ${body['message']}');
+          setState(() { _loadingSlots = false; _slotsError = body['message'] as String? ?? 'Could not load slots.'; });
+        }
+      } else {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        debugPrint('   ❌ HTTP ${res.statusCode}: ${body['message']}');
+        setState(() { _loadingSlots = false; _slotsError = body['message'] as String? ?? 'Could not load slots.'; });
+      }
+    } catch (e) {
+      debugPrint('   ❌ exception : $e');
+      if (!mounted) return;
+      setState(() { _loadingSlots = false; _slotsError = 'Could not reach server. Check your connection.'; });
+    }
+    debugPrint('────────────────────────────────────────────────────\n');
+  }
+
+  // ── Slot section body ─────────────────────────────────────
+  Widget _buildSlotBody() {
+    if (_selectedDate == null) {
+      return const Text(
+        'Please select a date first',
+        style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+      );
+    }
+    if (_loadingSlots) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 12),
+          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+        ),
+      );
+    }
+    if (_slotsError.isNotEmpty) {
+      return Text(
+        _slotsError,
+        style: const TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+      );
+    }
+    if (_availableSlots.isEmpty) {
+      return const Text(
+        'No slots available. Try another date.',
+        style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+      );
+    }
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: _availableSlots.map((slot) {
+        final isSelected = _selectedSlot?.id == slot.id;
+        return GestureDetector(
+          onTap: () => setState(() {
+            _selectedSlot            = slot;
+            _selectedAppointmentTime = null; // reset when slot changes
+          }),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+            decoration: BoxDecoration(
+              color: isSelected ? AppColors.brandGreen : Colors.white,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: isSelected ? AppColors.brandGreen : AppColors.divider,
+                width: isSelected ? 1.5 : 1,
+              ),
+            ),
+            child: Text(slot.label,
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: isSelected ? Colors.white : AppColors.textPrimary)),
+          ),
+        );
+      }).toList(),
     );
-
-    if (!mounted) return;
-    setState(() {
-      _availableSlots  = slots;
-      _isLoadingSlots  = false;
-    });
   }
 
   // ── Prescription upload — multi-image ────────────────────
@@ -301,41 +486,31 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     // Build items list from cart
     final items = widget.cart.map((t) => {
-      'packageId':     int.tryParse(t.id) ?? 0,
-      'packageType':   t.type == 'package' ? 'package' : 'test',
-      'originalPrice': t.originalPrice,
-      'finalPrice':    t.finalPrice,
+      'packageId':   int.tryParse(t.id) ?? 0,
+      'packageType': t.type == 'package' ? 'package' : 'test',
+      'finalPrice':  t.finalPrice,
     }).toList();
 
-    final dateStr = _selectedDate != null
-        ? '${_selectedDate!.year}-'
-          '${_selectedDate!.month.toString().padLeft(2, '0')}-'
-          '${_selectedDate!.day.toString().padLeft(2, '0')}'
-        : null;
-
-    final isPayNow = razorpayPaymentId != 'pay_later' && razorpayPaymentId.isNotEmpty;
-    final payload = {
-      'patientId':           widget.patientId,
-      'bookingType':         _isHomeCollection ? 'home_collection' : 'lab_visit',
-      'totalAmount':         _grandTotal,
-      'discountAmount':      0,
-      'sourceChannel':       'mobile_app',
-      'notes':               null,
-      'items':               items,
-      'branchId':            widget.branch?.id != null ? int.tryParse(widget.branch!.id) : null,
-      'collectionDate':      dateStr,
-      'availableSlotId':     _selectedSlot?.id != null ? int.tryParse(_selectedSlot!.id) : null,
-      'patientIdRef':        widget.member.patientIdRef,
-      'collectionAddress':   widget.address,
-      'collectionPincode':   widget.pincode,
-      'collectionCity':      widget.city,
-      'paymentType':         isPayNow ? 'full' : 'pay_later',
-      'razorpayPaymentId':   isPayNow ? razorpayPaymentId : null,
+    final payload = <String, dynamic>{
+      'patientId':      widget.patientId,
+      'bookingType':    widget.mode == 'Home Collection' ? 'home_collection' : 'lab_visit',
+      'totalAmount':    _grandTotal,
+      'discountAmount': 0,
+      'sourceChannel':  'mobile_app',
+      'notes':          null,
+      'items':          items,
+      if (widget.branchId       != null) 'branchId':       widget.branchId,
+      if (widget.collectionDate != null) 'collectionDate': widget.collectionDate,
+      if (widget.patientLat     != null) 'collectionLatitude':  widget.patientLat,
+      if (widget.patientLng     != null) 'collectionLongitude': widget.patientLng,
+      if (_selectedSlot != null && int.tryParse(_selectedSlot!.id) != null)
+        'slotId': int.parse(_selectedSlot!.id),
+      if (_selectedAppointmentTime != null)
+        'appointmentTime': _selectedAppointmentTime!.time,
     };
 
     debugPrint('\n📤 [CHECKOUT] POST /api/bookings');
     debugPrint('   patientId   : ${widget.patientId}');
-    debugPrint('   patientIdRef: ${widget.member.patientIdRef}');
     debugPrint('   bookingType : ${payload['bookingType']}');
     debugPrint('   totalAmount : ₹$_grandTotal');
     debugPrint('   items       : ${items.length} — ${items.map((i) => 'pkg${i['packageId']}(₹${i['finalPrice']})').join(', ')}');
@@ -345,49 +520,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     String bookingRef;
 
     try {
-      final data = await ApiService.createBooking(payload);
-      debugPrint('📥 [CHECKOUT] Response: $data');
+      final url = Uri.parse('${AppConstants.serverUrl}/api/bookings');
+      final res = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      ).timeout(const Duration(seconds: 10));
 
-      if (data['success'] != true) {
-        throw Exception(data['message'] ?? 'Booking failed');
+      debugPrint('📥 [CHECKOUT] Response ${res.statusCode}: ${res.body}');
+
+      if (res.statusCode != 201) {
+        throw Exception('Server returned ${res.statusCode}');
       }
 
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
       bookingId  = data['bookingId']  as int;
       bookingRef = data['bookingRef'] as String;
       debugPrint('✅ [CHECKOUT] Booking created — bookingId=$bookingId ref=$bookingRef');
-
-      // Find the bookingItemId for the doc-required item
-      int? docBookingItemId;
-      final rawItems = (data['bookingItems'] as List?)?.cast<Map<String, dynamic>>() ?? [];
-      for (final bi in rawItems) {
-        if (bi['docRequired'] == true) {
-          docBookingItemId = bi['bookingItemId'] as int?;
-          break;
-        }
-      }
-
-      // Upload prescriptions if provided (home collection or lab visit)
-      if (_prescriptions.isNotEmpty) {
-        debugPrint('[CHECKOUT] Uploading ${_prescriptions.length} prescription(s)…');
-        final urls = <String>[];
-        for (final doc in _prescriptions) {
-          final url = await ApiService.uploadFile(doc.bytes, doc.fileName);
-          if (url != null) urls.add(url);
-        }
-        if (urls.isNotEmpty) {
-          await ApiService.savePrescription(
-            bookingId:     bookingId,
-            patientId:     widget.patientId,
-            bookingItemId: docBookingItemId,
-            branchId:      widget.branch?.id != null ? int.tryParse(widget.branch!.id) : null,
-            testMode:      _isHomeCollection ? 'home_collection' : 'lab_visit',
-            imageUrls:     urls,
-          );
-          debugPrint('[CHECKOUT] ${urls.length} prescription image(s) saved');
-        } else {
-          debugPrint('[CHECKOUT] ⚠️ All prescription uploads failed');
-        }
-      }
     } catch (e) {
       debugPrint('❌ [CHECKOUT] API call failed: $e');
       if (!mounted) return;
@@ -400,33 +549,58 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       return;
     }
 
+    final booking = BookingModel(
+      id: bookingRef,
+      member: widget.member,
+      tests: widget.cart,
+      mode: widget.mode,
+      address: widget.address,
+      pincode: widget.pincode,
+      city: widget.city,
+      branch: widget.branch,
+      date: _selectedDate!,
+      timeSlot: _selectedSlot?.label ?? '',
+      paymentType: _paymentType,
+      serviceCharge: _serviceCharge,
+      testsTotal: _testsTotal,
+      grandTotal: _grandTotal,
+      paidAmount: _payableNow,
+      status: 'Technician Allocated',
+      createdAt: DateTime.now(),
+      docRequired: _anyDocRequired,
+      docVerified: _docVerified,
+      isVip: widget.isVip,
+      selectedTechnician: _selectedTechnician,
+    );
+
     if (mounted) {
       setState(() => _isProcessing = false);
       if (widget.mode == 'Home Collection') {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
-            builder: (_) => _HomeCollectionSuccessScreen(
-              bookingRef:  bookingRef,
-              patientName: widget.member.name,
-              address:     address.isEmpty ? 'Home Collection' : address,
-              date:        _selectedDate!,
-              timeSlot:    _selectedSlot?.label ?? '',
+            builder: (_) => BookingConfirmationScreen(
+              bookingId:            bookingId,
+              patientId:            widget.patientId,
+              patientName:          widget.member.name,
+              patientMobile:        widget.member.mobile,
+              patientAddress:       address.isEmpty ? 'Home Collection' : address,
+              patientLat:           widget.patientLat,
+              patientLng:           widget.patientLng,
+              hospital:             'MicroLab Home Collection',
+              branchId:             widget.branchId,
+              branchName:           widget.branch?.name,
+              slotId:               int.tryParse(_selectedSlot?.id ?? ''),
+              slotLabel:            _selectedSlot?.label,
+              appointmentTime:      _selectedAppointmentTime?.time,
+              appointmentTimeLabel: _selectedAppointmentTime?.label,
             ),
           ),
         );
       } else {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(
-            builder: (_) => _LabVisitSuccessScreen(
-              bookingRef:  bookingRef,
-              patientName: widget.member.name,
-              branch:      widget.branch,
-              date:        _selectedDate!,
-              timeSlot:    _selectedSlot?.label ?? '',
-            ),
-          ),
+          MaterialPageRoute(builder: (_) => _BookingSuccessScreen(booking: booking)),
         );
       }
     }
@@ -571,61 +745,55 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
           const SizedBox(height: 14),
 
-          // ── Time Slot (available only) ────────────────────
+          // ── Time Slot ─────────────────────────────────────
           _SectionCard(
             title: 'Time Slot',
             icon: Icons.schedule_outlined,
             required: true,
-            child: _selectedDate == null
-                ? const Text('Please select a date first',
-                    style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic))
-                : _isLoadingSlots
-                    ? const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 8),
-                        child: Center(
-                          child: SizedBox(
-                            width: 20, height: 20,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: AppColors.brandGreen),
-                          ),
-                        ),
-                      )
-                    : _availableSlots.isEmpty
-                        ? const Text('No slots available for this date',
-                            style: TextStyle(fontSize: 12, color: AppColors.textHint,
-                                fontStyle: FontStyle.italic))
-                        : Wrap(
-                            spacing: 10,
-                            runSpacing: 10,
-                            children: _availableSlots.map((slot) {
-                              final isSelected = _selectedSlot?.id == slot.id;
-                              return GestureDetector(
-                                onTap: () => setState(() => _selectedSlot = slot),
-                                child: AnimatedContainer(
-                                  duration: const Duration(milliseconds: 180),
-                                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                                  decoration: BoxDecoration(
-                                    color: isSelected ? AppColors.brandGreen : Colors.white,
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(
-                                      color: isSelected ? AppColors.brandGreen : AppColors.divider,
-                                      width: isSelected ? 1.5 : 1,
-                                    ),
-                                  ),
-                                  child: Text(slot.label,
-                                      style: TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                          color: isSelected ? Colors.white : AppColors.textPrimary)),
-                                ),
-                              );
-                            }).toList(),
-                          ),
+            child: _buildSlotBody(),
           ),
+
+          // ── Appointment Time (shown when slot has intervals) ─
+          if (_selectedSlot != null && _currentSlotIntervals.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _SectionCard(
+              title: 'Appointment Time',
+              icon: Icons.access_time_outlined,
+              required: true,
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: _currentSlotIntervals.map((interval) {
+                  final isSel = _selectedAppointmentTime?.time == interval.time;
+                  return GestureDetector(
+                    onTap: () => setState(() => _selectedAppointmentTime = interval),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: isSel ? AppColors.brandGreen : Colors.white,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: isSel ? AppColors.brandGreen : AppColors.divider,
+                          width: isSel ? 1.5 : 1,
+                        ),
+                      ),
+                      child: Text(interval.label,
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: isSel ? Colors.white : AppColors.textPrimary)),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ],
 
           const SizedBox(height: 14),
 
           // ── Prescription / Document (multi-image) ─────────
+          // Required when any test needs it; also always shown for VIP
           if (_anyDocRequired || widget.isVip)
             _SectionCard(
               title: 'Prescription / Document',
@@ -638,12 +806,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: _anyDocRequired && _isHomeCollection
+                      color: _anyDocRequired
                           ? const Color(0xFFFFF3E0)
                           : AppColors.brandGreenSurface,
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
-                        color: _anyDocRequired && _isHomeCollection
+                        color: _anyDocRequired
                             ? const Color(0xFFFFCC02).withValues(alpha: 0.4)
                             : AppColors.brandGreenLight,
                       ),
@@ -652,28 +820,24 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Icon(
-                          _anyDocRequired && _isHomeCollection
+                          _anyDocRequired
                               ? Icons.info_outline_rounded
                               : Icons.upload_file_outlined,
                           size: 14,
-                          color: _anyDocRequired && _isHomeCollection
+                          color: _anyDocRequired
                               ? const Color(0xFFE65100)
                               : AppColors.brandGreen,
                         ),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            _isHomeCollection
-                                ? (_anyDocRequired
-                                    ? 'One or more tests require a prescription. Upload up to $_maxPrescrips images. Full payment unlocks after technician verification.'
-                                    : 'Upload your prescription or any relevant documents (optional). Up to $_maxPrescrips images.')
-                                : (_anyDocRequired
-                                    ? 'One or more tests require a prescription. Upload a digital copy for advance review and bring the original to the lab. Full payment unlocks after lab verification.'
-                                    : 'Upload a digital copy of your prescription for advance review (optional). Bring the original to the lab.'),
+                            _anyDocRequired
+                                ? 'One or more tests require a prescription. Upload up to $_maxPrescrips images. Full payment unlocks after technician verification.'
+                                : 'Upload your prescription or any relevant documents (optional). Up to $_maxPrescrips images.',
                             style: TextStyle(
                               fontSize: 12,
                               height: 1.4,
-                              color: _anyDocRequired && _isHomeCollection
+                              color: _anyDocRequired
                                   ? const Color(0xFF795548)
                                   : AppColors.brandGreen,
                             ),
@@ -687,27 +851,26 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   // Thumbnail grid
                   if (_prescriptions.isNotEmpty) ...[
                     SizedBox(
-                      height: 112,
+                      height: 104,
                       child: ListView.separated(
                         scrollDirection: Axis.horizontal,
-                        padding: const EdgeInsets.fromLTRB(2, 8, 10, 0),
                         itemCount: _prescriptions.length +
                             (_prescriptions.length < _maxPrescrips ? 1 : 0),
-                        separatorBuilder: (_, __) => const SizedBox(width: 10),
-                          itemBuilder: (_, i) {
-                            if (i == _prescriptions.length) {
-                              return _PresAddMoreTile(
-                                onTap: _isPicking ? null : _showPresSourcePicker,
-                              );
-                            }
-                            return _PresThumbnailCard(
-                              doc: _prescriptions[i],
-                              onView: () => _viewPres(i),
-                              onDelete: () => _deletePres(i),
+                        separatorBuilder: (_, __) => const SizedBox(width: 8),
+                        itemBuilder: (_, i) {
+                          if (i == _prescriptions.length) {
+                            return _PresAddMoreTile(
+                              onTap: _isPicking ? null : _showPresSourcePicker,
                             );
-                          },
-                        ),
+                          }
+                          return _PresThumbnailCard(
+                            doc: _prescriptions[i],
+                            onView: () => _viewPres(i),
+                            onDelete: () => _deletePres(i),
+                          );
+                        },
                       ),
+                    ),
                     const SizedBox(height: 4),
                     Text(
                       '${_prescriptions.length} of $_maxPrescrips image${_prescriptions.length == 1 ? '' : 's'} uploaded',
@@ -829,37 +992,36 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Service charge info banner — home collection only
-                if (_isHomeCollection)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    margin: const EdgeInsets.only(bottom: 14),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppColors.brandGreenLight),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.directions_car_outlined, size: 14, color: AppColors.brandGreen),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Service charge of ₹${_serviceCharge.toInt()} is estimated based on travel distance. Final amount is confirmed when the technician starts the journey.',
-                            style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
-                          ),
-                        ),
-                      ],
-                    ),
+                // Service charge info banner
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  margin: const EdgeInsets.only(bottom: 14),
+                  decoration: BoxDecoration(
+                    color: AppColors.brandGreenSurface,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.brandGreenLight),
                   ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.directions_car_outlined, size: 14, color: AppColors.brandGreen),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Service charge of ₹${_serviceCharge.toInt()} is estimated based on travel distance. Final amount is confirmed when the technician starts the journey.',
+                          style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
 
                 // Option 1: Pay Full Amount Now
                 _PaymentOptionTile(
                   selected: _paymentType == 'full',
                   title: 'Pay Full Amount Now',
                   subtitle: _fullPaymentEnabled
-                      ? 'Pay ₹${_grandTotal.toInt()} ${_isHomeCollection ? '(tests + service charge)' : '(tests total)'} · Nothing due ${_isHomeCollection ? 'at collection' : 'at the lab'}'
+                      ? 'Pay ₹${_grandTotal.toInt()} (tests + service charge) · Nothing due at collection'
                       : 'Available after technician verifies your prescription',
                   amount: '₹${_grandTotal.toInt()} now',
                   badge: _fullPaymentEnabled ? 'RECOMMENDED' : 'LOCKED',
@@ -873,7 +1035,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 _PaymentOptionTile(
                   selected: _paymentType == 'pay_later',
                   title: 'Pay Later',
-                  subtitle: 'Pay ₹${_grandTotal.toInt()} ${_isHomeCollection ? 'at the time of collection' : 'at the lab'} · No payment needed now',
+                  subtitle: 'Pay ₹${_grandTotal.toInt()} at the time of collection · No payment needed now',
                   amount: '₹0 now',
                   badge: 'FLEXIBLE',
                   badgeColor: AppColors.blue,
@@ -886,8 +1048,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
           const SizedBox(height: 14),
 
-          // ── VIP: Technician Selection (home collection only) ──
-          if (widget.isVip && _isHomeCollection) ...[
+          // ── VIP: Technician Selection ─────────────────────
+          if (widget.isVip) ...[
             _SectionCard(
               title: 'Choose Technician',
               icon: Icons.medical_services_outlined,
@@ -930,18 +1092,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             child: Column(
               children: [
                 _BillRow('Tests Total', '₹${_testsTotal.toInt()}'),
-                if (_isHomeCollection)
-                  _BillRow('Service Charge (est.)', '+ ₹${_serviceCharge.toInt()}', sub: true),
+                _BillRow('Service Charge (est.)', '+ ₹${_serviceCharge.toInt()}', sub: true),
                 const Divider(height: 20),
                 _BillRow('Grand Total', '₹${_grandTotal.toInt()}', bold: true),
                 const SizedBox(height: 8),
                 _BillRow('Pay Now', '₹${_payableNow.toInt()}', bold: true, green: true),
                 if (_paymentType == 'pay_later')
-                  _BillRow(
-                    _isHomeCollection ? 'Due at Collection' : 'Due at Lab',
-                    '₹${_payableLater.toInt()}',
-                    sub: true,
-                  ),
+                  _BillRow('Due at Collection', '₹${_payableLater.toInt()}', sub: true),
               ],
             ),
           ),
@@ -966,9 +1123,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       ? 'Please select a date'
                       : _selectedSlot == null
                           ? 'Please select a time slot'
-                          : _isHomeCollection && widget.isVip && _selectedTechnician == null
-                              ? 'Please choose your preferred technician'
-                              : '',
+                          : _currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null
+                              ? 'Please select an appointment time'
+                              : widget.isVip && _selectedTechnician == null
+                                  ? 'Please choose your preferred technician'
+                                  : '',
                   style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)),
                   textAlign: TextAlign.center,
                 ),
@@ -1229,6 +1388,205 @@ class _PaymentOptionTile extends StatelessWidget {
   }
 }
 
+// ─── Booking Success (Lab Test / static) ─────────────────────────────────────
+
+class _BookingSuccessScreen extends StatelessWidget {
+  final BookingModel booking;
+  const _BookingSuccessScreen({required this.booking});
+
+  String _formatDate(DateTime d) {
+    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4F6F8),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
+                children: [
+                  // Success banner
+                  Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: AppColors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: AppColors.divider),
+                    ),
+                    child: Column(
+                      children: [
+                        Container(
+                          width: 72, height: 72,
+                          decoration: const BoxDecoration(
+                            color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+                          child: const Icon(Icons.check_circle_outline_rounded,
+                              size: 40, color: AppColors.brandGreen),
+                        ),
+                        const SizedBox(height: 16),
+                        const Text('Booking Confirmed!',
+                            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                        const SizedBox(height: 6),
+                        Text(booking.id,
+                            style: const TextStyle(fontSize: 13, color: AppColors.textSecondary, letterSpacing: 0.5)),
+                        const SizedBox(height: 16),
+                        BookingStatusBadge(status: booking.status),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  _SectionCard(
+                    title: 'Booking Details',
+                    icon: Icons.info_outline_rounded,
+                    child: Column(
+                      children: [
+                        _ConfirmRow(Icons.person_outline, 'Customer', booking.member.name),
+                        _ConfirmRow(Icons.event_outlined, 'Date', _formatDate(booking.date)),
+                        _ConfirmRow(Icons.schedule_outlined, 'Time Slot', booking.timeSlot),
+                        _ConfirmRow(
+                          booking.mode == 'Home Collection' ? Icons.home_outlined : Icons.local_hospital_outlined,
+                          'Mode', booking.mode,
+                        ),
+                        if (booking.isVip && booking.selectedTechnician != null)
+                          _ConfirmRow(Icons.medical_services_outlined,
+                              'Technician', booking.selectedTechnician!.name),
+                        if (booking.mode == 'Home Collection' && booking.city != null)
+                          _ConfirmRow(Icons.location_on_outlined, 'Location',
+                              '${booking.city}${booking.pincode != null ? ', ${booking.pincode}' : ''}'),
+                        if (booking.mode == 'Lab Test' && booking.branch != null)
+                          if (booking.branch != null) _ConfirmRow(Icons.local_hospital_outlined, 'Branch', booking.branch!.name),
+                        if (booking.selectedTechnician != null)
+                          _ConfirmRow(Icons.medical_services_outlined, 'Technician',
+                              '${booking.selectedTechnician!.name}  ★ ${booking.selectedTechnician!.rating}'),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  _SectionCard(
+                    title: 'Tests Booked',
+                    icon: Icons.science_outlined,
+                    child: Column(
+                      children: booking.tests.map((t) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 5),
+                        child: Row(
+                          children: [
+                            Container(width: 6, height: 6,
+                              decoration: BoxDecoration(
+                                color: t.type == 'package' ? AppColors.brandGreen : const Color(0xFF1565C0),
+                                shape: BoxShape.circle)),
+                            const SizedBox(width: 10),
+                            Expanded(child: Text(t.name,
+                                style: const TextStyle(fontSize: 13, color: AppColors.textPrimary))),
+                            Text('₹${t.finalPrice.toInt()}',
+                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                          ],
+                        ),
+                      )).toList(),
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  _SectionCard(
+                    title: 'Payment',
+                    icon: Icons.payment_outlined,
+                    child: Column(
+                      children: [
+                        _ConfirmRow(Icons.receipt_outlined, 'Tests Total', '₹${booking.testsTotal.toInt()}'),
+                        _ConfirmRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${booking.serviceCharge.toInt()}'),
+                        _ConfirmRow(Icons.calculate_outlined, 'Grand Total', '₹${booking.grandTotal.toInt()}'),
+                        const Divider(height: 16),
+                        _ConfirmRow(Icons.check_circle_outline, 'Paid Now',
+                            booking.paymentType == 'pay_later' ? '₹0' : '₹${booking.paidAmount.toInt()}',
+                            valueColor: AppColors.brandGreen),
+                        if (booking.paymentType == 'pay_later')
+                          _ConfirmRow(Icons.schedule_outlined, 'Due at Collection',
+                              '₹${booking.grandTotal.toInt()} (tests + service charge)',
+                              valueColor: const Color(0xFFE65100)),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreenSurface,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.brandGreenLight),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: const [
+                        Text("What's next?",
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+                        SizedBox(height: 10),
+                        _NextStep('1', 'A technician has been allocated to your booking'),
+                        _NextStep('2', 'You will receive a call 1 hour before the appointment'),
+                        _NextStep('3', 'Keep your samples ready as per test requirements'),
+                        _NextStep('4', 'Reports will be shared within the promised time'),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            Container(
+              padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
+              color: Colors.white,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.brandGreen,
+                        side: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text('Back to Home', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.push(context, MaterialPageRoute(
+                          builder: (_) => MyBookingsScreen(initialBooking: booking)));
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.brandGreen,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text('My Bookings', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
 // ─── Reusable widgets ─────────────────────────────────────────────────────────
 
 class _SectionCard extends StatelessWidget {
@@ -1304,6 +1662,58 @@ class _BillRow extends StatelessWidget {
                 fontSize: sub ? 12 : 14,
                 fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
                 color: green ? AppColors.brandGreen : AppColors.textPrimary)),
+          ],
+        ),
+      );
+}
+
+class _ConfirmRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color? valueColor;
+  const _ConfirmRow(this.icon, this.label, this.value, {this.valueColor});
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 15, color: AppColors.brandGreen),
+            const SizedBox(width: 10),
+            SizedBox(width: 110,
+              child: Text(label, style: const TextStyle(fontSize: 13, color: AppColors.textSecondary))),
+            Expanded(
+              child: Text(value, style: TextStyle(
+                  fontSize: 13, fontWeight: FontWeight.w500,
+                  color: valueColor ?? AppColors.textPrimary)),
+            ),
+          ],
+        ),
+      );
+}
+
+class _NextStep extends StatelessWidget {
+  final String number;
+  final String text;
+  const _NextStep(this.number, this.text);
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 20, height: 20,
+              decoration: const BoxDecoration(color: AppColors.brandGreen, shape: BoxShape.circle),
+              child: Center(child: Text(number,
+                  style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Text(text,
+                style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4))),
           ],
         ),
       );
@@ -1502,362 +1912,5 @@ class _PresViewerPageState extends State<_PresViewerPage> {
               ),
             ),
         ]),
-      );
-}
-
-// ─── Home Collection Booking Confirmation ────────────────────────────────────
-
-class _HomeCollectionSuccessScreen extends StatelessWidget {
-  final String   bookingRef;
-  final String   patientName;
-  final String   address;
-  final DateTime date;
-  final String   timeSlot;
-
-  const _HomeCollectionSuccessScreen({
-    required this.bookingRef,
-    required this.patientName,
-    required this.address,
-    required this.date,
-    required this.timeSlot,
-  });
-
-  String _fmtDate(DateTime d) {
-    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const days   = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-    return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 32, 16, 24),
-                children: [
-                  // ── Success icon + heading ──
-                  Center(
-                    child: Column(
-                      children: [
-                        Container(
-                          width: 80, height: 80,
-                          decoration: const BoxDecoration(
-                            color: AppColors.brandGreenSurface,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(Icons.check_circle_outline_rounded,
-                              size: 44, color: AppColors.brandGreen),
-                        ),
-                        const SizedBox(height: 18),
-                        const Text(
-                          'Booking Confirmed!',
-                          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700,
-                              color: AppColors.textPrimary),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          bookingRef,
-                          style: const TextStyle(fontSize: 13, color: AppColors.textSecondary,
-                              letterSpacing: 0.5),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 24),
-
-                  // ── Booking details card ──
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: AppColors.divider),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Booking Details',
-                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
-                                color: AppColors.textPrimary)),
-                        const SizedBox(height: 12),
-                        _DetailRow(Icons.person_outline,    'Patient',   patientName),
-                        _DetailRow(Icons.event_outlined,    'Date',      _fmtDate(date)),
-                        _DetailRow(Icons.schedule_outlined, 'Time Slot', timeSlot),
-                        _DetailRow(Icons.home_outlined,     'Address',   address),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 14),
-
-                  // ── What's next banner ──
-                  Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.brandGreenLight),
-                    ),
-                    child: const Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text("What's next?",
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                color: AppColors.brandGreen)),
-                        SizedBox(height: 10),
-                        _InfoLine2('1', 'A technician will be allocated to your booking'),
-                        _InfoLine2('2', 'You will receive a notification once assigned'),
-                        _InfoLine2('3', 'Keep your samples ready as per test requirements'),
-                        _InfoLine2('4', 'Reports will be shared within the promised time'),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            // ── Bottom button ──
-            Container(
-              padding: EdgeInsets.fromLTRB(16, 12, 16,
-                  MediaQuery.of(context).padding.bottom + 12),
-              color: Colors.white,
-              child: SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: ElevatedButton(
-                  onPressed: () =>
-                      Navigator.popUntil(context, (route) => route.isFirst),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
-                  ),
-                  child: const Text('Back to Home',
-                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _InfoLine2 extends StatelessWidget {
-  final String number;
-  final String text;
-  const _InfoLine2(this.number, this.text);
-
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 20, height: 20,
-              decoration: const BoxDecoration(
-                  color: AppColors.brandGreen, shape: BoxShape.circle),
-              child: Center(
-                child: Text(number,
-                    style: const TextStyle(color: Colors.white, fontSize: 11,
-                        fontWeight: FontWeight.w700)),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(text,
-                  style: const TextStyle(fontSize: 12, color: AppColors.brandGreen,
-                      height: 1.4)),
-            ),
-          ],
-        ),
-      );
-}
-
-// ─── Lab Visit Booking Confirmation ──────────────────────────────────────────
-
-class _LabVisitSuccessScreen extends StatelessWidget {
-  final String      bookingRef;
-  final String      patientName;
-  final BranchModel? branch;
-  final DateTime    date;
-  final String      timeSlot;
-
-  const _LabVisitSuccessScreen({
-    required this.bookingRef,
-    required this.patientName,
-    required this.branch,
-    required this.date,
-    required this.timeSlot,
-  });
-
-  String _fmtDate(DateTime d) {
-    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const days   = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-    return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 32, 16, 24),
-                children: [
-                  // ── Success icon + heading ──
-                  Center(
-                    child: Column(
-                      children: [
-                        Container(
-                          width: 80, height: 80,
-                          decoration: const BoxDecoration(
-                            color: AppColors.brandGreenSurface,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(Icons.check_circle_outline_rounded,
-                              size: 44, color: AppColors.brandGreen),
-                        ),
-                        const SizedBox(height: 18),
-                        const Text(
-                          'Lab Visit Booked!',
-                          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700,
-                              color: AppColors.textPrimary),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          bookingRef,
-                          style: const TextStyle(fontSize: 13, color: AppColors.textSecondary,
-                              letterSpacing: 0.5),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 24),
-
-                  // ── Visit details card ──
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: AppColors.divider),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Visit Details',
-                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
-                                color: AppColors.textPrimary)),
-                        const SizedBox(height: 12),
-                        _DetailRow(Icons.person_outline,       'Patient',   patientName),
-                        _DetailRow(Icons.event_outlined,        'Date',      _fmtDate(date)),
-                        _DetailRow(Icons.schedule_outlined,     'Time Slot', timeSlot),
-                        if (branch != null) ...[
-                          _DetailRow(Icons.local_hospital_outlined, 'Branch', branch!.name),
-                          if (branch!.address.isNotEmpty)
-                            _DetailRow(Icons.location_on_outlined, 'Address', branch!.address),
-                        ],
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 14),
-
-                  // ── Info banner ──
-                  Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.brandGreenLight),
-                    ),
-                    child: const Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(Icons.info_outline, size: 16, color: AppColors.brandGreen),
-                        SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            'Please visit the lab at your scheduled time. Carry a valid ID and any prescription if required.',
-                            style: TextStyle(fontSize: 13, color: AppColors.brandGreen, height: 1.4),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            // ── Bottom button ──
-            Container(
-              padding: EdgeInsets.fromLTRB(16, 12, 16,
-                  MediaQuery.of(context).padding.bottom + 12),
-              color: Colors.white,
-              child: SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: ElevatedButton(
-                  onPressed: () =>
-                      Navigator.popUntil(context, (route) => route.isFirst),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
-                  ),
-                  child: const Text('Back to Home',
-                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _DetailRow extends StatelessWidget {
-  final IconData icon;
-  final String   label;
-  final String   value;
-  const _DetailRow(this.icon, this.label, this.value);
-
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(icon, size: 15, color: AppColors.brandGreen),
-            const SizedBox(width: 10),
-            SizedBox(
-              width: 80,
-              child: Text(label,
-                  style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-            ),
-            Expanded(
-              child: Text(value,
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
-                      color: AppColors.textPrimary)),
-            ),
-          ],
-        ),
       );
 }

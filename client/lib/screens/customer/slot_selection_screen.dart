@@ -1,32 +1,53 @@
+// slot_selection_screen.dart
+//
+// Step 2 of the branch-based booking flow (after BranchSelectionScreen).
+//
+// Flow:
+//  1. Patient picks a collection date (today or any future date).
+//  2. Available slots are loaded from GET /api/branches/slots?branchId=&date=.
+//  3. Patient picks a time slot.
+//  4. "Confirm & Proceed" → navigates to CheckoutScreen with branch +
+//     collection date + slot pre-filled so the booking API call carries them.
+
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/models.dart';
 import 'package:microlab/theme/app_theme.dart';
-import 'package:microlab/services/api_service.dart';
 import 'package:http/http.dart' as http;
 import 'checkout_screen.dart';
+
+// ── Slot model (from API response) ────────────────────────────────────────────
 
 class _SlotItem {
   final int    timeSlotId;
   final int    slotId;
   final String label;
+  final String startTime;
+  final String endTime;
   final int    remaining;
 
   const _SlotItem({
     required this.timeSlotId,
     required this.slotId,
     required this.label,
+    required this.startTime,
+    required this.endTime,
     required this.remaining,
   });
 
   factory _SlotItem.fromJson(Map<String, dynamic> j) => _SlotItem(
-        timeSlotId: (j['time_slot_id'] as num).toInt(),
-        slotId:     (j['slot_id']     as num).toInt(),
-        label:      j['label']        as String? ?? '',
-        remaining:  (j['remaining']   as num?)?.toInt() ?? 0,
+        timeSlotId: j['timeSlotId'] as int,
+        slotId:     j['slotId']     as int,
+        label:      j['label']      as String? ?? '',
+        startTime:  j['startTime']  as String? ?? '',
+        endTime:    j['endTime']    as String? ?? '',
+        remaining:  j['remaining']  as int? ?? 0,
       );
 }
+
+// ── Screen ─────────────────────────────────────────────────────────────────────
 
 class SlotSelectionScreen extends StatefulWidget {
   final MemberModel     member;
@@ -57,10 +78,14 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
   bool            _loadingSlots = false;
   String          _slotError    = '';
 
+  // ── Date helpers ───────────────────────────────────────────────────────────
+
   String _formatDate(DateTime d) {
-    const months = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const days   = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const months = [
+      '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
   }
 
@@ -73,12 +98,14 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
     return d.year == now.year && d.month == now.month && d.day == now.day;
   }
 
+  // ── Date picker ────────────────────────────────────────────────────────────
+
   Future<void> _pickDate() async {
     final now    = DateTime.now();
     final picked = await showDatePicker(
       context:     context,
       initialDate: _selectedDate ?? now,
-      firstDate:   now,
+      firstDate:   now,                              // today allowed
       lastDate:    now.add(const Duration(days: 30)),
       helpText:    'SELECT COLLECTION DATE',
       builder: (ctx, child) => Theme(
@@ -104,6 +131,8 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
     }
   }
 
+  // ── Load slots from API ────────────────────────────────────────────────────
+
   Future<void> _loadSlots(DateTime date) async {
     setState(() {
       _loadingSlots = true;
@@ -111,11 +140,11 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
     });
 
     try {
-      final uri = Uri.parse('${ApiService.baseUrl}/api/slots')
-          .replace(queryParameters: {
-        'branch_id': widget.branch.id,
-        'date':      _toApiDate(date),
-        'slot_type': 'home_collection',
+      final uri = Uri.parse(
+        '${AppConstants.serverUrl}/api/branches/slots',
+      ).replace(queryParameters: {
+        'branchId': widget.branch.id,
+        'date':     _toApiDate(date),
       });
 
       final res  = await http.get(uri).timeout(const Duration(seconds: 10));
@@ -149,6 +178,8 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
     }
   }
 
+  // ── Proceed to checkout ────────────────────────────────────────────────────
+
   void _proceed() {
     if (_selectedDate == null || _selectedSlot == null) return;
 
@@ -156,25 +187,28 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
       context,
       MaterialPageRoute(
         builder: (_) => CheckoutScreen(
-          member:          widget.member,
-          cart:            widget.cart,
-          mode:            'Home Collection',
-          patientId:       widget.patientId,
-          patientLat:      widget.patientLat,
-          patientLng:      widget.patientLng,
-          branch:          widget.branch,
+          member:     widget.member,
+          cart:       widget.cart,
+          mode:       'Home Collection',
+          patientId:  widget.patientId,
+          patientLat: widget.patientLat,
+          patientLng: widget.patientLng,
+          branch:     widget.branch,
+          // Pass pre-selected date + slot so CheckoutScreen skips its picker
           preSelectedDate: _selectedDate,
-          preSelectedSlot: TimeSlot(
-            id:    _selectedSlot!.timeSlotId.toString(),
-            label: _selectedSlot!.label,
-            time:  _selectedSlot!.label,
-          ),
+          preSelectedSlotLabel: _selectedSlot!.label,
+          // New branch booking fields forwarded to POST /api/bookings
+          branchId:           int.parse(widget.branch.id),
+          collectionDate:     _toApiDate(_selectedDate!),
+          timeSlotId:         _selectedSlot!.timeSlotId,
         ),
       ),
     );
   }
 
   bool get _canProceed => _selectedDate != null && _selectedSlot != null;
+
+  // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -184,9 +218,9 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
       child: Scaffold(
         backgroundColor: AppColors.background,
         appBar: AppBar(
-          backgroundColor:  Colors.white,
-          foregroundColor:  AppColors.textPrimary,
-          elevation:        0,
+          backgroundColor: Colors.white,
+          foregroundColor: AppColors.textPrimary,
+          elevation: 0,
           surfaceTintColor: Colors.transparent,
           title: const Text(
             'Select Date & Slot',
@@ -206,14 +240,14 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
 
-                    // Branch chip
+                    // ── Branch summary chip ──────────────────────────────
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 14, vertical: 10),
                       decoration: BoxDecoration(
-                        color:        AppColors.brandGreenSurface,
+                        color: AppColors.brandGreenSurface,
                         borderRadius: BorderRadius.circular(12),
-                        border:       Border.all(color: AppColors.brandGreenLight),
+                        border: Border.all(color: AppColors.brandGreenLight),
                       ),
                       child: Row(children: [
                         const Icon(Icons.local_hospital_rounded,
@@ -233,7 +267,7 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
 
                     const SizedBox(height: 20),
 
-                    // Date card
+                    // ── Date card ────────────────────────────────────────
                     _SectionCard(
                       title: 'Collection Date',
                       icon:  Icons.calendar_today_outlined,
@@ -293,6 +327,7 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
                             ),
                           ),
 
+                          // Same-day notice
                           if (_selectedDate != null && _isToday(_selectedDate!))
                             Padding(
                               padding: const EdgeInsets.only(top: 10),
@@ -310,7 +345,7 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
 
                     const SizedBox(height: 16),
 
-                    // Slots card
+                    // ── Slots card ───────────────────────────────────────
                     _SectionCard(
                       title: 'Time Slot',
                       icon:  Icons.schedule_outlined,
@@ -321,12 +356,12 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
               ),
             ),
 
-            // Bottom bar
+            // ── Bottom bar ───────────────────────────────────────────────
             Container(
               padding: EdgeInsets.fromLTRB(
                   16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
               decoration: const BoxDecoration(
-                color:  Colors.white,
+                color: Colors.white,
                 border: Border(top: BorderSide(color: AppColors.divider)),
               ),
               child: Column(
@@ -345,11 +380,11 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
                       ),
                     ),
                   SizedBox(
-                    width:  double.infinity,
+                    width: double.infinity,
                     height: 52,
                     child: ElevatedButton.icon(
                       onPressed: _canProceed ? _proceed : null,
-                      icon:  const Icon(Icons.arrow_forward_rounded, size: 18),
+                      icon: const Icon(Icons.arrow_forward_rounded, size: 18),
                       label: const Text(
                         'Confirm & Proceed',
                         style: TextStyle(
@@ -374,6 +409,8 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
       ),
     );
   }
+
+  // ── Slots body (loading / error / grid) ───────────────────────────────────
 
   Widget _buildSlotsBody() {
     if (_selectedDate == null) {
@@ -414,12 +451,17 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
           onTap: () => setState(() => _selectedSlot = slot),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            padding: const EdgeInsets.symmetric(
+                horizontal: 16, vertical: 10),
             decoration: BoxDecoration(
-              color: isSelected ? AppColors.brandGreen : Colors.white,
+              color: isSelected
+                  ? AppColors.brandGreen
+                  : Colors.white,
               borderRadius: BorderRadius.circular(10),
               border: Border.all(
-                color: isSelected ? AppColors.brandGreen : AppColors.divider,
+                color: isSelected
+                    ? AppColors.brandGreen
+                    : AppColors.divider,
                 width: isSelected ? 1.5 : 1,
               ),
             ),
@@ -431,14 +473,18 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
                   style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
-                      color: isSelected ? Colors.white : AppColors.textPrimary),
+                      color: isSelected
+                          ? Colors.white
+                          : AppColors.textPrimary),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   '${slot.remaining} left',
                   style: TextStyle(
                       fontSize: 10,
-                      color: isSelected ? Colors.white70 : AppColors.textHint),
+                      color: isSelected
+                          ? Colors.white70
+                          : AppColors.textHint),
                 ),
               ],
             ),
@@ -452,18 +498,22 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
 // ── Shared widgets ─────────────────────────────────────────────────────────────
 
 class _SectionCard extends StatelessWidget {
-  final String   title;
+  final String  title;
   final IconData icon;
-  final Widget   child;
-  const _SectionCard({required this.title, required this.icon, required this.child});
+  final Widget  child;
+  const _SectionCard({
+    required this.title,
+    required this.icon,
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) => Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color:        Colors.white,
+          color: Colors.white,
           borderRadius: BorderRadius.circular(14),
-          border:       Border.all(color: AppColors.divider),
+          border: Border.all(color: AppColors.divider),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -489,15 +539,20 @@ class _InfoChip extends StatelessWidget {
   final Color    color;
   final Color    bg;
   final String   text;
-  const _InfoChip({required this.icon, required this.color, required this.bg, required this.text});
+  const _InfoChip({
+    required this.icon,
+    required this.color,
+    required this.bg,
+    required this.text,
+  });
 
   @override
   Widget build(BuildContext context) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color:        bg,
+          color: bg,
           borderRadius: BorderRadius.circular(10),
-          border:       Border.all(color: color.withValues(alpha: 0.3)),
+          border: Border.all(color: color.withValues(alpha: 0.3)),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -506,7 +561,8 @@ class _InfoChip extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(text,
-                  style: TextStyle(fontSize: 12, color: color, height: 1.4)),
+                  style: TextStyle(
+                      fontSize: 12, color: color, height: 1.4)),
             ),
           ],
         ),

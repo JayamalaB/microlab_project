@@ -4,15 +4,20 @@ const { DataTypes } = require('sequelize');
 const sequelize = require('./sequelize');
 
 module.exports = sequelize.define('TechnicianCollectionBooking', {
-  collection_booking_id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  collection_id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
   booking_id:            { type: DataTypes.INTEGER, allowNull: false, unique: true },
   technician_id:         { type: DataTypes.INTEGER, allowNull: false },
   technician_name:       DataTypes.STRING(150),
   slot_id:               DataTypes.INTEGER,
   patient_id:            DataTypes.INTEGER,
   collection_date:       DataTypes.DATEONLY,
+  // ✅ FIXED: Added 'all_collected' to match DB schema consistency
   collection_status: {
-    type: DataTypes.ENUM('assigned', 'en_route', 'arrived', 'collected', 'completed', 'cancelled'),
+    type: DataTypes.ENUM(
+      'assigned', 'en_route', 'arrived',
+      'collection_started', 'sample_collected', 'otp_verified', 'handed_to_lab',
+      'collected', 'completed', 'all_collected', 'cancelled'
+    ),
     defaultValue: 'assigned',
   },
   assigned_at:           DataTypes.DATE,
@@ -28,4 +33,4 @@ module.exports = sequelize.define('TechnicianCollectionBooking', {
   notes:                 DataTypes.TEXT,
   created_at:            DataTypes.DATE,
   updated_at:            DataTypes.DATE,
-}, { tableName: 'technician_collection_booking', timestamps: false });
+}, { tableName: 'ip_technician_collection', timestamps: false });

@@ -160,12 +160,16 @@ class TestModel {
 // ─── Branch Model ─────────────────────────────────────────────────────────────
 
 class BranchModel {
-  final String id;
-  final String name;
-  final String address;
+  final String  id;
+  final String  name;
+  final String  address;
   final String? location;
   final String? pincode;
   final String? mobileNo;
+  final String? telephoneNo;
+  final String? email;
+  final double? lat;
+  final double? lng;
 
   BranchModel({
     required this.id,
@@ -174,15 +178,23 @@ class BranchModel {
     this.location,
     this.pincode,
     this.mobileNo,
+    this.telephoneNo,
+    this.email,
+    this.lat,
+    this.lng,
   });
 
   factory BranchModel.fromJson(Map<String, dynamic> j) => BranchModel(
-        id:       (j['branchId'] ?? j['id'])?.toString() ?? '',
-        name:     j['name']     as String? ?? '',
-        address:  j['address']  as String? ?? '',
-        location: j['location'] as String?,
-        pincode:  j['pincode']?.toString(),
-        mobileNo: j['mobileNo'] as String?,
+        id:          j['branchId']?.toString() ?? '',
+        name:        j['name']        as String? ?? '',
+        address:     j['address']     as String? ?? '',
+        location:    j['location']    as String?,
+        pincode:     j['pincode']     as String?,
+        mobileNo:    j['mobileNo']    as String?,
+        telephoneNo: j['telephoneNo'] as String?,
+        email:       j['email']       as String?,
+        lat:         (j['latitude']  as num?)?.toDouble(),
+        lng:         (j['longitude'] as num?)?.toDouble(),
       );
 }
 
@@ -263,6 +275,19 @@ class TimeSlot {
   final String label;
   final String time;
   const TimeSlot({required this.id, required this.label, required this.time});
+}
+
+// ─── Time Interval (appointment time within a slot) ───────────────────────────
+
+class TimeInterval {
+  final String time;        // "06:30" — sent to server
+  final String label;       // "6:30 AM" — displayed to patient
+  final bool   isAvailable;
+  const TimeInterval({
+    required this.time,
+    required this.label,
+    this.isAvailable = true,
+  });
 }
 
 // ─── Technician Model ─────────────────────────────────────────────────────────
