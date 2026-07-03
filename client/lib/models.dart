@@ -14,6 +14,9 @@ class MemberModel {
   final String? relation;
   final String? healthCondition;
   final Uint8List? photoBytes;
+  final String? photoUrl;
+  final bool isReadOnly;
+  final String? patientIdRef;
 
   MemberModel({
     required this.id,
@@ -27,6 +30,9 @@ class MemberModel {
     this.relation,
     this.healthCondition,
     this.photoBytes,
+    this.photoUrl,
+    this.isReadOnly = false,
+    this.patientIdRef,
   });
 
   int? get age {
@@ -34,8 +40,57 @@ class MemberModel {
     final today = DateTime.now();
     int a = today.year - dob!.year;
     if (today.month < dob!.month ||
-        (today.month == dob!.month && today.day < dob!.day)) a--;
+        (today.month == dob!.month && today.day < dob!.day)) { a--; }
     return a;
+  }
+}
+
+// ─── Patient Model ────────────────────────────────────────────────────────────
+
+class PatientModel {
+  final int patientId;
+  final String? patientIdRef;
+  final String name;
+  final String gender;
+  final String location;
+  final String address;
+  final String? email;
+  final String? dateOfBirth;
+  final String? age;
+  final String? relation;
+  final String? healthCondition;
+  final String? photo;
+
+  const PatientModel({
+    required this.patientId,
+    this.patientIdRef,
+    required this.name,
+    required this.gender,
+    required this.location,
+    required this.address,
+    this.email,
+    this.dateOfBirth,
+    this.age,
+    this.relation,
+    this.healthCondition,
+    this.photo,
+  });
+
+  factory PatientModel.fromJson(Map<String, dynamic> j) {
+    return PatientModel(
+      patientId:       (j['patient_id'] as num).toInt(),
+      patientIdRef:    j['patient_id_ref']?.toString(),
+      name:            j['name'].toString(),
+      gender:          j['gender'].toString(),
+      location:        j['location'].toString(),
+      address:         j['address'].toString(),
+      email:           j['email']?.toString(),
+      dateOfBirth:     j['date_of_birth']?.toString(),
+      age:             j['age']?.toString(),
+      relation:        j['relation']?.toString(),
+      healthCondition: j['health_condition']?.toString(),
+      photo:           j['photo']?.toString(),
+    );
   }
 }
 
@@ -94,7 +149,7 @@ class TestModel {
       originalPrice: original,
       offerPercent: offerPct,
       finalPrice: finalP,
-      docRequired: (j['doc_req'] ?? 'no') == 'yes',
+      docRequired: j['doc_req'] == 1 || j['doc_req'] == true || j['doc_req'] == 'yes',
       startDate: j['start_date']?.toString(),
       endDate: j['end_date']?.toString(),
       reportStatus: j['report_sts'] ?? '',
@@ -110,19 +165,32 @@ class BranchModel {
   final String address;
   final String? location;
   final String? pincode;
+  final String? mobileNo;
+
   BranchModel({
     required this.id,
     required this.name,
     required this.address,
     this.location,
     this.pincode,
+    this.mobileNo,
   });
+
+  factory BranchModel.fromJson(Map<String, dynamic> j) => BranchModel(
+        id:       (j['branchId'] ?? j['id'])?.toString() ?? '',
+        name:     j['name']     as String? ?? '',
+        address:  j['address']  as String? ?? '',
+        location: j['location'] as String?,
+        pincode:  j['pincode']?.toString(),
+        mobileNo: j['mobileNo'] as String?,
+      );
 }
 
 // ─── Booking Model ────────────────────────────────────────────────────────────
 
 class BookingModel {
   final String id;
+  final int? bookingIdNum;          // numeric DB booking_id for API calls
   final MemberModel member;
   final List<TestModel> tests;
   final String mode;
@@ -137,20 +205,25 @@ class BookingModel {
   final double testsTotal;
   final double grandTotal;
   final double paidAmount;
+  final double amountDue;
+  final String? paymentStatus;      // 'paid' | 'pending' | null
   final String status;
   final DateTime createdAt;
   final bool docRequired;
   final bool docVerified;
+  final String? prescriptionStatus; // 'pending_review' | 'verified' | null
+  final List<String> prescriptionImages;
   final bool isVip;
   final TechnicianModel? selectedTechnician;
-  final String? reportUrl;        // download link from API
-  final DateTime? reportReadyDate; // when report became available
-  final int? rating;               // 1-5 stars; null = not yet rated
+  final String? reportUrl;
+  final DateTime? reportReadyDate;
+  final int? rating;
   final String? feedbackComment;
   final DateTime? feedbackDate;
 
   BookingModel({
     required this.id,
+    this.bookingIdNum,
     required this.member,
     required this.tests,
     required this.mode,
@@ -165,10 +238,14 @@ class BookingModel {
     required this.testsTotal,
     required this.grandTotal,
     required this.paidAmount,
+    this.amountDue = 0,
+    this.paymentStatus,
     required this.status,
     required this.createdAt,
     required this.docRequired,
     required this.docVerified,
+    this.prescriptionStatus,
+    this.prescriptionImages = const [],
     this.isVip = false,
     this.selectedTechnician,
     this.reportUrl,

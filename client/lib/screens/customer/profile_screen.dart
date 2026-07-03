@@ -97,7 +97,7 @@ class ProfileScreen extends StatelessWidget {
                     fontWeight: FontWeight.w700,
                     color: AppColors.textPrimary)),
             const Spacer(),
-            if (self != null)
+            if (self != null && !self.isReadOnly)
               _EditButton(onTap: () => onEditMember(self)),
           ],
         ),
@@ -241,11 +241,11 @@ class ProfileScreen extends StatelessWidget {
                 Icon(Icons.people_outline_rounded,
                     size: 32, color: AppColors.textHint),
                 SizedBox(height: 8),
-                Text('No patients added yet',
+                Text('No customers added yet',
                     style: TextStyle(
                         fontSize: 14, color: AppColors.textSecondary)),
                 SizedBox(height: 2),
-                Text('Tap "Add Patient" to add family members',
+                Text('Tap "Add" to add family members',
                     style: TextStyle(
                         fontSize: 12, color: AppColors.textHint)),
               ],
@@ -254,7 +254,7 @@ class ProfileScreen extends StatelessWidget {
 
         ...patients.map((m) => _PatientCard(
               member: m,
-              onEdit: () => onEditMember(m),
+              onEdit: m.isReadOnly ? null : () => onEditMember(m),
             )),
       ],
     );
@@ -314,6 +314,12 @@ class _Avatar extends StatelessWidget {
       return CircleAvatar(
         radius: 30,
         backgroundImage: MemoryImage(member!.photoBytes!),
+      );
+    }
+    if (member?.photoUrl != null && member!.photoUrl!.isNotEmpty) {
+      return CircleAvatar(
+        radius: 30,
+        backgroundImage: NetworkImage(member!.photoUrl!),
       );
     }
     final initials = member?.name.isNotEmpty == true
@@ -403,8 +409,8 @@ class _HDivider extends StatelessWidget {
 
 class _PatientCard extends StatelessWidget {
   final MemberModel member;
-  final VoidCallback onEdit;
-  const _PatientCard({required this.member, required this.onEdit});
+  final VoidCallback? onEdit;
+  const _PatientCard({required this.member, this.onEdit});
 
   @override
   Widget build(BuildContext context) {
@@ -432,14 +438,23 @@ class _PatientCard extends StatelessWidget {
             margin: const EdgeInsets.only(right: 12, top: 2),
             decoration: const BoxDecoration(
                 color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-            child: Center(
-              child: Text(
-                member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
-                style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.brandGreen),
-              ),
+            child: ClipOval(
+              child: member.photoBytes != null
+                  ? Image.memory(member.photoBytes!, fit: BoxFit.cover)
+                  : member.photoUrl != null && member.photoUrl!.isNotEmpty
+                      ? Image.network(member.photoUrl!, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Center(
+                            child: Text(
+                              member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
+                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
+                            ),
+                          ))
+                      : Center(
+                          child: Text(
+                            member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
+                          ),
+                        ),
             ),
           ),
           Expanded(
@@ -492,20 +507,20 @@ class _PatientCard extends StatelessWidget {
               ],
             ),
           ),
-          // Edit icon
-          GestureDetector(
-            onTap: onEdit,
-            child: Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: AppColors.brandGreenSurface,
-                borderRadius: BorderRadius.circular(8),
+          if (onEdit != null)
+            GestureDetector(
+              onTap: onEdit,
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: AppColors.brandGreenSurface,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.edit_outlined,
+                    size: 16, color: AppColors.brandGreen),
               ),
-              child: const Icon(Icons.edit_outlined,
-                  size: 16, color: AppColors.brandGreen),
             ),
-          ),
         ],
       ),
     );

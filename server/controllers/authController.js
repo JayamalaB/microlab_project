@@ -54,6 +54,9 @@ exports.testSms = async (req, res) => {
 };
 
 exports.sendOtp = async (req, res) => {
+  const t0 = Date.now();
+  const elapsed = () => `${Date.now() - t0}ms`;
+  let step = 'init';
   try {
     const { mobile, role = 'customer' } = req.body;
 
@@ -62,60 +65,90 @@ exports.sendOtp = async (req, res) => {
     }
 
     const clientType = role === 'technician' ? 'technician' : 'customer';
-    const dbUserType = role === 'technician' ? 'Technician' : 'Patients';
-    const t0 = Date.now();
-    const elapsed = () => `${Date.now() - t0}ms`;
+    const dbUserType = role === 'technician' ? 'technician' : 'patient_user';
 
-    // Check client server FIRST — blocks OTP for unregistered technicians
-    writeLog(`[sendOtp] ${mobile} (${clientType}) — calling client server`);
-    const clientRes = await checkClientUser(mobile, clientType);
-    writeLog(`[sendOtp] client server done — ${elapsed()} | result: ${clientRes ? clientRes.msg : 'null (timeout/error)'}`);
+    step = 'checkClientUser';
+    writeLog(`[sendOtp] ${mobile} (${clientType})`);
+    let clientRes = null;
+    try {
+      clientRes = await checkClientUser(mobile, clientType);
+    } catch (clientErr) {
+      writeLog(`[sendOtp] checkClientUser threw: ${clientErr.message}`);
+    }
+    writeLog(`[sendOtp] client server done — ${elapsed()} | result: ${clientRes ? clientRes.msg : 'null'}`);
 
     if (role === 'technician' && (!clientRes || clientRes.status !== 'success')) {
-      return res.status(403).json({
-        success: false,
-        message: 'Mobile not registered as technician',
-      });
+      return res.status(403).json({ success: false, message: 'Mobile not registered as technician' });
     }
 
     const otp = generateOtp();
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
-    writeLog(`[sendOtp] querying DB — ${elapsed()}`);
+    step = 'select_user';
+    writeLog(`[sendOtp] SELECT ip_users — ${elapsed()}`);
     const [existing] = await db.query(
-      'SELECT user_id FROM users WHERE mobile_no = ?',
+      'SELECT user_id, client_id FROM ip_users WHERE user_mobile_no = ?',
       [mobile]
     );
-    writeLog(`[sendOtp] DB select done — ${elapsed()}`);
+    writeLog(`[sendOtp] select done — found=${existing.length} — ${elapsed()}`);
 
     if (existing.length === 0) {
-      await db.query(
-        `INSERT INTO users (username, email, mobile_no, last_otp, otp_expiry, user_type, access_type)
-         VALUES (?, ?, ?, ?, ?, ?, 'mobile_app')`,
-        [`user_${mobile}`, `${mobile}@microlab.app`, mobile, otp, expiresAt, dbUserType]
+      step = 'insert_user';
+      writeLog(`[sendOtp] new user — inserting ip_users — ${elapsed()}`);
+      const [insertResult] = await db.query(
+        `INSERT INTO ip_users
+           (user_name, user_email, user_mobile_no, user_otp, user_otp_expiry,
+            user_microlab_type, access_type,
+            user_date_created, user_date_modified, user_password, user_type, user_all_clients, role_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'mobile_app', NOW(), NOW(), '', 0, 0, 0)`,
+        [`user_${mobile}`, null, mobile, otp, expiresAt, dbUserType]
       );
-      writeLog(`[sendOtp] DB insert done — ${elapsed()}`);
-    } else {
+      const newUserId = insertResult.insertId;
+      writeLog(`[sendOtp] ip_users inserted — user_id=${newUserId} — ${elapsed()}`);
+
+      step = 'insert_client';
+      const [clientResult] = await db.query(
+        `INSERT INTO ip_clients
+           (client_name, client_mobile_no, client_reg_source, client_date_created, client_date_modified)
+         VALUES (?, ?, 'mobile_app', NOW(), NOW())`,
+        [`user_${mobile}`, mobile]
+      );
+      const newClientId = clientResult.insertId;
+      writeLog(`[sendOtp] ip_clients inserted — client_id=${newClientId} — ${elapsed()}`);
+
+      step = 'link_client';
       await db.query(
-        'UPDATE users SET last_otp = ?, otp_expiry = ?, user_type = ? WHERE mobile_no = ?',
+        'UPDATE ip_users SET client_id = ? WHERE user_id = ?',
+        [newClientId, newUserId]
+      );
+      writeLog(`[sendOtp] client_id linked — ${elapsed()}`);
+    } else {
+      step = 'update_otp';
+      await db.query(
+        `UPDATE ip_users
+         SET user_otp = ?, user_otp_expiry = ?, user_microlab_type = ?, user_date_modified = NOW()
+         WHERE user_mobile_no = ?`,
         [otp, expiresAt, dbUserType, mobile]
       );
-      writeLog(`[sendOtp] DB update done — ${elapsed()}`);
+      writeLog(`[sendOtp] otp updated — ${elapsed()}`);
     }
 
+    step = 'sms';
     try {
       writeLog(`[sendOtp] calling SMS gateway — ${elapsed()}`);
       const smsResponse = await sendSms(mobile, otp);
       writeLog(`[sendOtp] SMS done — ${elapsed()} | response: ${smsResponse}`);
     } catch (smsErr) {
-      writeLog(`[sendOtp] SMS failed — ${elapsed()} | ${smsErr.message}`);
+      writeLog(`[sendOtp] SMS failed (non-fatal) — ${elapsed()} | ${smsErr.message}`);
     }
 
-    writeLog(`[sendOtp] total — ${elapsed()}`);
+    writeLog(`[sendOtp] done — total ${elapsed()}`);
     res.json({ success: true, message: `OTP sent to ${mobile}` });
   } catch (err) {
+    const errDetail = `step=${step} | ${err.message} | code=${err.code} | sqlState=${err.sqlState} | sql=${err.sql}`;
+    writeLog(`[sendOtp] ERROR — ${errDetail}`);
     console.error('sendOtp error:', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error', debug: errDetail });
   }
 };
 
@@ -128,8 +161,9 @@ exports.verifyOtp = async (req, res) => {
     }
 
     const [rows] = await db.query(
-      `SELECT * FROM users
-       WHERE mobile_no = ? AND last_otp = ? AND otp_expiry > NOW() AND is_active = 1`,
+      `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
+       FROM ip_users
+       WHERE user_mobile_no = ? AND user_otp = ? AND user_otp_expiry > NOW() AND user_active = 1`,
       [mobile, otp]
     );
 
@@ -140,25 +174,19 @@ exports.verifyOtp = async (req, res) => {
     const user = rows[0];
     const sessionId = crypto.randomBytes(32).toString('hex');
     const token = jwt.sign(
-      { user_id: user.user_id, mobile, user_type: user.user_type },
+      { user_id: user.user_id, client_id: user.client_id, mobile, user_type: user.user_microlab_type },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
     const tokenExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     await db.query(
-      `UPDATE users
-       SET last_otp = NULL, otp_expiry = NULL,
-           auth_token = ?, token_expiry = ?,
-           session_id = ?, is_logged_in = 1, last_active_at = NOW()
+      `UPDATE ip_users
+       SET user_otp = NULL, user_otp_expiry = NULL,
+           user_auth_token = ?, user_token_expiry = ?,
+           session_id = ?, is_logged_in = 1, user_last_active_at = NOW(), user_date_modified = NOW()
        WHERE user_id = ?`,
       [token, tokenExpiry, sessionId, user.user_id]
-    );
-
-    await db.query(
-      `INSERT INTO user_sessions (user_id, session_id, auth_token, token_expiry, access_type, is_logged_in, last_active_at)
-       VALUES (?, ?, ?, ?, 'mobile_app', 1, NOW())`,
-      [user.user_id, sessionId, token, tokenExpiry]
     );
 
     res.json({
@@ -167,16 +195,19 @@ exports.verifyOtp = async (req, res) => {
       data: {
         token,
         user: {
-          user_id: user.user_id,
-          mobile: user.mobile_no,
-          name: user.username,
-          user_type: user.user_type,
+          user_id:   user.user_id,
+          client_id: user.client_id,
+          mobile:    user.user_mobile_no,
+          name:      user.user_name,
+          user_type: user.user_microlab_type,
         },
       },
     });
   } catch (err) {
+    const errDetail = `${err.message} | code=${err.code} | sql=${err.sql}`;
+    writeLog(`[verifyOtp] ERROR — ${errDetail}`);
     console.error('verifyOtp error:', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error', debug: errDetail });
   }
 };
 
@@ -185,17 +216,10 @@ exports.logout = async (req, res) => {
     const { user_id } = req.user;
 
     await db.query(
-      `UPDATE users
-       SET auth_token = NULL, token_expiry = NULL,
-           session_id = NULL, is_logged_in = 0
+      `UPDATE ip_users
+       SET user_auth_token = NULL, user_token_expiry = NULL,
+           session_id = NULL, is_logged_in = 0, user_date_modified = NOW()
        WHERE user_id = ?`,
-      [user_id]
-    );
-
-    await db.query(
-      `UPDATE user_sessions
-       SET is_logged_in = 0, logged_out_at = NOW()
-       WHERE user_id = ? AND is_logged_in = 1`,
       [user_id]
     );
 

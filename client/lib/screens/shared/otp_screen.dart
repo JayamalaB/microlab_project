@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/models.dart';
 import 'package:sms_autofill/sms_autofill.dart';
 import '../customer/customer_home_screen.dart';
 import '../technician/technician_dashboard_screen.dart';
@@ -130,13 +131,17 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         final token = result['data']?['token'];
         if (token != null) await ApiService.saveToken(token);
         await ApiService.saveUserInfo(widget.mobile, widget.userRole);
+        final rawPatients = result['data']?['patients'] as List<dynamic>? ?? [];
+        final patients = rawPatients
+            .map((p) => PatientModel.fromJson(p as Map<String, dynamic>))
+            .toList();
         setState(() => _isVerifying = false);
         const technicianIds = {'8056535850': 1, '7339535472': 2};
         final int userId = widget.userRole == 'technician'
             ? (technicianIds[widget.mobile] ?? 1)
             : 1;
         _connectSocket(userId);
-        _showSuccess();
+        _showSuccess(patients);
       } else {
         setState(() {
           _isVerifying = false;
@@ -167,7 +172,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
     );
   }
 
-  void _showSuccess() {
+  void _showSuccess(List<PatientModel> patients) {
     if (widget.userRole == 'customer') {
       Navigator.pushAndRemoveUntil(
         context,
@@ -175,6 +180,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
           builder: (_) => CustomerHomeScreen(
             mobile: widget.mobile,
             isVip: false,
+            patients: patients,
           ),
         ),
         (route) => false,

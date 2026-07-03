@@ -58,10 +58,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   double? _lng;
   BranchModel? _selectedBranch;
   bool _loadingBranches = false;
-  int get _patientId {
-    final id = SocketService.instance.userId;
-    return id > 0 ? id : 1;
-  }
+  int get _patientId => int.parse(widget.member.id);
 
   // ── Cart ──────────────────────────────────────────────────
   final List<TestModel> _cart = [];
@@ -179,27 +176,89 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         onRemove: (t) => setState(() => _cart.removeWhere((x) => x.id == t.id)),
         onCheckout: () {
           Navigator.pop(context);
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => CheckoutScreen(
-                member: widget.member,
-                cart: List.from(_cart),
-                mode: _mode,
-                address: _address,
-                pincode: _pincode,
-                city: _city,
-                branch: _selectedBranch,
-                isVip: widget.isVip,
-                patientId: _patientId,
-                patientLat: _lat,
-                patientLng: _lng,
+          if (_mode == 'Home Collection') {
+            _lookupBranchAndCheckout();
+          } else {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => CheckoutScreen(
+                  member:   widget.member,
+                  cart:     List.from(_cart),
+                  mode:     _mode,
+                  address:  _address,
+                  pincode:  _pincode,
+                  city:     _city,
+                  branch:   _selectedBranch,
+                  isVip:    widget.isVip,
+                  patientId: _patientId,
+                  patientLat: _lat,
+                  patientLng: _lng,
+                ),
               ),
-            ),
-          ).then((_) => setState(() => _cart.clear()));
+            ).then((_) => setState(() => _cart.clear()));
+          }
         },
       ),
     );
+  }
+
+  Future<void> _lookupBranchAndCheckout() async {
+    if (_pincode == null && _lat == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Please update your address before booking a home collection.'),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(children: [
+          CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+          SizedBox(width: 16),
+          Text('Finding nearest branch…'),
+        ]),
+      ),
+    );
+
+    final branch = await ApiService.lookupBranch(
+      pincode: _pincode,
+      place:   _city,
+      lat:     _lat,
+      lng:     _lng,
+    );
+
+    if (!mounted) return;
+    Navigator.pop(context); // close loading dialog
+
+    if (branch == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('No branch found for your area. Please contact support.'),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CheckoutScreen(
+          member:     widget.member,
+          cart:       List.from(_cart),
+          mode:       'Home Collection',
+          address:    _address,
+          pincode:    _pincode,
+          city:       _city,
+          patientId:  _patientId,
+          patientLat: _lat,
+          patientLng: _lng,
+          branch:     branch,
+        ),
+      ),
+    ).then((_) => setState(() => _cart.clear()));
   }
 
   void _showTestDetail(TestModel test) {

@@ -1,13 +1,16 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
-import 'checkout_screen.dart';
+import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/razorpay_service.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
 
 class MyBookingsScreen extends StatefulWidget {
   final BookingModel? initialBooking;
   final bool embedded;
-  const MyBookingsScreen({super.key, this.initialBooking, this.embedded = false});
+  final ValueNotifier<int>? refreshTrigger;
+  const MyBookingsScreen({super.key, this.initialBooking, this.embedded = false, this.refreshTrigger});
 
   @override
   State<MyBookingsScreen> createState() => _MyBookingsScreenState();
@@ -16,9 +19,9 @@ class MyBookingsScreen extends StatefulWidget {
 class _MyBookingsScreenState extends State<MyBookingsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
-
-  // Mock bookings list — replace with GET /api/bookings
-  late List<BookingModel> _bookings;
+  List<BookingModel> _bookings = [];
+  bool _isLoading = true;
+  String? _error;
 
   final List<String> _tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
 
@@ -26,80 +29,168 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: _tabs.length, vsync: this);
-    _buildMockBookings();
+    _loadBookings();
+    widget.refreshTrigger?.addListener(_loadBookings);
   }
 
-  void _buildMockBookings() {
-    // TODO: replace with GET /api/bookings
-    final sampleMember = MemberModel(
-      id: 's1', name: 'Ravi Kumar', mobile: '9876543210',
-      gender: 'Male', location: 'Chennai',
-      address: '12, Gandhi Street, T Nagar, Chennai - 600017',
-      relation: 'Self', dob: DateTime(1985, 6, 15),
-    );
-    final List<TestModel> sampleTests = [
-      TestModel.fromJson({'id': '1', 'name': 'HbA1c', 'type': 'single', 'category': 'Diabetes', 'description': '3-month average blood sugar', 'offer': 'no', 'original_price': '600', 'final_price': '540', 'doc_req': 'no', 'report_sts': '48 hrs'}),
-      TestModel.fromJson({'id': '2', 'name': 'CBC', 'type': 'single', 'category': 'General', 'description': 'Complete blood count', 'offer': 'no', 'original_price': '350', 'final_price': '350', 'doc_req': 'no', 'report_sts': '24 hrs'}),
-    ];
-
-    _bookings = [
-      // Upcoming
-      BookingModel(
-        id: 'BK00123456', member: sampleMember, tests: sampleTests,
-        mode: 'Home Collection', city: 'Chennai', pincode: '600017',
-        address: '12, Gandhi Street, T Nagar',
-        date: DateTime.now().add(const Duration(days: 2)),
-        timeSlot: '10:00 AM', paymentType: 'service_charge',
-        serviceCharge: 99, testsTotal: 890, grandTotal: 989, paidAmount: 99,
-        status: 'Technician Allocated', createdAt: DateTime.now().subtract(const Duration(hours: 3)),
-        docRequired: false, docVerified: false,
-      ),
-      BookingModel(
-        id: 'BK00123789', member: sampleMember,
-        tests: [TestModel.fromJson({'id': '5', 'name': 'Diabetes Care Package', 'type': 'package', 'category': 'Diabetes', 'description': 'HbA1c + Fasting + Insulin', 'offer': 'yes', 'original_price': '1800', 'offer_pct': '20', 'final_price': '1440', 'doc_req': 'no', 'report_sts': '48 hrs'})],
-        mode: 'Lab Test', branch: null,
-        date: DateTime.now().add(const Duration(days: 5)),
-        timeSlot: '1:00 PM', paymentType: 'full',
-        serviceCharge: 99, testsTotal: 1440, grandTotal: 1539, paidAmount: 1539,
-        status: 'In Progress', createdAt: DateTime.now().subtract(const Duration(days: 1)),
-        docRequired: false, docVerified: false,
-      ),
-      // Completed
-      BookingModel(
-        id: 'BK00122001', member: sampleMember,
-        tests: [TestModel.fromJson({'id': '4', 'name': 'Lipid Profile', 'type': 'single', 'category': 'Heart', 'description': 'Cholesterol, HDL, LDL', 'offer': 'no', 'original_price': '500', 'final_price': '500', 'doc_req': 'no', 'report_sts': '24 hrs'})],
-        mode: 'Home Collection', city: 'Chennai', pincode: '600017',
-        address: '12, Gandhi Street, T Nagar',
-        date: DateTime.now().subtract(const Duration(days: 7)),
-        timeSlot: '4:00 PM', paymentType: 'full',
-        serviceCharge: 99, testsTotal: 500, grandTotal: 599, paidAmount: 599,
-        status: 'Completed', createdAt: DateTime.now().subtract(const Duration(days: 8)),
-        docRequired: false, docVerified: false,
-        reportUrl: 'https://example.com/reports/BK00122001.pdf',
-        reportReadyDate: DateTime.now().subtract(const Duration(days: 6)),
-      ),
-    ];
-
-    // Add the real booking from checkout if provided (add at front)
-    if (widget.initialBooking != null) {
-      _bookings.insert(0, widget.initialBooking!);
+  Future<void> _loadBookings() async {
+    setState(() { _isLoading = true; _error = null; });
+    try {
+      final raw = await ApiService.getMyBookings();
+      debugPrint('[MyBookings] raw rows: ${raw.length}');
+      final mapped = <BookingModel>[];
+      for (final row in raw) {
+        try {
+          mapped.add(_fromApi(row));
+        } catch (e) {
+          debugPrint('[MyBookings] _fromApi failed for row: $row\nError: $e');
+        }
+      }
+      if (widget.initialBooking != null &&
+          !mapped.any((b) => b.id == widget.initialBooking!.id)) {
+        mapped.insert(0, widget.initialBooking!);
+      }
+      debugPrint('[MyBookings] mapped ${mapped.length} booking(s)');
+      setState(() { _bookings = mapped; _isLoading = false; });
+    } catch (e, st) {
+      debugPrint('[MyBookings] _loadBookings error: $e\n$st');
+      setState(() { _error = 'Could not load bookings'; _isLoading = false; });
     }
+  }
+
+  static String _mapStatus(String raw) {
+    switch (raw) {
+      case 'confirmed':  return 'Confirmed';
+      case 'collected':  return 'Sample Collected';
+      case 'completed':  return 'Completed';
+      case 'cancelled':  return 'Cancelled';
+      default:           return 'Pending';
+    }
+  }
+
+  static List<String> _parsePresImages(dynamic raw) {
+    if (raw == null) return [];
+    try {
+      final list = jsonDecode(raw as String) as List;
+      return list.map((e) => e.toString()).toList();
+    } catch (_) { return []; }
+  }
+
+  static BookingModel _fromApi(Map<String, dynamic> b) {
+    // test_items format: "Name:::price:::type|||Name:::price:::type"
+    final rawItems = (b['test_items'] as String? ?? '')
+        .split('|||')
+        .where((s) => s.isNotEmpty)
+        .toList();
+    final tests = rawItems.asMap().entries.map((e) {
+      final parts = e.value.split(':::');
+      final name  = parts.isNotEmpty ? parts[0] : 'Unknown';
+      final price = parts.length > 1 ? (double.tryParse(parts[1]) ?? 0.0) : 0.0;
+      final type  = parts.length > 2 ? parts[2] : 'test';
+      return TestModel(
+        id: e.key.toString(),
+        name: name,
+        type: type == 'package' ? 'package' : 'single',
+        category: '',
+        description: '',
+        hasOffer: false,
+        originalPrice: price,
+        finalPrice: price,
+        docRequired: false,
+        reportStatus: '',
+      );
+    }).toList();
+
+    final total      = double.tryParse(b['total_amount']?.toString() ?? '') ?? 0.0;
+    final itemsTotal = double.tryParse(b['items_total']?.toString() ?? '') ?? total;
+    final amountPaid = double.tryParse(b['amount_paid']?.toString() ?? '') ?? 0.0;
+    final amountDue  = double.tryParse(b['amount_due']?.toString() ?? '') ?? (total - amountPaid).clamp(0, double.infinity);
+
+    final presImages = _parsePresImages(b['presc_image_url']);
+    final presStatus = b['prescription_status'] as String?;
+
+    final bookingType = b['booking_type'] as String? ?? 'lab_visit';
+    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Visit';
+
+    DateTime date;
+    final collDate = b['collection_date'] as String?;
+    if (collDate != null && collDate.isNotEmpty) {
+      date = DateTime.tryParse(collDate) ?? DateTime.now();
+    } else {
+      date = DateTime.tryParse(b['created_at'] as String? ?? '') ?? DateTime.now();
+    }
+
+    BranchModel? branch;
+    if (b['branch_id'] != null && b['branch_name'] != null) {
+      branch = BranchModel(
+        id: b['branch_id'].toString(),
+        name: b['branch_name'] as String,
+        address: b['branch_address'] as String? ?? '',
+        location: b['branch_location'] as String?,
+        pincode: b['branch_pincode']?.toString(),
+      );
+    }
+
+    final member = MemberModel(
+      id: b['patient_id']?.toString() ?? '0',
+      name: b['patient_name'] as String? ?? 'Patient',
+      mobile: b['patient_mobile'] as String? ?? '',
+      gender: '',
+      location: '',
+      address: '',
+    );
+
+    final slotLabel = (b['slot_label'] as String?) ??
+                      (b['slot_time_formatted'] as String?);
+
+    return BookingModel(
+      id:                  b['booking_ref'] as String? ?? b['booking_id_num'].toString(),
+      bookingIdNum:        b['booking_id_num'] != null ? (b['booking_id_num'] as num).toInt() : null,
+      member:              member,
+      tests:               tests,
+      mode:                mode,
+      address:             b['collection_address'] as String?,
+      pincode:             b['collection_pincode']?.toString(),
+      city:                b['collection_city']    as String?,
+      branch:              branch,
+      date:                date,
+      timeSlot:            slotLabel ?? 'Not specified',
+      paymentType:         amountPaid >= total && total > 0 ? 'full' : 'pay_later',
+      serviceCharge:       (total - itemsTotal).clamp(0, double.infinity),
+      testsTotal:          itemsTotal,
+      grandTotal:          total,
+      paidAmount:          amountPaid,
+      amountDue:           amountDue,
+      paymentStatus:       b['payment_status'] as String?,
+      status:              _mapStatus(b['booking_status'] as String? ?? 'pending'),
+      createdAt:           DateTime.tryParse(b['created_at'] as String? ?? '') ?? DateTime.now(),
+      docRequired:         presImages.isNotEmpty,
+      docVerified:         presStatus == 'verified',
+      prescriptionStatus:  presStatus,
+      prescriptionImages:  presImages,
+    );
   }
 
   List<BookingModel> _filtered(String tab) {
     if (tab == 'All') return _bookings;
     if (tab == 'Upcoming') {
       return _bookings.where((b) =>
+        b.status == 'Pending' || b.status == 'Confirmed' ||
         b.status == 'Technician Allocated' || b.status == 'In Progress'
       ).toList();
     }
-    if (tab == 'Completed') return _bookings.where((b) => b.status == 'Completed').toList();
+    if (tab == 'Completed') {
+      return _bookings.where((b) =>
+        b.status == 'Completed' || b.status == 'Sample Collected'
+      ).toList();
+    }
     if (tab == 'Cancelled') return _bookings.where((b) => b.status == 'Cancelled').toList();
     return _bookings;
   }
 
   @override
   void dispose() {
+    widget.refreshTrigger?.removeListener(_loadBookings);
     _tabController.dispose();
     super.dispose();
   }
@@ -138,26 +229,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
               ],
             ),
           ),
-          Expanded(
-            child: ColoredBox(
-              color: const Color(0xFFF4F6F8),
-              child: TabBarView(
-                controller: _tabController,
-                children: _tabs.map((tab) {
-                  final list = _filtered(tab);
-                  if (list.isEmpty) return _emptyState(tab);
-                  return ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-                    itemCount: list.length,
-                    itemBuilder: (_, i) => _BookingCard(
-                      booking: list[i],
-                      onTap: () => _showBookingDetail(list[i]),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
-          ),
+          Expanded(child: _buildTabBody()),
         ],
       );
     }
@@ -186,7 +258,40 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
           tabs: _tabs.map((t) => Tab(text: t)).toList(),
         ),
       ),
-      body: TabBarView(
+      body: _buildTabBody(),
+    );
+  }
+
+  Widget _buildTabBody() {
+    if (_isLoading) {
+      return const ColoredBox(
+        color: Color(0xFFF4F6F8),
+        child: Center(child: CircularProgressIndicator(color: AppColors.brandGreen)),
+      );
+    }
+    if (_error != null) {
+      return ColoredBox(
+        color: const Color(0xFFF4F6F8),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.wifi_off_rounded, size: 40, color: AppColors.textHint),
+              const SizedBox(height: 12),
+              Text(_error!, style: const TextStyle(color: AppColors.textSecondary)),
+              const SizedBox(height: 16),
+              TextButton(
+                onPressed: _loadBookings,
+                child: const Text('Retry', style: TextStyle(color: AppColors.brandGreen)),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return ColoredBox(
+      color: const Color(0xFFF4F6F8),
+      child: TabBarView(
         controller: _tabController,
         children: _tabs.map((tab) {
           final list = _filtered(tab);
@@ -241,7 +346,10 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _BookingDetailSheet(booking: booking),
+      builder: (_) => _BookingDetailSheet(
+        booking: booking,
+        onPaymentSuccess: _loadBookings,
+      ),
     );
   }
 }
@@ -301,19 +409,23 @@ class _BookingCard extends StatelessWidget {
 
   Color _statusColor(String s) {
     switch (s) {
-      case 'Completed': return AppColors.brandGreen;
-      case 'Cancelled': return const Color(0xFFD32F2F);
-      case 'In Progress': return const Color(0xFF1565C0);
-      default: return const Color(0xFFE65100);
+      case 'Completed':       return AppColors.brandGreen;
+      case 'Sample Collected': return const Color(0xFF2E7D32);
+      case 'Confirmed':       return const Color(0xFF1565C0);
+      case 'In Progress':     return const Color(0xFF1565C0);
+      case 'Cancelled':       return const Color(0xFFD32F2F);
+      default:                return const Color(0xFFE65100); // Pending
     }
   }
 
   IconData _statusIcon(String s) {
     switch (s) {
-      case 'Completed': return Icons.check_circle_outline;
-      case 'Cancelled': return Icons.cancel_outlined;
-      case 'In Progress': return Icons.directions_run_rounded;
-      default: return Icons.person_pin_outlined;
+      case 'Completed':       return Icons.check_circle_outline;
+      case 'Sample Collected': return Icons.science_outlined;
+      case 'Confirmed':       return Icons.event_available_outlined;
+      case 'In Progress':     return Icons.directions_run_rounded;
+      case 'Cancelled':       return Icons.cancel_outlined;
+      default:                return Icons.hourglass_empty_rounded; // Pending
     }
   }
 
@@ -547,14 +659,89 @@ class _BookingCard extends StatelessWidget {
 
 // ─── Booking Detail Sheet ─────────────────────────────────────────────────────
 
-class _BookingDetailSheet extends StatelessWidget {
+class _BookingDetailSheet extends StatefulWidget {
   final BookingModel booking;
-  const _BookingDetailSheet({required this.booking});
+  final VoidCallback? onPaymentSuccess;
+  const _BookingDetailSheet({required this.booking, this.onPaymentSuccess});
+
+  @override
+  State<_BookingDetailSheet> createState() => _BookingDetailSheetState();
+}
+
+class _BookingDetailSheetState extends State<_BookingDetailSheet> {
+  bool _isProcessing = false;
+
+  @override
+  void dispose() {
+    clearRazorpay();
+    super.dispose();
+  }
+
+  BookingModel get b => widget.booking;
 
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
     return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
+  }
+
+  bool get _paymentPending => b.paymentStatus != 'paid' && b.grandTotal > 0;
+  bool get _prescriptionBlocking =>
+      b.prescriptionImages.isNotEmpty && b.prescriptionStatus != 'verified';
+
+  void _triggerPayment() {
+    if (b.bookingIdNum == null) return;
+    final amount = b.amountDue > 0 ? b.amountDue : b.grandTotal;
+    setState(() => _isProcessing = true);
+
+    openRazorpay(
+      options: {
+        'key':         'rzp_test_SonqjjPurqlLci',
+        'amount':      (amount * 100).toInt(),
+        'name':        'MicroLab',
+        'description': b.tests.map((t) => t.name).join(', '),
+        'prefill': {
+          'contact': b.member.mobile,
+          'name':    b.member.name,
+        },
+        'theme': {'color': '#0A5C4A'},
+      },
+      onSuccess: (paymentId) async {
+        final ok = await ApiService.payBooking(
+          bookingId:          b.bookingIdNum!,
+          razorpayPaymentId:  paymentId,
+          amount:             amount,
+        );
+        if (!mounted) return;
+        setState(() => _isProcessing = false);
+        if (ok) {
+          Navigator.pop(context);
+          widget.onPaymentSuccess?.call();
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('Payment successful! Booking confirmed.'),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('Payment recorded but confirmation failed. Contact support.'),
+            backgroundColor: Colors.orange[700],
+            behavior: SnackBarBehavior.floating,
+          ));
+        }
+      },
+      onError: (message) {
+        if (!mounted) return;
+        setState(() => _isProcessing = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(message == 'Payment cancelled' ? 'Payment cancelled' : 'Payment failed: $message'),
+          backgroundColor: message == 'Payment cancelled' ? AppColors.textSecondary : Colors.red[700],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      },
+    );
   }
 
   @override
@@ -587,12 +774,12 @@ class _BookingDetailSheet extends StatelessWidget {
                     children: [
                       const Text('Booking Details',
                           style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                      Text(booking.id,
+                      Text(b.id,
                           style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
                     ],
                   ),
                 ),
-                BookingStatusBadge(status: booking.status),
+                BookingStatusBadge(status: b.status),
               ],
             ),
           ),
@@ -610,24 +797,29 @@ class _BookingDetailSheet extends StatelessWidget {
                   _DetailSection(
                     title: 'Appointment',
                     rows: [
-                      _DetailRow(Icons.person_outline, 'Customer', booking.member.name),
-                      _DetailRow(Icons.event_outlined, 'Date', _formatDate(booking.date)),
-                      _DetailRow(Icons.schedule_outlined, 'Time', booking.timeSlot),
+                      _DetailRow(Icons.person_outline, 'Customer', b.member.name),
+                      _DetailRow(Icons.event_outlined, 'Date', _formatDate(b.date)),
+                      _DetailRow(Icons.schedule_outlined, 'Time', b.timeSlot),
                       _DetailRow(
-                        booking.mode == 'Home Collection' ? Icons.home_outlined : Icons.local_hospital_outlined,
-                        'Mode', booking.mode,
+                        b.mode == 'Home Collection' ? Icons.home_outlined : Icons.local_hospital_outlined,
+                        'Mode', b.mode,
                       ),
-                      if (booking.isVip && booking.selectedTechnician != null)
-                        _DetailRow(Icons.medical_services_outlined,
-                            'Technician', booking.selectedTechnician!.name),
-                      if (booking.isVip)
-                        _DetailRow(Icons.star_rounded, 'Type',
-                            'VIP Customer', valueColor: const Color(0xFFFFB300)),
-                      if (booking.city != null)
-                        _DetailRow(Icons.location_on_outlined, 'Location',
-                            '${booking.city}${booking.pincode != null ? ', ${booking.pincode}' : ''}'),
-                      if (booking.branch != null)
-                        if (booking.branch != null) _DetailRow(Icons.local_hospital_outlined, 'Branch', booking.branch!.name),
+                      if (b.isVip && b.selectedTechnician != null)
+                        _DetailRow(Icons.medical_services_outlined, 'Technician', b.selectedTechnician!.name),
+                      if (b.isVip)
+                        _DetailRow(Icons.star_rounded, 'Type', 'VIP Customer', valueColor: const Color(0xFFFFB300)),
+                      if (b.mode == 'Home Collection') ...[
+                        if (b.address != null && b.address!.isNotEmpty)
+                          _DetailRow(Icons.home_outlined, 'Collection Address', b.address!),
+                        if (b.city != null || b.pincode != null)
+                          _DetailRow(Icons.location_on_outlined, 'Area',
+                            [b.city, b.pincode].where((s) => s != null && s.isNotEmpty).join(', ')),
+                      ] else ...[
+                        if (b.branch != null)
+                          _DetailRow(Icons.local_hospital_outlined, 'Branch', b.branch!.name),
+                        if (b.branch?.address != null && b.branch!.address.isNotEmpty)
+                          _DetailRow(Icons.location_on_outlined, 'Branch Address', b.branch!.address),
+                      ],
                     ],
                   ),
 
@@ -635,12 +827,10 @@ class _BookingDetailSheet extends StatelessWidget {
 
                   // Tests
                   _DetailSection(
-                    title: 'Tests & Packages (${booking.tests.length})',
-                    rows: booking.tests.map((t) => _DetailRow(
+                    title: 'Tests & Packages (${b.tests.length})',
+                    rows: b.tests.map((t) => _DetailRow(
                       t.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
-                      t.name,
-                      '₹${t.finalPrice.toInt()}',
-                      valueBold: true,
+                      t.name, '₹${t.finalPrice.toInt()}', valueBold: true,
                     )).toList(),
                   ),
 
@@ -650,72 +840,153 @@ class _BookingDetailSheet extends StatelessWidget {
                   _DetailSection(
                     title: 'Payment',
                     rows: [
-                      _DetailRow(Icons.receipt_outlined, 'Tests Total', '₹${booking.testsTotal.toInt()}'),
-                      _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${booking.serviceCharge.toInt()}'),
-                      _DetailRow(Icons.calculate_outlined, 'Grand Total', '₹${booking.grandTotal.toInt()}', valueBold: true),
+                      _DetailRow(Icons.receipt_outlined, 'Tests Total', '₹${b.testsTotal.toInt()}'),
+                      if (b.serviceCharge > 0)
+                        _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${b.serviceCharge.toInt()}'),
+                      _DetailRow(Icons.calculate_outlined, 'Grand Total', '₹${b.grandTotal.toInt()}', valueBold: true),
                       _DetailRow(Icons.check_circle_outline, 'Paid',
-                          '₹${booking.paidAmount.toInt()}', valueColor: AppColors.brandGreen),
-                      if (booking.paymentType == 'service_charge')
-                        _DetailRow(Icons.pending_outlined, 'Due at Collection',
-                            '₹${(booking.grandTotal - booking.paidAmount).toInt()}',
-                            valueColor: const Color(0xFFE65100)),
+                          '₹${b.paidAmount.toInt()}', valueColor: AppColors.brandGreen),
+                      if (b.amountDue > 0)
+                        _DetailRow(Icons.pending_outlined,
+                            b.mode == 'Home Collection' ? 'Due at Collection' : 'Due at Lab',
+                            '₹${b.amountDue.toInt()}', valueColor: const Color(0xFFE65100)),
                     ],
                   ),
 
-                  if (booking.docRequired) ...[
+                  // Prescription section
+                  if (b.prescriptionImages.isNotEmpty) ...[
                     const SizedBox(height: 16),
-                    _DetailSection(
-                      title: 'Document',
-                      rows: [
-                        _DetailRow(
-                          booking.docVerified ? Icons.verified_outlined : Icons.pending_outlined,
-                          'Prescription',
-                          booking.docVerified ? 'Verified' : 'Awaiting verification',
-                          valueColor: booking.docVerified ? AppColors.brandGreen : const Color(0xFFE65100),
+                    Text('Prescription',
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                            color: AppColors.textSecondary, letterSpacing: 0.3)),
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppColors.background,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.divider),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Status badge
+                          Row(children: [
+                            Icon(
+                              b.prescriptionStatus == 'verified'
+                                  ? Icons.verified_outlined
+                                  : Icons.hourglass_top_rounded,
+                              size: 14,
+                              color: b.prescriptionStatus == 'verified'
+                                  ? AppColors.brandGreen
+                                  : const Color(0xFFE65100),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              b.prescriptionStatus == 'verified'
+                                  ? 'Prescription Verified'
+                                  : 'Awaiting Verification',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: b.prescriptionStatus == 'verified'
+                                    ? AppColors.brandGreen
+                                    : const Color(0xFFE65100),
+                              ),
+                            ),
+                          ]),
+                          const SizedBox(height: 12),
+                          // Thumbnails
+                          SizedBox(
+                            height: 80,
+                            child: ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              itemCount: b.prescriptionImages.length,
+                              separatorBuilder: (_, __) => const SizedBox(width: 8),
+                              itemBuilder: (_, i) => ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.network(
+                                  b.prescriptionImages[i],
+                                  width: 80, height: 80,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => Container(
+                                    width: 80, height: 80,
+                                    color: AppColors.brandGreenSurface,
+                                    child: const Icon(Icons.image_not_supported_outlined,
+                                        color: AppColors.brandGreen, size: 28),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text('${b.prescriptionImages.length} image${b.prescriptionImages.length == 1 ? '' : 's'} uploaded',
+                              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                        ],
+                      ),
+                    ),
+                  ],
+
+                  // Pay Now button — only shown after prescription is verified (or no doc required)
+                  if (_paymentPending && !_prescriptionBlocking) ...[
+                    const SizedBox(height: 20),
+                    GestureDetector(
+                      onTap: _isProcessing ? null : _triggerPayment,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        decoration: BoxDecoration(
+                          color: _isProcessing
+                              ? AppColors.brandGreen.withValues(alpha: 0.5)
+                              : const Color(0xFF1565C0),
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                      ],
+                        child: _isProcessing
+                            ? const Center(child: SizedBox(width: 20, height: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white))))
+                            : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                const Icon(Icons.payment_outlined, size: 18, color: Colors.white),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Pay ₹${(b.amountDue > 0 ? b.amountDue : b.grandTotal).toInt()} via Razorpay',
+                                  style: const TextStyle(fontSize: 14,
+                                      fontWeight: FontWeight.w600, color: Colors.white),
+                                ),
+                              ]),
+                      ),
                     ),
                   ],
 
                   // Report section for completed bookings
-                  if (booking.status == 'Completed') ...[
+                  if (b.status == 'Completed') ...[
                     const SizedBox(height: 16),
                     _DetailSection(
                       title: 'Report',
                       rows: [
-                        _DetailRow(
-                          Icons.science_outlined,
-                          'Status',
-                          booking.reportUrl != null ? 'Ready to download' : 'Being processed',
-                          valueColor: booking.reportUrl != null ? AppColors.brandGreen : const Color(0xFFE65100),
-                        ),
-                        if (booking.reportReadyDate != null)
-                          _DetailRow(
-                            Icons.event_available_outlined,
-                            'Available since',
-                            _formatDate(booking.reportReadyDate!),
-                          ),
+                        _DetailRow(Icons.science_outlined, 'Status',
+                          b.reportUrl != null ? 'Ready to download' : 'Being processed',
+                          valueColor: b.reportUrl != null ? AppColors.brandGreen : const Color(0xFFE65100)),
+                        if (b.reportReadyDate != null)
+                          _DetailRow(Icons.event_available_outlined, 'Available since',
+                              _formatDate(b.reportReadyDate!)),
                       ],
                     ),
-                    if (booking.reportUrl != null) ...[
+                    if (b.reportUrl != null) ...[
                       const SizedBox(height: 12),
                       GestureDetector(
-                        onTap: () => _downloadReport(context, booking),
+                        onTap: () => _downloadReport(context, b),
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 13),
                           decoration: BoxDecoration(
                             color: AppColors.brandGreen,
                             borderRadius: BorderRadius.circular(12),
                           ),
-                          child: const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.download_outlined, size: 18, color: Colors.white),
-                              SizedBox(width: 8),
-                              Text('Download Report',
-                                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
-                            ],
-                          ),
+                          child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                            Icon(Icons.download_outlined, size: 18, color: Colors.white),
+                            SizedBox(width: 8),
+                            Text('Download Report',
+                                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
+                          ]),
                         ),
                       ),
                     ],

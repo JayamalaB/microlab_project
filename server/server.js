@@ -22,6 +22,7 @@ io.on('connection', (socket) => {
 
 app.use(cors());
 app.use(express.json());
+app.use('/uploads', require('express').static(require('path').join(__dirname, 'uploads')));
 
 // Routes
 app.use('/api/auth',         require('./routes/auth'));
@@ -30,6 +31,10 @@ app.use('/api/bookings',     require('./routes/bookings'));
 app.use('/api/technicians',  require('./routes/technicians'));
 app.use('/api/branches',     require('./routes/branches'));
 app.use('/api/packages',     require('./routes/packages'));
+app.use('/api/patients',     require('./routes/patients'));
+app.use('/api/slots',        require('./routes/slots'));
+app.use('/api/upload',        require('./routes/upload'));
+app.use('/api/prescriptions', require('./routes/prescriptions'));
 
 app.get('/', (req, res) => {
   res.json({ success: true, message: 'MediCollect API running' });
