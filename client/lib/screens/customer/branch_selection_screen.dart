@@ -54,6 +54,46 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
   String       _errorMsg = '';
 
   @override
+  void initState() {
+    super.initState();
+    // If patient GPS is known, auto-detect the nearest branch on screen open.
+    if (widget.patientLat != null && widget.patientLng != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _autoDetect());
+    }
+  }
+
+  Future<void> _autoDetect() async {
+    setState(() { _state = _LookupState.loading; _branch = null; _errorMsg = ''; });
+    try {
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/branches/lookup')
+          .replace(queryParameters: {
+            'lat': widget.patientLat.toString(),
+            'lng': widget.patientLng.toString(),
+          });
+      final res  = await http.get(uri).timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      Map<String, dynamic>? body;
+      try { body = jsonDecode(res.body) as Map<String, dynamic>; } catch (_) {
+        setState(() { _state = _LookupState.idle; });
+        return;
+      }
+      if (res.statusCode == 200 && body['success'] == true) {
+        final b = body;
+        setState(() {
+          _branch = BranchModel.fromJson(b['branch'] as Map<String, dynamic>);
+          _state  = _LookupState.found;
+        });
+      } else {
+        // GPS auto-detect failed silently — user can still type pincode/place.
+        setState(() { _state = _LookupState.idle; });
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() { _state = _LookupState.idle; });
+    }
+  }
+
+  @override
   void dispose() {
     _pincodeCtrl.dispose();
     _placeCtrl.dispose();

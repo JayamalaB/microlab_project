@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../constants/app_constants.dart';
 import 'notification_service.dart';
@@ -21,6 +23,9 @@ class SocketBooking {
   final DateTime createdAt;
   final int?    branchId;
   final String? branchName;
+  final int?    slotId;
+  final String? slotLabel;
+  final String? appointmentTime; // "06:30" — exact time within slot
 
   SocketBooking({
     required this.bookingId,
@@ -35,6 +40,9 @@ class SocketBooking {
     required this.createdAt,
     this.branchId,
     this.branchName,
+    this.slotId,
+    this.slotLabel,
+    this.appointmentTime,
   });
 
   factory SocketBooking.fromJson(Map<String, dynamic> j) => SocketBooking(
@@ -43,18 +51,79 @@ class SocketBooking {
         patientName:    j['patientName']    as String? ?? '',
         patientMobile:  j['patientMobile']  as String? ?? '',
         patientAddress: j['patientAddress'] as String? ?? '',
-        patientLat:     (j['patientLat']    as num?)?.toDouble(),
-        patientLng:     (j['patientLng']    as num?)?.toDouble(),
+        patientLat:     _toDouble(j['patientLat']),
+        patientLng:     _toDouble(j['patientLng']),
         hospital:       j['hospital']       as String? ?? '',
         bookingType:    j['bookingType']    as String? ?? 'lab',
         createdAt: DateTime.tryParse(j['createdAt'] as String? ?? '') ??
             DateTime.now(),
-        branchId:   j['branchId']   != null ? _toInt(j['branchId'])  : null,
-        branchName: j['branchName'] as String?,
+        branchId:        j['branchId']        != null ? _toInt(j['branchId'])  : null,
+        branchName:      j['branchName']      as String?,
+        slotId:          j['slotId']          != null ? _toInt(j['slotId'])    : null,
+        slotLabel:       j['slotLabel']       as String?,
+        appointmentTime: j['appointmentTime'] as String?,
       );
 
   static int _toInt(dynamic v) =>
       v is int ? v : int.tryParse(v?.toString() ?? '0') ?? 0;
+
+  // Handles both num (from Socket.IO) and String (from FCM data payload).
+  static double? _toDouble(dynamic v) {
+    if (v == null) return null;
+    if (v is num) return v.toDouble();
+    return double.tryParse(v.toString());
+  }
+}
+
+// One available slot returned by the server when the chosen slot has no techs.
+class SlotOption {
+  final int    slotId;
+  final String label;
+  const SlotOption({required this.slotId, required this.label});
+  factory SlotOption.fromJson(Map<String, dynamic> j) => SlotOption(
+        slotId: _toInt(j['slotId']),
+        label:  j['label'] as String? ?? '',
+      );
+  static int _toInt(dynamic v) {
+    if (v is int) return v;
+    return int.tryParse(v?.toString() ?? '') ?? 0;
+  }
+}
+
+// Alternate appointment time within the same slot (from slot_no_availability).
+class AppointmentTimeOption {
+  final String time;   // "06:30" — re-emitted to server
+  final String label;  // "6:30 AM" — shown to patient
+  const AppointmentTimeOption({required this.time, required this.label});
+  factory AppointmentTimeOption.fromJson(Map<String, dynamic> j) =>
+      AppointmentTimeOption(
+        time:  j['time']  as String? ?? '',
+        label: j['label'] as String? ?? '',
+      );
+}
+
+class SlotNoAvailability {
+  final int                        bookingId;
+  final String                     message;
+  final List<AppointmentTimeOption> timeIntervals; // alternate times in same slot
+  final List<SlotOption>           slots;          // alternate master slots
+  const SlotNoAvailability({
+    required this.bookingId,
+    required this.message,
+    required this.timeIntervals,
+    required this.slots,
+  });
+  factory SlotNoAvailability.fromJson(Map<String, dynamic> j) =>
+      SlotNoAvailability(
+        bookingId: SlotOption._toInt(j['bookingId']),
+        message:   j['message'] as String? ?? '',
+        timeIntervals: (j['timeIntervals'] as List? ?? [])
+            .map((t) => AppointmentTimeOption.fromJson(t as Map<String, dynamic>))
+            .toList(),
+        slots: (j['slots'] as List? ?? [])
+            .map((s) => SlotOption.fromJson(s as Map<String, dynamic>))
+            .toList(),
+      );
 }
 
 class BookingAcceptedEvent {
@@ -237,6 +306,17 @@ class SocketService {
   // ── FCM push token ─────────────────────────────────────────────────────────
   String? _fcmToken;
 
+  // ── Heartbeat timer ────────────────────────────────────────────────────────
+  // Sends technician_heartbeat every 20 s while online.
+  // Server uses this to cancel the 45 s grace-period timer and refresh last_ping_at.
+  Timer? _heartbeatTimer;
+
+  // ── Network connectivity watcher ───────────────────────────────────────────
+  // Monitors OS-level network changes (WiFi reconnect, mobile data handoff).
+  // When connectivity is restored and the socket is down, we force an immediate
+  // reconnect instead of waiting for socket.io's own retry cycle.
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+
   // Called by NotificationService after getToken() or onTokenRefresh.
   void updateFcmToken(String token) {
     _fcmToken = token;
@@ -269,10 +349,11 @@ class SocketService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   // lab / shared
-  final _bookingRequestCtrl      = StreamController<SocketBooking>.broadcast();
-  final _bookingAcceptedCtrl     = StreamController<BookingAcceptedEvent>.broadcast();
-  final _bookingCancelledCtrl    = StreamController<int>.broadcast();
-  final _bookingTimeoutCtrl      = StreamController<int>.broadcast();
+  final _bookingRequestCtrl        = StreamController<SocketBooking>.broadcast();
+  final _bookingAcceptedCtrl       = StreamController<BookingAcceptedEvent>.broadcast();
+  final _bookingCancelledCtrl      = StreamController<int>.broadcast();
+  final _bookingTimeoutCtrl        = StreamController<int>.broadcast();
+  final _slotNoAvailabilityCtrl    = StreamController<SlotNoAvailability>.broadcast();
   final _locationUpdateCtrl      = StreamController<LocationUpdate>.broadcast();
   final _techEnRouteCtrl         = StreamController<int>.broadcast();
   final _techArrivedCtrl         = StreamController<int>.broadcast();
@@ -291,10 +372,11 @@ class SocketService {
   // availability sync — dashboard listens to keep its toggle in sync
   final _availabilityCtrl        = StreamController<bool>.broadcast();
 
-  Stream<SocketBooking>        get onBookingRequest       => _bookingRequestCtrl.stream;
-  Stream<BookingAcceptedEvent> get onBookingAccepted      => _bookingAcceptedCtrl.stream;
-  Stream<int>                  get onBookingCancelled     => _bookingCancelledCtrl.stream;
-  Stream<int>                  get onBookingTimeout       => _bookingTimeoutCtrl.stream;
+  Stream<SocketBooking>        get onBookingRequest        => _bookingRequestCtrl.stream;
+  Stream<BookingAcceptedEvent> get onBookingAccepted       => _bookingAcceptedCtrl.stream;
+  Stream<int>                  get onBookingCancelled      => _bookingCancelledCtrl.stream;
+  Stream<int>                  get onBookingTimeout        => _bookingTimeoutCtrl.stream;
+  Stream<SlotNoAvailability>   get onSlotNoAvailability    => _slotNoAvailabilityCtrl.stream;
   Stream<LocationUpdate>       get onLocationUpdate       => _locationUpdateCtrl.stream;
   Stream<int>                  get onTechnicianEnRoute    => _techEnRouteCtrl.stream;
   Stream<int>                  get onTechnicianArrived    => _techArrivedCtrl.stream;
@@ -357,8 +439,11 @@ class SocketService {
       io.OptionBuilder()
           .setTransports(['websocket'])
           .disableAutoConnect()
-          .setReconnectionAttempts(10)
+          // No attempt limit — socket.io will keep retrying forever.
+          // Delay starts at 2 s and doubles per attempt, capped at 10 s so the
+          // technician reconnects quickly after a brief outage (tunnel, elevator).
           .setReconnectionDelay(2000)
+          .setReconnectionDelayMax(10000)
           .build(),
     );
 
@@ -382,6 +467,7 @@ class SocketService {
 
     _registerEventHandlers();
     _socket!.connect();
+    _watchNetworkChanges();
 
     // Fetch FCM token once per login so it's ready before the first goOnline().
     if (role == 'technician') {
@@ -483,6 +569,15 @@ class SocketService {
       final id = _parseId((data as Map)['bookingId']);
       _log('EVENT', 'booking_timeout  id=$id');
       _bookingTimeoutCtrl.add(id);
+    });
+
+    _socket!.on('slot_no_availability', (data) {
+      try {
+        final e = SlotNoAvailability.fromJson(
+            Map<String, dynamic>.from(data as Map));
+        _log('EVENT', 'slot_no_availability  id=${e.bookingId}  slots=${e.slots.length}');
+        _slotNoAvailabilityCtrl.add(e);
+      } catch (e) { _log('ERROR', 'slot_no_availability: $e'); }
     });
 
     _socket!.on('location_update', (data) {
@@ -617,6 +712,8 @@ class SocketService {
     _lastLng     = lng;
     _availabilityCtrl.add(true);
     _log('AVAILABILITY', 'state → ONLINE  lat=$lat lng=$lng');
+    _persistOnlineState(true);
+    _startHeartbeat();
 
     if (!isConnected) {
       _log('ONLINE', 'socket not connected — state queued, will emit on connect');
@@ -634,12 +731,42 @@ class SocketService {
     _isAvailable = false;
     _availabilityCtrl.add(false);
     _log('AVAILABILITY', 'state → OFFLINE');
+    _persistOnlineState(false);
+    _stopHeartbeat();
 
     if (!isConnected) {
       _log('OFFLINE', 'socket not connected — state updated locally');
       return;
     }
     _emitTechnicianOffline();
+  }
+
+  // ── Heartbeat helpers ──────────────────────────────────────────────────────
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (_isAvailable && isConnected) {
+        _socket?.emit('technician_heartbeat', {
+          'technicianId': userId,
+          'lat':          _lastLat,
+          'lng':          _lastLng,
+        });
+      }
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+  }
+
+  // Fire-and-forget — persists isOnline across app kills so the dashboard
+  // can auto-restore the online state on cold start.
+  void _persistOnlineState(bool isOnline) {
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setBool('tech_is_online', isOnline);
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -704,6 +831,32 @@ class SocketService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /// Check [hasActiveBooking] before calling — warn user if a booking is live.
+  // Called by the dashboard's AppLifecycleState.resumed handler and by the
+  // network watcher. Forces a reconnect when the socket is down but the
+  // SocketService is still initialised (user is logged in).
+  void reconnect() {
+    if (_socket == null || _socket!.connected) return;
+    _log('RECONNECT', 'manual reconnect triggered');
+    _socket!.connect();
+  }
+
+  // Listens for OS-level network changes. When the phone regains connectivity
+  // (e.g. exits a tunnel, switches from WiFi to mobile data) and the socket
+  // is not connected, we trigger an immediate reconnect rather than waiting for
+  // socket.io's own exponential-backoff timer to fire next.
+  void _watchNetworkChanges() {
+    _connectivitySub?.cancel();
+    _connectivitySub = Connectivity()
+        .onConnectivityChanged
+        .listen((List<ConnectivityResult> results) {
+      final hasNetwork = results.any((r) => r != ConnectivityResult.none);
+      if (hasNetwork && !isConnected) {
+        _log('NETWORK', 'connectivity restored → reconnecting');
+        reconnect();
+      }
+    });
+  }
+
   void disconnect() {
     if (_socket == null) return;
 
@@ -716,6 +869,11 @@ class SocketService {
       _socket?.emit('driver_offline', {'driverId': userId});
       _log('OFFLINE', 'emitted driver_offline on disconnect');
     }
+
+    _persistOnlineState(false);
+    _stopHeartbeat();
+    _connectivitySub?.cancel();
+    _connectivitySub = null;
 
     _socket!.disconnect();
     _socket!.dispose();
@@ -741,6 +899,7 @@ class SocketService {
     _bookingAcceptedCtrl.close();
     _bookingCancelledCtrl.close();
     _bookingTimeoutCtrl.close();
+    _slotNoAvailabilityCtrl.close();
     _locationUpdateCtrl.close();
     _techEnRouteCtrl.close();
     _techArrivedCtrl.close();
@@ -774,6 +933,9 @@ class SocketService {
     String  bookingType = 'lab',
     int?    branchId,
     String? branchName,
+    int?    slotId,
+    String? slotLabel,
+    String? appointmentTime, // "06:30" — exact time within slot
   }) {
     _socket?.emit('booking_request', {
       'bookingId':      bookingId,
@@ -785,10 +947,21 @@ class SocketService {
       'patientLng':     patientLng,
       'hospital':       hospital,
       'bookingType':    bookingType,
-      if (branchId   != null) 'branchId':   branchId,
-      if (branchName != null) 'branchName': branchName,
+      if (branchId        != null) 'branchId':        branchId,
+      if (branchName      != null) 'branchName':      branchName,
+      if (slotId          != null) 'slotId':          slotId,
+      if (slotLabel       != null) 'slotLabel':       slotLabel,
+      if (appointmentTime != null) 'appointmentTime': appointmentTime,
     });
-    _log('EMIT', 'booking_request  id=$bookingId type=$bookingType branch=$branchId ($branchName)');
+    _log('EMIT', 'booking_request  id=$bookingId type=$bookingType branch=$branchId ($branchName) slot=$slotId ($slotLabel) time=$appointmentTime');
+  }
+
+  void emitCancelSearch({required int bookingId, required int patientId}) {
+    _socket?.emit('patient_cancel_search', {
+      'bookingId': bookingId,
+      'patientId': patientId,
+    });
+    _log('EMIT', 'patient_cancel_search  id=$bookingId');
   }
 
   /// Transport booking request — [bookingId] may be a String or int.

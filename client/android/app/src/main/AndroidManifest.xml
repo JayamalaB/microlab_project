@@ -27,7 +27,23 @@
         android:maxSdkVersion="28"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- Required for location access when app is in background (screen off) -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <!-- Android 14+: foreground service types -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Keep location permission for geolocator plugin's own service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <!-- Android 13+: show persistent "You are Online" notification -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Prevent CPU sleep during active collection jobs -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- Restart service after phone reboot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- Required for Permission.ignoreBatteryOptimizations.request() to work.
+         Without this in the manifest the request silently does nothing on Samsung,
+         Xiaomi, Oppo, Vivo etc. that have aggressive OEM battery management. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
     <application
         android:label="MicroLab"
@@ -53,10 +69,29 @@
             android:name="flutterEmbedding"
             android:value="2"/>
      
-
-             <meta-data
+        <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="AIzaSyBIGPfna9mxSXpAJOhp0xigKhyZeeU0L0I"/>
+        
+        <!-- Foreground Service — shows the persistent "You are Online" notification
+             and keeps the app process alive while the technician is online.
+             Class name: ForegroundService (renamed from ForegroundTaskService in v8.x).
+             Using "dataSync" type which does NOT require ACCESS_BACKGROUND_LOCATION
+             permission at runtime, unlike "location" type which caused silent failure
+             on Android 14. Location is handled separately by geolocator plugin.
+             The plugin's own manifest declares RebootReceiver and RestartReceiver;
+             those are auto-merged by Flutter, so no duplicate declarations here. -->
+        <!-- Foreground Service — shows the persistent "You are Online" notification
+             and keeps the app process alive while the technician is online.
+             No stopWithTask here: the notification intentionally persists after the
+             user kills the app so they know they are still in the dispatch pool.
+             Bookings reach them via FCM (grace period + slot fallback).
+             The notification only disappears when the tech manually toggles offline. -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false"/>
+
         <!-- Required for image_picker on Android 11+ -->
         <provider
             android:name="androidx.core.content.FileProvider"

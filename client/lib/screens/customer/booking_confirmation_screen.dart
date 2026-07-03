@@ -17,6 +17,10 @@ class BookingConfirmationScreen extends StatefulWidget {
   final String  hospital;
   final int?    branchId;
   final String? branchName;
+  final int?    slotId;
+  final String? slotLabel;
+  final String? appointmentTime;       // "06:30" — exact time within slot
+  final String? appointmentTimeLabel;  // "6:30 AM" — display
 
   const BookingConfirmationScreen({
     super.key,
@@ -30,6 +34,10 @@ class BookingConfirmationScreen extends StatefulWidget {
     required this.hospital,
     this.branchId,
     this.branchName,
+    this.slotId,
+    this.slotLabel,
+    this.appointmentTime,
+    this.appointmentTimeLabel,
   });
 
   @override
@@ -43,12 +51,27 @@ class _BookingConfirmationScreenState
   late final AnimationController _pulseCtrl;
 
   StreamSubscription<BookingAcceptedEvent>? _acceptedSub;
-  StreamSubscription<int>? _timeoutSub;
+  StreamSubscription<int>?                  _timeoutSub;
+  StreamSubscription<SlotNoAvailability>?   _slotNoAvailSub;
 
   Timer? _searchTimer;
-  int _secondsSearched = 0;
-  bool _timedOut = false;
-  bool _accepted = false;
+  int  _secondsSearched = 0;
+  bool _timedOut        = false;
+  bool _accepted        = false;
+
+  // Mutable slot/time — updated when the patient re-selects after slot_no_availability.
+  int?    _currentSlotId;
+  String? _currentSlotLabel;
+  String? _currentAppointmentTime;
+  String? _currentAppointmentTimeLabel;
+
+  // Slot/time re-selection state
+  bool                      _slotNoAvail        = false;
+  String                    _slotNoAvailMessage = '';
+  List<AppointmentTimeOption> _altTimeIntervals = [];
+  List<SlotOption>            _altSlots         = [];
+  AppointmentTimeOption?      _pickedAltTime;
+  SlotOption?                 _pickedAltSlot;
 
   @override
   void initState() {
@@ -64,6 +87,11 @@ class _BookingConfirmationScreenState
       duration: const Duration(milliseconds: 1600),
     )..repeat(reverse: true);
 
+    _currentSlotId               = widget.slotId;
+    _currentSlotLabel            = widget.slotLabel;
+    _currentAppointmentTime      = widget.appointmentTime;
+    _currentAppointmentTimeLabel = widget.appointmentTimeLabel;
+
     debugPrint('\n🔵 [BOOKING CONFIRMATION] bookingId=${widget.bookingId} patientId=${widget.patientId}');
     debugPrint('   Registering patient socket and emitting booking_request...');
 
@@ -73,18 +101,21 @@ class _BookingConfirmationScreenState
       bookingId: widget.bookingId,
     );
     SocketService.instance.emitBookingRequest(
-      bookingId:      widget.bookingId,
-      patientId:      widget.patientId,
-      patientName:    widget.patientName,
-      patientMobile:  widget.patientMobile,
-      patientAddress: widget.patientAddress,
-      patientLat:     widget.patientLat,
-      patientLng:     widget.patientLng,
-      hospital:       widget.hospital,
-      branchId:       widget.branchId,
-      branchName:     widget.branchName,
+      bookingId:       widget.bookingId,
+      patientId:       widget.patientId,
+      patientName:     widget.patientName,
+      patientMobile:   widget.patientMobile,
+      patientAddress:  widget.patientAddress,
+      patientLat:      widget.patientLat,
+      patientLng:      widget.patientLng,
+      hospital:        widget.hospital,
+      branchId:        widget.branchId,
+      branchName:      widget.branchName,
+      slotId:          widget.slotId,
+      slotLabel:       widget.slotLabel,
+      appointmentTime: widget.appointmentTime,
     );
-    debugPrint('   branchId: ${widget.branchId ?? 'none'}  branchName: ${widget.branchName ?? '—'}');
+    debugPrint('   branchId: ${widget.branchId ?? 'none'}  branchName: ${widget.branchName ?? '—'}  slot: ${widget.slotId} (${widget.slotLabel ?? '—'})  time: ${widget.appointmentTime ?? '—'}');
 
     _acceptedSub = SocketService.instance.onBookingAccepted.listen((event) {
       if (event.bookingId != widget.bookingId || !mounted) return;
@@ -97,6 +128,20 @@ class _BookingConfirmationScreenState
       if (id != widget.bookingId || !mounted) return;
       debugPrint('⏰ [BOOKING CONFIRMATION] booking_timeout for bookingId=$id');
       if (mounted) setState(() => _timedOut = true);
+    });
+
+    _slotNoAvailSub = SocketService.instance.onSlotNoAvailability.listen((e) {
+      if (e.bookingId != widget.bookingId || !mounted) return;
+      debugPrint('⚠️ [BOOKING CONFIRMATION] slot_no_availability  times=${e.timeIntervals.length} slots=${e.slots.length}');
+      _searchTimer?.cancel();
+      setState(() {
+        _slotNoAvail        = true;
+        _slotNoAvailMessage = e.message;
+        _altTimeIntervals   = e.timeIntervals;
+        _altSlots           = e.slots;
+        _pickedAltTime      = null;
+        _pickedAltSlot      = null;
+      });
     });
 
     _searchTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -115,6 +160,7 @@ class _BookingConfirmationScreenState
     _pulseCtrl.dispose();
     _acceptedSub?.cancel();
     _timeoutSub?.cancel();
+    _slotNoAvailSub?.cancel();
     _searchTimer?.cancel();
     super.dispose();
   }
@@ -160,6 +206,84 @@ class _BookingConfirmationScreenState
     });
   }
 
+  void _restartSearch() {
+    _searchTimer?.cancel();
+    _searchTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _secondsSearched++);
+      if (_secondsSearched >= AppConstants.bookingSearchTimeoutSeconds) {
+        _searchTimer?.cancel();
+        if (mounted) setState(() => _timedOut = true);
+      }
+    });
+  }
+
+  // Re-dispatch with a different master slot (clears appointment time)
+  void _retryWithNewSlot(SlotOption slot) {
+    setState(() {
+      _currentSlotId               = slot.slotId;
+      _currentSlotLabel            = slot.label;
+      _currentAppointmentTime      = null;
+      _currentAppointmentTimeLabel = null;
+      _slotNoAvail                 = false;
+      _slotNoAvailMessage          = '';
+      _altTimeIntervals            = [];
+      _altSlots                    = [];
+      _pickedAltTime               = null;
+      _pickedAltSlot               = null;
+      _timedOut                    = false;
+      _secondsSearched             = 0;
+    });
+    SocketService.instance.emitBookingRequest(
+      bookingId:      widget.bookingId,
+      patientId:      widget.patientId,
+      patientName:    widget.patientName,
+      patientMobile:  widget.patientMobile,
+      patientAddress: widget.patientAddress,
+      patientLat:     widget.patientLat,
+      patientLng:     widget.patientLng,
+      hospital:       widget.hospital,
+      branchId:       widget.branchId,
+      branchName:     widget.branchName,
+      slotId:         _currentSlotId,
+      slotLabel:      _currentSlotLabel,
+      // no appointmentTime — new slot, no time selected yet
+    );
+    _restartSearch();
+  }
+
+  // Re-dispatch with a different appointment time in the same slot
+  void _retryWithNewTime(AppointmentTimeOption t) {
+    setState(() {
+      _currentAppointmentTime      = t.time;
+      _currentAppointmentTimeLabel = t.label;
+      _slotNoAvail                 = false;
+      _slotNoAvailMessage          = '';
+      _altTimeIntervals            = [];
+      _altSlots                    = [];
+      _pickedAltTime               = null;
+      _pickedAltSlot               = null;
+      _timedOut                    = false;
+      _secondsSearched             = 0;
+    });
+    SocketService.instance.emitBookingRequest(
+      bookingId:       widget.bookingId,
+      patientId:       widget.patientId,
+      patientName:     widget.patientName,
+      patientMobile:   widget.patientMobile,
+      patientAddress:  widget.patientAddress,
+      patientLat:      widget.patientLat,
+      patientLng:      widget.patientLng,
+      hospital:        widget.hospital,
+      branchId:        widget.branchId,
+      branchName:      widget.branchName,
+      slotId:          _currentSlotId,
+      slotLabel:       _currentSlotLabel,
+      appointmentTime: _currentAppointmentTime,
+    );
+    _restartSearch();
+  }
+
   void _cancel() {
     showDialog(
       context: context,
@@ -179,6 +303,10 @@ class _BookingConfirmationScreenState
           ),
           ElevatedButton(
             onPressed: () {
+              SocketService.instance.emitCancelSearch(
+                bookingId: widget.bookingId,
+                patientId: widget.patientId,
+              );
               Navigator.pop(context);
               Navigator.pop(context);
             },
@@ -252,6 +380,167 @@ class _BookingConfirmationScreenState
                   const Text('Opening tracking map…',
                       style: TextStyle(
                           fontSize: 14, color: AppColors.textSecondary)),
+                ]
+
+                // ── Slot no-availability state ────────────────────────────
+                else if (_slotNoAvail) ...[
+                  Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFF8E1),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                          color: const Color(0xFFF9A825).withValues(alpha: 0.3)),
+                    ),
+                    child: const Icon(Icons.schedule_outlined,
+                        color: Color(0xFFF9A825), size: 40),
+                  ),
+                  const SizedBox(height: 20),
+                  const Text('Slot Unavailable',
+                      style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary)),
+                  const SizedBox(height: 10),
+                  Text(
+                    _slotNoAvailMessage,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                        fontSize: 13,
+                        color: AppColors.textSecondary,
+                        height: 1.5),
+                  ),
+                  // ── Alternate appointment times (same slot) ───────────
+                  if (_altTimeIntervals.isNotEmpty) ...[
+                    const SizedBox(height: 20),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text('Other available times:',
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.textPrimary)),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: _altTimeIntervals.map((t) {
+                        final picked = _pickedAltTime?.time == t.time;
+                        return ChoiceChip(
+                          label: Text(t.label,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: picked ? Colors.white : AppColors.textPrimary)),
+                          selected: picked,
+                          selectedColor: AppColors.brandGreen,
+                          backgroundColor: AppColors.background,
+                          side: BorderSide(
+                              color: picked ? AppColors.brandGreen : AppColors.divider),
+                          onSelected: (_) => setState(() {
+                            _pickedAltTime = t;
+                            _pickedAltSlot = null; // mutually exclusive
+                          }),
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: _pickedAltTime != null
+                            ? () => _retryWithNewTime(_pickedAltTime!)
+                            : null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.brandGreen,
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor:
+                              AppColors.brandGreen.withValues(alpha: 0.4),
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14)),
+                        ),
+                        child: const Text('Try at this time',
+                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                      ),
+                    ),
+                  ],
+
+                  // ── Alternate slots ───────────────────────────────────
+                  if (_altSlots.isNotEmpty) ...[
+                    const SizedBox(height: 20),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        _altTimeIntervals.isNotEmpty ? 'Or choose another slot:' : 'Available slots:',
+                        style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.textPrimary)),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: _altSlots.map((s) {
+                        final picked = _pickedAltSlot?.slotId == s.slotId;
+                        return ChoiceChip(
+                          label: Text(s.label,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: picked ? Colors.white : AppColors.textPrimary)),
+                          selected: picked,
+                          selectedColor: AppColors.brandGreen,
+                          backgroundColor: AppColors.background,
+                          side: BorderSide(
+                              color: picked ? AppColors.brandGreen : AppColors.divider),
+                          onSelected: (_) => setState(() {
+                            _pickedAltSlot = s;
+                            _pickedAltTime = null; // mutually exclusive
+                          }),
+                        );
+                      }).toList(),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: _pickedAltSlot != null
+                            ? () => _retryWithNewSlot(_pickedAltSlot!)
+                            : null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.brandGreen,
+                          foregroundColor: Colors.white,
+                          disabledBackgroundColor:
+                              AppColors.brandGreen.withValues(alpha: 0.4),
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14)),
+                        ),
+                        child: const Text('Try with this slot',
+                            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.textSecondary,
+                        side: const BorderSide(color: AppColors.divider),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14)),
+                      ),
+                      child: const Text('Go Back',
+                          style: TextStyle(fontSize: 15)),
+                    ),
+                  ),
                 ]
 
                 // ── Timeout state ─────────────────────────────────────────
@@ -399,6 +688,16 @@ class _BookingConfirmationScreenState
                         const SizedBox(height: 8),
                         _SummaryRow(Icons.local_hospital_outlined,
                             'Destination', widget.hospital),
+                        if (_currentSlotLabel != null) ...[
+                          const SizedBox(height: 8),
+                          _SummaryRow(Icons.schedule_outlined,
+                              'Slot', _currentSlotLabel!),
+                        ],
+                        if (_currentAppointmentTimeLabel != null) ...[
+                          const SizedBox(height: 8),
+                          _SummaryRow(Icons.access_time_outlined,
+                              'Time', _currentAppointmentTimeLabel!),
+                        ],
                       ],
                     ),
                   ),
@@ -406,8 +705,8 @@ class _BookingConfirmationScreenState
 
                 const Spacer(),
 
-                // Cancel button (only during search)
-                if (!_accepted && !_timedOut) ...[
+                // Cancel button (only during active search)
+                if (!_accepted && !_timedOut && !_slotNoAvail) ...[
                   TextButton(
                     onPressed: _cancel,
                     child: const Text('Cancel Search',

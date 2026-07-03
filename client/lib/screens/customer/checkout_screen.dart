@@ -84,12 +84,28 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     TimeSlot(id: '5', label: '5:00 PM',  time: '17:00'),
   ];
   // API-loaded slots used when branchId is provided.
-  List<TimeSlot> _branchSlots  = [];
-  bool           _loadingSlots = false;
-  String         _slotsError   = '';
+  List<TimeSlot>              _branchSlots    = [];
+  List<Map<String, dynamic>>  _branchSlotsRaw = []; // includes timeIntervals
+  bool                        _loadingSlots   = false;
+  String                      _slotsError     = '';
+  TimeInterval?               _selectedAppointmentTime;
 
   List<TimeSlot> get _availableSlots =>
       widget.branchId != null ? _branchSlots : _staticSlots;
+
+  // Appointment times available for the currently selected slot (empty = no duration configured)
+  List<TimeInterval> get _currentSlotIntervals {
+    if (_selectedSlot == null) return [];
+    final raw = _branchSlotsRaw.firstWhere(
+      (s) => s['slotId']?.toString() == _selectedSlot!.id,
+      orElse: () => <String, dynamic>{},
+    );
+    final list = raw['timeIntervals'] as List? ?? [];
+    return list.map<TimeInterval>((t) => TimeInterval(
+      time:  t['time']  as String? ?? '',
+      label: t['label'] as String? ?? '',
+    )).toList();
+  }
 
   TimeSlot? _selectedSlot;
 
@@ -130,7 +146,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   double get _payableNow => _paymentType == 'full' ? _grandTotal : 0;
   double get _payableLater => _paymentType == 'full' ? 0 : _grandTotal;
 
-  bool get _canProceed => _selectedDate != null && _selectedSlot != null && (!widget.isVip || _selectedTechnician != null);
+  bool get _canProceed {
+    if (_selectedDate == null || _selectedSlot == null) return false;
+    // If this slot has specific appointment times, one must be selected
+    if (_currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null) return false;
+    if (widget.isVip && _selectedTechnician == null) return false;
+    return true;
+  }
 
   // ── Date picker (future only) ─────────────────────────────
   @override
@@ -191,11 +213,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (picked != null) {
       debugPrint('   picked      : ${picked.toIso8601String().substring(0,10)}');
       setState(() {
-        _selectedDate       = picked;
-        _selectedSlot       = null;
-        _selectedTechnician = null;
-        _branchSlots        = [];
-        _slotsError         = '';
+        _selectedDate            = picked;
+        _selectedSlot            = null;
+        _selectedAppointmentTime = null;
+        _selectedTechnician      = null;
+        _branchSlots             = [];
+        _branchSlotsRaw          = [];
+        _slotsError              = '';
       });
       if (widget.branchId != null) {
         debugPrint('   → branchId=${widget.branchId} — loading API slots');
@@ -237,20 +261,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (res.statusCode == 200) {
         final body = jsonDecode(res.body) as Map<String, dynamic>;
         if (body['success'] == true) {
-          final list = (body['slots'] as List).map((s) {
-            final m = s as Map<String, dynamic>;
-            return TimeSlot(
-              id:    m['timeSlotId']?.toString() ?? '',
-              label: m['label']     as String? ?? '',
-              time:  m['startTime'] as String? ?? '',
-            );
-          }).toList();
+          final rawList = (body['slots'] as List).cast<Map<String, dynamic>>();
+          final list = rawList.map((m) => TimeSlot(
+            id:    m['slotId']?.toString() ?? '',
+            label: m['label']     as String? ?? '',
+            time:  m['startTime'] as String? ?? '',
+          )).toList();
           debugPrint('   ✅ slots     : ${list.length} available');
           for (final s in list) { debugPrint('      • [${s.id}] ${s.label} (${s.time})'); }
           setState(() {
-            _branchSlots  = list;
-            _loadingSlots = false;
-            _slotsError   = list.isEmpty ? 'No slots available for this date. Try another date.' : '';
+            _branchSlotsRaw = rawList;
+            _branchSlots    = list;
+            _loadingSlots   = false;
+            _slotsError     = list.isEmpty ? 'No slots available for this date. Try another date.' : '';
           });
         } else {
           debugPrint('   ⚠️  API returned success=false: ${body['message']}');
@@ -303,7 +326,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       children: _availableSlots.map((slot) {
         final isSelected = _selectedSlot?.id == slot.id;
         return GestureDetector(
-          onTap: () => setState(() => _selectedSlot = slot),
+          onTap: () => setState(() {
+            _selectedSlot            = slot;
+            _selectedAppointmentTime = null; // reset when slot changes
+          }),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
             padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
@@ -477,6 +503,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (widget.collectionDate != null) 'collectionDate': widget.collectionDate,
       if (widget.patientLat     != null) 'collectionLatitude':  widget.patientLat,
       if (widget.patientLng     != null) 'collectionLongitude': widget.patientLng,
+      if (_selectedSlot != null && int.tryParse(_selectedSlot!.id) != null)
+        'slotId': int.parse(_selectedSlot!.id),
+      if (_selectedAppointmentTime != null)
+        'appointmentTime': _selectedAppointmentTime!.time,
     };
 
     debugPrint('\n📤 [CHECKOUT] POST /api/bookings');
@@ -550,16 +580,20 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           context,
           MaterialPageRoute(
             builder: (_) => BookingConfirmationScreen(
-              bookingId:      bookingId,
-              patientId:      widget.patientId,
-              patientName:    widget.member.name,
-              patientMobile:  widget.member.mobile,
-              patientAddress: address.isEmpty ? 'Home Collection' : address,
-              patientLat:     widget.patientLat,
-              patientLng:     widget.patientLng,
-              hospital:       'MicroLab Home Collection',
-              branchId:       widget.branchId,
-              branchName:     widget.branch?.name,
+              bookingId:            bookingId,
+              patientId:            widget.patientId,
+              patientName:          widget.member.name,
+              patientMobile:        widget.member.mobile,
+              patientAddress:       address.isEmpty ? 'Home Collection' : address,
+              patientLat:           widget.patientLat,
+              patientLng:           widget.patientLng,
+              hospital:             'MicroLab Home Collection',
+              branchId:             widget.branchId,
+              branchName:           widget.branch?.name,
+              slotId:               int.tryParse(_selectedSlot?.id ?? ''),
+              slotLabel:            _selectedSlot?.label,
+              appointmentTime:      _selectedAppointmentTime?.time,
+              appointmentTimeLabel: _selectedAppointmentTime?.label,
             ),
           ),
         );
@@ -718,6 +752,43 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             required: true,
             child: _buildSlotBody(),
           ),
+
+          // ── Appointment Time (shown when slot has intervals) ─
+          if (_selectedSlot != null && _currentSlotIntervals.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _SectionCard(
+              title: 'Appointment Time',
+              icon: Icons.access_time_outlined,
+              required: true,
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: _currentSlotIntervals.map((interval) {
+                  final isSel = _selectedAppointmentTime?.time == interval.time;
+                  return GestureDetector(
+                    onTap: () => setState(() => _selectedAppointmentTime = interval),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: isSel ? AppColors.brandGreen : Colors.white,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: isSel ? AppColors.brandGreen : AppColors.divider,
+                          width: isSel ? 1.5 : 1,
+                        ),
+                      ),
+                      child: Text(interval.label,
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: isSel ? Colors.white : AppColors.textPrimary)),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ],
 
           const SizedBox(height: 14),
 
@@ -1052,9 +1123,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       ? 'Please select a date'
                       : _selectedSlot == null
                           ? 'Please select a time slot'
-                          : widget.isVip && _selectedTechnician == null
-                              ? 'Please choose your preferred technician'
-                              : '',
+                          : _currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null
+                              ? 'Please select an appointment time'
+                              : widget.isVip && _selectedTechnician == null
+                                  ? 'Please choose your preferred technician'
+                                  : '',
                   style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)),
                   textAlign: TextAlign.center,
                 ),

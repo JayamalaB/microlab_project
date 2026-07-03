@@ -1,16 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:geolocator/geolocator.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/auth_service.dart';
+import 'package:microlab/services/battery_service.dart';
+import 'package:microlab/services/foreground_service.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'technician_booking_detail_screen.dart';
 import 'technician_history_screen.dart';
 import 'technician_slot_screen.dart';
 import 'technician_profile_screen.dart';
 import 'booking_request_overlay.dart';
+import 'package:microlab/services/booking_notification_service.dart';
 import 'technician_active_job_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -30,20 +35,22 @@ class TechnicianDashboardScreen extends StatefulWidget {
       _TechnicianDashboardScreenState();
 }
 
-class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
+class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
+    with WidgetsBindingObserver {
   int _selectedIndex = 0;
 
   // Mock bookings — replace with GET /api/technician/bookings
   late List<TechnicianBooking> _bookings;
 
   StreamSubscription<SocketBooking>? _bookingRequestSub;
+  StreamSubscription<SocketBooking>? _bookingNotifAcceptSub;
   bool _overlayOpen = false;
   int  _sessionRequestCount = 0;
 
   // Availability — technician starts Offline after login
   bool _isOnline = false;
   bool _isTogglingOnline = false;
-  Timer? _idlePingTimer;
+  StreamSubscription<Position>? _locationSub;
   
   // ✅ FIXED: Cache pending bookings to avoid rebuilding on every access
   List<TechnicianBooking>? _cachedPending;
@@ -57,24 +64,197 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
     // incoming booking_request events are not silently dropped by the
     // !_isOnline guard in _listenToSocket.
     _isOnline = SocketService.instance.isAvailable;
-    if (_isOnline) _startIdlePing();
+    if (_isOnline) _startLocationStream();
     _listenToSocket();
+    _checkNotificationPendingAccept();
+    WidgetsBinding.instance.addObserver(this);
+    // If the app was killed while the tech was online, restore their online
+    // state silently — same as Uber/Rapido auto-reconnect on cold start.
+    if (!_isOnline) _checkAndRestoreOnlineState();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+
+    debugPrint('[LIFECYCLE] App resumed from background');
+
+    // 1. Reconnect socket if it dropped while suspended.
+    //    socket.io has its own backoff retry, but triggering reconnect
+    //    immediately gives a faster recovery after the screen unlocks.
+    if (!SocketService.instance.isConnected) {
+      debugPrint('[LIFECYCLE] Socket disconnected — reconnecting immediately');
+      SocketService.instance.reconnect();
+    } else {
+      debugPrint('[LIFECYCLE] Socket Connected ✓');
+    }
+
+    // 2. If the technician was online but OEM battery management killed the
+    //    foreground service while the screen was off, restart it silently.
+    //    The technician's online status is still stored in SocketService,
+    //    so the socket reconnect above will re-emit technician_online.
+    if (_isOnline && !kIsWeb) {
+      ForegroundService.instance.isRunning.then((running) {
+        if (!running && mounted) {
+          debugPrint('[LIFECYCLE] Foreground Service Stopped by OEM — restarting...');
+          ForegroundService.instance.start().then((ok) {
+            debugPrint('[LIFECYCLE] Service restart: ${ok ? "Success ✓" : "Failed ❌"}');
+          });
+        } else {
+          debugPrint('[LIFECYCLE] Service Running ✓');
+        }
+      });
+    }
+
+    // 3. If a booking arrived while the screen was off, a notification was shown
+    //    but the overlay never appeared. Now that the tech is back in the app
+    //    (via app icon, not the notification), show the overlay so they can
+    //    still Accept or Decline within the 40-second server window.
+    _showPendingBackgroundBooking();
+  }
+
+  void _showPendingBackgroundBooking() {
+    if (!mounted || _overlayOpen || !_isOnline) return;
+    final booking =
+        BookingNotificationService.instance.consumePendingBackgroundBooking();
+    if (booking == null) return;
+
+    debugPrint('[LIFECYCLE] Pending booking #${booking.bookingId} — showing overlay');
+    // Dismiss the notification since the overlay now takes over as the primary UI.
+    BookingNotificationService.instance
+        .cancelBookingNotification(booking.bookingId);
+
+    _overlayOpen = true;
+    _sessionRequestCount++;
+    ForegroundService.instance.updateText('New booking request');
+    BookingNotificationService.instance.markOverlayHandling(booking.bookingId);
+    showBookingRequestOverlay(context, booking, _sessionRequestCount)
+        .then((accepted) {
+      _overlayOpen = false;
+      BookingNotificationService.instance
+          .clearOverlayHandling(booking.bookingId);
+      if (!mounted) return;
+      if (!accepted) {
+        ForegroundService.instance.updateText('Ready for booking requests');
+        return;
+      }
+      _onBookingAccepted(booking);
+    });
+  }
+
+  // ── Online state restore (cold start) ────────────────────────────────────
+  // Called from initState when the app was killed while the tech was online.
+  // Reads the persisted flag and silently restores their online state —
+  // same pattern Uber/Rapido use to reconnect automatically on cold start.
+  Future<void> _checkAndRestoreOnlineState() async {
+    final prefs     = await SharedPreferences.getInstance();
+    final wasOnline = prefs.getBool('tech_is_online') ?? false;
+    if (!wasOnline || !mounted) return;
+    debugPrint('[RESTORE] was online before kill — auto-restoring');
+    await _autoRestoreOnlineState();
+  }
+
+  Future<void> _autoRestoreOnlineState() async {
+    if (!mounted) return;
+
+    // Reconnect socket immediately; _handleTechnicianReconnect will re-emit
+    // technician_online once connected because _isAvailable is still false
+    // at this point — we call goOnline() below which sets it first.
+    if (!SocketService.instance.isConnected) {
+      SocketService.instance.reconnect();
+    }
+
+    if (!kIsWeb) {
+      final running = await ForegroundService.instance.isRunning;
+      if (!running) await ForegroundService.instance.start();
+    }
+
+    // Last-known position is instant (no GPS warm-up needed).
+    // Falls back to a fresh low-accuracy fix with a 5 s timeout.
+    Position? pos;
+    try {
+      pos = await Geolocator.getLastKnownPosition();
+      pos ??= await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.low,
+        ),
+      ).timeout(const Duration(seconds: 5));
+    } catch (_) {}
+
+    if (!mounted) return;
+
+    final lat = pos?.latitude  ?? 0.0;
+    final lng = pos?.longitude ?? 0.0;
+
+    SocketService.instance.goOnline(lat: lat, lng: lng);
+    setState(() => _isOnline = true);
+    _startLocationStream();
+    debugPrint('[RESTORE] online restored  lat=$lat lng=$lng');
+    // Retry pending background booking now that _isOnline is true.
+    // addPostFrameCallback in _checkNotificationPendingAccept() ran earlier
+    // while _isOnline was still false — this is the second attempt.
+    _showPendingBackgroundBooking();
   }
 
   void _listenToSocket() {
     _bookingRequestSub =
         SocketService.instance.onBookingRequest.listen((booking) {
-      if (!mounted || _overlayOpen || !_isOnline) return;
+      if (!mounted || !_isOnline) return;
+
+      // Screen off / app backgrounded: show notification only (no overlay UI).
+      // Also store the booking so if the tech opens the app via the app icon
+      // (not the notification), didChangeAppLifecycleState can show the overlay.
+      final isBackground =
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.paused;
+      if (isBackground) {
+        BookingNotificationService.instance.setPendingBackgroundBooking(booking);
+        BookingNotificationService.instance.showBookingNotification(booking);
+        return;
+      }
+
+      // Foreground: show the in-app overlay for richer UX.
+      if (_overlayOpen) return;
       _overlayOpen = true;
       _sessionRequestCount++;
-      showBookingRequestOverlay(context, booking, _sessionRequestCount).then((accepted) {
+      ForegroundService.instance.updateText('New booking request');
+      // Prevent FCM onForeground from showing a duplicate notification
+      // for the same booking while the overlay is open.
+      BookingNotificationService.instance.markOverlayHandling(booking.bookingId);
+      showBookingRequestOverlay(context, booking, _sessionRequestCount)
+          .then((accepted) {
         _overlayOpen = false;
-        if (!accepted || !mounted) return;
-        // Add to dashboard — skip if already loaded from DB (dedup by bookingId)
-        final alreadyLoaded = _bookings.any((b) => b.id == booking.bookingId.toString());
-        if (alreadyLoaded) return;
-        setState(() {
-          _bookings.insert(0, TechnicianBooking(
+        BookingNotificationService.instance
+            .clearOverlayHandling(booking.bookingId);
+        if (!mounted) return;
+        if (!accepted) {
+          ForegroundService.instance.updateText('Ready for booking requests');
+          return;
+        }
+        _onBookingAccepted(booking);
+      });
+    });
+
+    // Accept events from notification taps (background / locked / killed states).
+    _bookingNotifAcceptSub =
+        BookingNotificationService.instance.onAccepted.listen((booking) {
+      if (!mounted) return;
+      _onBookingAccepted(booking);
+    });
+
+    // booking_cancelled is handled inside BookingRequestOverlay itself.
+  }
+
+  // Shared handler for a booking the technician just accepted — via overlay
+  // OR via notification action button.
+  void _onBookingAccepted(SocketBooking booking) {
+    ForegroundService.instance.updateText('Booking assigned — en route');
+    final alreadyLoaded =
+        _bookings.any((b) => b.id == booking.bookingId.toString());
+    if (!alreadyLoaded) {
+      setState(() {
+        _bookings.insert(
+          0,
+          TechnicianBooking(
             id: booking.bookingId.toString(),
             customerName: booking.patientName,
             customerPhone: booking.patientMobile,
@@ -95,22 +275,76 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
             patientLat: booking.patientLat,
             patientLng: booking.patientLng,
             hospital: booking.hospital,
-          ));
-          _cachedPending = null; // ✅ Invalidate cache
-        });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Booking #${booking.bookingId} added — start when ready'),
-          backgroundColor: AppColors.brandGreen,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          duration: const Duration(seconds: 3),
-        ));
+          ),
+        );
+        _cachedPending = null;
       });
-    });
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('Booking #${booking.bookingId} accepted — start when ready'),
+      backgroundColor: AppColors.brandGreen,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      duration: const Duration(seconds: 3),
+    ));
+  }
 
-    // booking_cancelled is handled inside BookingRequestOverlay itself.
-    // The overlay subscribes to onBookingCancelled with a bookingId filter and
-    // calls Navigator.pop(false) on its own context — a single, safe dismiss path.
+  // Called in initState() to handle any notification action that fired during
+  // main() — before runApp() — while the dashboard widget wasn't built yet.
+  //
+  // Two cases handled here:
+  //   1. Accept button tapped on a killed-app notification → _onBookingAccepted
+  //   2. Body tapped on a killed-app notification → show overlay (same as
+  //      _showPendingBackgroundBooking but scheduled via addPostFrameCallback
+  //      because the widget tree isn't ready yet in initState)
+  void _checkNotificationPendingAccept() {
+    // Case 1 — Accept button tapped on a killed-app notification.
+    // Socket is not connected yet — defer and emit booking_accepted once
+    // the socket is ready, then update the dashboard UI.
+    final pendingAccept =
+        BookingNotificationService.instance.consumePendingAccept();
+    if (pendingAccept != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _emitAcceptThenHandle(pendingAccept);
+      });
+    }
+
+    // Case 2 — Body tap (or background booking pending from a previous session)
+    // addPostFrameCallback defers until after the first frame so context and
+    // Navigator are ready for showBookingRequestOverlay().
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _showPendingBackgroundBooking();
+    });
+  }
+
+  // Emit booking_accepted to the server then update the dashboard UI.
+  // Called when the tech tapped Accept on a killed-app FCM notification.
+  // The socket may not be connected yet — waits for it if needed.
+  void _emitAcceptThenHandle(SocketBooking booking) {
+    void emit() {
+      SocketService.instance.emitBookingAccepted(
+        bookingId:      booking.bookingId,
+        technicianId:   SocketService.instance.userId,
+        technicianName: SocketService.instance.userName,
+        sessionId:      SocketService.instance.sessionId,
+      );
+    }
+
+    if (SocketService.instance.isConnected) {
+      emit();
+      _onBookingAccepted(booking);
+    } else {
+      // Socket still connecting — emit as soon as it is ready.
+      SocketService.instance.onConnected
+          .where((connected) => connected)
+          .take(1)
+          .listen((_) {
+        if (!mounted) return;
+        emit();
+        _onBookingAccepted(booking);
+      });
+    }
   }
 
   void _loadMockData() {
@@ -211,17 +445,44 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
 
     try {
       if (_isOnline) {
-        _stopIdlePing();
+        _stopLocationStream();
         SocketService.instance.goOffline();
+        // Stop the foreground service — Android can now manage the process normally.
+        await ForegroundService.instance.stop();
         if (mounted) setState(() => _isOnline = false);
       } else {
-        // Ensure location permission is granted before going Online
+        // ── PERMISSION ORDER IS CRITICAL ─────────────────────────────────
+        //
+        // Android 12+ throws ForegroundServiceStartNotAllowedException if
+        // startForegroundService() is called while the app is in the background.
+        // Samsung's BBA2 component also blocks service starts for ~4 seconds
+        // after the activity returns from any OS Settings page.
+        //
+        // Two types of permission UX:
+        //   IN-APP DIALOG  — system overlay, Activity stays in foreground → safe BEFORE start()
+        //   SETTINGS PAGE  — Activity goes to background → MUST be AFTER start()
+        //
+        // CORRECT ORDER (matches Uber Driver / Rapido Captain architecture):
+        //   1. Foreground location permission   — in-app dialog ✓
+        //   2. Notification permission          — in-app dialog ✓
+        //   3. Standard battery exemption       — in-app popup ✓ (once per denial)
+        //   4. OEM battery guide                — in-app sheet ✓ (once per install)
+        //   5. Get GPS position                 — no dialog ✓
+        //   6. startWithRetry()                 — service FIRST, up to 3 attempts ✓
+        //        └── if all fail: stay OFFLINE, show error dialog with Retry/Settings
+        //   7. goOnline() + setState            — ONLY after service confirmed RUNNING ✓
+        //   8. _startLocationStream()
+        //   9. Background location              — opens Settings, service already running ✓
+
+        // ── Step 1: Foreground location permission ────────────────────────
+        debugPrint('[TOGGLE] checking foreground location permission');
         var permission = await Geolocator.checkPermission();
         if (permission == LocationPermission.denied) {
           permission = await Geolocator.requestPermission();
         }
         if (permission == LocationPermission.denied ||
             permission == LocationPermission.deniedForever) {
+          debugPrint('[TOGGLE] location denied — cannot go online');
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(
               content: const Text('Location permission is required to go online'),
@@ -233,57 +494,217 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
           return;
         }
 
-        // Fetch position — fall back to last-known on timeout (last-known unsupported on web)
+        // ── Step 2: Notification permission (Android 13+) ─────────────────
+        // Shows an in-app overlay dialog — does NOT open Settings, so the
+        // activity stays in the foreground the whole time. Safe to do before start().
+        if (!kIsWeb) {
+          debugPrint('[TOGGLE] checking notification permission');
+          var notifStatus = await Permission.notification.status;
+          debugPrint('[TOGGLE] notification status=$notifStatus');
+          if (notifStatus.isDenied) {
+            notifStatus = await Permission.notification.request();
+            debugPrint('[TOGGLE] notification after request=$notifStatus');
+          }
+          if (notifStatus.isPermanentlyDenied && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: const Text(
+                'Enable notifications in Settings → Apps → MicroLab → Notifications.',
+              ),
+              action: const SnackBarAction(
+                label: 'Open Settings',
+                onPressed: openAppSettings,
+              ),
+              duration: const Duration(seconds: 8),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ));
+          }
+        }
+
+        // ── Step 3: Standard Android battery exemption ───────────────────
+        // Shows "Stop optimising battery?" system popup (in-app overlay,
+        // Activity stays in foreground). Shown only if not already granted.
+        // MUST be before start() — Samsung kills the service within 5s
+        // if the app is not in the battery exemption list.
+        if (!kIsWeb) {
+          await BatteryService.instance.ensureStandardExemption();
+        }
+
+        // ── Step 4: OEM battery guide (Samsung / Xiaomi / Oppo etc.) ─────
+        // Shown ONCE per install. Instructs the technician to add MicroLab
+        // to "Never sleeping apps" in their phone's battery settings.
+        // This covers manufacturer restrictions that the standard Android
+        // battery API cannot reach programmatically.
+        if (!kIsWeb && mounted) {
+          await BatteryService.instance.showOemGuideIfNeeded(context);
+        }
+
+        // ── Step 5: Get current GPS position ─────────────────────────────
+        debugPrint('[TOGGLE] fetching GPS position');
         Position? pos;
         try {
           pos = await Geolocator.getCurrentPosition(
             locationSettings: const LocationSettings(accuracy: LocationAccuracy.medium),
           ).timeout(const Duration(seconds: 10));
+          debugPrint('[TOGGLE] position: lat=${pos.latitude} lng=${pos.longitude}');
         } catch (_) {
-          try { pos = await Geolocator.getLastKnownPosition(); } catch (_) {}
+          try {
+            pos = await Geolocator.getLastKnownPosition();
+            debugPrint('[TOGGLE] using last-known position: lat=${pos?.latitude} lng=${pos?.longitude}');
+          } catch (_) {
+            debugPrint('[TOGGLE] could not get position — proceeding with 0,0');
+          }
         }
 
+        // ── Step 6: Start foreground service ─────────────────────────────
+        //
+        // CRITICAL: Service MUST start successfully BEFORE the technician is
+        // marked Online. If started after, a service failure leaves the tech
+        // Online with no persistent notification and no protection against
+        // the process being killed.
+        //
+        // startWithRetry() attempts up to 3 times (each up to 5s) before
+        // giving up. Battery exemption is already granted in Steps 3-4 so
+        // Samsung should allow the service to run.
+        debugPrint('[TOGGLE] Foreground Service Starting...');
+        final fgsStarted = await ForegroundService.instance.startWithRetry();
+
+        if (!fgsStarted) {
+          // All 3 attempts failed — technician stays OFFLINE.
+          // Show a non-blocking dialog so the finally block can immediately
+          // reset _isTogglingOnline (the dialog does not block the function).
+          debugPrint('[TOGGLE] ❌ Service Failed — Technician stays OFFLINE');
+          if (mounted) {
+            showDialog<void>(
+              context: context,
+              barrierDismissible: false,
+              builder: (ctx) => AlertDialog(
+                icon: const Icon(
+                  Icons.error_outline_rounded,
+                  color: Colors.orange,
+                  size: 48,
+                ),
+                title: const Text('Cannot Go Online'),
+                content: const Text(
+                  'The background service failed to start after 3 attempts.\n\n'
+                  'Your phone\'s battery settings may be restricting MicroLab '
+                  'from running in the background.\n\n'
+                  'Open Battery Settings, find MicroLab, and set it to '
+                  '"Unrestricted", then try again.',
+                ),
+                actionsAlignment: MainAxisAlignment.spaceEvenly,
+                actions: [
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.settings_outlined, size: 16),
+                    label: const Text('Battery Settings'),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      ForegroundService.instance.openBatterySettings();
+                    },
+                  ),
+                  ElevatedButton.icon(
+                    icon: const Icon(Icons.refresh_rounded, size: 16),
+                    label: const Text('Retry'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF1565C0),
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      // _isTogglingOnline is already false when this fires
+                      // (the dialog is non-blocking — finally ran before the
+                      // user had a chance to tap this button).
+                      if (mounted) _toggleAvailability();
+                    },
+                  ),
+                ],
+              ),
+            );
+          }
+          return; // ← stay OFFLINE, finally block resets _isTogglingOnline
+        }
+
+        // ── Step 7: Mark Online ────────────────────────────────────────────
+        // Service is confirmed RUNNING. Now it is safe to go online.
+        // The socket emits technician_online. UI switches to green.
+        debugPrint('[TOGGLE] Foreground Notification Displayed ✓');
         SocketService.instance.goOnline(
           lat: pos?.latitude ?? 0.0,
           lng: pos?.longitude ?? 0.0,
         );
         if (mounted) setState(() => _isOnline = true);
-        _startIdlePing();
+        debugPrint('[TOGGLE] Socket Connected ✓ — Technician Online');
+
+        // ── Step 8: Start GPS stream ──────────────────────────────────────
+        _startLocationStream();
+        debugPrint('[TOGGLE] Location Updates Started ✓');
+
+        // ── Step 9: Background location permission ───────────────────────
+        // Opens OS Settings on Android 11+ — app goes to background briefly.
+        // Safe now because the service is RUNNING (confirmed in Step 6).
+        if (!kIsWeb) {
+          final bgStatus = await Permission.locationAlways.status;
+          debugPrint('[TOGGLE] background location status=$bgStatus');
+          if (!bgStatus.isGranted) {
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: const Text(
+                  'Set location to "Allow all the time" for live tracking '
+                  'when the screen is off.',
+                ),
+                backgroundColor: const Color(0xFF1565C0),
+                behavior: SnackBarBehavior.floating,
+                duration: const Duration(seconds: 4),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ));
+            }
+            await Permission.locationAlways.request();
+            debugPrint('[TOGGLE] background location after request='
+                '${await Permission.locationAlways.status}');
+          }
+        }
+
       }
     } finally {
       if (mounted) setState(() => _isTogglingOnline = false);
     }
   }
 
-  void _startIdlePing() {
-    _idlePingTimer?.cancel();
-    _idlePingTimer = Timer.periodic(
-      Duration(seconds: AppConstants.idlePingSeconds),
-      (_) async {
+  // Continuous GPS stream — fires automatically whenever the device moves 10+ metres.
+  // Unlike a timer, this stream keeps delivering positions even when the screen is
+  // locked, because the foreground service (Feature 1) keeps the Dart isolate alive.
+  void _startLocationStream() {
+    _locationSub?.cancel();
+    _locationSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        // Only emit when the technician has actually moved 10 metres —
+        // avoids spamming the server with duplicate coordinates while stationary.
+        distanceFilter: 10,
+      ),
+    ).listen(
+      (pos) {
         if (!mounted || !_isOnline) return;
-        try {
-          final pos = await Geolocator.getLastKnownPosition();
-          if (pos != null) {
-            SocketService.instance.emitIdleLocation(
-              lat: pos.latitude,
-              lng: pos.longitude,
-            );
-          }
-        } catch (_) {}
+        SocketService.instance.emitIdleLocation(
+          lat: pos.latitude,
+          lng: pos.longitude,
+        );
       },
+      onError: (_) {}, // silently ignore location errors (GPS unavailable etc.)
     );
   }
 
-  void _stopIdlePing() {
-    _idlePingTimer?.cancel();
-    _idlePingTimer = null;
+  void _stopLocationStream() {
+    _locationSub?.cancel();
+    _locationSub = null;
   }
 
   Future<void> _handleLogout() async {
-    // 1. Go offline — stops ping timer + socket
+    // 1. Go offline — stops ping timer + socket + foreground service
     if (_isOnline) {
-      _stopIdlePing();
+      _stopLocationStream();
       SocketService.instance.goOffline();
+      await ForegroundService.instance.stop();
     }
 
     // 2. Read IDs before clearing prefs
@@ -437,10 +858,18 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _bookingRequestSub?.cancel();
-    _stopIdlePing();
+    _bookingNotifAcceptSub?.cancel();
+    _stopLocationStream();
     if (_isOnline) {
       SocketService.instance.goOffline();
+      // BUG FIX: stop() was missing here. If this widget is disposed without
+      // the process dying (e.g. navigation stack fully popped), the foreground
+      // notification would linger with no code behind it.
+      // dispose() cannot be async so we fire-and-forget — acceptable because
+      // if the process is also dying the service goes with it anyway.
+      ForegroundService.instance.stop();
     }
     super.dispose();
   }

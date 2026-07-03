@@ -710,6 +710,15 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                               : 'Unassigned',
                       highlight: true,
                     ),
+                    if (widget.booking.slotLabel?.isNotEmpty == true) ...[
+                      const SizedBox(height: 10),
+                      _DetailRow(
+                        icon: Icons.access_time_rounded,
+                        label: 'Slot',
+                        value: widget.booking.slotLabel!,
+                        highlight: true,
+                      ),
+                    ],
                     const SizedBox(height: 10),
                     _DetailRow(
                       icon: Icons.tag_rounded,

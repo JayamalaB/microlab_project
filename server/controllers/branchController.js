@@ -1,5 +1,18 @@
 const db = require('../config/db');
 
+// "06:30:00" → "6:30 AM"
+function _fmtTimeLabel(timeStr) {
+  const [h, m] = timeStr.split(':').map(Number);
+  const period = h < 12 ? 'AM' : 'PM';
+  const h12 = h % 12 || 12;
+  return `${h12}:${String(m).padStart(2, '0')} ${period}`;
+}
+
+// "06:30:00" → "06:30"
+function _fmtTime(timeStr) {
+  return timeStr.slice(0, 5);
+}
+
 // Haversine distance in km between two lat/lng points
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R    = 6371;
@@ -156,16 +169,13 @@ exports.getAvailableSlots = async (req, res) => {
   try {
     const [rows] = await db.execute(
       `SELECT
-         ts.tech_slot_id  AS time_slot_id,
-         ts.slot_id,
-         ts.technician_id,
+         s.slot_id,
          s.slot_label,
-         s.slot_start     AS start_time,
-         s.slot_end       AS end_time,
-         ts.max_bookings  AS max_users,
-         ts.booked_count,
-         ts.is_available,
-         (ts.max_bookings - ts.booked_count) AS remaining
+         s.slot_start              AS start_time,
+         s.slot_end                AS end_time,
+         SUM(ts.max_bookings)      AS max_users,
+         SUM(ts.booked_count)      AS booked_count,
+         SUM(ts.max_bookings - ts.booked_count) AS remaining
        FROM ip_technician_slots ts
        JOIN ip_slots s ON s.slot_id = ts.slot_id
        WHERE ts.branch_id    = ?
@@ -173,9 +183,42 @@ exports.getAvailableSlots = async (req, res) => {
          AND ts.is_available = 1
          AND ts.booked_count < ts.max_bookings
          AND s.slot_active   = 1
+       GROUP BY s.slot_id, s.slot_label, s.slot_start, s.slot_end
        ORDER BY s.slot_start ASC`,
       [branchId, date]
     );
+
+    // For each slot, fetch distinct available appointment times from ip_avilable_slots
+    const slotsWithIntervals = await Promise.all(rows.map(async r => {
+      const [timeRows] = await db.execute(
+        `SELECT DISTINCT ias.slot_time
+         FROM ip_avilable_slots ias
+         JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
+         WHERE ts.branch_id   = ?
+           AND ts.slot_id     = ?
+           AND ts.slot_date   = ?
+           AND ias.is_available = 1
+         ORDER BY ias.slot_time ASC`,
+        [branchId, r.slot_id, date]
+      );
+
+      const timeIntervals = timeRows.map(t => ({
+        time:  _fmtTime(t.slot_time),         // "06:30"
+        label: _fmtTimeLabel(t.slot_time),    // "6:30 AM"
+      }));
+
+      return {
+        slotId:        r.slot_id,
+        label:         r.slot_label,
+        startTime:     r.start_time,
+        endTime:       r.end_time,
+        maxUsers:      Number(r.max_users),
+        bookedCount:   Number(r.booked_count),
+        remaining:     Number(r.remaining),
+        isAvailable:   true,
+        timeIntervals,   // [] when no duration configured (old flow)
+      };
+    }));
 
     console.log(`✅ Found ${rows.length} available slot(s) for branch=${branchId} date=${date}`);
 
@@ -183,18 +226,7 @@ exports.getAvailableSlots = async (req, res) => {
       success:  true,
       date,
       branchId: Number(branchId),
-      slots:    rows.map(r => ({
-        timeSlotId:   r.time_slot_id,
-        slotId:       r.slot_id,
-        technicianId: r.technician_id,
-        label:        r.slot_label,
-        startTime:    r.start_time,
-        endTime:      r.end_time,
-        maxUsers:     r.max_users,
-        bookedCount:  r.booked_count,
-        remaining:    r.remaining,
-        isAvailable:  r.is_available === 1,
-      })),
+      slots:    slotsWithIntervals,
     });
   } catch (err) {
     console.error('❌ getAvailableSlots FAILED:', err.message);

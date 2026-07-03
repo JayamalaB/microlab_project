@@ -120,7 +120,9 @@ exports.verifyOtp = async (req, res) => {
       `SELECT u.user_id, tech.technician_id, tech.branch_id
        FROM ip_users u
        JOIN ip_technicians tech ON tech.user_id = u.user_id
-       WHERE u.user_mobile_no = ? AND u.user_microlab_type = 'technician'`,
+       WHERE u.user_mobile_no = ? AND u.user_microlab_type = 'technician'
+       ORDER BY tech.technician_id ASC
+       LIMIT 1`,
       [mobile]
     );
 

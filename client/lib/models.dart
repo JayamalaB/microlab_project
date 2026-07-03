@@ -109,6 +109,8 @@ class BranchModel {
   final String? mobileNo;
   final String? telephoneNo;
   final String? email;
+  final double? lat;
+  final double? lng;
 
   BranchModel({
     required this.id,
@@ -119,6 +121,8 @@ class BranchModel {
     this.mobileNo,
     this.telephoneNo,
     this.email,
+    this.lat,
+    this.lng,
   });
 
   factory BranchModel.fromJson(Map<String, dynamic> j) => BranchModel(
@@ -130,6 +134,8 @@ class BranchModel {
         mobileNo:    j['mobileNo']    as String?,
         telephoneNo: j['telephoneNo'] as String?,
         email:       j['email']       as String?,
+        lat:         (j['latitude']  as num?)?.toDouble(),
+        lng:         (j['longitude'] as num?)?.toDouble(),
       );
 }
 
@@ -200,6 +206,19 @@ class TimeSlot {
   final String label;
   final String time;
   const TimeSlot({required this.id, required this.label, required this.time});
+}
+
+// ─── Time Interval (appointment time within a slot) ───────────────────────────
+
+class TimeInterval {
+  final String time;        // "06:30" — sent to server
+  final String label;       // "6:30 AM" — displayed to patient
+  final bool   isAvailable;
+  const TimeInterval({
+    required this.time,
+    required this.label,
+    this.isAvailable = true,
+  });
 }
 
 // ─── Technician Model ─────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:permission_handler/permission_handler.dart' show openAppSettings;
 import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/foreground_service.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'technician_booking_detail_screen.dart';
@@ -103,6 +104,12 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
   @override
   void dispose() {
     _isDisposing = true;
+    // If the screen closes without a completed handover (e.g. back button),
+    // reset the persistent notification to the waiting state so the technician
+    // doesn't see "Collecting from..." when they're actually idle on the dashboard.
+    if (_status != _JobStatus.handedOver) {
+      ForegroundService.instance.updateText('Ready for booking requests');
+    }
     _pulseController.removeListener(_rebuildBeacon);
     _pulseController.dispose();
     _posSub?.cancel();
@@ -571,6 +578,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       _roadDistKm = null;
     });
     SocketService.instance.emitEnRoute(bookingId: widget.bookingId);
+    ForegroundService.instance.updateText('En route to ${widget.patientName}');
     HapticFeedback.mediumImpact();
     if (_myPosition != null && widget.patientLat != null && widget.patientLng != null) {
       final myPos = LatLng(_myPosition!.latitude, _myPosition!.longitude);
@@ -590,11 +598,13 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       _initialDistKm = null;
     });
     SocketService.instance.emitArrived(bookingId: widget.bookingId);
+    ForegroundService.instance.updateText('Arrived at ${widget.patientName}');
     HapticFeedback.mediumImpact();
   }
 
   void _startCollection() {
     SocketService.instance.emitCollectionStarted(bookingId: widget.bookingId);
+    ForegroundService.instance.updateText('Collecting from ${widget.patientName}');
     HapticFeedback.mediumImpact();
     Navigator.push(
       context,
@@ -623,6 +633,13 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       ),
     ).then((wasCompleted) {
       if (wasCompleted == true && mounted) {
+        // Emit the handed_to_lab socket event — this is the line that writes
+        // ip_technician_collection.completed_at = NOW() on the server, marks
+        // the booking as 'collected' in ip_bookings, frees the technician in
+        // the dispatch pool, and notifies the patient that their sample is on
+        // the way to the lab.
+        SocketService.instance.emitHandedToLab(bookingId: widget.bookingId);
+        ForegroundService.instance.updateText('Ready for booking requests');
         setState(() => _status = _JobStatus.handedOver);
         HapticFeedback.heavyImpact();
         Future.delayed(const Duration(milliseconds: 1500), () {

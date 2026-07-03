@@ -23,8 +23,13 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
   late final List<DateTime> _days;
   int _selectedDayIndex = 0;
 
-  final Map<String, Set<int>> _selectedSlots = {};
-  final Map<String, Set<int>> _savedSlots    = {};
+  final Map<String, Set<int>>       _selectedSlots     = {};
+  final Map<String, Set<int>>       _savedSlots        = {};
+  // slotId → appointment duration in minutes (null = no duration / old flow)
+  final Map<String, Map<int, int?>> _selectedDurations = {};
+  final Map<String, Map<int, int?>> _savedDurations    = {};
+
+  static const _durationOptions = [15, 30, 40];
 
   bool _isSaving = false;
 
@@ -56,7 +61,8 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
     final today = DateTime(now.year, now.month, now.day);
     _days = List.generate(3, (i) => today.add(Duration(days: i)));
     for (final d in _days) {
-      _selectedSlots[_key(d)] = {};
+      _selectedSlots[_key(d)]     = <int>{};
+      _selectedDurations[_key(d)] = <int, int?>{};
     }
     _loadSlots();
   }
@@ -82,18 +88,25 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
       final masterRaw = body['masterSlots'] as List<dynamic>? ?? [];
       final techRaw   = body['techSlots']   as List<dynamic>? ?? [];
 
-      final master = masterRaw.map((e) => e as Map<String, dynamic>).toList();
+      // Deduplicate by slot_id — guards against duplicate rows in ip_slots table.
+      final seenIds = <int>{};
+      final master = masterRaw
+          .map((e) => e as Map<String, dynamic>)
+          .where((s) => seenIds.add(s['slot_id'] as int))
+          .toList();
 
-      // Pre-select slots that match our 3 days
-      final Map<String, Set<int>> preSelected = {
-        for (final d in _days) _key(d): <int>{},
-      };
+      // Pre-select slots and durations that match our 3 days
+      final Map<String, Set<int>>       preSelected  = { for (final d in _days) _key(d): <int>{} };
+      final Map<String, Map<int, int?>> preDurations = { for (final d in _days) _key(d): <int, int?>{} };
+
       for (final ts in techRaw) {
         final dateStr = (ts['slot_date'] as String).substring(0, 10);
         final slotId  = ts['slot_id'] as int;
         final avail   = (ts['is_available'] as int?) ?? 1;
+        final dur     = ts['duration_minutes'] as int?;
         if (avail == 1 && preSelected.containsKey(dateStr)) {
           preSelected[dateStr]!.add(slotId);
+          preDurations[dateStr]![slotId] = dur;
         }
       }
 
@@ -101,10 +114,14 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
         _masterSlots = master;
         _selectedSlots.clear();
         _savedSlots.clear();
+        _selectedDurations.clear();
+        _savedDurations.clear();
         for (final d in _days) {
           final k = _key(d);
-          _selectedSlots[k] = Set.from(preSelected[k] ?? {});
-          _savedSlots[k]    = Set.from(preSelected[k] ?? {});
+          _selectedSlots[k]     = Set.from(preSelected[k]  ?? {});
+          _savedSlots[k]        = Set.from(preSelected[k]  ?? {});
+          _selectedDurations[k] = Map.from(preDurations[k] ?? {});
+          _savedDurations[k]    = Map.from(preDurations[k] ?? {});
         }
         _slotsLoading = false;
       });
@@ -121,6 +138,11 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
       final cur = _selectedSlots[k] ?? {};
       final sav = _savedSlots[k]    ?? {};
       if (cur.length != sav.length || !cur.containsAll(sav)) return true;
+      final curDur = _selectedDurations[k] ?? {};
+      final savDur = _savedDurations[k]    ?? {};
+      for (final slotId in cur) {
+        if (curDur[slotId] != savDur[slotId]) return true;
+      }
     }
     return false;
   }
@@ -130,7 +152,12 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
   void _toggleSlot(String k, int slotId) {
     setState(() {
       final s = _selectedSlots[k]!;
-      s.contains(slotId) ? s.remove(slotId) : s.add(slotId);
+      if (s.contains(slotId)) {
+        s.remove(slotId);
+        _selectedDurations[k]?.remove(slotId);
+      } else {
+        s.add(slotId);
+      }
     });
   }
 
@@ -138,7 +165,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
       setState(() => _selectedSlots[k] = {for (final s in _masterSlots) s['slot_id'] as int});
 
   void _clearAll(String k) =>
-      setState(() => _selectedSlots[k] = {});
+      setState(() { _selectedSlots[k] = {}; _selectedDurations[k] = {}; });
 
   Future<void> _save() async {
     setState(() => _isSaving = true);
@@ -148,8 +175,17 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
       final token  = prefs.getString('auth_token') ?? '';
 
       final slotsPayload = _days.map((d) {
-        final k = _key(d);
-        return {'date': k, 'slot_ids': (_selectedSlots[k] ?? {}).toList()};
+        final k      = _key(d);
+        final durMap = <String, int>{};
+        for (final slotId in (_selectedSlots[k] ?? {})) {
+          final dur = _selectedDurations[k]?[slotId];
+          if (dur != null) durMap[slotId.toString()] = dur;
+        }
+        return {
+          'date':     k,
+          'slot_ids': (_selectedSlots[k] ?? {}).toList(),
+          if (durMap.isNotEmpty) 'durations': durMap,
+        };
       }).toList();
 
       final res = await http.put(
@@ -166,9 +202,11 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
       if (res.statusCode == 200) {
         setState(() {
           _savedSlots.clear();
+          _savedDurations.clear();
           for (final d in _days) {
             final k = _key(d);
-            _savedSlots[k] = Set.from(_selectedSlots[k] ?? {});
+            _savedSlots[k]     = Set.from(_selectedSlots[k]     ?? {});
+            _savedDurations[k] = Map.from(_selectedDurations[k] ?? {});
           }
         });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -383,8 +421,90 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
             }).toList(),
           ),
 
+        // Duration picker — shown for every selected slot
         if (selected.isNotEmpty) ...[
           const SizedBox(height: 20),
+          const Text(
+            'Appointment Duration',
+            style: TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Set how long each appointment takes (optional)',
+            style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: 10),
+          ...selected.map((slotId) {
+            final slot  = _masterSlots.firstWhere((s) => s['slot_id'] == slotId,
+                orElse: () => {'slot_label': 'Slot $slotId'});
+            final label = slot['slot_label'] as String;
+            final curDur = _selectedDurations[k]?[slotId];
+
+            return Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.divider),
+              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(label,
+                    style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.textPrimary)),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    // None option
+                    GestureDetector(
+                      onTap: () => setState(() => _selectedDurations[k]![slotId] = null),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 140),
+                        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: curDur == null ? AppColors.brandGreen : const Color(0xFFF5F5F5),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: curDur == null ? AppColors.brandGreen : AppColors.divider,
+                          ),
+                        ),
+                        child: Text('No fixed time',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: curDur == null ? Colors.white : AppColors.textSecondary)),
+                      ),
+                    ),
+                    ..._durationOptions.map((min) => GestureDetector(
+                      onTap: () => setState(() => _selectedDurations[k]![slotId] = min),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 140),
+                        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: curDur == min ? AppColors.brandGreen : const Color(0xFFF5F5F5),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: curDur == min ? AppColors.brandGreen : AppColors.divider,
+                          ),
+                        ),
+                        child: Text('$min min',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: curDur == min ? Colors.white : AppColors.textSecondary)),
+                      ),
+                    )),
+                  ],
+                ),
+              ]),
+            );
+          }),
+
+          const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             decoration: BoxDecoration(

@@ -21,6 +21,8 @@ exports.createBooking = async (req, res) => {
     notes               = null,
     items               = [],
     branchId            = null,
+    slotId              = null,
+    appointmentTime     = null,  // "HH:MM" — exact time within slot
     collectionDate      = null,
     collectionLatitude  = null,
     collectionLongitude = null,
@@ -41,7 +43,7 @@ exports.createBooking = async (req, res) => {
 
     // Derive start/end datetime — NOT NULL in ip_bookings, fall back to today if not sent
     const dateStr       = collectionDate ?? new Date().toISOString().slice(0, 10);
-    const startDatetime = `${dateStr} 00:00:00`;
+    const startDatetime = appointmentTime ? `${dateStr} ${appointmentTime}:00` : `${dateStr} 00:00:00`;
     const endDatetime   = `${dateStr} 23:59:59`;
 
     // Get primary product_id from first item (ip_bookings.product_id is NOT NULL)
@@ -53,28 +55,28 @@ exports.createBooking = async (req, res) => {
     console.log(`📋 Inserting booking ref=${bookingRef} client_id=${patientId} product_id=${primaryProductId}`);
 
     const bookingParams = [
-      patientId, branchId ?? null, bookingRef, primaryProductId,
+      patientId, branchId ?? null, slotId ?? null, bookingRef, primaryProductId,
       bookingType, collectionDate ?? null,
       startDatetime, endDatetime,
       totalAmount, notes ?? null,
       collectionLatitude ?? null, collectionLongitude ?? null,
     ];
     console.log('💾 [DB] INSERT ip_bookings | values:', JSON.stringify({
-      client_id: patientId, branch_id: branchId, booking_ref: bookingRef,
-      product_id: primaryProductId, booking_type: bookingType,
+      client_id: patientId, branch_id: branchId, slot_id: slotId,
+      booking_ref: bookingRef, product_id: primaryProductId, booking_type: bookingType,
       booking_date: collectionDate, start_datetime: startDatetime,
       end_datetime: endDatetime, amount_due: totalAmount,
       notes, collection_latitude: collectionLatitude, collection_longitude: collectionLongitude,
     }));
     const [bResult] = await conn.execute(
       `INSERT INTO ip_bookings
-         (client_id, branch_id, booking_ref, product_id,
+         (client_id, branch_id, slot_id, booking_ref, product_id,
           status, booking_type, booking_date,
           start_datetime, end_datetime,
           amount_due, notes,
           collection_latitude, collection_longitude,
           created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       bookingParams
     );
     const bookingId = bResult.insertId;

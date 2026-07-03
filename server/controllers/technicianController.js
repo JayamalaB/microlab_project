@@ -6,6 +6,20 @@
 
 const db = require('../config/db');
 
+// Converts "HH:MM:SS" TIME strings to appointment slot array "HH:MM:00"
+function _generateIntervals(startTime, endTime, durationMinutes) {
+  const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+  const startMin = toMin(startTime);
+  const endMin   = toMin(endTime);
+  const times = [];
+  for (let t = startMin; t < endMin; t += durationMinutes) {
+    const h = String(Math.floor(t / 60)).padStart(2, '0');
+    const m = String(t % 60).padStart(2, '0');
+    times.push(`${h}:${m}:00`);
+  }
+  return times;
+}
+
 // ── GET /api/technicians/:technicianId/profile ───────────────────────────────
 exports.getProfile = async (req, res) => {
   const { technicianId } = req.params;
@@ -189,14 +203,19 @@ exports.getSlots = async (req, res) => {
   console.log(`\n📅 [GET SLOTS] technician_id=${technicianId}`);
   try {
     const [masterSlots] = await db.execute(
-      `SELECT slot_id, slot_label, slot_start, slot_end, slot_type
+      `SELECT slot_id,
+              MIN(slot_label)       AS slot_label,
+              MIN(slot_start)       AS slot_start,
+              MIN(slot_end)         AS slot_end,
+              MIN(slot_type)        AS slot_type
        FROM ip_slots
        WHERE slot_active = 1
-       ORDER BY display_order ASC, slot_start ASC`
+       GROUP BY slot_id
+       ORDER BY MIN(slot_start) ASC`
     );
 
     const [techSlots] = await db.execute(
-      `SELECT slot_id, DATE_FORMAT(slot_date, '%Y-%m-%d') AS slot_date, max_bookings, booked_count, is_available
+      `SELECT slot_id, DATE_FORMAT(slot_date, '%Y-%m-%d') AS slot_date, max_bookings, booked_count, is_available, duration_minutes
        FROM ip_technician_slots
        WHERE technician_id = ? AND slot_date >= CURDATE()
        ORDER BY slot_date ASC`,
@@ -212,7 +231,8 @@ exports.getSlots = async (req, res) => {
 };
 
 // ── PUT /api/technicians/:technicianId/slots ──────────────────────────────────
-// Body: { slots: [{ date: 'YYYY-MM-DD', slot_ids: [1, 2, 3] }] }
+// Body: { slots: [{ date: 'YYYY-MM-DD', slot_ids: [1,2], durations: {"1":30,"2":15} }] }
+// durations is optional; omitting it (or a specific slot_id key) skips interval generation.
 exports.saveSlots = async (req, res) => {
   const { technicianId } = req.params;
   const { slots } = req.body;
@@ -222,7 +242,6 @@ exports.saveSlots = async (req, res) => {
       return res.status(422).json({ success: false, message: 'slots must be an array' });
     }
 
-    // Get technician's branch_id
     const [[tech]] = await db.execute(
       'SELECT branch_id FROM ip_technicians WHERE technician_id = ?',
       [technicianId]
@@ -230,32 +249,66 @@ exports.saveSlots = async (req, res) => {
     if (!tech) return res.status(404).json({ success: false, message: 'Technician not found' });
     const branchId = tech.branch_id;
 
-    // ✅ FIXED: Using transaction for consistency
     const connection = await db.getConnection();
     try {
       await connection.beginTransaction();
 
-      // Remove all future slots then re-insert only selected ones
+      // Delete ip_avilable_slots tied to this tech's future slots before removing the slots
+      await connection.query(
+        `DELETE ias FROM ip_avilable_slots ias
+         JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
+         WHERE ts.technician_id = ? AND ts.slot_date >= CURDATE()`,
+        [technicianId]
+      );
+
+      // Remove all future technician slots then re-insert selected ones
       await connection.query(
         'DELETE FROM ip_technician_slots WHERE technician_id = ? AND slot_date >= CURDATE()',
         [technicianId]
       );
 
+      let totalIntervals = 0;
       for (const day of slots) {
         if (!Array.isArray(day.slot_ids) || day.slot_ids.length === 0) continue;
+        const durMap = day.durations ?? {}; // { "1": 30, "2": 15 } — keyed by slot_id string
+
         for (const slotId of day.slot_ids) {
-          await connection.query(
+          const durationMinutes = durMap[String(slotId)] ? Number(durMap[String(slotId)]) : null;
+
+          const [ins] = await connection.query(
             `INSERT INTO ip_technician_slots
-               (technician_id, slot_id, slot_date, branch_id, max_bookings, is_available, created_by)
-             VALUES (?, ?, ?, ?, 5, 1, ?)`,
-            [technicianId, slotId, day.date, branchId, technicianId]
+               (technician_id, slot_id, slot_date, branch_id, max_bookings, is_available, duration_minutes, created_by)
+             VALUES (?, ?, ?, ?, 5, 1, ?, ?)`,
+            [technicianId, slotId, day.date, branchId, durationMinutes, technicianId]
           );
+          const techSlotId = ins.insertId;
+
+          // Generate per-appointment-time rows in ip_avilable_slots when duration is set
+          if (durationMinutes) {
+            const [[slotDef]] = await connection.query(
+              'SELECT slot_start, slot_end FROM ip_slots WHERE slot_id = ?',
+              [slotId]
+            );
+            if (slotDef) {
+              const times = _generateIntervals(slotDef.slot_start, slotDef.slot_end, durationMinutes);
+              for (const t of times) {
+                await connection.query(
+                  `INSERT INTO ip_avilable_slots
+                     (booking_type, technician_slot_id, slot_date, slot_time, is_available)
+                   VALUES ('home', ?, ?, ?, 1)`,
+                  [techSlotId, day.date, t]
+                );
+              }
+              totalIntervals += times.length;
+              console.log(`   slot_id=${slotId} date=${day.date} ${durationMinutes}min → ${times.length} intervals`);
+            }
+          }
         }
       }
 
       await connection.commit();
       const total = slots.reduce((s, d) => s + (d.slot_ids?.length ?? 0), 0);
-      console.log(`✅ Slots saved — ${slots.length} day(s), ${total} slot entries`);
+      console.log(`✅ Slots saved — ${slots.length} day(s), ${total} slot entries, ${totalIntervals} intervals`);
       res.json({ success: true, message: 'Slots saved' });
     } catch (e) {
       await connection.rollback();
