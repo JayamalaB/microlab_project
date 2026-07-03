@@ -1,17 +1,40 @@
 const db = require('../config/db');
 
-// GET /api/tests — list products/tests from ip_products
+// Maps ip_products row → shape TestModel.fromJson() expects
+function mapProduct(r) {
+  const original    = parseFloat(r.product_price ?? 0) || 0;
+  const hasOffer    = r.offer === 'yes' || r.offer === '1' || r.offer == 1;
+  const discountPct = hasOffer ? (parseFloat(r.discount_percent) || 0) : 0;
+  const finalP      = hasOffer && discountPct > 0
+    ? Math.round(original * (1 - discountPct / 100) * 100) / 100
+    : original;
+
+  return {
+    id:             r.product_id?.toString(),
+    name:           r.product_name   ?? '',
+    type:           r.product_type   ?? 'single',
+    category:       r.product_category ?? 'General',
+    description:    r.product_description ?? '',
+    original_price: original,
+    final_price:    finalP,
+    offer:          hasOffer ? 'yes' : 'no',
+    offer_pct:      hasOffer ? discountPct : null,
+    start_date:     r.offer_start_date ?? null,
+    end_date:       r.offer_end_date   ?? null,
+    doc_req:        (r.document_required === 'yes' || r.document_required == 1) ? 'yes' : 'no',
+    pre_instrs:     r.pre_instructions ?? null,
+    report_sts:     r.report_tat_hours  ?? '24 hrs',
+    available_for_home: r.available_for_home ?? 1,
+    available_for_lab:  r.available_for_lab  ?? 1,
+  };
+}
+
+// GET /api/tests — list active products from ip_products
 exports.getCatalog = async (req, res) => {
   try {
     const { type, search } = req.query;
 
-    let sql = `SELECT product_id AS id, product_name AS name, product_type AS type,
-                      product_description AS description, product_price AS original_price,
-                      offer_price AS final_price, document_required AS doc_req,
-                      pre_instructions AS pre_instrs, report_tat_hours AS report_sts,
-                      available_for_home, available_for_lab, package_type
-               FROM ip_products
-               WHERE product_active = 1`;
+    let sql    = 'SELECT * FROM ip_products WHERE product_active = 1 AND deleted_at IS NULL';
     const params = [];
 
     if (type) {
@@ -25,29 +48,24 @@ exports.getCatalog = async (req, res) => {
     sql += ' ORDER BY product_name';
 
     const [rows] = await db.execute(sql, params);
-    res.json({ success: true, packages: rows });
+    res.json({ success: true, data: rows.map(mapProduct) });
   } catch (err) {
-    console.error('getCatalog:', err.message);
-    res.status(500).json({ success: false, message: 'Server error' });
+    const detail = `${err.message} | code=${err.code} | sql=${err.sql}`;
+    console.error('getCatalog:', detail);
+    res.status(500).json({ success: false, message: 'Server error', debug: detail });
   }
 };
 
-// GET /api/tests/:id — single product/test
+// GET /api/tests/:id — single product
 exports.getTest = async (req, res) => {
   try {
     const [rows] = await db.execute(
-      `SELECT product_id AS id, product_name AS name, product_type AS type,
-              product_description AS description, product_price AS original_price,
-              offer_price AS final_price, document_required AS doc_req,
-              pre_instructions AS pre_instrs, report_tat_hours AS report_sts,
-              available_for_home, available_for_lab, package_type
-       FROM ip_products
-       WHERE product_id = ? AND product_active = 1`,
+      'SELECT * FROM ip_products WHERE product_id = ? AND product_active = 1 AND deleted_at IS NULL',
       [req.params.id]
     );
     if (!rows.length)
       return res.status(404).json({ success: false, message: 'Product not found' });
-    res.json({ success: true, package: rows[0] });
+    res.json({ success: true, package: mapProduct(rows[0]) });
   } catch (err) {
     console.error('getTest:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });

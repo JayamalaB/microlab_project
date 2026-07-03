@@ -626,7 +626,7 @@ async function _notifySlotNoAvailability(io, bookingId, failedSlotId, branchId, 
     if (appointmentTime && failedSlotId != null) {
       const [timeRows] = await db.execute(
         `SELECT DISTINCT ias.slot_time
-         FROM ip_avilable_slots ias
+         FROM ip_available_slots ias
          JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
          WHERE ts.branch_id     = ?
            AND ts.slot_id       = ?
@@ -1049,7 +1049,7 @@ module.exports = function bookingSocket(io, socket) {
       // Mark the exact appointment time as taken so no other booking can claim it.
       if (appointmentTime && bookingDate) {
         dbRun(
-          `UPDATE ip_avilable_slots ias
+          `UPDATE ip_available_slots ias
            JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
            SET ias.is_available = 0, ias.updated_at = NOW()
            WHERE ts.technician_id  = ?
@@ -1668,11 +1668,11 @@ module.exports = function bookingSocket(io, socket) {
         slotTechIds = new Set(techRows.map(r => r.technician_id));
 
         // When the patient chose a specific appointment time, further restrict to
-        // techs who still have that exact time available in ip_avilable_slots.
+        // techs who still have that exact time available in ip_available_slots.
         if (appointmentTime && slotTechIds.size > 0) {
           const [availRows] = await db.execute(
             `SELECT DISTINCT ts.technician_id
-             FROM ip_avilable_slots ias
+             FROM ip_available_slots ias
              JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
              WHERE ts.slot_id      = ?
                AND ts.slot_date   = ?

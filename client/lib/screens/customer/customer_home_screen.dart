@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/auth_service.dart';
+import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/screens/shared/onboarding_screen.dart';
 import 'add_member_screen.dart';
@@ -18,7 +19,11 @@ import 'support_chatbot.dart';
 class CustomerHomeScreen extends StatefulWidget {
   final String mobile;
   final bool isVip;
-  const CustomerHomeScreen({super.key, required this.mobile, this.isVip = false});
+  const CustomerHomeScreen({
+    super.key,
+    required this.mobile,
+    this.isVip = false,
+  });
 
   @override
   State<CustomerHomeScreen> createState() => _CustomerHomeScreenState();
@@ -28,33 +33,56 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   int _selectedIndex = 0;
   MemberModel? _activeMember;
+  List<MemberModel> _members = [];
+  bool _loadingPatients = true;
 
-  // TODO: Replace with GET /api/customer/members
-  final List<MemberModel> _members = [
-    MemberModel(
-      id: '1',
-      name: 'Ravi Kumar',
-      mobile: '9876543210',
-      gender: 'Male',
-      location: 'Chennai',
-      address: '12, Gandhi Street, T Nagar, Chennai - 600017',
-      email: 'ravi@email.com',
-      dob: DateTime(1985, 6, 15),
-      relation: 'Self',
-      healthCondition: 'Diabetes',
-      photoBytes: null,
-    ),
-    MemberModel(
-      id: '2',
-      name: 'Priya Kumar',
-      mobile: '9876543211',
-      gender: 'Female',
-      location: 'Chennai',
-      address: '12, Gandhi Street, T Nagar, Chennai - 600017',
-      relation: 'Spouse',
-      dob: DateTime(1988, 3, 22),
-    ),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _loadPatients();
+  }
+
+  Future<void> _loadPatients() async {
+    try {
+      final patients = await ApiService.getPatients();
+      if (!mounted) return;
+      setState(() {
+        _members = patients.map(_patientToMember).toList();
+        _loadingPatients = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loadingPatients = false);
+    }
+  }
+
+  static DateTime? _parseDob(String? s) {
+    if (s == null || s.isEmpty) return null;
+    final parts = s.split('-');
+    if (parts.length != 3) return null;
+    try {
+      if (parts[0].length == 4) {
+        return DateTime(int.parse(parts[0]), int.parse(parts[1]), int.parse(parts[2]));
+      }
+      return DateTime(int.parse(parts[2]), int.parse(parts[1]), int.parse(parts[0]));
+    } catch (_) { return null; }
+  }
+
+  MemberModel _patientToMember(PatientModel p) => MemberModel(
+    id:              p.patientId.toString(),
+    name:            p.name,
+    mobile:          widget.mobile,
+    gender:          p.gender,
+    location:        p.location,
+    address:         p.address,
+    email:           p.email,
+    dob:             _parseDob(p.dateOfBirth),
+    relation:        p.relation,
+    healthCondition: p.healthCondition,
+    photoBytes:      null,
+    photoUrl:        (p.photo != null && p.photo!.isNotEmpty) ? p.photo : null,
+    patientIdRef:    p.patientIdRef,
+    isReadOnly:      p.patientIdRef != null,
+  );
 
   Future<void> _logout() async {
     SocketService.instance.disconnect();
@@ -196,7 +224,14 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
           IndexedStack(
             index: _stackIndex,
             children: [
-              _members.isEmpty ? _emptyState() : _memberList(),
+              _loadingPatients
+                  ? const Center(
+                      child: CircularProgressIndicator(
+                        valueColor: AlwaysStoppedAnimation<Color>(AppColors.brandGreen),
+                        strokeWidth: 2,
+                      ),
+                    )
+                  : _members.isEmpty ? _emptyState() : _memberList(),
               // Slot 1: embedded dashboard
               if (_activeMember != null)
                 SafeArea(
@@ -370,6 +405,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
 
 class _MemberAvatar extends StatelessWidget {
   final Uint8List? photoBytes;
+  final String? photoUrl;
   final String initials;
   final Color avatarColor;
   final double size;
@@ -377,6 +413,7 @@ class _MemberAvatar extends StatelessWidget {
 
   const _MemberAvatar({
     required this.photoBytes,
+    this.photoUrl,
     required this.initials,
     required this.avatarColor,
     required this.size,
@@ -385,30 +422,43 @@ class _MemberAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hasPhoto = photoBytes != null && photoBytes!.isNotEmpty;
+    final hasBytes = photoBytes != null && photoBytes!.isNotEmpty;
+    final hasUrl   = photoUrl   != null && photoUrl!.isNotEmpty;
     return Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
         color: avatarColor.withValues(alpha: 0.1),
         shape: BoxShape.circle,
-        border: hasPhoto
+        border: (hasBytes || hasUrl)
             ? Border.all(color: avatarColor.withValues(alpha: 0.3), width: 1.5)
             : null,
       ),
       child: ClipOval(
-        child: hasPhoto
+        child: hasBytes
             ? Image.memory(
                 photoBytes!,
                 fit: BoxFit.cover,
                 width: size,
                 height: size,
-                errorBuilder: (_, __, ___) => _initials(),
+                errorBuilder: (_, __, ___) => hasUrl ? _networkImage() : _initials(),
               )
-            : _initials(),
+            : hasUrl
+                ? _networkImage()
+                : _initials(),
       ),
     );
   }
+
+  Widget _networkImage() => Image.network(
+    photoUrl!,
+    fit: BoxFit.cover,
+    width: size,
+    height: size,
+    errorBuilder: (_, __, ___) => _initials(),
+    loadingBuilder: (_, child, progress) =>
+        progress == null ? child : _initials(),
+  );
 
   Widget _initials() => Center(
         child: Text(initials,
@@ -483,6 +533,7 @@ class _MemberCard extends StatelessWidget {
                 // Avatar
                 _MemberAvatar(
                   photoBytes: member.photoBytes,
+                  photoUrl: member.photoUrl,
                   initials: _initials,
                   avatarColor: _avatarColor,
                   size: 44,
@@ -596,29 +647,31 @@ class _MemberCard extends StatelessWidget {
                         Text('View', style: TextStyle(fontSize: 14)),
                       ]),
                     ),
-                    const PopupMenuItem(
-                      value: 'edit',
-                      height: 44,
-                      child: Row(children: [
-                        Icon(Icons.edit_outlined,
-                            size: 16, color: AppColors.textSecondary),
-                        SizedBox(width: 10),
-                        Text('Edit', style: TextStyle(fontSize: 14)),
-                      ]),
-                    ),
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(
-                      value: 'delete',
-                      height: 44,
-                      child: Row(children: [
-                        Icon(Icons.person_remove_outlined,
-                            size: 16, color: Color(0xFFD32F2F)),
-                        SizedBox(width: 10),
-                        Text('Remove',
-                            style: TextStyle(
-                                fontSize: 14, color: Color(0xFFD32F2F))),
-                      ]),
-                    ),
+                    if (!member.isReadOnly) ...[
+                      const PopupMenuItem(
+                        value: 'edit',
+                        height: 44,
+                        child: Row(children: [
+                          Icon(Icons.edit_outlined,
+                              size: 16, color: AppColors.textSecondary),
+                          SizedBox(width: 10),
+                          Text('Edit', style: TextStyle(fontSize: 14)),
+                        ]),
+                      ),
+                      const PopupMenuDivider(),
+                      const PopupMenuItem(
+                        value: 'delete',
+                        height: 44,
+                        child: Row(children: [
+                          Icon(Icons.person_remove_outlined,
+                              size: 16, color: Color(0xFFD32F2F)),
+                          SizedBox(width: 10),
+                          Text('Remove',
+                              style: TextStyle(
+                                  fontSize: 14, color: Color(0xFFD32F2F))),
+                        ]),
+                      ),
+                    ],
                   ],
                 ),
               ],
@@ -709,6 +762,7 @@ class _MemberDetailSheet extends StatelessWidget {
           // Avatar + name
           _MemberAvatar(
             photoBytes: member.photoBytes,
+            photoUrl: member.photoUrl,
             initials: member.name.isNotEmpty
                 ? member.name[0].toUpperCase()
                 : '?',

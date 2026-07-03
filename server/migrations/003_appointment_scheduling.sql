@@ -5,7 +5,7 @@
 
 -- Adds appointment duration to each technician slot declaration.
 -- NULL = no duration configured (old flow — no interval generation).
--- Values 15 / 30 / 40 trigger auto-generation of ip_avilable_slots rows.
+-- Values 15 / 30 / 40 trigger auto-generation of ip_available_slots rows.
 
 ALTER TABLE ip_technician_slots
   ADD COLUMN IF NOT EXISTS duration_minutes TINYINT UNSIGNED NULL DEFAULT NULL

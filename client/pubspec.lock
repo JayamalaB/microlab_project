@@ -561,7 +561,7 @@ packages:
     source: hosted
     version: "1.6.0"
   http_parser:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: http_parser
       sha256: "178d74305e7866013777bab2c3d8726205dc5a4dd935297175b19a23a2e66571"
@@ -904,6 +904,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "7.0.2"
+  pin_input_text_field:
+    dependency: transitive
+    description:
+      name: pin_input_text_field
+      sha256: f45683032283d30b670ec343781660655e3e1953438b281a0bc6e2d358486236
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.5.2"
   platform:
     dependency: transitive
     description:
@@ -1061,6 +1069,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.2.1"
+  sms_autofill:
+    dependency: "direct main"
+    description:
+      name: sms_autofill
+      sha256: "5c6c5569a310fce12117eaefab5be6e29cc676b635e43be8b70b1946ec21ae91"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.5.0"
   socket_io_client:
     dependency: "direct main"
     description:

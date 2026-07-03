@@ -4,7 +4,6 @@ const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { checkClientUser } = require('../utils/secureId');
 
 const LOG_DIR  = path.join(__dirname, '..', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'otp.log');
@@ -64,21 +63,27 @@ exports.sendOtp = async (req, res) => {
       return res.status(422).json({ success: false, message: 'Invalid mobile number' });
     }
 
-    const clientType = role === 'technician' ? 'technician' : 'customer';
     const dbUserType = role === 'technician' ? 'technician' : 'patient_user';
 
-    step = 'checkClientUser';
-    writeLog(`[sendOtp] ${mobile} (${clientType})`);
-    let clientRes = null;
-    try {
-      clientRes = await checkClientUser(mobile, clientType);
-    } catch (clientErr) {
-      writeLog(`[sendOtp] checkClientUser threw: ${clientErr.message}`);
-    }
-    writeLog(`[sendOtp] client server done — ${elapsed()} | result: ${clientRes ? clientRes.msg : 'null'}`);
-
-    if (role === 'technician' && (!clientRes || clientRes.status !== 'success')) {
-      return res.status(403).json({ success: false, message: 'Mobile not registered as technician' });
+    // ── Technician: verify against get_technician.php before issuing OTP ─────
+    let technicianInfo = null;
+    if (role === 'technician') {
+      step = 'fetchRegistry';
+      writeLog(`[sendOtp] fetching technician registry for ${mobile}`);
+      try {
+        const phpResult = await fetchFromRegistry(process.env.JAYAMALA_URL, mobile, 'technician');
+        writeLog(`[sendOtp] registry response — ${elapsed()} | status: ${phpResult.body.status}`);
+        if (phpResult.body.status !== 'success') {
+          return res.status(403).json({
+            success: false,
+            message: phpResult.body.msg ?? 'Mobile not registered as technician',
+          });
+        }
+        technicianInfo = phpResult.body.technician;
+      } catch (regErr) {
+        writeLog(`[sendOtp] registry unreachable — ${regErr.message}`);
+        return res.status(502).json({ success: false, message: 'Technician registry unreachable. Try again.' });
+      }
     }
 
     const otp = generateOtp();
@@ -143,7 +148,15 @@ exports.sendOtp = async (req, res) => {
     }
 
     writeLog(`[sendOtp] done — total ${elapsed()}`);
-    res.json({ success: true, message: `OTP sent to ${mobile}` });
+    res.json({
+      success: true,
+      message: `OTP sent to ${mobile}`,
+      ...(technicianInfo && {
+        name:           technicianInfo.name ?? technicianInfo.technician_name ?? null,
+        specialization: technicianInfo.specialization ?? null,
+        photo:          technicianInfo.tech_photo ?? null,
+      }),
+    });
   } catch (err) {
     const errDetail = `step=${step} | ${err.message} | code=${err.code} | sqlState=${err.sqlState} | sql=${err.sql}`;
     writeLog(`[sendOtp] ERROR — ${errDetail}`);
@@ -333,8 +346,26 @@ exports.verifyOtp = async (req, res) => {
       patient = patients[0];
     }
 
+    // Fetch patient list from PHP registry (micro_patient.php)
+    let phpPatients = [];
+    try {
+      const phpResult = await fetchFromRegistry(process.env.CLIENT_PATIENT_URL, mobile, 'patient');
+      if (phpResult.body.status === 'success') {
+        phpPatients = Array.isArray(phpResult.body.patient) ? phpResult.body.patient : [];
+      }
+    } catch (err) {
+      console.warn('[verifyOtp] micro_patient.php unreachable (non-fatal):', err.message);
+    }
+
     const token = jwt.sign(
-      { id: patient.patient_id, userId: dbUser.user_id, mobile, role },
+      {
+        id:        patient.patient_id,
+        user_id:   dbUser.user_id,
+        client_id: dbUser.client_id,
+        mobile,
+        role,
+        user_type: dbUser.user_microlab_type,
+      },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
@@ -347,7 +378,7 @@ exports.verifyOtp = async (req, res) => {
     return res.json({
       success: true,
       message: 'Login successful',
-      data: { token, user: patient },
+      data: { token, user: patient, patients: phpPatients },
     });
 
   } catch (err) {

@@ -4,9 +4,10 @@ import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/models.dart';
+import 'package:microlab/constants/app_constants.dart';
 
 class ApiService {
-  static const String baseUrl = 'http://microlab.neuralarc.com:30008';
+  static const String baseUrl = AppConstants.serverUrl;
 
   static Future<Map<String, dynamic>> sendOtp(String mobile, String role) async {
     final res = await http
@@ -76,7 +77,7 @@ class ApiService {
 
   static Future<List<TestModel>> getPackages() async {
     final res = await http
-        .get(Uri.parse('$baseUrl/api/packages'))
+        .get(Uri.parse('$baseUrl/api/tests'))
         .timeout(const Duration(seconds: 15));
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (body['success'] == true) {

@@ -253,10 +253,10 @@ exports.saveSlots = async (req, res) => {
     try {
       await connection.beginTransaction();
 
-      // Delete ip_avilable_slots tied to this tech's future slots before removing the slots
+      // Delete ip_available_slots tied to this tech's future slots before removing the slots
       await connection.query(
-        `DELETE ias FROM ip_avilable_slots ias
-         JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
+        `DELETE ias FROM ip_available_slots ias
+         JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
          WHERE ts.technician_id = ? AND ts.slot_date >= CURDATE()`,
         [technicianId]
       );
@@ -293,9 +293,9 @@ exports.saveSlots = async (req, res) => {
               const times = _generateIntervals(slotDef.slot_start, slotDef.slot_end, durationMinutes);
               for (const t of times) {
                 await connection.query(
-                  `INSERT INTO ip_avilable_slots
-                     (booking_type, technician_slot_id, slot_date, slot_time, is_available)
-                   VALUES ('home', ?, ?, ?, 1)`,
+                  `INSERT INTO ip_available_slots
+                     (booking_type, technician_slot_id, slot_date, slot_time, is_available, created_at)
+                   VALUES ('home', ?, ?, ?, 1, NOW())`,
                   [techSlotId, day.date, t]
                 );
               }

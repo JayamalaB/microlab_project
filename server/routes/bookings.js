@@ -18,9 +18,6 @@ router.get('/:bookingId', bookingController.getBooking);
 // POST /api/bookings/:bookingId/pay — pay a pending booking via Razorpay
 router.post('/:bookingId/pay', auth, bookingController.payBooking);
 
-// GET /api/bookings/:bookingId/tech-location — technician's last-known GPS
-router.get('/:bookingId/tech-location', bookingController.getTechLocation);
-
 // PUT /api/bookings/:bookingId/lab-status — update lab pipeline stage
 router.put('/:bookingId/lab-status', bookingController.updateLabStatus);
 

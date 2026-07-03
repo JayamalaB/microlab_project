@@ -188,12 +188,12 @@ exports.getAvailableSlots = async (req, res) => {
       [branchId, date]
     );
 
-    // For each slot, fetch distinct available appointment times from ip_avilable_slots
+    // For each slot, fetch distinct available appointment times from ip_available_slots
     const slotsWithIntervals = await Promise.all(rows.map(async r => {
       const [timeRows] = await db.execute(
         `SELECT DISTINCT ias.slot_time
-         FROM ip_avilable_slots ias
-         JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
+         FROM ip_available_slots ias
+         JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
          WHERE ts.branch_id   = ?
            AND ts.slot_id     = ?
            AND ts.slot_date   = ?

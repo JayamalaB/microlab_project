@@ -27,15 +27,15 @@ exports.getSlots = async (req, res) => {
     let rows;
 
     if (slot_type === 'home_collection') {
-      writeLog(`[getSlots] querying ip_avilable_slots for home_collection date=${date} branch_id=${branch_id}`);
+      writeLog(`[getSlots] querying ip_available_slots for home_collection date=${date} branch_id=${branch_id}`);
 
-      // Debug: what technician_slot_ids exist in ip_avilable_slots for this date?
+      // Debug: what technician_slot_ids exist in ip_available_slots for this date?
       const [avDebug] = await db.execute(
-        `SELECT available_slot_id, technician_slot_id FROM ip_avilable_slots
+        `SELECT available_slot_id, technician_slot_id FROM ip_available_slots
          WHERE slot_date = ? AND booking_type = 'home_collection' AND is_available = 1`,
         [date]
       );
-      writeLog(`[getSlots] ip_avilable_slots rows for date=${date}: ${JSON.stringify(avDebug)}`);
+      writeLog(`[getSlots] ip_available_slots rows for date=${date}: ${JSON.stringify(avDebug)}`);
 
       // Debug: what tech_slot_ids exist in ip_technician_slots for this branch?
       const [tsDebug] = await db.execute(
@@ -51,7 +51,7 @@ exports.getSlots = async (req, res) => {
            TIME_FORMAT(av.slot_time, '%H:%i')      AS time,
            TIME_FORMAT(av.slot_time, '%h:%i %p')   AS label,
            (ts.max_bookings - ts.booked_count)     AS remaining
-         FROM ip_avilable_slots av
+         FROM ip_available_slots av
          JOIN ip_technician_slots ts
            ON ts.tech_slot_id = av.technician_slot_id
          WHERE av.slot_date    = ?
@@ -70,7 +70,7 @@ exports.getSlots = async (req, res) => {
           message: 'branch_id is required for lab_visit',
         });
       }
-      writeLog(`[getSlots] querying ip_avilable_slots for lab_visit date=${date} branch_id=${branch_id}`);
+      writeLog(`[getSlots] querying ip_available_slots for lab_visit date=${date} branch_id=${branch_id}`);
       [rows] = await db.execute(
         `SELECT
            MIN(av.available_slot_id)               AS time_slot_id,
@@ -78,7 +78,7 @@ exports.getSlots = async (req, res) => {
            TIME_FORMAT(av.slot_time, '%H:%i')      AS time,
            TIME_FORMAT(av.slot_time, '%h:%i %p')   AS label,
            SUM(ls.max_bookings - ls.booked_count)  AS remaining
-         FROM ip_avilable_slots av
+         FROM ip_available_slots av
          JOIN ip_lab_slots ls
            ON ls.lab_slot_id = av.lab_slot_id
          WHERE av.slot_date    = ?

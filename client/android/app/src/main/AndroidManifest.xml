@@ -18,8 +18,6 @@
     </queries>
 
     <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.RECEIVE_SMS"/>
-    <uses-permission android:name="android.permission.READ_SMS"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -42,10 +40,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <!-- Restart service after phone reboot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-    <!-- Required for Permission.ignoreBatteryOptimizations.request() to work.
-         Without this in the manifest the request silently does nothing on Samsung,
-         Xiaomi, Oppo, Vivo etc. that have aggressive OEM battery management. -->
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <!-- REQUEST_IGNORE_BATTERY_OPTIMIZATIONS is declared by flutter_foreground_task
+         plugin's own manifest (auto-merged) — declaring it here is redundant and
+         triggers a Play Protect hard-block on sideloaded APKs (Android 12+). -->
 
     <application
         android:label="MicroLab"

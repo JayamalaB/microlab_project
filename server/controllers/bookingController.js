@@ -50,13 +50,13 @@ exports.createBooking = async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    // Resolve slot → get lab_slot_id / technician_slot_id from ip_avilable_slots
+    // Resolve slot → get lab_slot_id / technician_slot_id from ip_available_slots
     let labSlotId  = null;
     let techSlotId = null;
     if (availableSlotId) {
       const [[avSlot]] = await conn.execute(
         `SELECT lab_slot_id, technician_slot_id, booking_type
-         FROM ip_avilable_slots WHERE available_slot_id = ?`,
+         FROM ip_available_slots WHERE available_slot_id = ?`,
         [availableSlotId]
       );
       if (avSlot) {
@@ -141,7 +141,7 @@ exports.createBooking = async (req, res) => {
     // 4. Mark this slot row as booked + increment booked count
     if (availableSlotId) {
       await conn.execute(
-        'UPDATE ip_avilable_slots SET is_available = 0, updated_at = NOW() WHERE available_slot_id = ?',
+        'UPDATE ip_available_slots SET is_available = 0, updated_at = NOW() WHERE available_slot_id = ?',
         [availableSlotId]
       );
       console.log(`🔒 available_slot_id=${availableSlotId} marked unavailable`);
@@ -266,7 +266,7 @@ exports.getMyBookings = async (req, res) => {
        FROM ip_bookings b
        LEFT JOIN ip_patients pat       ON pat.patient_id  = b.patient_id
        LEFT JOIN ip_branches br        ON br.branch_id    = b.branch_id
-       LEFT JOIN ip_avilable_slots av   ON av.available_slot_id = b.available_slot_id
+       LEFT JOIN ip_available_slots av   ON av.available_slot_id = b.available_slot_id
        LEFT JOIN ip_booking_items bi   ON bi.booking_id   = b.booking_id
        LEFT JOIN ip_products pkg       ON pkg.product_id  = bi.product_id
        LEFT JOIN ip_payment_transactions bpt
