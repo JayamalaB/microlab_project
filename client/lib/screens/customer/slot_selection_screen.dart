@@ -22,28 +22,22 @@ import 'checkout_screen.dart';
 
 class _SlotItem {
   final int    timeSlotId;
-  final int    slotId;
   final String label;
-  final String startTime;
-  final String endTime;
+  final String time;
   final int    remaining;
 
   const _SlotItem({
     required this.timeSlotId,
-    required this.slotId,
     required this.label,
-    required this.startTime,
-    required this.endTime,
+    required this.time,
     required this.remaining,
   });
 
   factory _SlotItem.fromJson(Map<String, dynamic> j) => _SlotItem(
-        timeSlotId: j['timeSlotId'] as int,
-        slotId:     j['slotId']     as int,
-        label:      j['label']      as String? ?? '',
-        startTime:  j['startTime']  as String? ?? '',
-        endTime:    j['endTime']    as String? ?? '',
-        remaining:  j['remaining']  as int? ?? 0,
+        timeSlotId: (j['time_slot_id'] as num).toInt(),
+        label:      j['label']     as String? ?? '',
+        time:       j['time']      as String? ?? '',
+        remaining:  (j['remaining'] as num?)?.toInt() ?? 0,
       );
 }
 
@@ -141,10 +135,11 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
 
     try {
       final uri = Uri.parse(
-        '${AppConstants.serverUrl}/api/branches/slots',
+        '${AppConstants.serverUrl}/api/slots',
       ).replace(queryParameters: {
-        'branchId': widget.branch.id,
-        'date':     _toApiDate(date),
+        'branch_id': widget.branch.id,
+        'date':      _toApiDate(date),
+        'slot_type': 'home_collection',
       });
 
       final res  = await http.get(uri).timeout(const Duration(seconds: 10));

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/constants/app_constants.dart';
+import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'my_bookings_screen.dart';
@@ -135,7 +136,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   // ── Computed ──────────────────────────────────────────────
   double get _testsTotal => widget.cart.fold(0, (s, t) => s + t.finalPrice);
-  double get _serviceCharge => _estimatedServiceCharge;
+  double get _serviceCharge => widget.mode == 'Lab Test' ? 0 : _estimatedServiceCharge;
   double get _grandTotal => _testsTotal + _serviceCharge;
 
   bool get _anyDocRequired => widget.cart.any((t) => t.docRequired);
@@ -245,10 +246,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     setState(() { _loadingSlots = true; _slotsError = ''; });
 
     try {
-      final uri = Uri.parse('${AppConstants.serverUrl}/api/branches/slots')
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/slots')
           .replace(queryParameters: {
-            'branchId': widget.branchId.toString(),
-            'date':     dateStr,
+            'branch_id': widget.branchId.toString(),
+            'date':      dateStr,
+            'slot_type': widget.mode == 'Home Collection' ? 'home_collection' : 'lab_visit',
           });
       debugPrint('   → GET $uri');
 
@@ -263,9 +265,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         if (body['success'] == true) {
           final rawList = (body['slots'] as List).cast<Map<String, dynamic>>();
           final list = rawList.map((m) => TimeSlot(
-            id:    m['slotId']?.toString() ?? '',
-            label: m['label']     as String? ?? '',
-            time:  m['startTime'] as String? ?? '',
+            id:    m['time_slot_id']?.toString() ?? '',
+            label: m['label'] as String? ?? '',
+            time:  m['time']  as String? ?? '',
           )).toList();
           debugPrint('   ✅ slots     : ${list.length} available');
           for (final s in list) { debugPrint('      • [${s.id}] ${s.label} (${s.time})'); }
@@ -491,6 +493,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'finalPrice':  t.finalPrice,
     }).toList();
 
+    final isPayNow = razorpayPaymentId != 'pay_later' && razorpayPaymentId.isNotEmpty;
+
     final payload = <String, dynamic>{
       'patientId':      widget.patientId,
       'bookingType':    widget.mode == 'Home Collection' ? 'home_collection' : 'lab_visit',
@@ -499,14 +503,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'sourceChannel':  'mobile_app',
       'notes':          null,
       'items':          items,
-      if (widget.branchId       != null) 'branchId':       widget.branchId,
-      if (widget.collectionDate != null) 'collectionDate': widget.collectionDate,
-      if (widget.patientLat     != null) 'collectionLatitude':  widget.patientLat,
+      'paymentType':    isPayNow ? 'full' : 'pay_later',
+      if (isPayNow) 'razorpayPaymentId': razorpayPaymentId,
+      if (widget.branchId   != null) 'branchId': widget.branchId,
+      if (_selectedDate     != null) 'collectionDate':
+          '${_selectedDate!.year}-${_selectedDate!.month.toString().padLeft(2, '0')}-${_selectedDate!.day.toString().padLeft(2, '0')}',
+      if (widget.patientLat != null) 'collectionLatitude':  widget.patientLat,
       if (widget.patientLng     != null) 'collectionLongitude': widget.patientLng,
       if (_selectedSlot != null && int.tryParse(_selectedSlot!.id) != null)
-        'slotId': int.parse(_selectedSlot!.id),
-      if (_selectedAppointmentTime != null)
-        'appointmentTime': _selectedAppointmentTime!.time,
+        'availableSlotId': int.parse(_selectedSlot!.id),
     };
 
     debugPrint('\n📤 [CHECKOUT] POST /api/bookings');
@@ -518,12 +523,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     int bookingId;
     String bookingRef;
+    int? docBookingItemId; // booking_item_id of first doc-required item
 
     try {
-      final url = Uri.parse('${AppConstants.serverUrl}/api/bookings');
+      final url   = Uri.parse('${AppConstants.serverUrl}/api/bookings');
+      final token = await ApiService.getToken();
       final res = await http.post(
         url,
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type':  'application/json',
+          if (token != null) 'Authorization': 'Bearer $token',
+        },
         body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 10));
 
@@ -536,7 +546,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       final data = jsonDecode(res.body) as Map<String, dynamic>;
       bookingId  = data['bookingId']  as int;
       bookingRef = data['bookingRef'] as String;
-      debugPrint('✅ [CHECKOUT] Booking created — bookingId=$bookingId ref=$bookingRef');
+
+      final bookingItems = (data['bookingItems'] as List? ?? [])
+          .cast<Map<String, dynamic>>();
+      final docItem = bookingItems.firstWhere(
+        (i) => i['docRequired'] == true,
+        orElse: () => bookingItems.isNotEmpty ? bookingItems.first : <String, dynamic>{},
+      );
+      docBookingItemId = docItem['bookingItemId'] as int?;
+
+      debugPrint('✅ [CHECKOUT] Booking created — bookingId=$bookingId ref=$bookingRef bookingItemId=$docBookingItemId');
     } catch (e) {
       debugPrint('❌ [CHECKOUT] API call failed: $e');
       if (!mounted) return;
@@ -547,6 +566,28 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         behavior: SnackBarBehavior.floating,
       ));
       return;
+    }
+
+    // Upload prescriptions and insert into ip_booking_documents
+    if (_prescriptions.isNotEmpty) {
+      try {
+        final urls = <String>[];
+        for (final doc in _prescriptions) {
+          final url = await ApiService.uploadFile(doc.bytes, doc.fileName);
+          if (url != null) urls.add(url);
+        }
+        if (urls.isNotEmpty) {
+          await ApiService.savePrescription(
+            bookingId:     bookingId,
+            patientId:     widget.patientId,
+            bookingItemId: docBookingItemId,
+            imageUrls:     urls,
+          );
+          debugPrint('📎 [CHECKOUT] ${urls.length} prescription(s) saved for booking $bookingId');
+        }
+      } catch (e) {
+        debugPrint('⚠️ [CHECKOUT] Prescription upload failed (non-fatal): $e');
+      }
     }
 
     final booking = BookingModel(
@@ -565,7 +606,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       testsTotal: _testsTotal,
       grandTotal: _grandTotal,
       paidAmount: _payableNow,
-      status: 'Technician Allocated',
+      status: widget.mode == 'Lab Test' ? 'Confirmed' : 'Technician Allocated',
       createdAt: DateTime.now(),
       docRequired: _anyDocRequired,
       docVerified: _docVerified,
@@ -832,7 +873,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         Expanded(
                           child: Text(
                             _anyDocRequired
-                                ? 'One or more tests require a prescription. Upload up to $_maxPrescrips images. Full payment unlocks after technician verification.'
+                                ? (widget.mode == 'Lab Test'
+                                    ? 'One or more tests require a prescription. Upload up to $_maxPrescrips images. Payment will be collected at the branch after verification.'
+                                    : 'One or more tests require a prescription. Upload up to $_maxPrescrips images. Full payment unlocks after technician verification.')
                                 : 'Upload your prescription or any relevant documents (optional). Up to $_maxPrescrips images.',
                             style: TextStyle(
                               fontSize: 12,
@@ -851,9 +894,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   // Thumbnail grid
                   if (_prescriptions.isNotEmpty) ...[
                     SizedBox(
-                      height: 104,
+                      height: 112,
                       child: ListView.separated(
                         scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.only(top: 8, right: 8),
                         itemCount: _prescriptions.length +
                             (_prescriptions.length < _maxPrescrips ? 1 : 0),
                         separatorBuilder: (_, __) => const SizedBox(width: 8),
@@ -936,20 +980,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(color: AppColors.brandGreenLight),
                       ),
-                      child: const Row(children: [
-                        Icon(Icons.hourglass_top_rounded, size: 14, color: AppColors.brandGreen),
-                        SizedBox(width: 8),
+                      child: Row(children: [
+                        const Icon(Icons.hourglass_top_rounded, size: 14, color: AppColors.brandGreen),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text('Prescription uploaded',
+                              const Text('Prescription uploaded',
                                   style: TextStyle(
                                       fontSize: 13,
                                       fontWeight: FontWeight.w600,
                                       color: AppColors.brandGreen)),
-                              Text('Awaiting technician verification',
-                                  style: TextStyle(
+                              Text(
+                                  widget.mode == 'Lab Test'
+                                      ? 'Bring original to the branch on appointment day'
+                                      : 'Awaiting technician verification',
+                                  style: const TextStyle(
                                       fontSize: 11,
                                       color: AppColors.textSecondary)),
                             ],
@@ -993,36 +1040,39 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 // Service charge info banner
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  margin: const EdgeInsets.only(bottom: 14),
-                  decoration: BoxDecoration(
-                    color: AppColors.brandGreenSurface,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: AppColors.brandGreenLight),
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Icon(Icons.directions_car_outlined, size: 14, color: AppColors.brandGreen),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          'Service charge of ₹${_serviceCharge.toInt()} is estimated based on travel distance. Final amount is confirmed when the technician starts the journey.',
-                          style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
+                if (widget.mode != 'Lab Test')
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    margin: const EdgeInsets.only(bottom: 14),
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreenSurface,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: AppColors.brandGreenLight),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(Icons.directions_car_outlined, size: 14, color: AppColors.brandGreen),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Service charge of ₹${_serviceCharge.toInt()} is estimated based on travel distance. Final amount is confirmed when the technician starts the journey.',
+                            style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
 
                 // Option 1: Pay Full Amount Now
                 _PaymentOptionTile(
                   selected: _paymentType == 'full',
                   title: 'Pay Full Amount Now',
                   subtitle: _fullPaymentEnabled
-                      ? 'Pay ₹${_grandTotal.toInt()} (tests + service charge) · Nothing due at collection'
-                      : 'Available after technician verifies your prescription',
+                      ? 'Pay ₹${_grandTotal.toInt()}${widget.mode == 'Lab Test' ? '' : ' (tests + service charge)'} · Nothing due at collection'
+                      : (widget.mode == 'Lab Test'
+                          ? 'Prescription required — payment collected at branch after verification'
+                          : 'Available after technician verifies your prescription'),
                   amount: '₹${_grandTotal.toInt()} now',
                   badge: _fullPaymentEnabled ? 'RECOMMENDED' : 'LOCKED',
                   badgeColor: _fullPaymentEnabled ? AppColors.brandGreen : AppColors.textHint,
@@ -1035,7 +1085,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 _PaymentOptionTile(
                   selected: _paymentType == 'pay_later',
                   title: 'Pay Later',
-                  subtitle: 'Pay ₹${_grandTotal.toInt()} at the time of collection · No payment needed now',
+                  subtitle: widget.mode == 'Lab Test'
+                      ? 'Pay ₹${_grandTotal.toInt()} at the branch · No payment needed now'
+                      : 'Pay ₹${_grandTotal.toInt()} at the time of collection · No payment needed now',
                   amount: '₹0 now',
                   badge: 'FLEXIBLE',
                   badgeColor: AppColors.blue,
@@ -1092,7 +1144,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             child: Column(
               children: [
                 _BillRow('Tests Total', '₹${_testsTotal.toInt()}'),
-                _BillRow('Service Charge (est.)', '+ ₹${_serviceCharge.toInt()}', sub: true),
+                if (_serviceCharge > 0)
+                  _BillRow('Service Charge (est.)', '+ ₹${_serviceCharge.toInt()}', sub: true),
                 const Divider(height: 20),
                 _BillRow('Grand Total', '₹${_grandTotal.toInt()}', bold: true),
                 const SizedBox(height: 8),
@@ -1502,7 +1555,8 @@ class _BookingSuccessScreen extends StatelessWidget {
                     child: Column(
                       children: [
                         _ConfirmRow(Icons.receipt_outlined, 'Tests Total', '₹${booking.testsTotal.toInt()}'),
-                        _ConfirmRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${booking.serviceCharge.toInt()}'),
+                        if (booking.serviceCharge > 0)
+                          _ConfirmRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${booking.serviceCharge.toInt()}'),
                         _ConfirmRow(Icons.calculate_outlined, 'Grand Total', '₹${booking.grandTotal.toInt()}'),
                         const Divider(height: 16),
                         _ConfirmRow(Icons.check_circle_outline, 'Paid Now',
@@ -1510,7 +1564,7 @@ class _BookingSuccessScreen extends StatelessWidget {
                             valueColor: AppColors.brandGreen),
                         if (booking.paymentType == 'pay_later')
                           _ConfirmRow(Icons.schedule_outlined, 'Due at Collection',
-                              '₹${booking.grandTotal.toInt()} (tests + service charge)',
+                              '₹${booking.grandTotal.toInt()}${booking.mode == 'Lab Test' ? '' : ' (tests + service charge)'}',
                               valueColor: const Color(0xFFE65100)),
                       ],
                     ),
@@ -1527,14 +1581,21 @@ class _BookingSuccessScreen extends StatelessWidget {
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
-                      children: const [
-                        Text("What's next?",
+                      children: [
+                        const Text("What's next?",
                             style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-                        SizedBox(height: 10),
-                        _NextStep('1', 'A technician has been allocated to your booking'),
-                        _NextStep('2', 'You will receive a call 1 hour before the appointment'),
-                        _NextStep('3', 'Keep your samples ready as per test requirements'),
-                        _NextStep('4', 'Reports will be shared within the promised time'),
+                        const SizedBox(height: 10),
+                        if (booking.mode == 'Lab Test') ...[
+                          const _NextStep('1', 'Visit the branch at your selected date and time slot'),
+                          const _NextStep('2', 'Carry any required prescriptions or documents'),
+                          const _NextStep('3', 'Follow the pre-test instructions for your tests'),
+                          const _NextStep('4', 'Reports will be shared within the promised time'),
+                        ] else ...[
+                          const _NextStep('1', 'A technician has been allocated to your booking'),
+                          const _NextStep('2', 'You will receive a call 1 hour before the appointment'),
+                          const _NextStep('3', 'Keep your samples ready as per test requirements'),
+                          const _NextStep('4', 'Reports will be shared within the promised time'),
+                        ],
                       ],
                     ),
                   ),

@@ -35,6 +35,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
   MemberModel? _activeMember;
   List<MemberModel> _members = [];
   bool _loadingPatients = true;
+  final _bookingsRefresh = ValueNotifier<int>(0);
 
   @override
   void initState() {
@@ -157,10 +158,19 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
     );
   }
 
-  void _onNavTap(int index) => setState(() {
-    _selectedIndex = index;
-    if (index != 0) _activeMember = null;
-  });
+  @override
+  void dispose() {
+    _bookingsRefresh.dispose();
+    super.dispose();
+  }
+
+  void _onNavTap(int index) {
+    setState(() {
+      _selectedIndex = index;
+      if (index != 0) _activeMember = null;
+    });
+    if (index == 1) _bookingsRefresh.value++;
+  }
 
   bool get _inDashboard => _selectedIndex == 0 && _activeMember != null;
   int get _stackIndex => _selectedIndex == 0
@@ -247,7 +257,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                 )
               else
                 const SizedBox.shrink(),
-              const SafeArea(top: false, bottom: false, child: MyBookingsScreen(embedded: true)),
+              SafeArea(top: false, bottom: false, child: MyBookingsScreen(embedded: true, refreshTrigger: _bookingsRefresh)),
               const SafeArea(top: false, bottom: false, child: ReportsScreen(embedded: true)),
               // Slot 4: profile
               SafeArea(

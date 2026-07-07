@@ -50,6 +50,15 @@ exports.createBooking = async (req, res) => {
   try {
     await conn.beginTransaction();
 
+    // Resolve patient_id_ref from ip_patients
+    let resolvedPatientIdRef = patientIdRef ?? null;
+    const [[patientRow]] = await conn.execute(
+      `SELECT patient_id_ref FROM ip_patients WHERE patient_id = ? LIMIT 1`,
+      [patientId]
+    );
+    if (patientRow?.patient_id_ref) resolvedPatientIdRef = patientRow.patient_id_ref;
+    console.log(`👤 patientId=${patientId} → patient_id_ref=${resolvedPatientIdRef}`);
+
     // Resolve slot → get lab_slot_id / technician_slot_id from ip_available_slots
     let labSlotId  = null;
     let techSlotId = null;
@@ -75,14 +84,15 @@ exports.createBooking = async (req, res) => {
           amount_paid, amount_due,
           source_channel, notes, collection_address, postal_code, city,
           patient_id, patient_id_ref, product_id,
-          payment_status, start_datetime, end_datetime, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), NOW())`,
+          payment_status, start_datetime, end_datetime, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
       [bookingRef, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
        bookingType, totalAmount, discountAmount ?? 0, amountPaid, amountDue,
        sourceChannel, notes ?? null,
        collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
-       patientId, patientIdRef ?? null,
-       isPaid ? 'paid' : 'unpaid']
+       patientId, resolvedPatientIdRef,
+       isPaid ? 'paid' : 'unpaid',
+       userId ?? null]
     );
     const bookingId = bResult.insertId;
     console.log(`✅ ip_bookings inserted → booking_id=${bookingId}`);
@@ -91,7 +101,7 @@ exports.createBooking = async (req, res) => {
     await conn.execute(
       `INSERT INTO ip_patient_bookings (booking_id, patient_id, patient_ref, created_at)
        VALUES (?, ?, ?, NOW())`,
-      [bookingId, patientId, patientIdRef ?? null]
+      [bookingId, patientId, resolvedPatientIdRef]
     );
 
     // 3. Line items (tests / packages)

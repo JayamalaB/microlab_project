@@ -280,8 +280,10 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
             return;
           }
           setState(() {
-            _pincode        = p;
-            _selectedBranch = null;
+            _pincode = p;
+            // Only clear branch for Home Collection — Lab Test branch is set
+            // separately via onBranchChanged and must not be wiped here.
+            if (_mode != 'Lab Test') _selectedBranch = null;
           });
           if (p != null && p.length == 6 && _mode == 'Home Collection') {
             debugPrint('   → 6 digits confirmed — starting branch auto-detect (city=$_city)');
@@ -994,7 +996,8 @@ class _LocationSheetState extends State<_LocationSheet> {
   bool _locationError = false;
   bool _branchError = false;
 
-  // Branches filtered by pincode/city search
+  // Branches for Lab Test mode
+  List<BranchModel> _allBranches      = [];
   List<BranchModel> _filteredBranches = [];
   bool _searchingBranches = false;
 
@@ -1027,11 +1030,30 @@ class _LocationSheetState extends State<_LocationSheet> {
     _branch = widget.selectedBranch;
     _pincodeCtrl.text = widget.pincode ?? '';
     _cityCtrl.text = widget.city ?? '';
-    _filteredBranches = widget.branches;
 
     _pincodeCtrl.addListener(_filterBranches);
     _cityCtrl.addListener(_filterBranches);
     _pincodeCtrl.addListener(_onPincodeChanged);
+
+    if (_mode == 'Lab Test') {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadBranches());
+    }
+  }
+
+  Future<void> _loadBranches() async {
+    if (!mounted) return;
+    setState(() => _searchingBranches = true);
+    try {
+      final branches = await ApiService.getBranches();
+      if (!mounted) return;
+      setState(() {
+        _allBranches      = branches;
+        _filteredBranches = branches;
+        _searchingBranches = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _searchingBranches = false);
+    }
   }
 
   Future<void> _getCurrentLocation() async {
@@ -1247,15 +1269,17 @@ class _LocationSheetState extends State<_LocationSheet> {
 
   void _filterBranches() {
     if (_mode != 'Lab Test') return;
-    final query = (_pincodeCtrl.text + _cityCtrl.text).trim().toLowerCase();
+    final query = '${_pincodeCtrl.text} ${_cityCtrl.text}'.trim().toLowerCase();
     setState(() {
       _branch = null;
       if (query.isEmpty) {
-        _filteredBranches = widget.branches;
+        _filteredBranches = _allBranches;
       } else {
-        _filteredBranches = widget.branches.where((b) =>
+        _filteredBranches = _allBranches.where((b) =>
           b.name.toLowerCase().contains(query) ||
-          b.address.toLowerCase().contains(query)
+          b.address.toLowerCase().contains(query) ||
+          (b.pincode?.contains(query) ?? false) ||
+          (b.location?.toLowerCase().contains(query) ?? false)
         ).toList();
       }
     });
@@ -1356,7 +1380,10 @@ class _LocationSheetState extends State<_LocationSheet> {
                     padding: EdgeInsets.only(
                         right: m == widget.modes.first ? 8 : 0),
                     child: GestureDetector(
-                      onTap: () => setState(() => _mode = m),
+                      onTap: () {
+                        setState(() => _mode = m);
+                        if (m == 'Lab Test' && _allBranches.isEmpty) _loadBranches();
+                      },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
                         padding: const EdgeInsets.symmetric(vertical: 12),
@@ -1738,7 +1765,21 @@ class _LocationSheetState extends State<_LocationSheet> {
                 ),
               ),
               const SizedBox(height: 8),
-              if (_filteredBranches.isEmpty)
+              if (_searchingBranches)
+                Container(
+                  padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: AppColors.divider),
+                  ),
+                  child: const Row(children: [
+                    SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                    SizedBox(width: 10),
+                    Text('Loading branches…', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                  ]),
+                )
+              else if (_filteredBranches.isEmpty)
                 Container(
                   padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
                   decoration: BoxDecoration(
