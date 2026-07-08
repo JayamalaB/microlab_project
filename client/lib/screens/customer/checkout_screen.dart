@@ -507,6 +507,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'paymentType':    isPayNow ? 'full' : 'pay_later',
       if (isPayNow) 'razorpayPaymentId': razorpayPaymentId,
       if (widget.branchId   != null) 'branchId': widget.branchId,
+      if (widget.address    != null && widget.address!.isNotEmpty)   'collectionAddress': widget.address,
+      if (widget.pincode    != null && widget.pincode!.isNotEmpty)   'collectionPincode': widget.pincode,
+      if (widget.city       != null && widget.city!.isNotEmpty)      'collectionCity':    widget.city,
       if (_selectedDate     != null) 'collectionDate':
           '${_selectedDate!.year}-${_selectedDate!.month.toString().padLeft(2, '0')}-${_selectedDate!.day.toString().padLeft(2, '0')}',
       if (widget.patientLat != null) 'collectionLatitude':  widget.patientLat,
@@ -1510,9 +1513,15 @@ class _BookingSuccessScreen extends StatelessWidget {
                         if (booking.isVip && booking.selectedTechnician != null)
                           _ConfirmRow(Icons.medical_services_outlined,
                               'Technician', booking.selectedTechnician!.name),
-                        if (booking.mode == 'Home Collection' && booking.city != null)
-                          _ConfirmRow(Icons.location_on_outlined, 'Location',
-                              '${booking.city}${booking.pincode != null ? ', ${booking.pincode}' : ''}'),
+                        if (booking.mode == 'Home Collection') ...[
+                          if (booking.address != null && booking.address!.isNotEmpty)
+                            _ConfirmRow(Icons.home_outlined, 'Address', booking.address!),
+                          if (booking.city != null || booking.pincode != null)
+                            _ConfirmRow(Icons.location_on_outlined, 'Location',
+                                [booking.city, booking.pincode]
+                                    .where((s) => s != null && s.isNotEmpty)
+                                    .join(', ')),
+                        ],
                         if (booking.mode == 'Lab Test' && booking.branch != null)
                           if (booking.branch != null) _ConfirmRow(Icons.local_hospital_outlined, 'Branch', booking.branch!.name),
                         if (booking.selectedTechnician != null)
