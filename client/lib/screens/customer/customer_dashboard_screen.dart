@@ -246,6 +246,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         selectedBranch: _selectedBranch,
         pincode: _pincode,
         city: _city,
+        address: _address,
         onModeChanged: (m) {
           final prev = _mode;
           debugPrint('\n🔄 [MODE CHANGE] $prev → $m');
@@ -350,7 +351,17 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 branchId:   branchId,
               ),
             ),
-          ).then((_) => setState(() => _cart.clear()));
+          ).then((booked) => setState(() {
+              _cart.clear();
+              if (booked == true) {
+                _address        = null;
+                _pincode        = null;
+                _city           = null;
+                _lat            = null;
+                _lng            = null;
+                _selectedBranch = null;
+              }
+            }));
         },
       ),
     );
@@ -961,6 +972,7 @@ class _LocationSheet extends StatefulWidget {
   final BranchModel? selectedBranch;
   final String? pincode;
   final String? city;
+  final String? address;
   final ValueChanged<String> onModeChanged;
   final ValueChanged<BranchModel?> onBranchChanged;
   final ValueChanged<String?> onPincodeChanged;
@@ -975,6 +987,7 @@ class _LocationSheet extends StatefulWidget {
     required this.selectedBranch,
     required this.pincode,
     required this.city,
+    this.address,
     required this.onModeChanged,
     required this.onBranchChanged,
     required this.onPincodeChanged,
@@ -1026,10 +1039,18 @@ class _LocationSheetState extends State<_LocationSheet> {
   @override
   void initState() {
     super.initState();
-    _mode = widget.mode;
+    _mode   = widget.mode;
     _branch = widget.selectedBranch;
     _pincodeCtrl.text = widget.pincode ?? '';
-    _cityCtrl.text = widget.city ?? '';
+    _cityCtrl.text    = widget.city    ?? '';
+
+    // Restore previously entered address so user sees it when going back
+    if (widget.address != null && widget.address!.isNotEmpty) {
+      _addressCtrl.text = widget.address!;
+      _manualAddress    = widget.address;
+      _manualSelected   = true;
+      _isManualMode     = true;
+    }
 
     _pincodeCtrl.addListener(_filterBranches);
     _cityCtrl.addListener(_filterBranches);

@@ -1619,7 +1619,7 @@ class _BookingSuccessScreen extends StatelessWidget {
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
+                      onPressed: () => Navigator.pop(context, true),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: AppColors.brandGreen,
                         side: const BorderSide(color: AppColors.brandGreen, width: 1.5),
