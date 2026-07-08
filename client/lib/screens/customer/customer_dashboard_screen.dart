@@ -344,7 +344,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 city:       _city,
                 branch:     _selectedBranch,
                 isVip:      widget.isVip,
-                patientId:  _patientId,
+                patientId:  int.tryParse(widget.member.id) ?? _patientId,
                 patientLat: _lat,
                 patientLng: _lng,
                 branchId:   branchId,
