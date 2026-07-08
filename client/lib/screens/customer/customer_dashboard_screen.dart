@@ -360,7 +360,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 }),
               ),
             ),
-          ).then((_) => setState(() => _cart.clear()));
+          );
         },
       ),
     );
