@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
@@ -680,7 +679,7 @@ class _BookingDetailSheet extends StatefulWidget {
 class _BookingDetailSheetState extends State<_BookingDetailSheet> {
   bool _isProcessing = false;
 
-  // Live technician state — polled every 30 s while sheet is open
+  // Live technician state — refreshed on demand
   String? _collectionStatus;
   String? _technicianName;
   String? _technicianMobile;
@@ -688,11 +687,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
   int?    _technicianId;
   double? _patientLat;
   double? _patientLng;
-  Timer?  _pollTimer;
-
-  static const _terminalStatuses = {
-    'sample_collected', 'handed_to_lab', 'all_collected', 'completed',
-  };
+  bool    _isTechRefreshing = false;
 
   @override
   void initState() {
@@ -706,17 +701,12 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
     _patientLat        = widget.booking.patientLat;
     _patientLng        = widget.booking.patientLng;
 
-    // Poll for all home collection bookings that aren't already in a terminal state
-    // — this catches both "no technician yet" and "technician assigned, tracking progress"
-    if (widget.booking.mode == 'Home Collection' &&
-        widget.booking.bookingIdNum != null &&
-        !_terminalStatuses.contains(_collectionStatus)) {
-      _startPolling();
-    }
   }
 
-  void _startPolling() {
-    _pollTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+  Future<void> _refreshTechStatus() async {
+    if (_isTechRefreshing || widget.booking.bookingIdNum == null) return;
+    setState(() => _isTechRefreshing = true);
+    try {
       final data = await ApiService.fetchBookingStatus(widget.booking.bookingIdNum!);
       if (!mounted || data == null) return;
       setState(() {
@@ -734,16 +724,13 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
           _patientLng = double.tryParse(data['collection_longitude'].toString());
         }
       });
-      // Stop polling once the job reaches a terminal state
-      if (_terminalStatuses.contains(_collectionStatus)) {
-        _pollTimer?.cancel();
-      }
-    });
+    } finally {
+      if (mounted) setState(() => _isTechRefreshing = false);
+    }
   }
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
     clearRazorpay();
     super.dispose();
   }
@@ -902,6 +889,8 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
                       mobile:           _technicianMobile,
                       photoUrl:         _technicianPhoto,
                       collectionStatus: _collectionStatus,
+                      isRefreshing:     _isTechRefreshing,
+                      onRefresh:        b.bookingIdNum != null ? _refreshTechStatus : null,
                       onTrack: (_collectionStatus == 'en_route' && _technicianId != null && b.bookingIdNum != null)
                           ? () => Navigator.push(context, MaterialPageRoute(
                               builder: (_) => TrackingMapScreen(
@@ -1106,6 +1095,8 @@ class _TechnicianCard extends StatelessWidget {
   final String? photoUrl;
   final String? collectionStatus;
   final VoidCallback? onTrack;   // non-null only when en_route + technicianId known
+  final VoidCallback? onRefresh;
+  final bool isRefreshing;
 
   const _TechnicianCard({
     this.name,
@@ -1113,6 +1104,8 @@ class _TechnicianCard extends StatelessWidget {
     this.photoUrl,
     this.collectionStatus,
     this.onTrack,
+    this.onRefresh,
+    this.isRefreshing = false,
   });
 
   bool get _assigned => name != null && name!.isNotEmpty;
@@ -1145,9 +1138,24 @@ class _TechnicianCard extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Technician Status',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                color: AppColors.textSecondary, letterSpacing: 0.3)),
+        Row(
+          children: [
+            const Text('Technician Status',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                    color: AppColors.textSecondary, letterSpacing: 0.3)),
+            const Spacer(),
+            if (isRefreshing)
+              const SizedBox(
+                width: 16, height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+              )
+            else
+              GestureDetector(
+                onTap: onRefresh,
+                child: const Icon(Icons.refresh_rounded, size: 20, color: AppColors.brandGreen),
+              ),
+          ],
+        ),
         const SizedBox(height: 10),
         Container(
           padding: const EdgeInsets.all(14),
@@ -1214,10 +1222,6 @@ class _TechnicianCard extends StatelessWidget {
                   style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
             ],
           ),
-        ),
-        const SizedBox(
-          width: 18, height: 18,
-          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
         ),
       ],
     );
