@@ -65,7 +65,11 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
           _history = rows.map((r) {
             final map    = r as Map<String, dynamic>;
             final rawStatus = map['collection_status'] as String? ?? '';
-            final status = (rawStatus == 'completed' || rawStatus == 'all_collected')
+            const completedStatuses = {
+              'completed', 'all_collected', 'collected',
+              'handed_to_lab', 'sample_collected', 'collection_started',
+            };
+            final status = completedStatuses.contains(rawStatus)
                 ? 'Completed'
                 : 'Cancelled';
             final dateStr = (map['collection_date'] ?? map['assigned_at'] ?? map['collected_at']) as String?;

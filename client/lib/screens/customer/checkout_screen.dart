@@ -7,9 +7,9 @@ import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/socket_service.dart';
 import 'my_bookings_screen.dart';
 import 'booking_widgets.dart';
-import 'booking_confirmation_screen.dart';
 import 'package:microlab/models.dart';
 
 // ─── Prescription doc model ───────────────────────────────────────────────────
@@ -265,9 +265,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         if (body['success'] == true) {
           final rawList = (body['slots'] as List).cast<Map<String, dynamic>>();
           final list = rawList.map((m) => TimeSlot(
-            id:    m['time_slot_id']?.toString() ?? '',
-            label: m['label'] as String? ?? '',
-            time:  m['time']  as String? ?? '',
+            id:          m['time_slot_id']?.toString() ?? '',
+            label:       m['label']       as String? ?? '',
+            time:        m['time']        as String? ?? '',
+            parentSlotId: m['slot_id'] != null ? (m['slot_id'] as num).toInt() : null,
           )).toList();
           debugPrint('   ✅ slots     : ${list.length} available');
           for (final s in list) { debugPrint('      • [${s.id}] ${s.label} (${s.time})'); }
@@ -606,7 +607,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       testsTotal: _testsTotal,
       grandTotal: _grandTotal,
       paidAmount: _payableNow,
-      status: widget.mode == 'Lab Test' ? 'Confirmed' : 'Technician Allocated',
+      status: 'Confirmed',
       createdAt: DateTime.now(),
       docRequired: _anyDocRequired,
       docVerified: _docVerified,
@@ -616,34 +617,33 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     if (mounted) {
       setState(() => _isProcessing = false);
+
       if (widget.mode == 'Home Collection') {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => BookingConfirmationScreen(
-              bookingId:            bookingId,
-              patientId:            widget.patientId,
-              patientName:          widget.member.name,
-              patientMobile:        widget.member.mobile,
-              patientAddress:       address.isEmpty ? 'Home Collection' : address,
-              patientLat:           widget.patientLat,
-              patientLng:           widget.patientLng,
-              hospital:             'MicroLab Home Collection',
-              branchId:             widget.branchId,
-              branchName:           widget.branch?.name,
-              slotId:               int.tryParse(_selectedSlot?.id ?? ''),
-              slotLabel:            _selectedSlot?.label,
-              appointmentTime:      _selectedAppointmentTime?.time,
-              appointmentTimeLabel: _selectedAppointmentTime?.label,
-            ),
-          ),
-        );
-      } else {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => _BookingSuccessScreen(booking: booking)),
+        // Fire technician dispatch in background — patient sees confirmation immediately.
+        final socket = SocketService.instance;
+        socket.registerPatientSocket(patientId: widget.patientId, bookingId: bookingId);
+        socket.emitBookingRequest(
+          bookingId:       bookingId,
+          patientId:       widget.patientId,
+          patientName:     widget.member.name,
+          patientMobile:   widget.member.mobile,
+          patientAddress:  address.isEmpty ? 'Home Collection' : address,
+          patientLat:      widget.patientLat,
+          patientLng:      widget.patientLng,
+          hospital:        'MicroLab Home Collection',
+          bookingType:     'lab',
+          branchId:        widget.branchId,
+          branchName:      widget.branch?.name,
+          slotId:          _selectedSlot?.parentSlotId ?? int.tryParse(_selectedSlot?.id ?? ''),
+          slotLabel:       _selectedSlot?.label,
+          appointmentTime: _selectedAppointmentTime?.time,
         );
       }
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => _BookingSuccessScreen(booking: booking)),
+      );
     }
   }
 

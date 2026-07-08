@@ -232,6 +232,14 @@ class BookingModel {
   final int? rating;
   final String? feedbackComment;
   final DateTime? feedbackDate;
+  // Assigned technician info (from ip_technician_collection)
+  final String? collectionStatus;   // 'assigned' | 'en_route' | 'arrived' | 'collected' | etc.
+  final String? technicianName;
+  final String? technicianMobile;
+  final String? technicianPhoto;
+  final int?    technicianId;       // ip_technicians.technician_id — needed for TrackingMapScreen
+  final double? patientLat;         // collection_latitude  — patient's home coordinates
+  final double? patientLng;         // collection_longitude
 
   BookingModel({
     required this.id,
@@ -265,6 +273,13 @@ class BookingModel {
     this.rating,
     this.feedbackComment,
     this.feedbackDate,
+    this.collectionStatus,
+    this.technicianName,
+    this.technicianMobile,
+    this.technicianPhoto,
+    this.technicianId,
+    this.patientLat,
+    this.patientLng,
   });
 }
 
@@ -274,7 +289,8 @@ class TimeSlot {
   final String id;
   final String label;
   final String time;
-  const TimeSlot({required this.id, required this.label, required this.time});
+  final int?   parentSlotId; // ip_slots.slot_id — required by booking socket dispatch
+  const TimeSlot({required this.id, required this.label, required this.time, this.parentSlotId});
 }
 
 // ─── Time Interval (appointment time within a slot) ───────────────────────────

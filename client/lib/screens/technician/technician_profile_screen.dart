@@ -5,6 +5,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
 
+String _resolvePhotoUrl(String raw) {
+  if (raw.isEmpty) return '';
+  if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+  final base = AppConstants.serverUrl.replaceAll(RegExp(r'/+$'), '');
+  final path = raw.startsWith('/') ? raw : '/$raw';
+  return '$base$path';
+}
+
 class TechnicianProfileScreen extends StatefulWidget {
   final String mobile;
   final bool embedded;
@@ -395,7 +403,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
                   ClipOval(
                     child: _photoUrl.isNotEmpty
                         ? Image.network(
-                            _photoUrl,
+                            _resolvePhotoUrl(_photoUrl),
                             width: 60,
                             height: 60,
                             fit: BoxFit.cover,

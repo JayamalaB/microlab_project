@@ -20,6 +20,7 @@ class TrackingMapScreen extends StatefulWidget {
   final double? patientLat;
   final double? patientLng;
   final String patientAddress;
+  final bool isPatientView;
 
   const TrackingMapScreen({
     super.key,
@@ -31,6 +32,7 @@ class TrackingMapScreen extends StatefulWidget {
     required this.patientLat,
     required this.patientLng,
     required this.patientAddress,
+    this.isPatientView = false,
   });
 
   @override
@@ -1080,52 +1082,54 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                       ),
                     ],
 
-                    const SizedBox(height: 12),
-                    const Divider(height: 1),
-                    const SizedBox(height: 10),
+                    if (!widget.isPatientView) ...[
+                      const SizedBox(height: 12),
+                      const Divider(height: 1),
+                      const SizedBox(height: 10),
 
-                    // Collection address card
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: AppColors.background,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: AppColors.divider),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.home_outlined,
-                              size: 16, color: AppColors.brandGreen),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Text(
-                                  'COLLECTION ADDRESS',
-                                  style: TextStyle(
-                                      fontSize: 9,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.textHint,
-                                      letterSpacing: 0.5),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  widget.patientAddress,
-                                  style: const TextStyle(
-                                      fontSize: 12,
-                                      color: AppColors.textPrimary,
-                                      fontWeight: FontWeight.w500),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ],
+                      // Collection address card — shown to technician only
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: AppColors.background,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.divider),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.home_outlined,
+                                size: 16, color: AppColors.brandGreen),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'COLLECTION ADDRESS',
+                                    style: TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w600,
+                                        color: AppColors.textHint,
+                                        letterSpacing: 0.5),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    widget.patientAddress,
+                                    style: const TextStyle(
+                                        fontSize: 12,
+                                        color: AppColors.textPrimary,
+                                        fontWeight: FontWeight.w500),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ),

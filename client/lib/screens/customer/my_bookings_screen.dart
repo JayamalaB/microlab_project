@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
@@ -5,6 +6,7 @@ import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
+import 'tracking_map_screen.dart';
 
 class MyBookingsScreen extends StatefulWidget {
   final BookingModel? initialBooking;
@@ -168,6 +170,13 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
       docVerified:         presStatus == 'verified',
       prescriptionStatus:  presStatus,
       prescriptionImages:  presImages,
+      collectionStatus:    b['collection_status'] as String?,
+      technicianName:      b['tech_name']         as String?,
+      technicianMobile:    b['tech_mobile']        as String?,
+      technicianPhoto:     b['tech_photo']         as String?,
+      technicianId:        b['technician_id'] != null ? (b['technician_id'] as num).toInt() : null,
+      patientLat:          b['collection_latitude']  != null ? double.tryParse(b['collection_latitude'].toString())  : null,
+      patientLng:          b['collection_longitude'] != null ? double.tryParse(b['collection_longitude'].toString()) : null,
     );
   }
 
@@ -671,8 +680,70 @@ class _BookingDetailSheet extends StatefulWidget {
 class _BookingDetailSheetState extends State<_BookingDetailSheet> {
   bool _isProcessing = false;
 
+  // Live technician state — polled every 30 s while sheet is open
+  String? _collectionStatus;
+  String? _technicianName;
+  String? _technicianMobile;
+  String? _technicianPhoto;
+  int?    _technicianId;
+  double? _patientLat;
+  double? _patientLng;
+  Timer?  _pollTimer;
+
+  static const _terminalStatuses = {
+    'sample_collected', 'handed_to_lab', 'all_collected', 'completed',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    // Seed from the snapshot passed in
+    _collectionStatus  = widget.booking.collectionStatus;
+    _technicianName    = widget.booking.technicianName;
+    _technicianMobile  = widget.booking.technicianMobile;
+    _technicianPhoto   = widget.booking.technicianPhoto;
+    _technicianId      = widget.booking.technicianId;
+    _patientLat        = widget.booking.patientLat;
+    _patientLng        = widget.booking.patientLng;
+
+    // Poll for all home collection bookings that aren't already in a terminal state
+    // — this catches both "no technician yet" and "technician assigned, tracking progress"
+    if (widget.booking.mode == 'Home Collection' &&
+        widget.booking.bookingIdNum != null &&
+        !_terminalStatuses.contains(_collectionStatus)) {
+      _startPolling();
+    }
+  }
+
+  void _startPolling() {
+    _pollTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      final data = await ApiService.fetchBookingStatus(widget.booking.bookingIdNum!);
+      if (!mounted || data == null) return;
+      setState(() {
+        _collectionStatus = data['collection_status'] as String? ?? _collectionStatus;
+        _technicianName   = data['tech_name']         as String? ?? _technicianName;
+        _technicianMobile = data['tech_mobile']        as String? ?? _technicianMobile;
+        _technicianPhoto  = data['tech_photo']         as String? ?? _technicianPhoto;
+        if (data['technician_id'] != null) {
+          _technicianId = (data['technician_id'] as num).toInt();
+        }
+        if (data['collection_latitude'] != null) {
+          _patientLat = double.tryParse(data['collection_latitude'].toString());
+        }
+        if (data['collection_longitude'] != null) {
+          _patientLng = double.tryParse(data['collection_longitude'].toString());
+        }
+      });
+      // Stop polling once the job reaches a terminal state
+      if (_terminalStatuses.contains(_collectionStatus)) {
+        _pollTimer?.cancel();
+      }
+    });
+  }
+
   @override
   void dispose() {
+    _pollTimer?.cancel();
     clearRazorpay();
     super.dispose();
   }
@@ -823,6 +894,32 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
                     ],
                   ),
 
+                  // Technician card — always shown for home collection
+                  if (b.mode == 'Home Collection') ...[
+                    const SizedBox(height: 16),
+                    _TechnicianCard(
+                      name:             _technicianName,
+                      mobile:           _technicianMobile,
+                      photoUrl:         _technicianPhoto,
+                      collectionStatus: _collectionStatus,
+                      onTrack: (_collectionStatus == 'en_route' && _technicianId != null && b.bookingIdNum != null)
+                          ? () => Navigator.push(context, MaterialPageRoute(
+                              builder: (_) => TrackingMapScreen(
+                                bookingId:      b.bookingIdNum!,
+                                patientId:      int.tryParse(b.member.id) ?? 0,
+                                trackingId:     b.bookingIdNum!.toString(),
+                                technicianId:   _technicianId!,
+                                technicianName: _technicianName ?? '',
+                                patientLat:     _patientLat,
+                                patientLng:     _patientLng,
+                                patientAddress: b.address ?? '',
+                                isPatientView:  true,
+                              ),
+                            ))
+                          : null,
+                    ),
+                  ],
+
                   const SizedBox(height: 16),
 
                   // Tests
@@ -856,8 +953,8 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
                   // Prescription section
                   if (b.prescriptionImages.isNotEmpty) ...[
                     const SizedBox(height: 16),
-                    Text('Prescription',
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                    const Text('Prescription',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
                             color: AppColors.textSecondary, letterSpacing: 0.3)),
                     const SizedBox(height: 10),
                     Container(
@@ -997,6 +1094,190 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ─── Technician Card (always shown for Home Collection bookings) ───────────────
+
+class _TechnicianCard extends StatelessWidget {
+  final String? name;            // null = no technician assigned yet
+  final String? mobile;
+  final String? photoUrl;
+  final String? collectionStatus;
+  final VoidCallback? onTrack;   // non-null only when en_route + technicianId known
+
+  const _TechnicianCard({
+    this.name,
+    this.mobile,
+    this.photoUrl,
+    this.collectionStatus,
+    this.onTrack,
+  });
+
+  bool get _assigned => name != null && name!.isNotEmpty;
+
+  String get _statusLabel {
+    switch (collectionStatus) {
+      case 'assigned':           return 'Assigned';
+      case 'en_route':           return 'On the way';
+      case 'arrived':            return 'Arrived';
+      case 'collection_started': return 'Collection Started';
+      case 'sample_collected':   return 'Sample Collected';
+      case 'handed_to_lab':      return 'Handed to Lab';
+      default:                   return 'Assigned';
+    }
+  }
+
+  Color get _statusColor {
+    switch (collectionStatus) {
+      case 'en_route':           return const Color(0xFF1565C0);
+      case 'arrived':            return const Color(0xFF2E7D32);
+      case 'collection_started': return const Color(0xFF6A1B9A);
+      case 'sample_collected':   return const Color(0xFF2E7D32);
+      case 'handed_to_lab':      return AppColors.brandGreen;
+      default:                   return AppColors.brandGreen;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text('Technician Status',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                color: AppColors.textSecondary, letterSpacing: 0.3)),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppColors.background,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.divider),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _assigned ? _assignedRow(context) : _pendingRow(),
+              if (onTrack != null) ...[
+                const SizedBox(height: 12),
+                GestureDetector(
+                  onTap: onTrack,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreen,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.my_location_rounded, size: 16, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text('Track Live',
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _pendingRow() {
+    return Row(
+      children: [
+        Container(
+          width: 52, height: 52,
+          decoration: BoxDecoration(
+            color: AppColors.brandGreenSurface,
+            borderRadius: BorderRadius.circular(26),
+          ),
+          child: const Icon(Icons.person_search_outlined, size: 26, color: AppColors.brandGreen),
+        ),
+        const SizedBox(width: 14),
+        const Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Finding Technician',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary)),
+              SizedBox(height: 4),
+              Text('A technician will be assigned shortly',
+                  style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+            ],
+          ),
+        ),
+        const SizedBox(
+          width: 18, height: 18,
+          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+        ),
+      ],
+    );
+  }
+
+  Widget _assignedRow(BuildContext context) {
+    return Row(
+      children: [
+        CircleAvatar(
+          radius: 26,
+          backgroundColor: AppColors.brandGreenSurface,
+          backgroundImage: photoUrl != null && photoUrl!.isNotEmpty
+              ? NetworkImage(photoUrl!)
+              : null,
+          child: photoUrl == null || photoUrl!.isEmpty
+              ? const Icon(Icons.person_outline, size: 26, color: AppColors.brandGreen)
+              : null,
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(name!,
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary)),
+              const SizedBox(height: 4),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: _statusColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(_statusLabel,
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                        color: _statusColor)),
+              ),
+            ],
+          ),
+        ),
+        if (mobile != null && mobile!.isNotEmpty)
+          GestureDetector(
+            onTap: () {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text('Technician mobile: $mobile'),
+                action: SnackBarAction(label: 'OK', onPressed: () {}),
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ));
+            },
+            child: Container(
+              width: 40, height: 40,
+              decoration: BoxDecoration(
+                color: AppColors.brandGreenSurface,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.phone_outlined, size: 20, color: AppColors.brandGreen),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -1265,7 +1546,7 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
                 onPressed: _rating > 0 && !_submitting ? _submit : null,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.brandGreen,
-                  disabledBackgroundColor: AppColors.brandGreen.withOpacity(0.35),
+                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
                   elevation: 0,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                 ),

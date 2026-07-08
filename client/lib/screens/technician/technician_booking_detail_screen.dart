@@ -412,6 +412,11 @@ void _handleStatusTransition(String next) {
       if (bookingId > 0) SocketService.instance.emitArrived(bookingId: bookingId);
       break;
 
+    case 'Collection Started':
+      setState(() => _currentStatus = 'Collection Started');
+      if (bookingId > 0) SocketService.instance.emitCollectionStarted(bookingId: bookingId);
+      break;
+
     case 'Sample Collected':
       setState(() => _currentStatus = 'Sample Collected');
       if (bookingId > 0) SocketService.instance.emitSampleCollected(bookingId: bookingId);

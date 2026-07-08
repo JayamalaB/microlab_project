@@ -272,7 +272,19 @@ exports.getMyBookings = async (req, res) => {
            ) END
            ORDER BY bi.booking_item_id SEPARATOR '|||'
          ) AS test_items,
-         SUM(bi.final_price) AS items_total
+         SUM(bi.final_price) AS items_total,
+         tc.technician_id,
+         tc.collection_status,
+         tc.collection_latitude,
+         tc.collection_longitude,
+         tc.assigned_at,
+         tc.en_route_at,
+         tc.arrived_at,
+         tc.collected_at,
+         tc.completed_at,
+         u.user_name        AS tech_name,
+         u.user_mobile_no   AS tech_mobile,
+         tech.tech_photo    AS tech_photo
        FROM ip_bookings b
        LEFT JOIN ip_patients pat       ON pat.patient_id  = b.patient_id
        LEFT JOIN ip_branches br        ON br.branch_id    = b.branch_id
@@ -285,6 +297,9 @@ exports.getMyBookings = async (req, res) => {
            WHERE t2.booking_id = b.booking_id AND (t2.is_refund = 0 OR t2.is_refund IS NULL)
            ORDER BY t2.created_at DESC LIMIT 1
          )
+       LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id
+       LEFT JOIN ip_users u          ON u.user_id = tech.user_id
        WHERE b.client_id = ?
          AND b.deleted_at IS NULL
        GROUP BY b.booking_id
@@ -366,11 +381,16 @@ exports.getPatientBookings = async (req, res) => {
               tc.collection_status, tc.collection_date,
               tc.assigned_at, tc.en_route_at, tc.arrived_at, tc.collected_at,
               tc.collection_address, tc.collection_latitude, tc.collection_longitude,
+              u.user_name        AS tech_name,
+              u.user_mobile_no   AS tech_mobile,
+              tech.tech_photo    AS tech_photo,
               GROUP_CONCAT(DISTINCT pkg.product_name ORDER BY pkg.product_name SEPARATOR ', ') AS test_names,
               SUM(bi.final_price) AS items_total
        FROM ip_bookings b
        JOIN ip_patient_bookings pb ON pb.booking_id = b.booking_id
        LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id
+       LEFT JOIN ip_users u          ON u.user_id = tech.user_id
        LEFT JOIN ip_booking_items bi ON bi.booking_id = b.booking_id
        LEFT JOIN ip_products pkg ON pkg.product_id = bi.product_id
        WHERE pb.patient_id = ?
@@ -398,11 +418,16 @@ exports.getBooking = async (req, res) => {
               tc.assigned_at, tc.en_route_at, tc.arrived_at,
               tc.collected_at, tc.completed_at,
               tc.collection_address, tc.collection_latitude, tc.collection_longitude,
+              u.user_name        AS tech_name,
+              u.user_mobile_no   AS tech_mobile,
+              tech.tech_photo    AS tech_photo,
               GROUP_CONCAT(DISTINCT pkg.product_name ORDER BY pkg.product_name SEPARATOR ', ') AS test_names,
               GROUP_CONCAT(DISTINCT bi.product_id ORDER BY bi.product_id SEPARATOR ',') AS package_ids,
               SUM(bi.final_price) AS items_total
        FROM ip_bookings b
        LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id
+       LEFT JOIN ip_users u          ON u.user_id = tech.user_id
        LEFT JOIN ip_booking_items bi ON bi.booking_id = b.booking_id
        LEFT JOIN ip_products pkg ON pkg.product_id = bi.product_id
        WHERE b.booking_id = ?

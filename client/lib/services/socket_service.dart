@@ -937,7 +937,15 @@ class SocketService {
     String? slotLabel,
     String? appointmentTime, // "06:30" — exact time within slot
   }) {
-    _socket?.emit('booking_request', {
+    if (_socket == null) {
+      _log('WARN', 'booking_request: socket not initialized — emit dropped');
+      return;
+    }
+    if (!isConnected) {
+      _log('WARN', 'booking_request: socket disconnected — forcing reconnect before emit');
+      reconnect(); // socket.io buffers the emit and sends it once connected
+    }
+    _socket!.emit('booking_request', {
       'bookingId':      bookingId,
       'patientId':      patientId,
       'patientName':    patientName,

@@ -633,12 +633,8 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       ),
     ).then((wasCompleted) {
       if (wasCompleted == true && mounted) {
-        // Emit the handed_to_lab socket event — this is the line that writes
-        // ip_technician_collection.completed_at = NOW() on the server, marks
-        // the booking as 'collected' in ip_bookings, frees the technician in
-        // the dispatch pool, and notifies the patient that their sample is on
-        // the way to the lab.
-        SocketService.instance.emitHandedToLab(bookingId: widget.bookingId);
+        // sample_collected and handed_to_lab are already emitted step-by-step
+        // inside TechnicianBookingDetailScreen — nothing to emit here.
         ForegroundService.instance.updateText('Ready for booking requests');
         setState(() => _status = _JobStatus.handedOver);
         HapticFeedback.heavyImpact();
@@ -658,12 +654,12 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       url,
       mode: LaunchMode.externalApplication,
     ).catchError((_) {
-      // Fallback to maps search
       launchUrl(
         Uri.parse(
             'https://maps.google.com/?q=${widget.patientLat},${widget.patientLng}'),
         mode: LaunchMode.externalApplication,
       );
+      return false;
     });
   }
 

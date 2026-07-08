@@ -345,6 +345,33 @@ class ApiService {
     return false;
   }
 
+  /// Returns only the live technician fields for a booking — used to poll
+  /// collection_status while the detail sheet is open.
+  /// Returns null on error or if no technician row exists yet.
+  static Future<Map<String, dynamic>?> fetchBookingStatus(int bookingId) async {
+    try {
+      final token = await getToken();
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/bookings/$bookingId'),
+        headers: token != null ? {'Authorization': 'Bearer $token'} : {},
+      ).timeout(const Duration(seconds: 10));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true && body['booking'] != null) {
+        final b = body['booking'] as Map<String, dynamic>;
+        return {
+          'collection_status':   b['collection_status'],
+          'tech_name':           b['tech_name'],
+          'tech_mobile':         b['tech_mobile'],
+          'tech_photo':          b['tech_photo'],
+          'technician_id':       b['technician_id'],
+          'collection_latitude': b['collection_latitude'],
+          'collection_longitude': b['collection_longitude'],
+        };
+      }
+    } catch (_) {}
+    return null;
+  }
+
   static Future<List<BranchModel>> getBranches({String? pincode, String? city}) async {
     final params = <String, String>{};
     if (pincode != null && pincode.isNotEmpty) params['pincode'] = pincode;

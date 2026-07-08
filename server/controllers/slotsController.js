@@ -48,6 +48,7 @@ exports.getSlots = async (req, res) => {
         `SELECT
            av.available_slot_id                    AS time_slot_id,
            av.technician_slot_id,
+           ts.slot_id,
            TIME_FORMAT(av.slot_time, '%H:%i')      AS time,
            TIME_FORMAT(av.slot_time, '%h:%i %p')   AS label,
            (ts.max_bookings - ts.booked_count)     AS remaining

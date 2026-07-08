@@ -21,6 +21,16 @@
 'use strict';
 const db              = require('../config/db');
 const { messaging }   = require('../config/firebase');
+const fs              = require('fs');
+const path            = require('path');
+
+const COLLECTION_LOG = path.join(__dirname, '..', 'logs', 'collection.log');
+function clog(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
+  const line = `[${ist}] ${msg}\n`;
+  process.stdout.write(line);
+  fs.appendFileSync(COLLECTION_LOG, line, 'utf8');
+}
 
 // "06:30:00" → "6:30 AM"
 function _fmtTimeLabel(timeStr) {
@@ -627,7 +637,7 @@ async function _notifySlotNoAvailability(io, bookingId, failedSlotId, branchId, 
       const [timeRows] = await db.execute(
         `SELECT DISTINCT ias.slot_time
          FROM ip_available_slots ias
-         JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
+         JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
          WHERE ts.branch_id     = ?
            AND ts.slot_id       = ?
            AND ts.slot_date     = ?
@@ -1050,7 +1060,7 @@ module.exports = function bookingSocket(io, socket) {
       if (appointmentTime && bookingDate) {
         dbRun(
           `UPDATE ip_available_slots ias
-           JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
+           JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
            SET ias.is_available = 0, ias.updated_at = NOW()
            WHERE ts.technician_id  = ?
              AND ts.slot_date      = ?
@@ -1187,35 +1197,70 @@ module.exports = function bookingSocket(io, socket) {
   // ── New 7-step technician flow ───────────────────────────────────────────────
 
   socket.on('collection_started', (data = {}) => {
+    clog(`[collection_started] RAW event received | data=${JSON.stringify(data)}`);
     const { bookingId, technicianId } = data;
-    if (!bookingId || !technicianId) return;
+    clog(`[collection_started] parsed bookingId=${bookingId} (type=${typeof bookingId})  technicianId=${technicianId} (type=${typeof technicianId})`);
+    if (!bookingId || !technicianId) {
+      clog(`[collection_started] GUARD FAILED — dropped. bookingId falsy=${!bookingId}  technicianId falsy=${!technicianId}`);
+      return;
+    }
     log('🧪', 'COLLECTION_STARTED', bookingId, `tech_id=${technicianId}`);
-    dbRun(
+    clog(`[collection_started] running UPDATE for booking_id=${bookingId}`);
+    db.execute(
       `UPDATE ip_technician_collection
-       SET collection_status = 'collection_started', updated_at = NOW()
+       SET collection_status = 'collection_started', collection_started_at = NOW(), updated_at = NOW()
        WHERE booking_id = ?`,
       [bookingId]
-    );
+    )
+    .then(([result]) => {
+      clog(`[collection_started] DB OK — affectedRows=${result.affectedRows}  changedRows=${result.changedRows}  booking_id=${bookingId}`);
+      if (result.affectedRows === 0) {
+        clog(`[collection_started] WARNING: 0 rows affected — no row with booking_id=${bookingId} in ip_technician_collection`);
+      }
+    })
+    .catch(e => {
+      clog(`[collection_started] DB ERROR — booking_id=${bookingId}  error="${e.message}"  code=${e.code}`);
+    });
     _notifyPatient(io, bookingId, 'collection_started', { bookingId });
   });
 
   socket.on('sample_collected', (data = {}) => {
+    clog(`[sample_collected] RAW event received | data=${JSON.stringify(data)}`);
     const { bookingId, technicianId } = data;
-    if (!bookingId || !technicianId) return;
+    clog(`[sample_collected] parsed bookingId=${bookingId}  technicianId=${technicianId}`);
+    if (!bookingId || !technicianId) {
+      clog(`[sample_collected] GUARD FAILED — dropped. bookingId falsy=${!bookingId}  technicianId falsy=${!technicianId}`);
+      return;
+    }
     log('🧫', 'SAMPLE_COLLECTED', bookingId, `tech_id=${technicianId}`);
-    dbRun(
+    clog(`[sample_collected] running UPDATE for booking_id=${bookingId}`);
+    db.execute(
       `UPDATE ip_technician_collection
        SET collection_status = 'sample_collected', collected_at = NOW(), updated_at = NOW()
        WHERE booking_id = ?`,
       [bookingId]
-    );
+    )
+    .then(([result]) => {
+      clog(`[sample_collected] DB OK — affectedRows=${result.affectedRows}  changedRows=${result.changedRows}  booking_id=${bookingId}`);
+      if (result.affectedRows === 0) {
+        clog(`[sample_collected] WARNING: 0 rows affected — no row with booking_id=${bookingId}`);
+      }
+    })
+    .catch(e => {
+      clog(`[sample_collected] DB ERROR — booking_id=${bookingId}  error="${e.message}"  code=${e.code}`);
+    });
     _notifyPatient(io, bookingId, 'sample_collected', { bookingId });
   });
 
   // Final technician step — stores completed_at timestamp, frees the technician
   socket.on('handed_to_lab', (data = {}) => {
+    clog(`[handed_to_lab] RAW event received | data=${JSON.stringify(data)}`);
     const { bookingId, technicianId } = data;
-    if (!bookingId || !technicianId) return;
+    clog(`[handed_to_lab] parsed bookingId=${bookingId}  technicianId=${technicianId}`);
+    if (!bookingId || !technicianId) {
+      clog(`[handed_to_lab] GUARD FAILED — dropped. bookingId falsy=${!bookingId}  technicianId falsy=${!technicianId}`);
+      return;
+    }
     log('🏥', 'HANDED_TO_LAB', bookingId, `tech_id=${technicianId}`);
 
     _freeTechnician(technicianId, bookingId);
@@ -1256,7 +1301,7 @@ module.exports = function bookingSocket(io, socket) {
     if (!bookingId) return;
     dbRun(
       `UPDATE ip_technician_collection
-       SET collection_status = 'sample_received', updated_at = NOW()
+       SET collection_status = 'sample_received', sample_received_at = NOW(), updated_at = NOW()
        WHERE booking_id = ?`,
       [bookingId]
     );
@@ -1269,7 +1314,7 @@ module.exports = function bookingSocket(io, socket) {
     if (!bookingId) return;
     dbRun(
       `UPDATE ip_technician_collection
-       SET collection_status = 'test_in_progress', updated_at = NOW()
+       SET collection_status = 'test_in_progress', test_in_progress_at = NOW(), updated_at = NOW()
        WHERE booking_id = ?`,
       [bookingId]
     );
@@ -1282,7 +1327,7 @@ module.exports = function bookingSocket(io, socket) {
     if (!bookingId) return;
     dbRun(
       `UPDATE ip_technician_collection
-       SET collection_status = 'report_ready', updated_at = NOW()
+       SET collection_status = 'report_ready', report_ready_at = NOW(), updated_at = NOW()
        WHERE booking_id = ?`,
       [bookingId]
     );
@@ -1673,7 +1718,7 @@ module.exports = function bookingSocket(io, socket) {
           const [availRows] = await db.execute(
             `SELECT DISTINCT ts.technician_id
              FROM ip_available_slots ias
-             JOIN ip_technician_slots ts ON ts.technician_slot_id = ias.technician_slot_id
+             JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
              WHERE ts.slot_id      = ?
                AND ts.slot_date   = ?
                AND ias.slot_time  = ?
@@ -1687,44 +1732,46 @@ module.exports = function bookingSocket(io, socket) {
         }
 
         if (slotTechIds.size === 0) {
-          // No tech has this slot/time for that date — tell the patient immediately.
-          log('🕐', 'SLOT_ZERO_TECHS', bookingId,
-            `slot=${slotId} date=${bookingDate} time=${appointmentTime ?? 'any'} — no tech available`);
-          await _notifySlotNoAvailability(io, bookingId, slotId, branchId, bookingDate, appointmentTime);
-          dispatchQueues.delete(bookingId);
-          return;
+          // No slot config for this booking date — fall back to any available branch tech
+          // rather than failing immediately (handles case where ip_technician_slots has no
+          // entries for the chosen date yet).
+          log('⚠️', 'SLOT_ZERO_TECHS', bookingId,
+            `slot=${slotId} date=${bookingDate} time=${appointmentTime ?? 'any'} — no slot config found, dispatching to any available branch tech`);
+          slotTechIds = null; // disable hard-filter below
         }
 
-        // Hard-filter: keep only slot-matched techs in the queue.
-        const before = queue.length;
-        queue = queue.filter(a => slotTechIds.has(a.id));
-        log('🕐', 'SLOT_FILTER', bookingId,
-          `slot=${slotId} (${slotLabel ?? '?'}) date=${bookingDate} — ${queue.length}/${before} techs match`);
+        if (slotTechIds !== null) {
+          // Hard-filter: keep only slot-matched techs in the queue.
+          const before = queue.length;
+          queue = queue.filter(a => slotTechIds.has(a.id));
+          log('🕐', 'SLOT_FILTER', bookingId,
+            `slot=${slotId} (${slotLabel ?? '?'}) date=${bookingDate} — ${queue.length}/${before} techs match`);
 
-        // If all online slot-matched techs are already in the queue but NONE are
-        // currently available (busy), fall through to Lane 2 / Lane 3.
-        if (queue.length === 0) {
-          // Lane 2 FCM-only techs with this slot
-          let fcmSlotQueue = buildFcmQueue(patientLat, patientLng, branchId)
-            .filter(a => slotTechIds.has(a.id));
-          if (fcmSlotQueue.length > 0) {
-            _registerFcmTechs(fcmSlotQueue);
-            queue = buildQueue(patientLat, patientLng, actorMap, branchId)
-              .filter(a => slotTechIds.has(a.id));
-            log('📡', 'SLOT_LANE2_INJECT', bookingId,
-              `injected ${fcmSlotQueue.length} FCM-only slot-matched tech(s)`);
-          }
+          // If all online slot-matched techs are already in the queue but NONE are
+          // currently available (busy), fall through to Lane 2 / Lane 3.
           if (queue.length === 0) {
-            // Lane 3 — offline tech with this slot
-            log('⚠️', 'SLOT_ALL_BUSY', bookingId,
-              `all slot-matched techs busy — trying Lane 3`);
-            const assigned = await _trySlotBasedAssign(io, socket, slotCtx);
-            if (!assigned) {
-              // _trySlotBasedAssign found nothing and didn't emit; we notify here.
-              await _notifySlotNoAvailability(io, bookingId, slotId, branchId, bookingDate, appointmentTime);
+            // Lane 2 FCM-only techs with this slot
+            let fcmSlotQueue = buildFcmQueue(patientLat, patientLng, branchId)
+              .filter(a => slotTechIds.has(a.id));
+            if (fcmSlotQueue.length > 0) {
+              _registerFcmTechs(fcmSlotQueue);
+              queue = buildQueue(patientLat, patientLng, actorMap, branchId)
+                .filter(a => slotTechIds.has(a.id));
+              log('📡', 'SLOT_LANE2_INJECT', bookingId,
+                `injected ${fcmSlotQueue.length} FCM-only slot-matched tech(s)`);
             }
-            // If assigned=true, _trySlotBasedAssign already set dispatchQueues — don't touch it.
-            return;
+            if (queue.length === 0) {
+              // Lane 3 — offline tech with this slot
+              log('⚠️', 'SLOT_ALL_BUSY', bookingId,
+                `all slot-matched techs busy — trying Lane 3`);
+              const assigned = await _trySlotBasedAssign(io, socket, slotCtx);
+              if (!assigned) {
+                // _trySlotBasedAssign found nothing and didn't emit; we notify here.
+                await _notifySlotNoAvailability(io, bookingId, slotId, branchId, bookingDate, appointmentTime);
+              }
+              // If assigned=true, _trySlotBasedAssign already set dispatchQueues — don't touch it.
+              return;
+            }
           }
         }
       } catch (err) {

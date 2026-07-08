@@ -4,7 +4,17 @@
 // Reads from ip_technician_live_location which is kept current by bookingSocket.js
 // via INSERT … ON DUPLICATE KEY UPDATE on every technician_online event.
 
-const db = require('../config/db');
+const db   = require('../config/db');
+const fs   = require('fs');
+const path = require('path');
+
+const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
+function tlog(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
+  const line = `[${ist}] ${msg}\n`;
+  process.stdout.write(line);
+  fs.appendFileSync(TECH_LOG, line, 'utf8');
+}
 
 // Converts "HH:MM:SS" TIME strings to appointment slot array "HH:MM:00"
 function _generateIntervals(startTime, endTime, durationMinutes) {
@@ -65,9 +75,9 @@ exports.getProfile = async (req, res) => {
 // ── GET /api/technicians/:technicianId/history ───────────────────────────────
 exports.getHistory = async (req, res) => {
   const { technicianId } = req.params;
-  console.log(`\n📋 [GET HISTORY] technician_id=${technicianId}`);
+  tlog(`[getHistory] START technician_id=${technicianId}`);
   try {
-    console.log(`   [HISTORY] running SQL query...`);
+    tlog(`[getHistory] running SQL query...`);
     const [rows] = await db.execute(
       `SELECT
          tc.collection_id,
@@ -77,6 +87,7 @@ exports.getHistory = async (req, res) => {
          tc.collection_address,
          tc.assigned_at,
          tc.collected_at,
+         tc.completed_at,
          s.slot_label,
          b.city,
          b.postal_code,
@@ -86,19 +97,23 @@ exports.getHistory = async (req, res) => {
        FROM ip_technician_collection tc
        JOIN      ip_bookings b  ON b.booking_id = tc.booking_id
        LEFT JOIN ip_slots    s  ON s.slot_id    = b.slot_id
-       LEFT JOIN ip_patients p  ON p.patient_id = b.client_id
+       LEFT JOIN ip_patients p  ON p.patient_id = b.patient_id
        WHERE tc.technician_id = ?
-         AND tc.collection_status IN ('completed','all_collected','collected','handed_to_lab','cancelled')
-       ORDER BY tc.collection_date DESC
-       LIMIT 50`,
+         AND tc.collection_status IN (
+           'completed','all_collected','collected',
+           'handed_to_lab','sample_collected','collection_started',
+           'cancelled'
+         )
+       ORDER BY COALESCE(tc.completed_at, tc.collected_at, tc.assigned_at) DESC
+       LIMIT 100`,
       [technicianId]
     );
-    console.log(`✅ [HISTORY] query done — ${rows.length} records`);
-    if (rows.length > 0) console.log(`   [HISTORY] first row keys: ${Object.keys(rows[0]).join(', ')}`);
+    tlog(`[getHistory] OK — ${rows.length} records returned`);
+    if (rows.length > 0) tlog(`[getHistory] first row: booking_id=${rows[0].booking_id} status=${rows[0].collection_status} patient=${rows[0].patient_name}`);
+    if (rows.length === 0) tlog(`[getHistory] WARNING — 0 rows: check technician_id=${technicianId} has completed/cancelled entries`);
     res.json({ success: true, data: rows });
   } catch (e) {
-    console.error(`❌ [HISTORY] SQL ERROR: ${e.message}`);
-    console.error(`   [HISTORY] SQL code: ${e.code} errno: ${e.errno}`);
+    tlog(`[getHistory] SQL ERROR: ${e.message} | code=${e.code} errno=${e.errno}`);
     res.status(500).json({ success: false, message: e.message, code: e.code });
   }
 };
@@ -295,7 +310,7 @@ exports.saveSlots = async (req, res) => {
                 await connection.query(
                   `INSERT INTO ip_available_slots
                      (booking_type, technician_slot_id, slot_date, slot_time, is_available, created_at)
-                   VALUES ('home', ?, ?, ?, 1, NOW())`,
+                   VALUES ('home_collection', ?, ?, ?, 1, NOW())`,
                   [techSlotId, day.date, t]
                 );
               }
