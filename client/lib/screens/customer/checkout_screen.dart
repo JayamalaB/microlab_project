@@ -740,6 +740,29 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     if (widget.city != null)
                       Expanded(child: _InfoLine(Icons.location_city_outlined, widget.city!)),
                   ]),
+                  if (widget.patientLat == null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF3CD),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                            color: const Color(0xFFFFCC02).withValues(alpha: 0.6)),
+                      ),
+                      child: const Row(children: [
+                        Icon(Icons.location_off_outlined,
+                            size: 13, color: Color(0xFF856404)),
+                        SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            'Location not pinned on map — technician tracking will use address only.',
+                            style: TextStyle(fontSize: 11, color: Color(0xFF856404), height: 1.4),
+                          ),
+                        ),
+                      ]),
+                    ),
+                  ],
                 ],
                 if (widget.mode == 'Lab Test' && widget.branch != null) ...[
                   if (widget.branch != null) _InfoLine(Icons.local_hospital_outlined, widget.branch!.name),

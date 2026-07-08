@@ -99,6 +99,26 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
 
     _requestLocationAndStart();
     _rebuildPatientMarker();
+
+    // When resuming a journey (back button → Continue Journey), the screen is a
+    // fresh instance with empty _polylines.  Kick off an immediate route fetch
+    // using the last-known position so the line reappears without waiting for
+    // the GPS stream's first distanceFilter trigger.
+    if (widget.startInEnRoute) _restoreRouteOnResume();
+  }
+
+  void _restoreRouteOnResume() {
+    Geolocator.getLastKnownPosition().then((pos) {
+      if (pos == null || !mounted || _isDisposing || _lastRouteFetchPos != null) return;
+      final myPos     = LatLng(pos.latitude, pos.longitude);
+      final patientPos = widget.patientLat != null && widget.patientLng != null
+          ? LatLng(widget.patientLat!, widget.patientLng!)
+          : null;
+      _lastRouteFetchPos = myPos;
+      _fetchRoute(myPos, patientPos);
+      setState(() => _myPosition = pos);
+      _rebuildSelfMarker();
+    });
   }
 
   @override
@@ -405,10 +425,12 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
       ));
     }
 
-    // Draw route line and refresh accurate road distance/ETA every 50 m
-    if ((_status == _JobStatus.assigned || _status == _JobStatus.enRoute) &&
-        widget.patientLat != null && widget.patientLng != null) {
-      final patientPos = LatLng(widget.patientLat!, widget.patientLng!);
+    // Draw route line and refresh accurate road distance/ETA every 50 m.
+    // Works even when patientLat/Lng are null — _fetchRoute falls back to address.
+    if (_status == _JobStatus.assigned || _status == _JobStatus.enRoute) {
+      final patientPos = widget.patientLat != null && widget.patientLng != null
+          ? LatLng(widget.patientLat!, widget.patientLng!)
+          : null;
       if (_lastRouteFetchPos == null ||
           _haversineKm(myPos, _lastRouteFetchPos!) * 1000 > 50) {
         _fetchRoute(myPos, patientPos);
@@ -430,18 +452,24 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
 
   // ── Directions API ───────────────────────────────────────────────────────────
 
-  Future<void> _fetchRoute(LatLng origin, LatLng dest) async {
+  // dest may be null when customer skipped the map pin — fall back to text address.
+  Future<void> _fetchRoute(LatLng origin, LatLng? dest) async {
     try {
       final apiKey = AppConstants.googleMapsApiKey;
       if (apiKey.isEmpty) {
         debugPrint('Google Maps API key is missing');
         return;
       }
-      
+
+      final destination = dest != null
+          ? '${dest.latitude},${dest.longitude}'
+          : Uri.encodeComponent(widget.patientAddress);
+      if (destination.isEmpty) return;
+
       final url = Uri.parse(
         'https://maps.googleapis.com/maps/api/directions/json'
         '?origin=${origin.latitude},${origin.longitude}'
-        '&destination=${dest.latitude},${dest.longitude}'
+        '&destination=$destination'
         '&mode=driving'
         '&key=$apiKey',
       );
@@ -471,6 +499,13 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
           setState(() {
             _roadDistKm = newDist;
             _etaMin = (durS / 60).ceil();
+            // When patient coords are absent, haversine can't compute distance.
+            // Use the road distance the API already returns to drive the
+            // progress bar and ETA badge (same data, different purpose).
+            if (widget.patientLat == null) {
+              _initialDistKm ??= newDist; // seed once on first successful fetch
+              _distKm = newDist;          // updated on every 50-m re-fetch
+            }
           });
         }
       }
@@ -580,9 +615,11 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
     SocketService.instance.emitEnRoute(bookingId: widget.bookingId);
     ForegroundService.instance.updateText('En route to ${widget.patientName}');
     HapticFeedback.mediumImpact();
-    if (_myPosition != null && widget.patientLat != null && widget.patientLng != null) {
+    if (_myPosition != null) {
       final myPos = LatLng(_myPosition!.latitude, _myPosition!.longitude);
-      final patientPos = LatLng(widget.patientLat!, widget.patientLng!);
+      final patientPos = widget.patientLat != null && widget.patientLng != null
+          ? LatLng(widget.patientLat!, widget.patientLng!)
+          : null;
       _fetchRoute(myPos, patientPos);
       _lastRouteFetchPos = myPos;
     }
@@ -647,18 +684,26 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
   }
 
   void _openInMaps() {
-    if (widget.patientLat == null || widget.patientLng == null) return;
-    final url = Uri.parse(
-        'https://www.google.com/maps/dir/?api=1&destination=${widget.patientLat},${widget.patientLng}&travelmode=driving');
-    launchUrl(
-      url,
-      mode: LaunchMode.externalApplication,
-    ).catchError((_) {
-      launchUrl(
-        Uri.parse(
-            'https://maps.google.com/?q=${widget.patientLat},${widget.patientLng}'),
-        mode: LaunchMode.externalApplication,
-      );
+    final Uri url;
+    if (widget.patientLat != null && widget.patientLng != null) {
+      url = Uri.parse(
+          'https://www.google.com/maps/dir/?api=1'
+          '&destination=${widget.patientLat},${widget.patientLng}'
+          '&travelmode=driving');
+    } else if (widget.patientAddress.isNotEmpty) {
+      final encoded = Uri.encodeComponent(widget.patientAddress);
+      url = Uri.parse(
+          'https://www.google.com/maps/dir/?api=1'
+          '&destination=$encoded'
+          '&travelmode=driving');
+    } else {
+      return;
+    }
+    launchUrl(url, mode: LaunchMode.externalApplication).catchError((_) {
+      final fallback = widget.patientLat != null && widget.patientLng != null
+          ? 'https://maps.google.com/?q=${widget.patientLat},${widget.patientLng}'
+          : 'https://maps.google.com/?q=${Uri.encodeComponent(widget.patientAddress)}';
+      launchUrl(Uri.parse(fallback), mode: LaunchMode.externalApplication);
       return false;
     });
   }
@@ -771,6 +816,35 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                       ),
                     ),
                   ),
+
+                  // No-coordinates warning banner
+                  if (widget.patientLat == null && _isEnRoute)
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 64,
+                      left: 12,
+                      right: 56,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFF3CD),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                              color: const Color(0xFFFFCC02).withValues(alpha: 0.7)),
+                        ),
+                        child: const Row(children: [
+                          Icon(Icons.location_off_outlined,
+                              size: 13, color: Color(0xFF856404)),
+                          SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'No GPS pin — tap Navigate for address-based route',
+                              style:
+                                  TextStyle(fontSize: 11, color: Color(0xFF856404)),
+                            ),
+                          ),
+                        ]),
+                      ),
+                    ),
 
                   // ETA badge
                   if (_distKm != null && _isEnRoute)
@@ -886,7 +960,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                         _fab(
                           icon: Icons.navigation_rounded,
                           color: AppColors.brandGreen,
-                          onTap: widget.patientLat != null && widget.patientLng != null
+                          onTap: (widget.patientLat != null || widget.patientAddress.isNotEmpty)
                               ? _openInMaps
                               : null,
                         ),

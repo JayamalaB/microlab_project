@@ -86,7 +86,8 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
               city:               map['city']               as String? ?? '',
               pincode:            map['postal_code']        as String? ?? '',
               date:               date,
-              timeSlot:           map['slot_label'] as String? ?? '—',
+              timeSlot:           (map['slot_time_formatted'] as String?) ??
+                                  (map['slot_label']          as String?) ?? '—',
               testNames:          const ['Home Collection'],
               mode:               'Home Collection',
               status:             status,
