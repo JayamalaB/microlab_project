@@ -89,15 +89,18 @@ exports.getHistory = async (req, res) => {
          tc.collected_at,
          tc.completed_at,
          s.slot_label,
+         TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
          b.city,
          b.postal_code,
          b.amount_paid,
          p.patient_name,
          p.patient_mobile
        FROM ip_technician_collection tc
-       JOIN      ip_bookings b  ON b.booking_id = tc.booking_id
-       LEFT JOIN ip_slots    s  ON s.slot_id    = b.slot_id
-       LEFT JOIN ip_patients p  ON p.patient_id = b.patient_id
+       JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
+       LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
+       LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
+       LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
+       LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
        WHERE tc.technician_id = ?
          AND tc.collection_status IN (
            'completed','all_collected','collected',
@@ -182,6 +185,7 @@ exports.getActiveBookings = async (req, res) => {
       `SELECT
          tc.collection_id,
          tc.booking_id,
+         b.booking_ref,
          tc.collection_status,
          DATE_FORMAT(tc.collection_date, '%Y-%m-%d') AS collection_date,
          tc.collection_address,
@@ -193,11 +197,14 @@ exports.getActiveBookings = async (req, res) => {
          b.collection_longitude  AS patient_lng,
          p.patient_name,
          p.patient_mobile,
-         s.slot_label
+         s.slot_label,
+         TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted
        FROM ip_technician_collection tc
-       JOIN      ip_bookings b  ON b.booking_id = tc.booking_id
-       LEFT JOIN ip_slots    s  ON s.slot_id    = b.slot_id
-       LEFT JOIN ip_patients p  ON p.patient_id = b.client_id
+       JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
+       LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
+       LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
+       LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
+       LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
        WHERE tc.technician_id = ?
          AND tc.collection_status IN ('assigned','en_route','arrived','collected')
        ORDER BY tc.assigned_at ASC`,

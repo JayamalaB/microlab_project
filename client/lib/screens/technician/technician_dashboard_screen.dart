@@ -51,7 +51,8 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   bool _isOnline = false;
   bool _isTogglingOnline = false;
   StreamSubscription<Position>? _locationSub;
-  
+  Timer? _refreshTimer;
+
   // ✅ FIXED: Cache pending bookings to avoid rebuilding on every access
   List<TechnicianBooking>? _cachedPending;
 
@@ -350,6 +351,9 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   void _loadMockData() {
     _bookings = [];
     _loadActiveBookings();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      if (mounted) _loadActiveBookings();
+    });
   }
 
   Future<void> _loadActiveBookings() async {
@@ -411,13 +415,15 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
           debugPrint('   → booking_id=${map['booking_id']} status=$cs → $status  patient=${map['patient_name']}');
           return TechnicianBooking(
             id:                map['booking_id']?.toString() ?? '',
+            bookingRef:        map['booking_ref']        as String?,
             customerName:      map['patient_name']       as String? ?? 'Patient',
             customerPhone:     map['patient_mobile']     as String? ?? '',
             address:           map['collection_address'] as String? ?? '',
             city:              map['city']               as String? ?? '',
             pincode:           map['postal_code']        as String? ?? '',
             date:              date,
-            timeSlot:          map['slot_label']         as String? ?? 'ASAP',
+            timeSlot:          (map['slot_time_formatted'] as String?) ??
+                               (map['slot_label']         as String?) ?? '—',
             testNames:         const ['Home Collection'],
             mode:              'Home Collection',
             status:            status,
@@ -861,6 +867,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
     WidgetsBinding.instance.removeObserver(this);
     _bookingRequestSub?.cancel();
     _bookingNotifAcceptSub?.cancel();
+    _refreshTimer?.cancel();
     _stopLocationStream();
     if (_isOnline) {
       SocketService.instance.goOffline();
@@ -974,35 +981,39 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                           Expanded(
                             child: _pending.isEmpty
                                 ? _emptyState('No pending bookings', Icons.calendar_today_outlined)
-                                : ListView.builder(
-                                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-                                    itemCount: _pending.length,
-                                    itemBuilder: (_, i) => _PendingBookingCard(
-                                      booking: _pending[i],
-                                      onCall: () => _callCustomer(_pending[i].customerPhone),
-                                      onStartCollection: () => _startJourney(_pending[i]),
-                                      onResume: () => _resumeJourney(_pending[i]),
-                                      onManage: () {
-                                        final b = _pending[i];
-                                        Navigator.push(context, MaterialPageRoute(
-                                          builder: (_) => TechnicianBookingDetailScreen(
-                                            booking: b,
-                                            onNewBooking: (newBooking) {
+                                : RefreshIndicator(
+                                    onRefresh: _loadActiveBookings,
+                                    color: AppColors.brandGreen,
+                                    child: ListView.builder(
+                                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+                                      itemCount: _pending.length,
+                                      itemBuilder: (_, i) => _PendingBookingCard(
+                                        booking: _pending[i],
+                                        onCall: () => _callCustomer(_pending[i].customerPhone),
+                                        onStartCollection: () => _startJourney(_pending[i]),
+                                        onResume: () => _resumeJourney(_pending[i]),
+                                        onManage: () {
+                                          final b = _pending[i];
+                                          Navigator.push(context, MaterialPageRoute(
+                                            builder: (_) => TechnicianBookingDetailScreen(
+                                              booking: b,
+                                              onNewBooking: (newBooking) {
+                                                setState(() {
+                                                  _bookings.insert(0, newBooking);
+                                                  _cachedPending = null;
+                                                });
+                                              },
+                                            ),
+                                          )).then((wasCompleted) {
+                                            if (wasCompleted == true && mounted) {
                                               setState(() {
-                                                _bookings.insert(0, newBooking);
-                                                _cachedPending = null; // ✅ Invalidate cache
+                                                _bookings.removeWhere((bk) => bk.id == b.id);
+                                                _cachedPending = null;
                                               });
-                                            },
-                                          ),
-                                        )).then((wasCompleted) {
-                                          if (wasCompleted == true && mounted) {
-                                            setState(() {
-                                              _bookings.removeWhere((bk) => bk.id == b.id);
-                                              _cachedPending = null; // ✅ Invalidate cache
-                                            });
-                                          }
-                                        });
-                                      },
+                                            }
+                                          });
+                                        },
+                                      ),
                                     ),
                                   ),
                           ),
@@ -1195,7 +1206,9 @@ class _PendingBookingCard extends StatelessWidget {
   Color get _statusColor {
     switch (booking.status) {
       case 'Confirmed':            return AppColors.brandGreen;
+      case 'En Route':             return const Color(0xFF1565C0);
       case 'Journey Started':      return const Color(0xFF1565C0);
+      case 'Arrived':              return const Color(0xFF6A1B9A);
       case 'Destination Reached':  return const Color(0xFF6A1B9A);
       case 'Collection Started':   return const Color(0xFFE65100);
       case 'Completed':            return AppColors.brandGreen;
@@ -1206,7 +1219,9 @@ class _PendingBookingCard extends StatelessWidget {
   IconData get _statusIcon {
     switch (booking.status) {
       case 'Confirmed':            return Icons.check_circle_outline;
+      case 'En Route':             return Icons.directions_bike_rounded;
       case 'Journey Started':      return Icons.directions_bike_rounded;
+      case 'Arrived':              return Icons.location_on_rounded;
       case 'Destination Reached':  return Icons.location_on_rounded;
       case 'Collection Started':   return Icons.science_outlined;
       default:                     return Icons.hourglass_top_rounded;
@@ -1228,8 +1243,10 @@ class _PendingBookingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Determine if booking is in progress (journey started but not completed)
-    final isInProgress = booking.status == 'Journey Started' || 
-                         booking.status == 'Destination Reached' || 
+    final isInProgress = booking.status == 'En Route' ||
+                         booking.status == 'Journey Started' ||
+                         booking.status == 'Arrived' ||
+                         booking.status == 'Destination Reached' ||
                          booking.status == 'Collection Started';
     
     // Determine if booking is confirmed (ready to start)
@@ -1281,7 +1298,7 @@ class _PendingBookingCard extends StatelessWidget {
                       ]),
                     ),
                   if (booking.isVip) const SizedBox(width: 8),
-                  Text(booking.id,
+                  Text(booking.bookingRef ?? '#${booking.id}',
                       style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
                 ],
               ),
