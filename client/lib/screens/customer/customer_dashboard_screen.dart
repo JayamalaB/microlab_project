@@ -349,19 +349,18 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 patientLat: _lat,
                 patientLng: _lng,
                 branchId:   branchId,
+                onBookingComplete: () => setState(() {
+                  _cart.clear();
+                  _address        = null;
+                  _pincode        = null;
+                  _city           = null;
+                  _lat            = null;
+                  _lng            = null;
+                  _selectedBranch = null;
+                }),
               ),
             ),
-          ).then((booked) => setState(() {
-              _cart.clear();
-              if (booked == true) {
-                _address        = null;
-                _pincode        = null;
-                _city           = null;
-                _lat            = null;
-                _lng            = null;
-                _selectedBranch = null;
-              }
-            }));
+          ).then((_) => setState(() => _cart.clear()));
         },
       ),
     );

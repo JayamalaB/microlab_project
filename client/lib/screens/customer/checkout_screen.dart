@@ -41,6 +41,7 @@ class CheckoutScreen extends StatefulWidget {
   final int?      branchId;
   final String?   collectionDate;
   final int?      timeSlotId;
+  final VoidCallback? onBookingComplete;
 
   const CheckoutScreen({
     super.key,
@@ -60,6 +61,7 @@ class CheckoutScreen extends StatefulWidget {
     this.branchId,
     this.collectionDate,
     this.timeSlotId,
+    this.onBookingComplete,
   });
 
   @override
@@ -645,7 +647,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => _BookingSuccessScreen(booking: booking)),
+        MaterialPageRoute(builder: (_) => _BookingSuccessScreen(
+          booking: booking,
+          onBookingComplete: widget.onBookingComplete,
+        )),
       );
     }
   }
@@ -1448,7 +1453,8 @@ class _PaymentOptionTile extends StatelessWidget {
 
 class _BookingSuccessScreen extends StatelessWidget {
   final BookingModel booking;
-  const _BookingSuccessScreen({required this.booking});
+  final VoidCallback? onBookingComplete;
+  const _BookingSuccessScreen({required this.booking, this.onBookingComplete});
 
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -1619,7 +1625,10 @@ class _BookingSuccessScreen extends StatelessWidget {
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context, true),
+                      onPressed: () {
+                        onBookingComplete?.call();
+                        Navigator.popUntil(context, (route) => route.isFirst);
+                      },
                       style: OutlinedButton.styleFrom(
                         foregroundColor: AppColors.brandGreen,
                         side: const BorderSide(color: AppColors.brandGreen, width: 1.5),
