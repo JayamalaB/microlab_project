@@ -23,6 +23,7 @@ import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/screens/customer/support_chatbot.dart';
 import 'package:microlab/screens/shared/onboarding_screen.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 // ─── Technician Dashboard Screen ──────────────────────────────────────────────
 
@@ -851,13 +852,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   }
 
   void _callCustomer(String phone) {
-    // TODO: url_launcher → launch('tel:+91$phone')
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('Calling +91 $phone…'),
-      backgroundColor: AppColors.brandGreen,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ));
+    launchUrl(Uri.parse('tel:+91$phone'));
   }
 
   void _onNavTap(int index) => setState(() => _selectedIndex = index);
