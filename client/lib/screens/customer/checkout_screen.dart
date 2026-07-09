@@ -529,6 +529,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     int bookingId;
     String bookingRef;
+    bool isScheduled = false;
     int? docBookingItemId; // booking_item_id of first doc-required item
 
     try {
@@ -550,8 +551,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       }
 
       final data = jsonDecode(res.body) as Map<String, dynamic>;
-      bookingId  = data['bookingId']  as int;
-      bookingRef = data['bookingRef'] as String;
+      bookingId   = data['bookingId']  as int;
+      bookingRef  = data['bookingRef'] as String;
+      isScheduled = data['isScheduled'] == true;
 
       final bookingItems = (data['bookingItems'] as List? ?? [])
           .cast<Map<String, dynamic>>();
@@ -623,8 +625,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (mounted) {
       setState(() => _isProcessing = false);
 
-      if (widget.mode == 'Home Collection') {
-        // Fire technician dispatch in background — patient sees confirmation immediately.
+      if (widget.mode == 'Home Collection' && !isScheduled) {
+        // Same-day booking: fire dispatch immediately in background.
         final socket = SocketService.instance;
         socket.registerPatientSocket(patientId: widget.patientId, bookingId: bookingId);
         socket.emitBookingRequest(
@@ -644,13 +646,18 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           appointmentTime: _selectedAppointmentTime?.time,
         );
       }
+      // Future-date bookings: cron will dispatch on the appointment day.
 
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => _BookingSuccessScreen(
-          booking: booking,
-          onBookingComplete: widget.onBookingComplete,
-        )),
+        MaterialPageRoute(
+          builder: (_) => isScheduled
+              ? _BookingScheduledScreen(booking: booking)
+              : _BookingSuccessScreen(
+                  booking: booking,
+                  onBookingComplete: widget.onBookingComplete,
+                ),
+        ),
       );
     }
   }
@@ -1688,6 +1695,176 @@ class _BookingSuccessScreen extends StatelessWidget {
   }
 }
 
+
+// ─── Booking Scheduled (future-date — cron will dispatch on the day) ──────────
+
+class _BookingScheduledScreen extends StatelessWidget {
+  final BookingModel booking;
+  const _BookingScheduledScreen({required this.booking});
+
+  String _formatDate(DateTime d) {
+    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4F6F8),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
+                children: [
+                  // Scheduled banner
+                  Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: AppColors.white,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: AppColors.divider),
+                    ),
+                    child: Column(
+                      children: [
+                        Container(
+                          width: 72, height: 72,
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFE3F2FD), shape: BoxShape.circle),
+                          child: const Icon(Icons.event_available_rounded,
+                              size: 40, color: Color(0xFF1565C0)),
+                        ),
+                        const SizedBox(height: 16),
+                        const Text('Booking Scheduled!',
+                            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                        const SizedBox(height: 6),
+                        Text(booking.id,
+                            style: const TextStyle(fontSize: 13, color: AppColors.textSecondary, letterSpacing: 0.5)),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'A technician will be assigned closer to your appointment time.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  _SectionCard(
+                    title: 'Booking Details',
+                    icon: Icons.info_outline_rounded,
+                    child: Column(
+                      children: [
+                        _ConfirmRow(Icons.person_outline, 'Customer', booking.member.name),
+                        _ConfirmRow(Icons.event_outlined, 'Date', _formatDate(booking.date)),
+                        _ConfirmRow(Icons.schedule_outlined, 'Time Slot', booking.timeSlot),
+                        _ConfirmRow(Icons.home_outlined, 'Mode', booking.mode),
+                        if (booking.mode == 'Home Collection' && booking.city != null)
+                          _ConfirmRow(Icons.location_on_outlined, 'Location',
+                              '${booking.city}${booking.pincode != null ? ', ${booking.pincode}' : ''}'),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  _SectionCard(
+                    title: 'Tests Booked',
+                    icon: Icons.science_outlined,
+                    child: Column(
+                      children: booking.tests.map((t) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 5),
+                        child: Row(
+                          children: [
+                            Container(width: 6, height: 6,
+                              decoration: BoxDecoration(
+                                color: t.type == 'package' ? AppColors.brandGreen : const Color(0xFF1565C0),
+                                shape: BoxShape.circle)),
+                            const SizedBox(width: 10),
+                            Expanded(child: Text(t.name,
+                                style: const TextStyle(fontSize: 13, color: AppColors.textPrimary))),
+                            Text('₹${t.finalPrice.toInt()}',
+                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                          ],
+                        ),
+                      )).toList(),
+                    ),
+                  ),
+
+                  const SizedBox(height: 14),
+
+                  // What happens next
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE3F2FD),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFF90CAF9)),
+                    ),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text("What happens next?",
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1565C0))),
+                        SizedBox(height: 10),
+                        _NextStep('1', 'Your booking is confirmed and saved'),
+                        _NextStep('2', 'A technician will be assigned ~1 hour before your slot'),
+                        _NextStep('3', 'You will receive a call before the technician arrives'),
+                        _NextStep('4', 'Keep your samples ready as per test requirements'),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            Container(
+              padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
+              color: Colors.white,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.brandGreen,
+                        side: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text('Back to Home', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.push(context, MaterialPageRoute(
+                          builder: (_) => MyBookingsScreen(initialBooking: booking)));
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF1565C0),
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text('My Bookings', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 // ─── Reusable widgets ─────────────────────────────────────────────────────────
 
