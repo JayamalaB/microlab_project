@@ -20,6 +20,9 @@ io.on('connection', (socket) => {
   bookingSocket(io, socket);
 });
 
+// Start scheduled dispatch cron (fires every minute)
+require('./scheduler/dispatchScheduler')(io);
+
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', require('express').static(require('path').join(__dirname, 'uploads')));

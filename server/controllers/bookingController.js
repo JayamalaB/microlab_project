@@ -30,7 +30,9 @@ exports.createBooking = async (req, res) => {
     availableSlotId   = null,
     collectionAddress = null,
     collectionPincode = null,
-    collectionCity    = null,
+    collectionCity      = null,
+    collectionLatitude  = null,
+    collectionLongitude = null,
     paymentType       = 'pay_later',
     razorpayPaymentId = null,
     razorpayOrderId   = null,
@@ -44,7 +46,12 @@ exports.createBooking = async (req, res) => {
   const amountPaid = isPaid ? totalAmount : 0;
   const amountDue  = isPaid ? 0 : totalAmount;
   const txPaymentType = isPaid ? 'RAZORPAY' : 'PAY_LATER';
-  console.log(`👤 client_id=${clientId} | patient_id=${patientId} | type=${bookingType} | total=₹${totalAmount} | payment=${paymentType}`);
+
+  // Future-date bookings are held until the cron scheduler fires dispatch
+  const todayIST      = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const bookingStatus = (collectionDate && collectionDate > todayIST) ? 'scheduled' : 'pending';
+
+  console.log(`👤 client_id=${clientId} | patient_id=${patientId} | type=${bookingType} | total=₹${totalAmount} | payment=${paymentType} | status=${bookingStatus}`);
 
   const conn = await db.getConnection();
   try {
@@ -83,13 +90,15 @@ exports.createBooking = async (req, res) => {
           booking_type, status, total_amount, discount_amount,
           amount_paid, amount_due,
           source_channel, notes, collection_address, postal_code, city,
+          collection_latitude, collection_longitude,
           patient_id, patient_id_ref, product_id,
           payment_status, start_datetime, end_datetime, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
       [bookingRef, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
-       bookingType, totalAmount, discountAmount ?? 0, amountPaid, amountDue,
+       bookingType, bookingStatus, totalAmount, discountAmount ?? 0, amountPaid, amountDue,
        sourceChannel, notes ?? null,
        collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
+       collectionLatitude ?? null, collectionLongitude ?? null,
        patientId, resolvedPatientIdRef,
        isPaid ? 'paid' : 'unpaid',
        userId ?? null]
@@ -189,8 +198,9 @@ exports.createBooking = async (req, res) => {
     );
     console.log(`✅ ip_payment_transactions inserted — ref=${txnRef}`);
 
-    // 6. Confirm booking immediately for paid orders
-    if (isPaid) {
+    // 6. Confirm booking immediately for paid same-day orders only.
+    //    Scheduled (future-date) bookings stay 'scheduled' until the cron dispatches them.
+    if (isPaid && bookingStatus !== 'scheduled') {
       await conn.execute(
         `UPDATE ip_bookings SET status = 'confirmed', updated_at = NOW() WHERE booking_id = ?`,
         [bookingId]
@@ -201,9 +211,10 @@ exports.createBooking = async (req, res) => {
     console.log(`🎉 Booking created — booking_id=${bookingId} ref=${bookingRef}`);
     console.log('─────────────────────────────────────────────────\n');
     res.status(201).json({
-      success: true,
+      success:     true,
       bookingId,
       bookingRef,
+      isScheduled: bookingStatus === 'scheduled',
       bookingItems: bookingItemsInserted.map(i => ({
         bookingItemId: i.bookingItemId,
         productId:     i.productId,
