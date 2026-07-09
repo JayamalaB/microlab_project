@@ -49,7 +49,10 @@ const DB_KEYWORDS = [
     'customer info', 'customer details', 'customer information',
     // MicroLab-specific DB terms
     'booking', 'bookings', 'my booking', 'test result', 'lab result',
-    'report ready', 'sample collected', 'my report', 'test status'
+    'report ready', 'sample collected', 'my report', 'test status',
+    // Patient/account terms (ip_patients / ip_clients)
+    'family member', 'my patients', 'patient profile', 'my profile', 'my subscription',
+    'subscription tier', 'subscription plan', 'my account', 'account status', 'blood group',
 ];
 
 const SITE_TERMS = [

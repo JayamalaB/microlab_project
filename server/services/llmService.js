@@ -98,6 +98,10 @@ Database Schema (ONLY these tables exist — never reference any other table):
   (lab branch locations and contact info)
 - ip_sample_tracking: sample_id, sample_barcode, booking_id, sample_type, sample_status, collected_at, results_ready_at, reported_at, notes
   (patient's own sample/report status — ONLY use when patient asks about THEIR OWN sample/report/result status)
+- ip_patients: patient_name, patient_surname, patient_gender, patient_dob, patient_age, patient_blood_group, patient_relation, patient_email, patient_mobile, patient_address, patient_city, health_conditions
+  (the logged-in patient's own profile PLUS family members registered under the same account — ONLY use when patient asks about THEIR OWN profile, a family member/relative, or "who is on my account")
+- ip_clients: client_name, client_mobile_no, subscription_tier, client_account_status
+  (the logged-in patient's account/subscription info — ONLY use when patient asks about THEIR OWN subscription plan or account status)
 
 Intent rules:
 - "show all tests", "list tests", "available tests", "what tests do you have" → test_query, keyword: null (list all)
@@ -105,13 +109,15 @@ Intent rules:
 - "thyroid tests", "blood tests" → test_query, keyword: category word only
 - "where is branch", "Coimbatore location" → branch_query
 - "my sample status", "where is my report", "track my test", "my result", "has my sample been collected" → sample_status_query
+- "who are my family members", "list patients on my account", "my profile", "my blood group", "my mother's details" → patient_profile_query
+- "my subscription", "my plan", "my account status", "is my account active" → client_account_query
 - NEVER set keyword to "available tests", "all tests", "show all" — those mean list everything
 
 User Question: "${question}"
 
 Respond with ONLY a JSON object (no extra text):
 {
-    "intent": "test_query|branch_query|sample_status_query|general",
+    "intent": "test_query|branch_query|sample_status_query|patient_profile_query|client_account_query|general",
     "entities": {
         "product_name": "specific test or package name, or null",
         "keyword": "category/type to search (e.g. thyroid, blood, vitamin), or null",
@@ -119,7 +125,9 @@ Respond with ONLY a JSON object (no extra text):
         "city": "city name (e.g. Coimbatore, Trichy), or null",
         "price_query": true/false,
         "fasting_query": true/false,
-        "booking_id": "booking ID if patient mentions one, or null"
+        "booking_id": "booking ID if patient mentions one, or null",
+        "relation": "family relation mentioned, e.g. mother, father, spouse, child, self, or null",
+        "person_name": "specific family member's name mentioned, or null"
     },
     "is_general": true/false
 }`;

@@ -8,9 +8,22 @@ const { resolveKnowledge } = require('../services/knowledgeService');
 const PRONOUN_PATTERN = /\b(he|she|his|her|their|they|this (branch|test)|that (branch|test))\b/i;
 const SESSION_TTL_MS  = 30 * 60 * 1000;
 
-// Only these two tables and their allowed columns are ever queried.
-const TEST_COLS   = 'product_name, product_description, product_price, pre_instructions';
-const BRANCH_COLS = 'branch_name, branch_address, branch_city, branch_state, branch_pincode, branch_mobile, branch_email';
+// Only these tables and their allowed columns are ever queried.
+const TEST_COLS    = 'product_name, product_description, product_price, pre_instructions';
+const BRANCH_COLS  = 'branch_name, branch_address, branch_city, branch_state, branch_pincode, branch_mobile, branch_email';
+// ip_patients / ip_clients — always scoped to the authenticated patient's own client_id (see
+// buildPatientProfileQuery / buildClientAccountQuery). Never selected without a patientId.
+const PATIENT_COLS = [
+    'patient_name', 'patient_surname', 'patient_gender', 'patient_dob', 'patient_age',
+    'patient_blood_group', 'patient_relation', 'patient_email', 'patient_mobile',
+    'patient_address', 'patient_city', 'health_conditions',
+];
+const CLIENT_COLS = ['client_name', 'client_mobile_no', 'subscription_tier', 'client_account_status'];
+
+// Intents that expose personal data — require a verified patientId and are never
+// served from (or written to) the question-text keyed answer cache.
+const PERSONAL_INTENTS = new Set(['sample_status_query', 'patient_profile_query', 'client_account_query']);
+const PERSONAL_QUESTION_PATTERN = /\b(my sample|my report|my result|track my|sample status|where is my|my famil|family member|my patients?|patient profile|my profile|my subscription|my account|blood group)\b/i;
 
 class LLMRetriever {
     constructor() {
@@ -72,9 +85,11 @@ class LLMRetriever {
         const skipKnowledge = opts.skipKnowledge === true;
         const patientId     = opts.patientId || null;
 
-        // ── 1. LLM answer cache — skip for patient-specific sample queries ─────
-        const isSampleQuestion = /\b(my sample|my report|my result|track my|sample status|where is my)\b/i.test(question);
-        if (!isPronoun && !isSampleQuestion) {
+        // ── 1. LLM answer cache — skip for personal (patient/account-specific) queries,
+        //      since the cache is keyed by question text only and would otherwise leak
+        //      one patient's data to another patient asking the same phrasing.
+        const isPersonalQuestion = PERSONAL_QUESTION_PATTERN.test(question);
+        if (!isPronoun && !isPersonalQuestion) {
             const hit = await cache.getLLMAnswer(question);
             if (hit) {
                 console.log(`🎯 Cache HIT: "${question}"`);
@@ -85,7 +100,7 @@ class LLMRetriever {
 
         // ── 2. Parse intent ────────────────────────────────────────────────────
         const intentData = !isPronoun ? await llmService.parseIntent(question) : null;
-        const DB_INTENTS = new Set(['test_query', 'branch_query', 'sample_status_query']);
+        const DB_INTENTS = new Set(['test_query', 'branch_query', 'sample_status_query', 'patient_profile_query', 'client_account_query']);
         const isDBIntent = intentData && DB_INTENTS.has(intentData.intent);
 
         // ── 3. Quick return for general greeting/chitchat ─────────────────────
@@ -122,6 +137,10 @@ class LLMRetriever {
         if (intent === 'general') {
             if (/\b(my sample|my report|my result|track my|sample status|where is my (report|result|sample))\b/i.test(question)) {
                 intent = 'sample_status_query';
+            } else if (/\b(family member|my patients?|patients? (on|under|in) my account|my profile|patient profile|my (blood group|dob|date of birth)|my (mother|father|spouse|wife|husband|child|children|son|daughter|sister|brother)'?s?\b)\b/i.test(question)) {
+                intent = 'patient_profile_query';
+            } else if (/\b(my subscription|subscription (tier|plan)|my (account status|membership)|is my account active|client account)\b/i.test(question)) {
+                intent = 'client_account_query';
             } else if (/\b(package[s]?|test[s]?|panel|checkup|health screen)\b/.test(qLow)) {
                 intent = 'test_query';
             } else if (/\b(branch|location|centre|center|address|coimbatore|trichy)\b/.test(qLow)) {
@@ -139,12 +158,17 @@ class LLMRetriever {
             entities.keyword = null;
         }
 
-        // Sample status requires a patient — reject without patientId
-        if (intent === 'sample_status_query' && !patientId) {
+        // Personal-data intents require a verified patient — reject without patientId
+        if (PERSONAL_INTENTS.has(intent) && !patientId) {
+            const messages = {
+                sample_status_query:   '🔐 To check your sample status, please make sure you are logged in. Your patient account is needed to retrieve personal test results.',
+                patient_profile_query: '🔐 To view patient/family profile details, please make sure you are logged in.',
+                client_account_query:  '🔐 To view your account/subscription details, please make sure you are logged in.',
+            };
             return {
                 question,
-                answer: '🔐 To check your sample status, please make sure you are logged in. Your patient account is needed to retrieve personal test results.',
-                context_used: { intent: 'sample_status_query', error: 'no_patient_id', from_cache: false, session_id: sessionId }
+                answer: messages[intent],
+                context_used: { intent, error: 'no_patient_id', from_cache: false, session_id: sessionId }
             };
         }
 
@@ -152,7 +176,11 @@ class LLMRetriever {
             ? this.buildBranchQuery(entities)
             : intent === 'sample_status_query'
                 ? this.buildSampleQuery(entities, patientId)
-                : this.buildTestQuery(entities);
+                : intent === 'patient_profile_query'
+                    ? this.buildPatientProfileQuery(entities, patientId)
+                    : intent === 'client_account_query'
+                        ? this.buildClientAccountQuery(patientId)
+                        : this.buildTestQuery(entities);
         const queryType = intent;
 
         let data  = [];
@@ -177,10 +205,15 @@ class LLMRetriever {
             }
         }
 
-        // Sample status gets a dedicated formatter — no LLM needed, avoids noisy date dumps.
+        // Personal-data intents get dedicated formatters — no LLM needed, keeps PII out of
+        // the general-purpose prompt and avoids noisy/inconsistent formatting.
         const formattedResponse = (intent === 'sample_status_query')
             ? this.formatSampleStatus(data, error)
-            : await llmService.formatResponse(question, intent, entities, data, error);
+            : (intent === 'patient_profile_query')
+                ? this.formatPatientProfile(data, error)
+                : (intent === 'client_account_query')
+                    ? this.formatClientAccount(data, error)
+                    : await llmService.formatResponse(question, intent, entities, data, error);
 
         this._updateSession(sessionId, intent, entities);
         llmService.saveToMemory(sessionId, question, formattedResponse);
@@ -195,9 +228,10 @@ class LLMRetriever {
             }
         };
 
-        // Only cache successful answers — never cache "not found" responses so bad
-        // results don't get served to the same question on retry.
-        if (!isPronoun && data.length > 0 && !error) await cache.setLLMAnswer(question, result);
+        // Only cache successful, non-personal answers — never cache "not found" responses
+        // so bad results don't get served to the same question on retry, and never cache
+        // personal data so a different patient asking the same phrasing can't reuse it.
+        if (!isPronoun && !isPersonalQuestion && data.length > 0 && !error) await cache.setLLMAnswer(question, result);
         return result;
     }
 
@@ -247,6 +281,38 @@ class LLMRetriever {
             return `SELECT ${cols} FROM ip_sample_tracking WHERE patient_id = '${pid}' AND booking_id = '${bid}' ORDER BY collected_at DESC LIMIT 5`;
         }
         return `SELECT ${cols} FROM ip_sample_tracking WHERE patient_id = '${pid}' ORDER BY collected_at DESC LIMIT 10`;
+    }
+
+    // Resolves the logged-in patient's client_id via a self-join, then returns every
+    // (non-deleted) patient row under that same client_id — i.e. the account holder
+    // plus any family members they registered. Never exposes another client's patients.
+    buildPatientProfileQuery(entities, patientId) {
+        if (!patientId) return null;
+        const pid  = String(patientId).replace(/'/g, "''");
+        const cols = PATIENT_COLS.map(c => `p2.${c}`).join(', ');
+        const conditions = [`p1.patient_id = '${pid}'`, 'p2.deleted_at IS NULL'];
+
+        if (entities.relation) {
+            conditions.push(`LOWER(p2.patient_relation) LIKE '%${entities.relation.toLowerCase().replace(/'/g, "''")}%'`);
+        }
+        if (entities.person_name) {
+            const n = entities.person_name.toLowerCase().replace(/'/g, "''");
+            conditions.push(`(LOWER(p2.patient_name) LIKE '%${n}%' OR LOWER(p2.patient_surname) LIKE '%${n}%')`);
+        }
+
+        return `SELECT ${cols} FROM ip_patients p1 ` +
+               `JOIN ip_patients p2 ON p2.client_id = p1.client_id ` +
+               `WHERE ${conditions.join(' AND ')} LIMIT 20`;
+    }
+
+    // Resolves the client account (subscription/status) tied to the logged-in patient.
+    buildClientAccountQuery(patientId) {
+        if (!patientId) return null;
+        const pid  = String(patientId).replace(/'/g, "''");
+        const cols = CLIENT_COLS.map(c => `c.${c}`).join(', ');
+        return `SELECT ${cols} FROM ip_clients c ` +
+               `JOIN ip_patients p ON p.client_id = c.client_id ` +
+               `WHERE p.patient_id = '${pid}' LIMIT 1`;
     }
 
     // Maps each sample_status to the date column that is most meaningful for it.
@@ -303,6 +369,49 @@ class LLMRetriever {
         if (s.includes('receiv'))               return 'Received at lab';
         if (s.includes('submit'))               return 'Submitted on';
         return 'Updated on';
+    }
+
+    _fmtDateOnly(val) {
+        if (!val) return null;
+        const d = new Date(val);
+        if (isNaN(d)) return null;
+        return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    }
+
+    formatPatientProfile(data, error) {
+        if (error) return `⚠️ Could not fetch patient information. Please try again or call 0422 4354242.`;
+        if (!data || data.length === 0) {
+            return `🔍 No patient records found for your account. Please contact us at 0422 4354242.`;
+        }
+
+        const lines = data.map((row, i) => {
+            const name = [row.patient_name, row.patient_surname].filter(Boolean).join(' ') || 'Unnamed';
+            let line = `${i + 1}. ${name}${row.patient_relation ? ` (${row.patient_relation})` : ''}`;
+            if (row.patient_gender)      line += `\n   • Gender: ${row.patient_gender}`;
+            if (row.patient_age != null) line += `\n   • Age: ${row.patient_age}`;
+            if (row.patient_dob)         line += `\n   • DOB: ${this._fmtDateOnly(row.patient_dob)}`;
+            if (row.patient_blood_group) line += `\n   • Blood Group: ${row.patient_blood_group}`;
+            if (row.patient_mobile)      line += `\n   • Mobile: ${row.patient_mobile}`;
+            if (row.patient_email)       line += `\n   • Email: ${row.patient_email}`;
+            if (row.patient_city)        line += `\n   • City: ${row.patient_city}`;
+            if (row.health_conditions)   line += `\n   • Health Conditions: ${row.health_conditions}`;
+            return line;
+        });
+
+        return `👨‍👩‍👧‍👦 Patients on your account:\n\n${lines.join('\n\n')}`;
+    }
+
+    formatClientAccount(data, error) {
+        if (error) return `⚠️ Could not fetch your account details. Please try again or call 0422 4354242.`;
+        if (!data || data.length === 0) {
+            return `🔍 No account details found for your login. Please contact us at 0422 4354242.`;
+        }
+
+        const row = data[0];
+        return `👤 Account: ${row.client_name || 'N/A'}\n` +
+               `📱 Mobile: ${row.client_mobile_no || 'N/A'}\n` +
+               `⭐ Subscription: ${row.subscription_tier || 'N/A'}\n` +
+               `✅ Status: ${row.client_account_status || 'N/A'}`;
     }
 }
 

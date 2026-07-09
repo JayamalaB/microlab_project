@@ -3,136 +3,294 @@
 
   "faqs": [
     {
-      "id": "bot_identity",
+      "id": "sample_collection_services",
       "questions": [
-        "who are you", "what are you", "are you a bot", "are you human",
-        "are you an ai", "what kind of assistant", "who made you",
-        "who created you", "what do you do", "what can you do",
-        "what are your capabilities", "how can you help"
+        "sample collection services", "what services does microlab offer",
+        "collection services", "types of sample collection"
       ],
-      "answer": "🤖 I'm MicroLab's AI-powered support assistant. I can help you with:\n\n🔹 **Tests** — available tests, fasting, pricing, report timings\n🔹 **Bookings** — how to book, cancel, or reschedule\n🔹 **Branches** — locations, hours, contact numbers\n🔹 **Home Collection** — how it works, slot info\n🔹 **Reports** — turnaround times, how to download\n\nTry asking: 'Do I need to fast?', 'Where is T Nagar branch?', or 'How long for my report?'"
+      "answer": "We offer:\n1. General lab visit\n2. Appointment / Priority-based lab visit\n3. Home sample collection"
     },
     {
-      "id": "business_hours",
+      "id": "reschedule_appointment",
       "questions": [
-        "business hours", "working hours", "when are you open",
-        "opening hours", "what time do you open", "what time do you close",
-        "lab hours", "timing", "open on sunday"
+        "reschedule my appointment", "reschedule appointment",
+        "change my appointment", "can i reschedule"
       ],
-      "answer": "🕐 **MicroLab Branch Hours:**\n\n• **T Nagar & Anna Nagar** — Mon–Sat: 7:00 AM – 8:00 PM · Sun: 8:00 AM – 2:00 PM\n• **Adyar** — Mon–Sat: 7:30 AM – 7:30 PM · Sun: 8:00 AM – 1:00 PM\n\nHome collection slots are available from 6:00 AM – 11:00 AM."
+      "answer": "Yes. Appointments can be rescheduled by contacting our customer support team via phone, WhatsApp, or by visiting your nearest Microlab branch. We recommend informing us at least 6 hours in advance."
     },
     {
-      "id": "fasting",
+      "id": "sample_collection_timing",
       "questions": [
-        "fasting", "do i need to fast", "fast before test",
-        "empty stomach", "eat before", "can i drink water",
-        "fasting required", "fasting needed"
+        "timing for sample collection", "sample collection timing",
+        "best time for sample collection", "what time for fasting test"
       ],
-      "answer": "🍽️ **Fasting requirements:**\n\n• **Fasting required (8–12 hrs):** HbA1c, Fasting Blood Glucose, Lipid Profile, Triglycerides\n• **No fasting needed:** CBC, Thyroid Profile, Vitamin D, Urine Routine, COVID tests\n\nEach test card in the app shows whether fasting is required. When in doubt, check the test details before booking."
+      "answer": "For tests/profiles requiring prior fasting, 6:00 AM to 11:00 AM is the ideal time-slot for sample collection. For non-fasting tests/profiles, you can choose any time-slot till 5:00 PM."
     },
     {
-      "id": "report_timing",
+      "id": "locate_branch",
       "questions": [
-        "report timing", "report time", "when will my report", "how long for report",
-        "report ready", "turnaround", "result time", "when will results",
-        "how long does", "report turnaround"
+        "locate the nearest microlab branch", "nearest microlab branch",
+        "find a branch near me", "how do i locate"
       ],
-      "answer": "⏱️ **Typical report turnaround times:**\n\n• CBC, Blood Sugar, Urine Routine — 24 hrs\n• Thyroid Profile (T3/T4/TSH) — 24 hrs\n• HbA1c — 48 hrs\n• Lipid Profile — 24 hrs\n• Vitamins (D, B12) & Hormones — 48–72 hrs\n• Culture tests — 3–5 days\n\nYou'll receive an SMS and in-app notification once your report is ready."
+      "answer": "You can find your nearest Microlab Laboratory branch through:\n1. Our website's Branch Locator\n2. Google Maps\n3. Customer Care Helpline\n4. WhatsApp Support"
     },
     {
-      "id": "collection_process",
+      "id": "lab_working_hours",
       "questions": [
-        "how collection works", "collection process", "how does home collection work",
-        "home collection", "sample collection", "technician visit",
-        "how does it work", "lab visit process"
+        "lab working hours", "working hours", "business hours",
+        "what time do you open", "what time do you close", "opening hours"
       ],
-      "answer": "🏠 **Home Collection:**\n1. Book & choose a time slot (6 AM – 11 AM)\n2. Our trained phlebotomist arrives at your door\n3. Sample collected & sent to the lab\n4. Report shared in the app within the promised time\n\n🏥 **Lab Visit:**\n1. Walk in or book a slot in advance\n2. Collect a token at the reception\n3. Sample collected in our phlebotomy room\n4. Download your report from the app"
+      "answer": "Our operating hours may vary by branch. Please contact your nearest Microlab centre or check our website — you can also check Google Maps for updated timings."
     },
     {
-      "id": "branches_tnagar",
+      "id": "what_to_bring",
       "questions": [
-        "t nagar", "tnagar", "pondy bazaar", "t nagar branch", "t nagar address"
+        "what should i bring", "what to bring when visiting",
+        "bring to the laboratory", "do i need a prescription to visit"
       ],
-      "answer": "📍 **MicroLab – T Nagar**\n\nAddress: 45, Pondy Bazaar, T Nagar, Chennai – 600017\n📞 +91 44-2815-0001\n🕐 Mon–Sat: 7:00 AM – 8:00 PM · Sun: 8:00 AM – 2:00 PM"
+      "answer": "Please bring: Doctor's prescription (if available)."
     },
     {
-      "id": "branches_adyar",
+      "id": "specialities_offered",
       "questions": [
-        "adyar", "gandhi nagar", "adyar branch", "adyar address"
+        "specialities are being offered", "specialities offered in microlab",
+        "what specialities", "departments does microlab have"
       ],
-      "answer": "📍 **MicroLab – Adyar**\n\nAddress: 12, Gandhi Nagar, Adyar, Chennai – 600020\n📞 +91 44-2491-0002\n🕐 Mon–Sat: 7:30 AM – 7:30 PM · Sun: 8:00 AM – 1:00 PM"
+      "answer": "We are a leading multi-disciplinary laboratory in India. We have more than 10 departments."
     },
     {
-      "id": "branches_annanagar",
+      "id": "mention_specialities",
       "questions": [
-        "anna nagar", "annanagar", "2nd avenue", "anna nagar branch", "anna nagar address"
+        "mention the specialities", "list the specialities", "list of departments"
       ],
-      "answer": "📍 **MicroLab – Anna Nagar**\n\nAddress: 89, 2nd Avenue, Anna Nagar, Chennai – 600040\n📞 +91 44-2628-0003\n🕐 Mon–Sat: 7:00 AM – 8:00 PM · Sun: Closed"
+      "answer": "1. Molecular Biology\n2. Microbiology\n3. Histopathology\n4. Cytogenetics\n5. Genetics\n6. Oncology\n7. Biochemistry\n8. Serology\n9. Clinical Pathology\n10. Hematology"
     },
     {
-      "id": "all_branches",
+      "id": "contact_customer_support",
       "questions": [
-        "all branches", "branch locations", "where are you located",
-        "locations", "nearest branch", "all locations", "your branches"
+        "contact microlab customer support", "customer support",
+        "how can i contact microlab", "contact support", "helpline", "toll free"
       ],
-      "answer": "📍 **MicroLab has 3 branches in Chennai:**\n\n1. **T Nagar** — 45, Pondy Bazaar · +91 44-2815-0001\n2. **Adyar** — 12, Gandhi Nagar · +91 44-2491-0002\n3. **Anna Nagar** — 89, 2nd Avenue · +91 44-2628-0003\n\nAll branches are open Mon–Sat. Sunday hours vary by location."
+      "answer": "You can reach us via:\nPhone – 0422 4354242\nWhatsApp\nEmail – microlabcbe@microlabindia.com"
     },
     {
-      "id": "cancel_booking",
+      "id": "how_to_book_test",
       "questions": [
-        "cancel booking", "how to cancel", "cancel my booking",
-        "cancel appointment", "cancel test", "cancellation policy"
+        "how can i book a lab test", "how to book a test", "book a lab test"
       ],
-      "answer": "❌ **To cancel a booking:**\n\n1. Go to the **Bookings** tab in the app\n2. Open the booking you want to cancel\n3. Tap **Cancel Booking**\n\nRefunds for online payments are processed within **5–7 business days** back to your original payment method."
+      "answer": "You can book your test through:\n1. Phone Call\n2. WhatsApp\n3. Visit our nearest MBL branch"
     },
     {
-      "id": "reschedule_booking",
+      "id": "fasting_required",
       "questions": [
-        "reschedule", "change slot", "change booking", "reschedule booking",
-        "change my appointment", "modify booking"
+        "fasting required before blood tests", "is fasting required",
+        "do i need to fast", "fasting needed"
       ],
-      "answer": "🔄 **To reschedule a booking:**\n\nCancel the existing booking and create a new one with your preferred slot. For urgent reschedules, call **1800-XXX-XXXX** and we'll assist you directly."
+      "answer": "Some tests require fasting while others do not. Our team will inform you about any preparation needed when you book your test."
     },
     {
-      "id": "payment_issue",
+      "id": "book_without_prescription",
       "questions": [
-        "payment issue", "payment failed", "payment deducted", "money deducted",
-        "paid but not confirmed", "payment problem", "refund"
+        "book a test without a doctor's prescription", "without a prescription",
+        "need a prescription to book"
       ],
-      "answer": "💳 **Payment issue?**\n\nIf payment was deducted but your booking wasn't confirmed, email us at **support@microlab.in** with:\n• Your mobile number\n• Payment screenshot\n• Approximate time of transaction\n\nWe'll resolve it within **24 hours**."
+      "answer": "Yes, health/general checkups can be booked without a prescription. Certain specialised tests may require a doctor's recommendation."
     },
     {
-      "id": "contact_support",
+      "id": "health_checkup_packages",
       "questions": [
-        "contact support", "customer support", "how to contact",
-        "support email", "help desk", "raise a complaint", "phone number",
-        "helpline", "toll free"
+        "health checkup packages", "do you offer health checkup packages", "checkup packages"
       ],
-      "answer": "📞 **Contact MicroLab Support:**\n\n• **Toll-Free:** 1800-XXX-XXXX\n• **Email:** support@microlab.in\n• **Hours:** Mon–Sat, 8:00 AM – 8:00 PM\n\nFor branch-specific queries, call the branch directly."
+      "answer": "Yes. We offer 5 comprehensive, exclusive health checkup packages."
+    },
+    {
+      "id": "master_health_checkup_prep",
+      "questions": [
+        "preparation for master health checkup", "master health checkup",
+        "prepare for master health checkup"
+      ],
+      "answer": "To ensure accurate test results:\n1. Fast for 10–12 hours before your appointment (water is allowed unless instructed otherwise).\n2. Avoid alcohol and non-veg meals the day before."
+    },
+    {
+      "id": "children_seniors_testing",
+      "questions": [
+        "children and senior citizens undergo testing", "testing for children",
+        "senior citizens testing", "all age groups"
+      ],
+      "answer": "Yes, we offer tests for all age groups."
+    },
+    {
+      "id": "report_time_taken",
+      "questions": [
+        "how long does it take to receive test reports", "report turnaround",
+        "how long for report", "when will my report"
+      ],
+      "answer": "Report delivery depends on the test type:\n1. Routine tests — within 6 hours or same day\n2. Specialised tests — 1–3 working days\n3. Advanced tests — as per test requirement"
+    },
+    {
+      "id": "access_test_reports",
+      "questions": [
+        "how can i access my test reports", "access my reports", "get my report"
+      ],
+      "answer": "Reports can be received through: Email, WhatsApp, Online Patient Portal, or a printed copy from the laboratory."
+    },
+    {
+      "id": "online_report_downloads",
+      "questions": [
+        "online report downloads", "download my report online", "download report"
+      ],
+      "answer": "Yes. Patients can securely access and download their reports online through our patient web portal. Reports can also be shared via email or WhatsApp upon request."
     },
     {
       "id": "payment_methods",
       "questions": [
-        "payment methods", "how can i pay", "accepted payments",
-        "upi", "cash on delivery", "cod", "online payment", "razorpay"
+        "payment methods are accepted", "how can i pay", "accepted payments",
+        "upi", "payment options"
       ],
-      "answer": "💳 We accept **Credit/Debit cards, UPI, Net Banking**, and **Pay Later** (pay at the lab) for eligible bookings. Payments are processed securely via Razorpay."
+      "answer": "We accept multiple payment options for your convenience:\n1. Cash\n2. Credit & Debit Cards\n3. UPI Payments (Google Pay, PhonePe, Paytm, etc.)"
     },
     {
-      "id": "about_microlab",
+      "id": "corporate_insurance_testing",
       "questions": [
-        "about microlab", "about your company", "what is microlab",
-        "tell me about microlab", "about this lab", "who is microlab"
+        "corporate and insurance-related testing", "insurance testing",
+        "corporate testing", "insurance related"
       ],
-      "answer": "🏥 **MicroLab Diagnostics** is a trusted diagnostic lab in Chennai offering accurate, affordable, and timely medical tests. We specialise in home blood sample collection, making it easy for patients to get tested from the comfort of their homes.\n\nWe have 3 branches across Chennai — T Nagar, Adyar, and Anna Nagar."
+      "answer": "No, we are not authorised for insurance-related testing."
     },
     {
-      "id": "download_report",
+      "id": "cancel_test_after_booking",
       "questions": [
-        "download report", "get my report", "access report", "view report",
-        "how to get report", "report download", "where is my report"
+        "cancel a test after booking", "cancel my booking", "how to cancel", "cancel appointment"
       ],
-      "answer": "📄 **To access your report:**\n\n1. Open the MicroLab app\n2. Go to the **Reports** tab\n3. Select the booking\n4. Tap **Download PDF** or **Share**\n\nYou'll also receive an SMS notification when your report is ready."
+      "answer": "You can cancel your test booking through the app at any time before the technician starts their journey for sample collection."
+    },
+    {
+      "id": "cancellation_technician_on_way",
+      "questions": [
+        "cancellation policy if the technician is already on the way",
+        "technician already on the way", "cancel after technician reached"
+      ],
+      "answer": "If the technician has already reached your location and the appointment is cancelled, the home collection service charge will be deducted. Any remaining amount, if applicable, will be processed according to the laboratory's refund policy."
+    },
+    {
+      "id": "refund_prepaid_bookings",
+      "questions": [
+        "refunds work for pre-paid bookings", "refund policy", "prepaid booking refund"
+      ],
+      "answer": "Refunds for pre-paid bookings are processed based on the cancellation policy. If the booking is cancelled before the technician starts the journey, the full amount will be refunded. If the technician has already reached your location, the home collection service charge will be deducted and the remaining amount, if applicable, will be refunded. Refunds are typically credited to the original payment method within the applicable processing time."
+    },
+    {
+      "id": "verify_technician_identity",
+      "questions": [
+        "verify the identity of the technician", "verify technician", "is the technician verified"
+      ],
+      "answer": "You can verify the technician's identity by viewing their photo and details in the app before the scheduled visit."
+    },
+    {
+      "id": "book_multiple_tests",
+      "questions": [
+        "book multiple tests in one visit", "multiple tests one visit"
+      ],
+      "answer": "Yes, you can book multiple tests."
+    },
+    {
+      "id": "book_for_family_member",
+      "questions": [
+        "book for someone else", "family member booking", "book for a family member"
+      ],
+      "answer": "Yes, you can book for family members."
+    },
+    {
+      "id": "report_not_received",
+      "questions": [
+        "didn't receive my report", "did not receive my report",
+        "report not received", "haven't got my report"
+      ],
+      "answer": "You can reach us via:\nPhone – 0422 4354242\nWhatsApp\nEmail – microlabcbe@microlabindia.com"
+    },
+    {
+      "id": "track_home_collection_technician",
+      "questions": [
+        "track my home collection technician", "track technician", "where is my technician"
+      ],
+      "answer": "Yes, you can track your home collection technician in the app."
+    },
+    {
+      "id": "branch_coimbatore",
+      "questions": [
+        "branch in coimbatore", "coimbatore branch", "microlab coimbatore"
+      ],
+      "answer": "Yes. Coimbatore is our headquarters city with 15+ branches including RS Puram (Head Office – 24 hrs), Ganapathy, Peelamedu, Ramanathapuram, Vadavalli, Saravanampatti, Selvapuram, Kuniyamuthur, Kovaiputhur, Nehru Nagar, Thudiyalur, Jothipuram, KNG Pudur, Sulur, and SVSA."
+    },
+    {
+      "id": "head_office",
+      "questions": [
+        "microlab head office", "head office address", "where is the head office"
+      ],
+      "answer": "No. 12A, Cowley Brown Road, RS Puram (E), Coimbatore – 641002\nPhone: 0422 4354242 / 2540525 / 2556628 / 2550673\nOpen: 24 Hours"
+    },
+    {
+      "id": "branches_across_india",
+      "questions": [
+        "how many microlab branches", "branches across india", "total branches"
+      ],
+      "answer": "Microlab has 50+ branches across India spanning Tamil Nadu, Karnataka, Kerala, Andhra Pradesh, Telangana, Maharashtra, Delhi NCR, Haryana, West Bengal, Assam, and more."
+    },
+    {
+      "id": "branches_outside_tamil_nadu",
+      "questions": [
+        "available outside tamil nadu", "branches outside tamil nadu", "microlab in other states"
+      ],
+      "answer": "Yes. We have branches in:\nKarnataka: Bangalore (3 locations), Mysuru, Mangalore, Hosur\nKerala: Palakkad, Cochin, Thiruvananthapuram\nAndhra Pradesh/Telangana: Hyderabad, Vijayawada, Chittoor\nMaharashtra: Mumbai, Pune\nNorth India: Delhi NCR (Noida), Gurugram\nOthers: Kolkata, Nagpur, Assam"
+    },
+    {
+      "id": "branch_chennai",
+      "questions": [
+        "branch in chennai", "chennai branch", "microlab chennai"
+      ],
+      "answer": "Yes. 115/18, Main Road, Y Block Main Road (Opp. to Tower Park Road), Anna Nagar, Chennai – 600040\nPhone: 044-43500217\nMobile: 9344847160\nEmail: microlabchennai@gmail.com"
+    },
+    {
+      "id": "branch_salem",
+      "questions": [
+        "branch in salem", "salem branch", "microlab salem"
+      ],
+      "answer": "Yes. 2nd Floor, Vangalamman Tower Building, Opp. Pranav Hospital, No. 77/2, Brindhavan Road, Fairlands, Salem – 636004\nPhone: 0427-4262775\nMobile: 9362129153\nEmail: microlabsalem@gmail.com"
+    },
+    {
+      "id": "branch_trichy",
+      "questions": [
+        "branch in trichy", "trichy branch", "microlab trichy"
+      ],
+      "answer": "Yes. Two locations in Trichy:\n\nKK Nagar: No. 24 & 25, Shanthi Guru Towers, EVR Road, KK Nagar Bus Stand – 620021 | Ph: 0431 2352151\nEVR Salai: 3/28, Plot No. 200, EVR Salai, KK Nagar – 620021 | Ph: 0431 3554312"
+    },
+    {
+      "id": "branch_madurai",
+      "questions": [
+        "branch in madurai", "madurai branch", "microlab madurai"
+      ],
+      "answer": "Yes. No. 368-C, Bharathiyar Apartment, 80 Feet Road, Anna Nagar, Madurai – 625020\nPhone: 0452-4390408\nMobile: 9840924080\nEmail: microlabqcmadurai@gmail.com"
+    },
+    {
+      "id": "branch_erode",
+      "questions": [
+        "branch in erode", "erode branch", "microlab erode"
+      ],
+      "answer": "Yes. 33/4, Chinnamuthu 2nd Street, Old Natesar Mill Area, EK Valasu, Perundurai Road, Erode – 638011\nPhone: 0424-2250739\nMobile: 9842915881\nEmail: microlabqcerode@gmail.com"
+    },
+    {
+      "id": "branch_tirupur",
+      "questions": [
+        "branch in tirupur", "tirupur branch", "microlab tirupur"
+      ],
+      "answer": "Yes. No. 471/291, Opp. to Geetha Pharmacy, Near Pushpa Bus Stop, Avinashi Road, Tirupur – 641602\nPhone: 0421 224 2266\nMobile: 6385238852\nEmail: tirupur.micro720@gmail.com"
+    },
+    {
+      "id": "branch_ooty",
+      "questions": [
+        "branch in ooty", "ooty branch", "microlab ooty"
+      ],
+      "answer": "Yes. 393/302, Rathina Complex, Ettines Road, Opp. to Aavin, Bombay Castle, Ooty – 643001\nPhone: 0423-2440673\nMobile: 9843863586\nEmail: microlabooty1@gmail.com"
     }
   ]
 }

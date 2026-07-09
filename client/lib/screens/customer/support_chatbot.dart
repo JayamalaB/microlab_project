@@ -80,109 +80,279 @@ extension _LayerX on _Layer {
       };
 }
 
-// ── Branch data ───────────────────────────────────────────────────────────────
-const _kBranches = [
-  {'name': 'MicroLab – Coimbatore', 'address': 'Coimbatore, Tamil Nadu', 'phone': '0422 4354242 / 4354212', 'hours': 'Mon–Sat: 7:00 AM – 8:00 PM  ·  Sun: 8:00 AM – 2:00 PM'},
-  {'name': 'MicroLab – Trichy',     'address': 'Trichy, Tamil Nadu',     'phone': '1800 425 1316 (Toll-Free)', 'hours': 'Mon–Sat: 7:00 AM – 8:00 PM  ·  Sun: 8:00 AM – 2:00 PM'},
+const _kFaqCategoryNames = [
+  'General Info', 'Testing Info', 'Payment Info', 'Booking Info', 'Branch Locations',
 ];
 
-const _kLocalChips = {
-  'Branch Info', 'Test FAQs', 'Booking Help', 'Contact Us',
-  'Coimbatore', 'Trichy', 'Other Branch',
-  'Fasting needed?', 'Report timing?', 'How collection works?',
-  'Cancel booking?', 'Reschedule?', 'Payment issue?', '← Back',
+// ── FAQ categories — mirrors the official MicroLab FAQ sheet ────────────────
+const _kFaqCategories = <String, List<String>>{
+  'General Info': [
+    'What sample collection services does Microlab offer?',
+    'Can I reschedule my appointment?',
+    'What is the timing for sample collection?',
+    'How do I locate the nearest Microlab branch?',
+    'What are your Lab working hours?',
+    'What should I bring when visiting the laboratory?',
+    'What specialities are being offered at Microlab?',
+    'Mention the specialities',
+    'How can I contact Microlab Customer Support?',
+  ],
+  'Testing Info': [
+    'How can I book a lab test?',
+    'Is fasting required before blood tests?',
+    "Can I book a test without a doctor's prescription?",
+    'Do you offer health checkup packages?',
+    'Is there a preparation procedure for Master Health Checkup?',
+    'Can children and senior citizens undergo testing at Microlab?',
+    'How long does it take to receive test reports?',
+    'How can I access my test reports?',
+    'Do you offer online report downloads?',
+  ],
+  'Payment Info': [
+    'What payment methods are accepted?',
+    'Do you accept corporate and insurance-related testing?',
+  ],
+  'Booking Info': [
+    'What if I need to cancel a test after booking?',
+    'What is the cancellation policy if the technician is already on the way?',
+    'How do refunds work for pre-paid bookings?',
+    'How do I verify the identity of the technician visiting my home?',
+    'Can I book multiple tests in one visit?',
+    'Can I book for someone else (family member)?',
+    "I didn't receive my report — what should I do?",
+    'Can I track my home collection technician?',
+  ],
+  'Branch Locations': [
+    'Does Microlab have a branch in Coimbatore?',
+    'Where is the Microlab Head Office?',
+    'How many Microlab branches are there across India?',
+    'Is Microlab available outside Tamil Nadu?',
+    'Does Microlab have a branch in Chennai?',
+    'Does Microlab have a branch in Salem?',
+    'Does Microlab have a branch in Trichy?',
+    'Does Microlab have a branch in Madurai?',
+    'Does Microlab have a branch in Erode?',
+    'Does Microlab have a branch in Tirupur?',
+    'Does Microlab have a branch in Ooty?',
+  ],
+};
+
+final Set<String> _kLocalChips = {
+  ..._kFaqCategoryNames,
+  '← Back',
   // Static info layer FAQ chips — answered locally, no server needed
-  'What tests do you offer?', 'What are your business hours?',
-  'What payment methods do you accept?', 'How can I track my report?',
-  'Are you NABL accredited?', 'Do you offer corporate packages?',
-  'What are home collection charges?', 'Can I cancel my booking?', 'How do I reach support?',
+  for (final qs in _kFaqCategories.values) ...qs,
   // Sample follow-up chips — answered locally
   'When will my report be ready?', 'How do I download my report?', 'Contact support',
+  // About Lab layer chips — answered locally so web scraping failure never shows "no info"
+  'What is Microbiological Laboratory (MBL)?',
+  'What diagnostic services does MicroLab offer?',
+  'Tell me about the Molecular Biology services',
+  'Tell me about the Cytogenetics department',
+  "What are MicroLab's accreditations?",
+  'Who are the doctors at MicroLab?',
+  'How can I access my reports online?',
+  'What is the home sample collection process?',
+  'How do I book a home collection?',
 };
 
 // ── Local answers for static-info chips ─────────────────────────────────────
 const _kStaticQALocal = <String, String>{
-  'What tests do you offer?':
-      '🧪 MicroLab Diagnostic Services:\n\n'
-      '• Molecular Biology – DNA/RNA-based diagnostics for disease monitoring\n'
-      '• Cytogenetics – Chromosomal analysis for genetic & oncological disorders\n'
-      '• Serology – Antigen & antibody testing for infectious/autoimmune diseases\n'
-      '• Microbiology – Culture, sensitivity & pathogen identification\n'
-      '• Biochemistry – Routine biochemical testing\n'
-      '• Clinical Pathology – Comprehensive pathological analysis\n\n'
-      'For the full test brochure, visit microlabindia.com or call 0422 4354242.',
+  'What sample collection services does Microlab offer?':
+      '🧪 Sample Collection Services:\n\n'
+      'We offer:\n'
+      '1. General lab visit\n'
+      '2. Appointment / Priority-based lab visit\n'
+      '3. Home sample collection',
 
-  'What are your business hours?':
-      '🕐 MicroLab Hours:\n\n'
-      '• Mon–Sat: 7:00 AM – 8:00 PM\n'
-      '• Sunday: 8:00 AM – 2:00 PM\n\n'
-      'Home sample collection is available during the same hours.\n'
-      'For emergencies, call our toll-free: 1800 425 1316.',
+  'Can I reschedule my appointment?':
+      '📅 Rescheduling:\n\n'
+      'Yes. Appointments can be rescheduled by contacting our customer support team via phone, WhatsApp, or by visiting your nearest Microlab branch.\n\n'
+      'We recommend informing us at least 6 hours in advance.',
 
-  'What payment methods do you accept?':
+  'What is the timing for sample collection?':
+      '⏰ Sample Collection Timing:\n\n'
+      'For tests/profiles requiring prior fasting, 6:00 AM to 11:00 AM is the ideal time-slot.\n\n'
+      'For non-fasting tests/profiles, you can choose any time-slot till 5:00 PM.',
+
+  'How do I locate the nearest Microlab branch?':
+      '📍 Locate a Branch:\n\n'
+      'You can find your nearest Microlab Laboratory branch through:\n'
+      '1. Our website\'s Branch Locator\n'
+      '2. Google Maps\n'
+      '3. Customer Care Helpline\n'
+      '4. WhatsApp Support',
+
+  'What are your Lab working hours?':
+      '🕐 Lab Working Hours:\n\n'
+      'Our operating hours may vary by branch. Please contact your nearest Microlab centre or check our website — you can also check Google Maps for updated timings.',
+
+  'What should I bring when visiting the laboratory?':
+      '🩺 What to Bring:\n\n'
+      'Please bring: Doctor\'s prescription (if available).',
+
+  'What specialities are being offered at Microlab?':
+      '🔬 Our Specialities:\n\n'
+      'We are a leading multi-disciplinary laboratory in India. We have more than 10 departments.',
+
+  'Mention the specialities':
+      '🔬 MicroLab Departments:\n\n'
+      '1. Molecular Biology\n2. Microbiology\n3. Histopathology\n4. Cytogenetics\n5. Genetics\n'
+      '6. Oncology\n7. Biochemistry\n8. Serology\n9. Clinical Pathology\n10. Hematology',
+
+  'How can I contact Microlab Customer Support?':
+      '📞 Contact MicroLab Customer Support:\n\n'
+      'Phone – 0422 4354242\nWhatsApp\nEmail – microlabcbe@microlabindia.com',
+
+  'How can I book a lab test?':
+      '🧾 Booking a Lab Test:\n\n'
+      'You can book your test through:\n1. Phone Call\n2. WhatsApp\n3. Visit our nearest MBL branch',
+
+  'Is fasting required before blood tests?':
+      '🍽️ Fasting Requirements:\n\n'
+      'Some tests require fasting while others do not. Our team will inform you about any preparation needed when you book your test.',
+
+  "Can I book a test without a doctor's prescription?":
+      '📝 Booking Without a Prescription:\n\n'
+      'Yes, health/general checkups can be booked without a prescription. Certain specialised tests may require a doctor\'s recommendation.',
+
+  'Do you offer health checkup packages?':
+      '📦 Health Checkup Packages:\n\n'
+      'Yes. We offer 5 comprehensive, exclusive health checkup packages.',
+
+  'Is there a preparation procedure for Master Health Checkup?':
+      '✅ Master Health Checkup Preparation:\n\n'
+      'To ensure accurate test results:\n'
+      '1. Fast for 10–12 hours before your appointment (water is allowed unless instructed otherwise).\n'
+      '2. Avoid alcohol and non-veg meals the day before.',
+
+  'Can children and senior citizens undergo testing at Microlab?':
+      '👨‍👩‍👧‍👦 Testing for All Ages:\n\n'
+      'Yes, we offer tests for all age groups.',
+
+  'How long does it take to receive test reports?':
+      '⏱ Report Turnaround:\n\n'
+      'Report delivery depends on the test type:\n'
+      '1. Routine tests — within 6 hours or same day\n'
+      '2. Specialised tests — 1–3 working days\n'
+      '3. Advanced tests — as per test requirement',
+
+  'How can I access my test reports?':
+      '📄 Accessing Your Reports:\n\n'
+      'Reports can be received through: Email, WhatsApp, Online Patient Portal, or a printed copy from the laboratory.',
+
+  'Do you offer online report downloads?':
+      '📱 Online Report Downloads:\n\n'
+      'Yes. Patients can securely access and download their reports online through our patient web portal. '
+      'Reports can also be shared via email or WhatsApp upon request.',
+
+  'What payment methods are accepted?':
       '💳 Accepted Payment Methods:\n\n'
-      '• UPI — GPay, PhonePe, Paytm\n'
-      '• Debit / Credit Cards (Visa, Mastercard, RuPay)\n'
-      '• Net Banking\n'
-      '• Cash at lab counter\n\n'
-      'For online bookings, payment is made at the time of booking confirmation.',
+      'We accept multiple payment options for your convenience:\n'
+      '1. Cash\n2. Credit & Debit Cards\n3. UPI Payments (Google Pay, PhonePe, Paytm, etc.)',
 
-  'How can I track my report?':
-      '📱 Access Your Report Online:\n\n'
-      '1. Visit microlabindiaonline.com → Patient Portal\n'
-      '2. Log in with your patient credentials\n'
-      '3. Download your report in PDF format\n\n'
-      'You\'ll receive an SMS notification when your report is ready.\n'
-      '• Routine tests: Same day / within 24 hours\n'
-      '• Specialised tests: 24–72 hours',
+  'Do you accept corporate and insurance-related testing?':
+      '🏢 Corporate & Insurance Testing:\n\n'
+      'No, we are not authorised for insurance-related testing.',
 
-  'Are you NABL accredited?':
-      '✅ Quality & Accreditations:\n\n'
-      'Microbiological Laboratory (MBL) is committed to:\n\n'
-      '• Accuracy & Reliability – validated protocols, modern instruments, strict QC\n'
-      '• Transparency & Ethics – complete integrity in testing and reporting\n'
-      '• Innovation & Upgradation – continuous adoption of new diagnostic technologies\n\n'
-      'For full accreditation details, visit microlabindia.com.',
+  'What if I need to cancel a test after booking?':
+      '❌ Cancelling After Booking:\n\n'
+      'You can cancel your test booking through the app at any time before the technician starts their journey for sample collection.',
 
-  'Do you offer corporate packages?':
-      '🏢 Corporate & Hospital Packages:\n\n'
-      'Yes! MicroLab partners with hospitals, clinics, and corporates:\n\n'
-      '• Dedicated Hospital / Doctor login portal for fast report access\n'
-      '• Bulk testing at discounted rates\n'
-      '• On-site / home collection at your premises\n'
-      '• Paperless digital reports\n\n'
-      'Contact: microlabcbe@microlabindia.com',
+  'What is the cancellation policy if the technician is already on the way?':
+      '🚗 Cancellation — Technician En Route:\n\n'
+      'If the technician has already reached your location and the appointment is cancelled, the home collection service charge will be deducted.\n\n'
+      'Any remaining amount, if applicable, will be processed according to the laboratory\'s refund policy.',
 
-  'What are home collection charges?':
-      '🚗 Home Sample Collection:\n\n'
-      '• Safe & hygienic collection by trained phlebotomists\n'
-      '• Collected at your doorstep — no need to visit the lab\n'
-      '• Available Mon–Sat 7 AM – 8 PM, Sun 8 AM – 2 PM\n\n'
-      'Call 0422 4354242 or WhatsApp 7904986636 to book and confirm charges.',
+  'How do refunds work for pre-paid bookings?':
+      '💰 Refunds for Pre-Paid Bookings:\n\n'
+      'Refunds are processed based on the cancellation policy:\n'
+      '• Cancelled before the technician starts the journey → full refund\n'
+      '• Technician already reached your location → home collection service charge deducted, remaining amount (if any) refunded\n\n'
+      'Refunds are typically credited to the original payment method within the applicable processing time.',
 
-  'Can I cancel my booking?':
-      '📋 Cancellation & Refund Policy:\n\n'
-      '• Cancel before sample collection → full refund within 5–7 working days\n'
-      '• After sample collection → no refund (processing has begun)\n'
-      '• Home collection: cancel at least 2 hours before your scheduled slot\n\n'
-      'For help: 0422 4354242 or WhatsApp 7904986636',
+  'How do I verify the identity of the technician visiting my home?':
+      '🪪 Verifying the Technician:\n\n'
+      'You can verify the technician\'s identity by viewing their photo and details in the app before the scheduled visit.',
 
-  'How do I reach support?':
-      '📞 Contact MicroLab:\n\n'
-      '• Phone: 0422 4354242 / 4354212\n'
-      '• Toll-Free: 1800 425 1316\n'
-      '• WhatsApp: 7904986636\n'
-      '• Email: microlabcbe@microlabindia.com\n'
-      '• Website: microlabindia.com\n\n'
-      '⏰ Support hours: Mon–Sat 7:00 AM – 8:00 PM',
+  'Can I book multiple tests in one visit?':
+      '🧪 Multiple Tests, One Visit:\n\nYes, you can book multiple tests.',
+
+  'Can I book for someone else (family member)?':
+      '👪 Booking for Family Members:\n\nYes, you can book for family members.',
+
+  "I didn't receive my report — what should I do?":
+      '📞 Report Not Received?\n\n'
+      'You can reach us via:\nPhone – 0422 4354242\nWhatsApp\nEmail – microlabcbe@microlabindia.com',
+
+  'Can I track my home collection technician?':
+      '🚚 Tracking Your Technician:\n\nYes, you can track your home collection technician in the app.',
+
+  'Does Microlab have a branch in Coimbatore?':
+      '📍 MicroLab – Coimbatore:\n\n'
+      'Yes. Coimbatore is our headquarters city with 15+ branches including RS Puram (Head Office – 24 hrs), '
+      'Ganapathy, Peelamedu, Ramanathapuram, Vadavalli, Saravanampatti, Selvapuram, Kuniyamuthur, Kovaiputhur, '
+      'Nehru Nagar, Thudiyalur, Jothipuram, KNG Pudur, Sulur, and SVSA.',
+
+  'Where is the Microlab Head Office?':
+      '🏢 MicroLab Head Office:\n\n'
+      'No. 12A, Cowley Brown Road, RS Puram (E), Coimbatore – 641002\n'
+      'Phone: 0422 4354242 / 2540525 / 2556628 / 2550673\nOpen: 24 Hours',
+
+  'How many Microlab branches are there across India?':
+      '🇮🇳 Branches Across India:\n\n'
+      'Microlab has 50+ branches across India spanning Tamil Nadu, Karnataka, Kerala, Andhra Pradesh, '
+      'Telangana, Maharashtra, Delhi NCR, Haryana, West Bengal, Assam, and more.',
+
+  'Is Microlab available outside Tamil Nadu?':
+      '🗺️ Beyond Tamil Nadu:\n\n'
+      'Yes. We have branches in:\n\n'
+      'Karnataka: Bangalore (3 locations), Mysuru, Mangalore, Hosur\n'
+      'Kerala: Palakkad, Cochin, Thiruvananthapuram\n'
+      'Andhra Pradesh/Telangana: Hyderabad, Vijayawada, Chittoor\n'
+      'Maharashtra: Mumbai, Pune\n'
+      'North India: Delhi NCR (Noida), Gurugram\n'
+      'Others: Kolkata, Nagpur, Assam',
+
+  'Does Microlab have a branch in Chennai?':
+      '📍 MicroLab – Chennai:\n\n'
+      'Yes. 115/18, Main Road, Y Block Main Road (Opp. to Tower Park Road), Anna Nagar, Chennai – 600040\n'
+      'Phone: 044-43500217\nMobile: 9344847160\nEmail: microlabchennai@gmail.com',
+
+  'Does Microlab have a branch in Salem?':
+      '📍 MicroLab – Salem:\n\n'
+      'Yes. 2nd Floor, Vangalamman Tower Building, Opp. Pranav Hospital, No. 77/2, Brindhavan Road, Fairlands, Salem – 636004\n'
+      'Phone: 0427-4262775\nMobile: 9362129153\nEmail: microlabsalem@gmail.com',
+
+  'Does Microlab have a branch in Trichy?':
+      '📍 MicroLab – Trichy:\n\n'
+      'Yes. Two locations in Trichy:\n\n'
+      'KK Nagar: No. 24 & 25, Shanthi Guru Towers, EVR Road, KK Nagar Bus Stand – 620021 | Ph: 0431 2352151\n'
+      'EVR Salai: 3/28, Plot No. 200, EVR Salai, KK Nagar – 620021 | Ph: 0431 3554312',
+
+  'Does Microlab have a branch in Madurai?':
+      '📍 MicroLab – Madurai:\n\n'
+      'Yes. No. 368-C, Bharathiyar Apartment, 80 Feet Road, Anna Nagar, Madurai – 625020\n'
+      'Phone: 0452-4390408\nMobile: 9840924080\nEmail: microlabqcmadurai@gmail.com',
+
+  'Does Microlab have a branch in Erode?':
+      '📍 MicroLab – Erode:\n\n'
+      'Yes. 33/4, Chinnamuthu 2nd Street, Old Natesar Mill Area, EK Valasu, Perundurai Road, Erode – 638011\n'
+      'Phone: 0424-2250739\nMobile: 9842915881\nEmail: microlabqcerode@gmail.com',
+
+  'Does Microlab have a branch in Tirupur?':
+      '📍 MicroLab – Tirupur:\n\n'
+      'Yes. No. 471/291, Opp. to Geetha Pharmacy, Near Pushpa Bus Stop, Avinashi Road, Tirupur – 641602\n'
+      'Phone: 0421 224 2266\nMobile: 6385238852\nEmail: tirupur.micro720@gmail.com',
+
+  'Does Microlab have a branch in Ooty?':
+      '📍 MicroLab – Ooty:\n\n'
+      'Yes. 393/302, Rathina Complex, Ettines Road, Opp. to Aavin, Bombay Castle, Ooty – 643001\n'
+      'Phone: 0423-2440673\nMobile: 9843863586\nEmail: microlabooty1@gmail.com',
 };
 
 const _kLayerQs = <_Layer, List<String>>{
-  _Layer.staticInfo: [
-    'What tests do you offer?', 'What are your business hours?',
-    'What payment methods do you accept?', 'How can I track my report?',
-    'Are you NABL accredited?', 'Do you offer corporate packages?',
-  ],
+  _Layer.staticInfo: _kFaqCategoryNames,
   _Layer.db: [
     'Show all available tests', 'What is the price of CBC test?',
     'List all branch locations', 'What tests are available for thyroid?',
@@ -193,25 +363,25 @@ const _kLayerQs = <_Layer, List<String>>{
     'What is Microbiological Laboratory (MBL)?',
     'What diagnostic services does MicroLab offer?',
     'Tell me about the Molecular Biology services',
-    'What is the home sample collection process?',
-    'How can I access my reports online?',
-    'Who are the doctors at MicroLab?',
+    'Tell me about the Cytogenetics department',
+    "What are MicroLab's accreditations?",
+    'How do I book a home collection?',
   ],
 };
 
 const _kFollowUps = <_Layer, List<String>>{
-  _Layer.staticInfo: ['What are home collection charges?', 'Can I cancel my booking?', 'How do I reach support?'],
+  _Layer.staticInfo: ['General Info', 'Testing Info', 'Branch Locations'],
   _Layer.db:         ['What is the test preparation?', 'Show all branch locations', 'Which tests have no fasting?'],
-  _Layer.web:        ['Tell me about the Cytogenetics department', "What are MicroLab's accreditations?", 'How do I book a home collection?'],
+  _Layer.web:        ['Who are the doctors at MicroLab?', 'How can I access my reports online?', 'What is the home sample collection process?'],
 };
 
 // Follow-ups by server intent — used when layer is "all"
 const _kIntentFollowUps = <String, List<String>>{
   'test_query':    ['Which tests require fasting?', 'Show all branch locations', 'What is the price of CBC test?'],
   'branch_query':  ['Show Coimbatore branch details', 'What are your working hours?', 'How do I book a home collection?'],
-  'default_qa':    ['What are home collection charges?', 'How can I track my report?', 'Can I cancel my booking?'],
+  'default_qa':    ['General Info', 'Testing Info', 'Branch Locations'],
   'website_live':  ["What are MicroLab's accreditations?", 'Tell me about home collection', 'Contact support'],
-  'general':       ['What tests do you offer?', 'Show all branch locations', 'Book Test'],
+  'general':       ['General Info', 'Show all branch locations', 'Book Test'],
 };
 
 const _kSampleFollowUps = [
@@ -910,52 +1080,33 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   }
 
   _Msg _localReply(String input) {
-    // Check static FAQ map first
+    // Top-level FAQ category menu
+    final categoryQs = _kFaqCategories[input];
+    if (categoryQs != null) {
+      return _Msg(
+        text: 'Here are our FAQs on $input — tap one to see the answer:',
+        isBot: true,
+        layer: _Layer.staticInfo,
+        chips: [...categoryQs, '← Back'],
+      );
+    }
+
+    // Check static FAQ map — show a few sibling questions from the same category as follow-ups
     final staticAnswer = _kStaticQALocal[input];
     if (staticAnswer != null) {
+      final category = _kFaqCategories.entries
+          .firstWhere((e) => e.value.contains(input), orElse: () => _kFaqCategories.entries.first)
+          .key;
+      final siblings = _kFaqCategories[category]!.where((q) => q != input).take(3).toList();
       return _Msg(
         text: staticAnswer,
         isBot: true,
         layer: _Layer.staticInfo,
-        chips: const ['Branch Info', 'Test FAQs', 'Booking Help', '← Back'],
+        chips: [...siblings, '← Back'],
       );
     }
 
     switch (input) {
-      case 'Branch Info':
-        return const _Msg(text: 'Which branch would you like info about?', isBot: true, layer: _Layer.staticInfo, chips: ['Coimbatore', 'Trichy', '← Back']);
-      case 'Test FAQs':
-        return const _Msg(text: 'What would you like to know about tests?', isBot: true, layer: _Layer.staticInfo, chips: ['Fasting needed?', 'Report timing?', 'How collection works?', '← Back']);
-      case 'Booking Help':
-        return const _Msg(text: 'What do you need help with?', isBot: true, layer: _Layer.staticInfo, chips: ['Cancel booking?', 'Reschedule?', 'Payment issue?', '← Back']);
-      case 'Contact Us':
-        return const _Msg(text: '📞 Phone: 0422 4354242 / 4354212\n\n🆓 Toll-Free: 1800 425 1316\n\n💬 WhatsApp: 7904986636\n\n📧 Email: microlabcbe@microlabindia.com\n\n⏰ Mon–Sat, 7:00 AM – 8:00 PM', isBot: true, layer: _Layer.staticInfo, chips: ['Branch Info', '← Back']);
-      case 'Coimbatore':
-      case 'Trichy':
-        final b = _kBranches.firstWhere(
-          (br) => (br['name'] as String).contains(input),
-          orElse: () => _kBranches[0],
-        );
-        return _Msg(
-          text: '📍 ${b['name']}\n\nAddress: ${b['address']}\n\n📞 ${b['phone']}\n\n🕐 ${b['hours']}',
-          isBot: true,
-          layer: _Layer.staticInfo,
-          chips: const ['Other Branch', 'Contact Us', '← Back'],
-        );
-      case 'Other Branch':
-        return const _Msg(text: 'Choose a branch:', isBot: true, layer: _Layer.staticInfo, chips: ['Coimbatore', 'Trichy', '← Back']);
-      case 'Fasting needed?':
-        return const _Msg(text: 'Fasting (8–12 hrs) is required for:\n\n• HbA1c, Blood Glucose Fasting\n• Lipid Profile\n• Liver Function Test (LFT)\n\nCBC, Thyroid Profile, Vitamin D, Serology, and Molecular Biology tests can generally be done without fasting.\n\nAlways confirm with the lab when booking.', isBot: true, layer: _Layer.staticInfo, chips: ['Report timing?', '← Back']);
-      case 'Report timing?':
-        return const _Msg(text: '⏱ Report Turnaround:\n\n• Routine tests (CBC, Blood Sugar) — Same day / 24 hrs\n• Thyroid, LFT, KFT — 24 hrs\n• HbA1c, Vitamins — 24–48 hrs\n• Molecular Biology, Cytogenetics — 48–72 hrs\n\nYou\'ll get an SMS when your report is ready. Download from microlabindiaonline.com.', isBot: true, layer: _Layer.staticInfo, chips: ['Fasting needed?', '← Back']);
-      case 'How collection works?':
-        return const _Msg(text: '🏠 Home Collection:\n1. Book & choose a time slot\n2. Trained phlebotomist arrives at your door\n3. Sample collected safely & hygienically\n4. Sent to lab for processing\n5. Report available on patient portal\n\n🏥 Lab Visit:\n1. Walk in or book a slot\n2. Sample collected at the centre\n3. Download report from microlabindiaonline.com', isBot: true, layer: _Layer.staticInfo, chips: ['← Back']);
-      case 'Cancel booking?':
-        return const _Msg(text: 'To cancel your booking:\n\n1. Go to the "Bookings" tab in the app\n2. Open your booking\n3. Tap "Cancel Booking"\n\n• Before sample collection → full refund in 5–7 working days\n• After sample collection → no refund\n• Home collection: cancel at least 2 hrs before slot', isBot: true, layer: _Layer.staticInfo, chips: ['Reschedule?', '← Back']);
-      case 'Reschedule?':
-        return const _Msg(text: 'To reschedule, cancel your existing booking and create a new one with your preferred slot.\n\nFor assistance, call 0422 4354242 or WhatsApp 7904986636.', isBot: true, layer: _Layer.staticInfo, chips: ['Contact Us', '← Back']);
-      case 'Payment issue?':
-        return const _Msg(text: 'If payment was deducted but booking wasn\'t confirmed:\n\n1. Note your transaction ID\n2. Email microlabcbe@microlabindia.com with your booking ID and payment screenshot\n3. Or call 0422 4354242\n\nWe\'ll resolve it within 24 hours.', isBot: true, layer: _Layer.staticInfo, chips: ['Contact Us', '← Back']);
       case 'When will my report be ready?':
         return const _Msg(
           text: '⏱ Typical report turnaround times:\n\n'
@@ -989,10 +1140,109 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           isBot: true, layer: _Layer.staticInfo,
           chips: ['Track my sample status', 'Show all available tests', '← Back'],
         );
+      // ── About Lab local answers ───────────────────────────────────────────
+      case 'What is Microbiological Laboratory (MBL)?':
+        return const _Msg(
+          text: '🏥 About Microbiological Laboratory (MBL):\n\n'
+              'MBL is a leading diagnostic laboratory committed to delivering accurate, '
+              'timely, and reliable test results. We serve patients, clinics, and hospitals '
+              'with a wide range of diagnostic services.\n\n'
+              '📍 Main centres in Coimbatore & Trichy\n'
+              '🔬 Departments: Molecular Biology, Cytogenetics, Serology, Microbiology, Biochemistry\n'
+              '📞 Contact: 0422 4354242 | microlabindia.com',
+          isBot: true, layer: _Layer.web,
+          chips: ['What diagnostic services does MicroLab offer?', "What are MicroLab's accreditations?", 'Contact support'],
+        );
+      case 'What diagnostic services does MicroLab offer?':
+        return const _Msg(
+          text: '🧪 MicroLab Diagnostic Departments:\n\n'
+              '• 🔬 Molecular Biology — DNA/RNA diagnostics, disease monitoring\n'
+              '• 🧬 Cytogenetics — Chromosomal analysis for genetic & oncological disorders\n'
+              '• 🩸 Serology — Antigen & antibody testing (infectious/autoimmune diseases)\n'
+              '• 🦠 Microbiology — Culture, sensitivity & pathogen identification\n'
+              '• ⚗️ Biochemistry — Metabolic panels, organ function tests\n'
+              '• 🩺 Clinical Pathology — CBC, urinalysis, haematology\n\n'
+              'All tests performed with modern instruments and strict quality control.',
+          isBot: true, layer: _Layer.web,
+          chips: ['Tell me about the Molecular Biology services', 'Tell me about the Cytogenetics department', "What are MicroLab's accreditations?"],
+        );
+      case 'Tell me about the Molecular Biology services':
+        return const _Msg(
+          text: '🔬 Molecular Biology at MicroLab:\n\n'
+              'Our Molecular Biology Department provides high-precision DNA and RNA-based diagnostics for:\n\n'
+              '• Infectious disease detection (TB, Hepatitis, HIV viral load)\n'
+              '• Cancer gene profiling & disease monitoring\n'
+              '• Genetic disorder screening\n'
+              '• RT-PCR and Next-Generation Sequencing (NGS)\n\n'
+              'Results are processed with validated techniques and strict quality control.',
+          isBot: true, layer: _Layer.web,
+          chips: ['Tell me about the Cytogenetics department', 'What diagnostic services does MicroLab offer?', "What are MicroLab's accreditations?"],
+        );
+      case 'Tell me about the Cytogenetics department':
+        return const _Msg(
+          text: '🧬 Cytogenetics at MicroLab:\n\n'
+              'Our Cytogenetics lab specialises in chromosomal analysis for:\n\n'
+              '• Genetic disorders (Down syndrome, Turner syndrome)\n'
+              '• Oncology — chromosomal changes in cancer cells\n'
+              '• Prenatal diagnosis\n'
+              '• Infertility & recurrent pregnancy loss evaluation\n\n'
+              'Tests include Karyotyping, FISH, and Microarray analysis.',
+          isBot: true, layer: _Layer.web,
+          chips: ['Tell me about the Molecular Biology services', 'What diagnostic services does MicroLab offer?', 'Contact support'],
+        );
+      case "What are MicroLab's accreditations?":
+        return const _Msg(
+          text: '✅ Quality & Accreditations:\n\n'
+              'Microbiological Laboratory (MBL) is committed to:\n\n'
+              '• Accuracy & Precision — validated protocols and modern instruments\n'
+              '• Transparency & Ethics — complete integrity in testing and reporting\n'
+              '• Innovation — continuous adoption of new diagnostic technologies\n'
+              '• Patient Safety — strict biosafety and quality control at every step\n\n'
+              'For full accreditation details, visit microlabindia.com.',
+          isBot: true, layer: _Layer.web,
+          chips: ['What diagnostic services does MicroLab offer?', 'Contact support'],
+        );
+      case 'Who are the doctors at MicroLab?':
+        return const _Msg(
+          text: '👨‍⚕️ Medical Team:\n\n'
+              'MicroLab is staffed by experienced pathologists, microbiologists, and '
+              'lab specialists trained in the latest diagnostic techniques.\n\n'
+              'For details about our medical team or to speak with a specialist:\n'
+              '📞 0422 4354242 / 4354212\n'
+              '🌐 microlabindia.com\n'
+              '📧 microlabcbe@microlabindia.com',
+          isBot: true, layer: _Layer.web,
+          chips: ['What diagnostic services does MicroLab offer?', 'Contact support'],
+        );
+      case 'How can I access my reports online?':
+        return const _Msg(
+          text: '📱 Accessing Your Report Online:\n\n'
+              '1. Visit microlabindia.com → Patient Portal\n'
+              '2. Log in with your patient credentials\n'
+              '3. Select your test from the dashboard\n'
+              '4. Tap "Download Report" to save as PDF\n\n'
+              '💬 You also receive an SMS notification when the report is ready.',
+          isBot: true, layer: _Layer.web,
+          chips: ['When will my report be ready?', 'Track my sample status', 'Contact support'],
+        );
+      case 'What is the home sample collection process?':
+      case 'How do I book a home collection?':
+        return const _Msg(
+          text: '🏠 Home Sample Collection:\n\n'
+              '1. Book online at microlabindia.com or call 0422 4354242\n'
+              '2. Choose your preferred date & time slot\n'
+              '3. A trained phlebotomist arrives at your doorstep\n'
+              '4. Sample is collected safely and hygienically\n'
+              '5. Sent to the lab for processing\n'
+              '6. Report available on the patient portal with SMS alert\n\n'
+              '📞 Home collection charges may apply — call to confirm.',
+          isBot: true, layer: _Layer.web,
+          chips: ['Can I track my home collection technician?', 'When will my report be ready?', 'Contact support'],
+        );
       case '← Back':
-        return const _Msg(text: 'Sure! What else can I help you with?', isBot: true, layer: _Layer.all, chips: ['Branch Info', 'Test FAQs', 'Booking Help', 'Contact Us']);
+        return _Msg(text: 'Sure! What else can I help you with?', isBot: true, layer: _Layer.all, chips: _kFaqCategoryNames);
       default:
-        return const _Msg(text: "I didn't quite get that. Please choose an option or type your question.", isBot: true, layer: _Layer.all, chips: ['Branch Info', 'Test FAQs', 'Booking Help', 'Contact Us']);
+        return _Msg(text: "I didn't quite get that. Please choose an option or type your question.", isBot: true, layer: _Layer.all, chips: _kFaqCategoryNames);
     }
   }
 
@@ -1322,7 +1572,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                                 setState(() => _msgs.add(_Msg(
                                   text: '✓ Switched to ${l.label}. Try your question again.',
                                   isBot: true, layer: l,
-                                  chips: _kLayerQs[l]?.take(4).toList(),
+                                  chips: _kLayerQs[l]?.take(5).toList(),
                                 )));
                               }
                               _scrollBottom();

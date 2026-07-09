@@ -111,14 +111,14 @@ ${context}`
 
 /**
  * POST /api/chat/verify-patient
- * Verifies patient credentials before exposing personal sample-tracking data.
- * Body: { patient_id, password }
+ * Verifies patient credentials before exposing personal sample-tracking, patient-profile,
+ * or client-account data. Body: { patient_id, password }
  *
- * NOTE: Update the table name (ip_patients) and column names below to match
- *       your actual adminmicro schema. Common alternatives:
- *       - table:    ip_user, ip_patients, ip_accounts
- *       - id col:   patient_id, user_id, id
- *       - pwd col:  password, patient_password, mobile (if mobile is used as pwd)
+ * ip_patients schema: patient_id, client_id, patient_name, patient_surname, patient_gender,
+ * patient_dob, patient_age, patient_blood_group, patient_relation, patient_email,
+ * patient_mobile, patient_address, patient_city, health_conditions, created_at, updated_at,
+ * deleted_at, patient_id_ref. The verified patient_id's client_id scopes ip_patients /
+ * ip_clients lookups so a patient only ever sees their own account (see llmRetriever.js).
  */
 router.post('/verify-patient', async (req, res) => {
     try {
