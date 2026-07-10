@@ -1,6 +1,7 @@
 class TechnicianBooking {
   final String id;
   final String? bookingRef;
+  final int? patientId;
   final String customerName;
   final String customerPhone;
   final String address;
@@ -25,6 +26,7 @@ class TechnicianBooking {
   TechnicianBooking({
     required this.id,
     this.bookingRef,
+    this.patientId,
     required this.customerName,
     required this.customerPhone,
     required this.address,

@@ -186,6 +186,7 @@ exports.getActiveBookings = async (req, res) => {
          tc.collection_id,
          tc.booking_id,
          b.booking_ref,
+         b.patient_id,
          tc.collection_status,
          DATE_FORMAT(tc.collection_date, '%Y-%m-%d') AS collection_date,
          tc.collection_address,
@@ -428,5 +429,129 @@ exports.getAll = async (req, res) => {
   } catch (e) {
     console.error('[technicianController.getAll]', e.message);
     res.status(500).json({ success: false, message: e.message });
+  }
+};
+
+
+// ── POST /api/technicians/add-customer ────────────────────────────────────────
+// Called by the technician app to add a walk-in patient at the same location.
+// Inherits date/address/coords from the parent booking so the new job appears
+// in the same slot without requiring a fresh booking flow on the patient side.
+exports.addCustomerBooking = async (req, res) => {
+  const technicianId = req.user.id;
+  const {
+    parentBookingId,
+    name, mobile, email, dob, age, gender, relation, healthNotes,
+    tests = [],
+  } = req.body;
+
+  if (!parentBookingId || !name || !mobile) {
+    return res.status(400).json({ success: false, message: 'parentBookingId, name and mobile are required' });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // 1. Inherit context from the parent booking
+    const [[parent]] = await conn.execute(
+      `SELECT client_id, booking_date, collection_address, postal_code, city,
+              collection_latitude, collection_longitude, available_slot_id
+       FROM ip_bookings WHERE booking_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [parentBookingId]
+    );
+    if (!parent) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Parent booking not found' });
+    }
+
+    // 2. Find or create patient by mobile + client
+    const [[existing]] = await conn.execute(
+      `SELECT patient_id FROM ip_patients
+       WHERE patient_mobile = ? AND client_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [mobile, parent.client_id]
+    );
+
+    let patientId;
+    if (existing) {
+      patientId = existing.patient_id;
+      await conn.execute(
+        `UPDATE ip_patients
+         SET patient_name=?, patient_email=?, patient_dob=?, patient_age=?,
+             patient_gender=?, patient_relation=?, health_conditions=?, updated_at=NOW()
+         WHERE patient_id=?`,
+        [name, email || null, dob || null, age || null,
+         gender || null, relation || null, healthNotes || null, patientId]
+      );
+    } else {
+      const [pRes] = await conn.execute(
+        `INSERT INTO ip_patients
+           (client_id, patient_name, patient_mobile, patient_email, patient_dob,
+            patient_age, patient_gender, patient_relation, health_conditions, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [parent.client_id, name, mobile, email || null, dob || null,
+         age || null, gender || null, relation || null, healthNotes || null,
+         `technician_${technicianId}`]
+      );
+      patientId = pRes.insertId;
+    }
+
+    // 3. Link patient to the PARENT booking (not a new booking)
+    const [[alreadyLinked]] = await conn.execute(
+      `SELECT 1 FROM ip_patient_bookings WHERE booking_id = ? AND patient_id = ? LIMIT 1`,
+      [parentBookingId, patientId]
+    );
+    if (!alreadyLinked) {
+      await conn.execute(
+        `INSERT INTO ip_patient_bookings (booking_id, patient_id, created_at) VALUES (?, ?, NOW())`,
+        [parentBookingId, patientId]
+      );
+    }
+
+    // 4. Resolve products and add as items under the PARENT booking
+    let totalAmount = 0;
+    for (const t of tests) {
+      if (!t.productId) continue;
+      const [[prod]] = await conn.execute(
+        `SELECT product_id, product_name, product_price FROM ip_products
+         WHERE product_id = ? AND product_active = 1 LIMIT 1`,
+        [t.productId]
+      );
+      if (prod) {
+        const price = parseFloat(prod.product_price ?? 0) || 0;
+        totalAmount += price;
+        await conn.execute(
+          `INSERT INTO ip_booking_items
+             (booking_id, product_id, product_name_snapshot, patient_id, unit_price, final_price, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+          [parentBookingId, prod.product_id, prod.product_name, patientId, price, price]
+        );
+      }
+    }
+
+    // 5. Update parent booking total so it reflects all patients' tests
+    if (totalAmount > 0) {
+      await conn.execute(
+        `UPDATE ip_bookings
+         SET total_amount = total_amount + ?, amount_due = amount_due + ?
+         WHERE booking_id = ?`,
+        [totalAmount, totalAmount, parentBookingId]
+      );
+    }
+
+    await conn.commit();
+    console.log(`✅ addCustomerBooking — patient_id=${patientId} attached to booking_id=${parentBookingId}`);
+    res.status(201).json({
+      success:     true,
+      patientId,
+      patientName: name,
+      totalAmount,
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('❌ addCustomerBooking FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error', detail: err.message });
+  } finally {
+    conn.release();
   }
 };

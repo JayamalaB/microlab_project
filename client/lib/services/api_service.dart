@@ -315,6 +315,175 @@ class ApiService {
     return false;
   }
 
+  // Returns [{bookingItemId, productId, name, category, price}]
+  static Future<List<Map<String, dynamic>>> getBookingItems(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return [];
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/items'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        return (body['items'] as List).cast<Map<String, dynamic>>();
+      }
+    } catch (e) {
+      debugPrint('[getBookingItems] ERROR: $e');
+    }
+    return [];
+  }
+
+  // Returns {bookingItemId, productId, name, category, price} or null on failure
+  static Future<Map<String, dynamic>?> addBookingItem({
+    required int bookingId,
+    required int productId,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/items'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'productId': productId}),
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return body['item'] as Map<String, dynamic>?;
+      debugPrint('[addBookingItem] failed: ${body['message']}');
+    } catch (e) {
+      debugPrint('[addBookingItem] ERROR: $e');
+    }
+    return null;
+  }
+
+  static Future<bool> removeBookingItem({
+    required int bookingId,
+    required int bookingItemId,
+  }) async {
+    final token = await getToken();
+    if (token == null) return false;
+    try {
+      final res = await http.delete(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/items/$bookingItemId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      return body['success'] == true;
+    } catch (e) {
+      debugPrint('[removeBookingItem] ERROR: $e');
+    }
+    return false;
+  }
+
+  // Fetches /api/tests and maps to {id, name, category, price} for the technician catalogue
+  static Future<List<Map<String, String>>> getTechTestCatalogue() async {
+    try {
+      final res = await http
+          .get(Uri.parse('$baseUrl/api/tests'))
+          .timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        return (body['data'] as List).map((p) {
+          final m = p as Map<String, dynamic>;
+          return {
+            'id':       m['id']?.toString() ?? '',
+            'name':     m['name']?.toString() ?? '',
+            'category': m['category']?.toString() ?? 'General',
+            'price':    (m['final_price'] as num?)?.toStringAsFixed(0) ?? '0',
+          };
+        }).toList();
+      }
+    } catch (e) {
+      debugPrint('[getTechTestCatalogue] ERROR: $e');
+    }
+    return [];
+  }
+
+  static Future<List<Map<String, dynamic>>> getPrescriptions(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return [];
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/prescriptions/$bookingId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        return (body['docs'] as List).cast<Map<String, dynamic>>();
+      }
+    } catch (e) {
+      debugPrint('[getPrescriptions] ERROR: $e');
+    }
+    return [];
+  }
+
+  static Future<int?> savePrescriptionDoc({
+    required int bookingId,
+    required int patientId,
+    required String imageUrl,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/prescriptions'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'bookingId': bookingId,
+          'patientId': patientId,
+          'imageUrls': [imageUrl],
+        }),
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        final ids = body['docIds'] as List?;
+        return ids?.isNotEmpty == true ? (ids!.first as num).toInt() : null;
+      }
+      debugPrint('[savePrescriptionDoc] failed: ${body['message']}');
+    } catch (e) {
+      debugPrint('[savePrescriptionDoc] ERROR: $e');
+    }
+    return null;
+  }
+
+  static Future<bool> verifyPrescription(int docId) async {
+    final token = await getToken();
+    if (token == null) return false;
+    try {
+      final res = await http.patch(
+        Uri.parse('$baseUrl/api/prescriptions/$docId/verify'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      return body['success'] == true;
+    } catch (e) {
+      debugPrint('[verifyPrescription] ERROR: $e');
+    }
+    return false;
+  }
+
+  static Future<bool> deletePrescription(int docId) async {
+    final token = await getToken();
+    if (token == null) return false;
+    try {
+      final res = await http.delete(
+        Uri.parse('$baseUrl/api/prescriptions/$docId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      return body['success'] == true;
+    } catch (e) {
+      debugPrint('[deletePrescription] ERROR: $e');
+    }
+    return false;
+  }
+
   static Future<bool> payBooking({
     required int bookingId,
     required String razorpayPaymentId,
@@ -369,6 +538,50 @@ class ApiService {
         };
       }
     } catch (_) {}
+    return null;
+  }
+
+  /// Returns {bookingId, bookingRef, patientId, patientName, totalAmount} or null on failure.
+  static Future<Map<String, dynamic>?> addCustomerBooking({
+    required int parentBookingId,
+    required String name,
+    required String mobile,
+    String? email,
+    String? dob,
+    int? age,
+    String? gender,
+    String? relation,
+    String? healthNotes,
+    required List<int> productIds,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/technicians/add-customer'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'parentBookingId': parentBookingId,
+          'name': name,
+          'mobile': mobile,
+          if (email != null && email.isNotEmpty) 'email': email,
+          if (dob != null) 'dob': dob,
+          if (age != null) 'age': age,
+          if (gender != null) 'gender': gender,
+          if (relation != null && relation.isNotEmpty) 'relation': relation,
+          if (healthNotes != null && healthNotes.isNotEmpty) 'healthNotes': healthNotes,
+          'tests': productIds.map((id) => {'productId': id}).toList(),
+        }),
+      ).timeout(const Duration(seconds: 20));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return body;
+      debugPrint('[addCustomerBooking] failed: ${body['message']}');
+    } catch (e) {
+      debugPrint('[addCustomerBooking] ERROR: $e');
+    }
     return null;
   }
 
