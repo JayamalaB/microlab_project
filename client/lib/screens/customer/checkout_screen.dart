@@ -12,6 +12,17 @@ import 'my_bookings_screen.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
 
+// ─── Family member added during checkout ──────────────────────────────────────
+
+class _FamilyMember {
+  final PatientModel patient;
+  final List<TestModel> tests;
+  final List<Uint8List> prescriptionBytes;
+  _FamilyMember({required this.patient, required this.tests, this.prescriptionBytes = const []});
+  double get testsTotal => tests.fold(0.0, (s, t) => s + t.finalPrice);
+  bool get anyDocRequired => tests.any((t) => t.docRequired);
+}
+
 // ─── Prescription doc model ───────────────────────────────────────────────────
 
 class _CheckoutDoc {
@@ -125,6 +136,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   String _paymentType = 'full';
   bool _isProcessing = false;
 
+  // ── Family members (Home Collection only) ─────────────────
+  final List<_FamilyMember> _familyMembers = [];
+  List<TestModel> _allTests = [];
+  bool _loadingAllTests = false;
+
   // ── VIP: selected technician ─────────────────────────────
   TechnicianModel? _selectedTechnician;
 
@@ -138,10 +154,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   // ── Computed ──────────────────────────────────────────────
   double get _testsTotal => widget.cart.fold(0, (s, t) => s + t.finalPrice);
+  double get _familyTotal => _familyMembers.fold(0.0, (s, m) => s + m.testsTotal);
   double get _serviceCharge => widget.mode == 'Lab Test' ? 0 : _estimatedServiceCharge;
-  double get _grandTotal => _testsTotal + _serviceCharge;
+  double get _grandTotal => _testsTotal + _familyTotal + _serviceCharge;
 
-  bool get _anyDocRequired => widget.cart.any((t) => t.docRequired);
+  bool get _primaryNeedsPrescription => widget.cart.any((t) => t.docRequired);
+
+  bool get _anyDocRequired =>
+      _primaryNeedsPrescription ||
+      _familyMembers.any((m) => m.anyDocRequired);
 
   // Pay Full locked when a doc is required but not yet verified by technician
   bool get _fullPaymentEnabled => !_anyDocRequired || _docVerified;
@@ -151,9 +172,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   bool get _canProceed {
     if (_selectedDate == null || _selectedSlot == null) return false;
-    // If this slot has specific appointment times, one must be selected
     if (_currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null) return false;
     if (widget.isVip && _selectedTechnician == null) return false;
+    if (_primaryNeedsPrescription && _prescriptions.isEmpty) return false;
     return true;
   }
 
@@ -422,6 +443,205 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     setState(() => _prescriptions.removeAt(index));
   }
 
+  // ── Family: load tests + open add-member sheet ────────────
+  Future<void> _showAddMemberSheet() async {
+    if (_allTests.isEmpty && !_loadingAllTests) {
+      setState(() => _loadingAllTests = true);
+      final tests = await ApiService.getPackages();
+      if (!mounted) return;
+      setState(() { _allTests = tests; _loadingAllTests = false; });
+    }
+    if (!mounted) return;
+    final excludedIds = {widget.patientId, ..._familyMembers.map((m) => m.patient.patientId)};
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _AddMemberSheet(
+        primaryPatientId:  widget.patientId,
+        excludedPatientIds: excludedIds,
+        allTests: _allTests,
+        onAdd: (m) => setState(() => _familyMembers.add(m)),
+      ),
+    );
+  }
+
+  // ── Family booking confirmation ────────────────────────────
+  Future<void> _confirmFamilyBooking(String razorpayPaymentId) async {
+    final isPayNow = razorpayPaymentId != 'pay_later' && razorpayPaymentId.isNotEmpty;
+    final slotId   = _selectedSlot != null ? int.tryParse(_selectedSlot!.id) : null;
+    final dateStr  = _selectedDate != null
+        ? '${_selectedDate!.year}-${_selectedDate!.month.toString().padLeft(2, '0')}-${_selectedDate!.day.toString().padLeft(2, '0')}'
+        : null;
+
+    final members = <Map<String, dynamic>>[
+      {
+        'patientId':    widget.patientId,
+        'items':        widget.cart.map((t) => {
+          'packageId':   int.tryParse(t.id) ?? 0,
+          'packageType': t.type,
+          'finalPrice':  t.finalPrice,
+        }).toList(),
+        'totalAmount':   _testsTotal + _serviceCharge,
+        'serviceCharge': _serviceCharge,
+      },
+      ..._familyMembers.map((m) => {
+        'patientId':    m.patient.patientId,
+        'items':        m.tests.map((t) => {
+          'packageId':   int.tryParse(t.id) ?? 0,
+          'packageType': t.type,
+          'finalPrice':  t.finalPrice,
+        }).toList(),
+        'totalAmount':   m.testsTotal,
+        'serviceCharge': 0,
+      }),
+    ];
+
+    final result = await ApiService.createFamilyBooking(
+      members:             members,
+      availableSlotId:     slotId,
+      collectionDate:      dateStr,
+      bookingType:         widget.mode == 'Home Collection' ? 'home_collection' : 'lab_visit',
+      collectionAddress:   widget.address,
+      collectionPincode:   widget.pincode,
+      collectionCity:      widget.city,
+      collectionLatitude:  widget.patientLat,
+      collectionLongitude: widget.patientLng,
+      branchId:            widget.branchId,
+      paymentType:         isPayNow ? 'full' : 'pay_later',
+      razorpayPaymentId:   isPayNow ? razorpayPaymentId : null,
+    );
+
+    if (!mounted) return;
+    setState(() => _isProcessing = false);
+
+    if (result == null || result['success'] != true) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(result?['message'] as String? ?? 'Booking failed. Please try again.'),
+        backgroundColor: Colors.red[700],
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+      return;
+    }
+
+    final bookings = (result['bookings'] as List? ?? []).cast<Map<String, dynamic>>();
+
+    // Upload prescriptions for ALL members.
+    // bookings[0] = primary patient, bookings[1..n] = family members in order.
+
+    // Primary patient — prescriptions collected in the checkout screen (_prescriptions)
+    if (_prescriptions.isNotEmpty && bookings.isNotEmpty) {
+      final primaryBookingId  = bookings[0]['bookingId']      as int?;
+      final primaryDocItemId  = bookings[0]['docRequiredItemId'] as int?;
+      if (primaryBookingId != null) {
+        try {
+          final urls = <String>[];
+          for (final doc in _prescriptions) {
+            final url = await ApiService.uploadFile(doc.bytes, doc.fileName);
+            if (url != null) urls.add(url);
+          }
+          if (urls.isNotEmpty) {
+            await ApiService.savePrescription(
+              bookingId:     primaryBookingId,
+              patientId:     widget.patientId,
+              bookingItemId: primaryDocItemId,
+              imageUrls:     urls,
+            );
+          }
+        } catch (_) {} // non-fatal
+      }
+    }
+
+    // Family members — prescriptions collected during add-member flow (Uint8List bytes)
+    for (int i = 0; i < _familyMembers.length; i++) {
+      final m = _familyMembers[i];
+      if (m.prescriptionBytes.isEmpty) continue;
+      final memberBookingIndex = i + 1;
+      if (memberBookingIndex >= bookings.length) continue;
+      final memberBookingId  = bookings[memberBookingIndex]['bookingId']         as int?;
+      final memberDocItemId  = bookings[memberBookingIndex]['docRequiredItemId'] as int?;
+      if (memberBookingId == null) continue;
+      try {
+        final urls = <String>[];
+        for (final bytes in m.prescriptionBytes) {
+          final url = await ApiService.uploadFile(
+              bytes, 'pres_${DateTime.now().millisecondsSinceEpoch}.jpg');
+          if (url != null) urls.add(url);
+        }
+        if (urls.isNotEmpty) {
+          await ApiService.savePrescription(
+            bookingId:     memberBookingId,
+            patientId:     m.patient.patientId,
+            bookingItemId: memberDocItemId,
+            imageUrls:     urls,
+          );
+        }
+      } catch (_) {} // non-fatal
+    }
+
+    final primaryBookingId = bookings.isNotEmpty ? bookings[0]['bookingId'] as int? : null;
+
+    if (primaryBookingId != null && widget.mode == 'Home Collection') {
+      final address = [widget.address, widget.city, widget.pincode]
+          .where((s) => s != null && s.isNotEmpty).join(', ');
+      final socket = SocketService.instance;
+      socket.registerPatientSocket(patientId: widget.patientId, bookingId: primaryBookingId);
+      socket.emitBookingRequest(
+        bookingId:       primaryBookingId,
+        patientId:       widget.patientId,
+        patientName:     widget.member.name,
+        patientMobile:   widget.member.mobile,
+        patientAddress:  address.isEmpty ? 'Home Collection' : address,
+        patientLat:      widget.patientLat,
+        patientLng:      widget.patientLng,
+        hospital:        'MicroLab Home Collection',
+        bookingType:     'lab',
+        branchId:        widget.branchId,
+        branchName:      widget.branch?.name,
+        slotId:          _selectedSlot?.parentSlotId ?? int.tryParse(_selectedSlot?.id ?? ''),
+        slotLabel:       _selectedSlot?.label,
+        appointmentTime: _selectedAppointmentTime?.time,
+      );
+    }
+
+    final primaryRef = bookings.isNotEmpty ? (bookings[0]['bookingRef'] as String? ?? '') : '';
+    final booking = BookingModel(
+      id:            primaryRef,
+      member:        widget.member,
+      tests:         widget.cart,
+      mode:          widget.mode,
+      address:       widget.address,
+      pincode:       widget.pincode,
+      city:          widget.city,
+      branch:        widget.branch,
+      date:          _selectedDate!,
+      timeSlot:      _selectedSlot?.label ?? '',
+      paymentType:   _paymentType,
+      serviceCharge: _serviceCharge,
+      testsTotal:    _testsTotal,
+      grandTotal:    _grandTotal,
+      paidAmount:    _payableNow,
+      status:        'Confirmed',
+      createdAt:     DateTime.now(),
+      docRequired:   _anyDocRequired,
+      docVerified:   _docVerified,
+      isVip:         widget.isVip,
+      selectedTechnician: _selectedTechnician,
+    );
+
+    if (mounted) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => _BookingSuccessScreen(
+          booking:           booking,
+          onBookingComplete: widget.onBookingComplete,
+          familyCount:       _familyMembers.length,
+        )),
+      );
+    }
+  }
+
   // ── Open Razorpay checkout (or confirm directly for Pay Later) ──────────
   void _proceedToPayment() {
     if (!_canProceed) return;
@@ -484,6 +704,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Confirm booking after Razorpay success ───────────
   Future<void> _confirmBooking(String razorpayPaymentId) async {
     setState(() => _isProcessing = true);
+    if (_familyMembers.isNotEmpty) {
+      await _confirmFamilyBooking(razorpayPaymentId);
+      return;
+    }
 
     final address = [widget.address, widget.city, widget.pincode]
         .where((s) => s != null && s.isNotEmpty)
@@ -648,8 +872,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => _BookingSuccessScreen(
-          booking: booking,
+          booking:           booking,
           onBookingComplete: widget.onBookingComplete,
+          familyCount:       0,
         )),
       );
     }
@@ -865,12 +1090,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           const SizedBox(height: 14),
 
           // ── Prescription / Document (multi-image) ─────────
-          // Required when any test needs it; also always shown for VIP
-          if (_anyDocRequired || widget.isVip)
+          if (_primaryNeedsPrescription || widget.isVip)
             _SectionCard(
-              title: 'Prescription / Document',
+              title: 'Prescription · ${widget.member.name}',
               icon: Icons.description_outlined,
-              required: _anyDocRequired,
+              required: _primaryNeedsPrescription,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -878,42 +1102,24 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: _anyDocRequired
-                          ? const Color(0xFFFFF3E0)
-                          : AppColors.brandGreenSurface,
+                      color: const Color(0xFFFFF3E0),
                       borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: _anyDocRequired
-                            ? const Color(0xFFFFCC02).withValues(alpha: 0.4)
-                            : AppColors.brandGreenLight,
-                      ),
+                      border: Border.all(color: const Color(0xFFFFCC02)),
                     ),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(
-                          _anyDocRequired
-                              ? Icons.info_outline_rounded
-                              : Icons.upload_file_outlined,
-                          size: 14,
-                          color: _anyDocRequired
-                              ? const Color(0xFFE65100)
-                              : AppColors.brandGreen,
-                        ),
+                        const Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFFE65100)),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            _anyDocRequired
-                                ? (widget.mode == 'Lab Test'
-                                    ? 'One or more tests require a prescription. Upload up to $_maxPrescrips images. Payment will be collected at the branch after verification.'
-                                    : 'One or more tests require a prescription. Upload up to $_maxPrescrips images. Full payment unlocks after technician verification.')
-                                : 'Upload your prescription or any relevant documents (optional). Up to $_maxPrescrips images.',
-                            style: TextStyle(
+                            widget.mode == 'Lab Test'
+                                ? 'A valid prescription is required for ${widget.member.name}. Upload it below — payment will be collected at the branch after verification.'
+                                : 'A valid prescription is required for ${widget.member.name}. Upload it below — you cannot proceed without uploading.',
+                            style: const TextStyle(
                               fontSize: 12,
                               height: 1.4,
-                              color: _anyDocRequired
-                                  ? const Color(0xFF795548)
-                                  : AppColors.brandGreen,
+                              color: Color(0xFF795548),
                             ),
                           ),
                         ),
@@ -965,10 +1171,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                           color: AppColors.background,
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                            color: _anyDocRequired
-                                ? AppColors.brandGreen
-                                : AppColors.divider,
-                            width: _anyDocRequired ? 1.5 : 1,
+                            color: const Color(0xFFE65100),
+                            width: 1.5,
                           ),
                         ),
                         child: Column(
@@ -1168,13 +1372,59 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             const SizedBox(height: 14),
           ],
 
+          // ── Family Members (Home Collection only) ─────────
+          if (widget.mode == 'Home Collection') ...[
+            const SizedBox(height: 14),
+            _SectionCard(
+              title: 'Family Members (Same Visit)',
+              icon: Icons.group_outlined,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_familyMembers.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 10),
+                      child: Text(
+                        'Add family members to share this home collection visit — single service charge applies.',
+                        style: TextStyle(fontSize: 12, color: AppColors.textHint, height: 1.4),
+                      ),
+                    ),
+                  ..._familyMembers.map((m) => _FamilyMemberTile(
+                    member: m,
+                    onRemove: () => setState(() => _familyMembers.remove(m)),
+                  )),
+                  const SizedBox(height: 4),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _loadingAllTests ? null : _showAddMemberSheet,
+                      icon: _loadingAllTests
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
+                          : const Icon(Icons.person_add_outlined, size: 16),
+                      label: const Text('Add Family Member'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.brandGreen,
+                        side: const BorderSide(color: AppColors.brandGreen),
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 14),
+
           // ── Billing Summary ───────────────────────────────
           _SectionCard(
             title: 'Billing Summary',
             icon: Icons.calculate_outlined,
             child: Column(
               children: [
-                _BillRow('Tests Total', '₹${_testsTotal.toInt()}'),
+                _BillRow('${widget.member.name} (Tests)', '₹${_testsTotal.toInt()}'),
+                ..._familyMembers.map((m) => _BillRow('${m.patient.name}', '₹${m.testsTotal.toInt()}')),
                 if (_serviceCharge > 0)
                   _BillRow('Service Charge (est.)', '+ ₹${_serviceCharge.toInt()}', sub: true),
                 const Divider(height: 20),
@@ -1211,7 +1461,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                               ? 'Please select an appointment time'
                               : widget.isVip && _selectedTechnician == null
                                   ? 'Please choose your preferred technician'
-                                  : '',
+                                  : (_primaryNeedsPrescription && _prescriptions.isEmpty)
+                                      ? 'Upload prescription for ${widget.member.name} to continue'
+                                      : '',
                   style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)),
                   textAlign: TextAlign.center,
                 ),
@@ -1477,7 +1729,8 @@ class _PaymentOptionTile extends StatelessWidget {
 class _BookingSuccessScreen extends StatelessWidget {
   final BookingModel booking;
   final VoidCallback? onBookingComplete;
-  const _BookingSuccessScreen({required this.booking, this.onBookingComplete});
+  final int familyCount;
+  const _BookingSuccessScreen({required this.booking, this.onBookingComplete, this.familyCount = 0});
 
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -1524,6 +1777,26 @@ class _BookingSuccessScreen extends StatelessWidget {
                       ],
                     ),
                   ),
+
+                  if (familyCount > 0) ...[
+                    const SizedBox(height: 14),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: AppColors.brandGreenSurface,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.brandGreenLight),
+                      ),
+                      child: Row(children: [
+                        const Icon(Icons.group_outlined, size: 18, color: AppColors.brandGreen),
+                        const SizedBox(width: 10),
+                        Expanded(child: Text(
+                          '$familyCount more family member${familyCount == 1 ? '' : 's'} added to this visit',
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen),
+                        )),
+                      ]),
+                    ),
+                  ],
 
                   const SizedBox(height: 14),
 
@@ -1941,6 +2214,532 @@ class _PresSourceTile extends StatelessWidget {
       );
 }
 
+// ─── Family member tile (shown in checkout list) ──────────────────────────────
+
+class _FamilyMemberTile extends StatelessWidget {
+  final _FamilyMember member;
+  final VoidCallback onRemove;
+  const _FamilyMemberTile({required this.member, required this.onRemove});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: AppColors.brandGreenSurface,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: AppColors.brandGreenLight),
+        ),
+        child: Row(children: [
+          const Icon(Icons.person_outline, size: 16, color: AppColors.brandGreen),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(member.patient.name,
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+              Text(
+                '${member.tests.length} test${member.tests.length == 1 ? '' : 's'} · ₹${member.testsTotal.toInt()}',
+                style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+              ),
+              if (member.anyDocRequired) ...[
+                const SizedBox(height: 3),
+                Row(children: [
+                  Icon(
+                    member.prescriptionBytes.isNotEmpty
+                        ? Icons.check_circle_rounded
+                        : Icons.error_outline_rounded,
+                    size: 12,
+                    color: member.prescriptionBytes.isNotEmpty
+                        ? AppColors.brandGreen
+                        : const Color(0xFFE65100),
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    member.prescriptionBytes.isNotEmpty
+                        ? 'Prescription uploaded'
+                        : 'Prescription required',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: member.prescriptionBytes.isNotEmpty
+                          ? AppColors.brandGreen
+                          : const Color(0xFFE65100),
+                    ),
+                  ),
+                ]),
+              ],
+            ]),
+          ),
+          GestureDetector(
+            onTap: onRemove,
+            child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+          ),
+        ]),
+      );
+}
+
+// ─── Add family member bottom sheet ───────────────────────────────────────────
+
+class _AddMemberSheet extends StatefulWidget {
+  final int primaryPatientId;
+  final Set<int> excludedPatientIds;
+  final List<TestModel> allTests;
+  final void Function(_FamilyMember) onAdd;
+
+  const _AddMemberSheet({
+    required this.primaryPatientId,
+    required this.excludedPatientIds,
+    required this.allTests,
+    required this.onAdd,
+  });
+
+  @override
+  State<_AddMemberSheet> createState() => _AddMemberSheetState();
+}
+
+class _AddMemberSheetState extends State<_AddMemberSheet> {
+  bool _loadingPatients = true;
+  List<PatientModel> _patients = [];
+  PatientModel? _selected;
+  final Set<String> _selectedTestIds = {};
+  int _step = 0; // 0 = pick patient, 1 = pick tests, 2 = upload prescription
+
+  final List<Uint8List> _prescriptionBytes = [];
+  bool _isPicking = false;
+  final ImagePicker _picker = ImagePicker();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPatients();
+  }
+
+  Future<void> _loadPatients() async {
+    final all = await ApiService.getPatients();
+    if (!mounted) return;
+    setState(() {
+      _patients = all.where((p) =>
+        p.patientId != widget.primaryPatientId &&
+        !widget.excludedPatientIds.contains(p.patientId)
+      ).toList();
+      _loadingPatients = false;
+    });
+  }
+
+  double get _selectedTotal =>
+    widget.allTests.where((t) => _selectedTestIds.contains(t.id)).fold(0.0, (s, t) => s + t.finalPrice);
+
+  bool get _needsPrescriptionStep =>
+    widget.allTests.where((t) => _selectedTestIds.contains(t.id)).any((t) => t.docRequired);
+
+  void _showPresSourcePicker() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.fromLTRB(0, 16, 0, 0),
+        child: SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 40, height: 4,
+              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2))),
+            const SizedBox(height: 12),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 20),
+              child: Align(alignment: Alignment.centerLeft,
+                child: Text('Upload Prescription', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary))),
+            ),
+            const SizedBox(height: 8),
+            _PresSourceTile(Icons.camera_alt_rounded, 'Take Photo',
+                'Open camera to capture prescription',
+                () { Navigator.pop(context); _pickPres(ImageSource.camera); }),
+            _PresSourceTile(Icons.photo_library_outlined, 'Choose from Gallery',
+                'Select one or more images',
+                () { Navigator.pop(context); _pickPres(ImageSource.gallery); }),
+            const SizedBox(height: 8),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickPres(ImageSource source) async {
+    if (_isPicking || _prescriptionBytes.length >= 5) return;
+    setState(() => _isPicking = true);
+    try {
+      if (source == ImageSource.camera) {
+        final img = await _picker.pickImage(source: ImageSource.camera, imageQuality: 85);
+        if (img != null) {
+          final bytes = await img.readAsBytes();
+          setState(() => _prescriptionBytes.add(bytes));
+        }
+      } else {
+        final images = await _picker.pickMultiImage(imageQuality: 80);
+        if (images.isNotEmpty) {
+          final toAdd = images.take(5 - _prescriptionBytes.length);
+          final bytes = await Future.wait(toAdd.map((f) => f.readAsBytes()));
+          setState(() => _prescriptionBytes.addAll(bytes));
+        }
+      }
+    } catch (_) {}
+    if (mounted) setState(() => _isPicking = false);
+  }
+
+  void _viewPresImage(int index) {
+    Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+      builder: (_) => _BytesViewerPage(images: List.from(_prescriptionBytes), initialIndex: index),
+    ));
+  }
+
+  void _confirm() {
+    if (_selected == null || _selectedTestIds.isEmpty) return;
+    final tests = widget.allTests.where((t) => _selectedTestIds.contains(t.id)).toList();
+    widget.onAdd(_FamilyMember(
+      patient: _selected!,
+      tests: tests,
+      prescriptionBytes: List.from(_prescriptionBytes),
+    ));
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.of(context).padding.bottom;
+    return DraggableScrollableSheet(
+      initialChildSize: 0.75,
+      minChildSize: 0.4,
+      maxChildSize: 0.92,
+      expand: false,
+      builder: (_, scroll) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: Column(children: [
+          // Handle
+          Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.only(top: 12, bottom: 4),
+            decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+          ),
+          // Header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Row(children: [
+              if (_step >= 1) ...[
+                GestureDetector(
+                  onTap: () => setState(() {
+                    if (_step == 2) {
+                      _step = 1;
+                      _prescriptionBytes.clear();
+                    } else {
+                      _step = 0;
+                      _selectedTestIds.clear();
+                    }
+                  }),
+                  child: const Icon(Icons.arrow_back_rounded, size: 20, color: AppColors.textPrimary),
+                ),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: Text(
+                  _step == 0
+                      ? 'Select Family Member'
+                      : _step == 1
+                          ? 'Select Tests for ${_selected!.name}'
+                          : 'Upload Prescription',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 12),
+          const Divider(height: 1),
+          // Body
+          Expanded(child: _step == 0
+              ? _buildPatientStep(scroll)
+              : _step == 1
+                  ? _buildTestStep(scroll)
+                  : _buildPrescriptionStep(scroll)),
+          // Button
+          Padding(
+            padding: EdgeInsets.fromLTRB(16, 8, 16, bottom + 12),
+            child: SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: _step == 0
+                    ? (_selected == null ? null : () => setState(() => _step = 1))
+                    : _step == 1
+                        ? (_selectedTestIds.isEmpty
+                            ? null
+                            : () { _needsPrescriptionStep ? setState(() => _step = 2) : _confirm(); })
+                        : (_prescriptionBytes.isEmpty ? null : _confirm),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.brandGreen,
+                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.3),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: Text(
+                  _step == 0
+                      ? 'Next: Select Tests'
+                      : _step == 1
+                          ? (_selectedTestIds.isEmpty
+                              ? 'Select at least one test'
+                              : (_needsPrescriptionStep ? 'Next: Upload Prescription' : 'Add to Booking · ₹${_selectedTotal.toInt()}'))
+                          : (_prescriptionBytes.isEmpty
+                              ? 'Upload prescription to continue'
+                              : 'Add to Booking · ₹${_selectedTotal.toInt()}'),
+                  style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                ),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildPatientStep(ScrollController scroll) {
+    if (_loadingPatients) {
+      return const Center(child: Padding(
+        padding: EdgeInsets.all(32),
+        child: CircularProgressIndicator(color: AppColors.brandGreen, strokeWidth: 2),
+      ));
+    }
+    if (_patients.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          const Icon(Icons.group_off_outlined, size: 48, color: AppColors.textHint),
+          const SizedBox(height: 12),
+          const Text('No other family members found.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 14, color: AppColors.textSecondary)),
+          const SizedBox(height: 6),
+          const Text('Add family members from your profile to include them in this booking.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: AppColors.textHint, height: 1.4)),
+        ]),
+      );
+    }
+    return ListView.separated(
+      controller: scroll,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      itemCount: _patients.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemBuilder: (_, i) {
+        final p = _patients[i];
+        final isSel = _selected?.patientId == p.patientId;
+        return GestureDetector(
+          onTap: () => setState(() => _selected = p),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: isSel ? AppColors.brandGreenSurface : Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isSel ? AppColors.brandGreen : AppColors.divider,
+                width: isSel ? 1.5 : 1,
+              ),
+            ),
+            child: Row(children: [
+              Container(
+                width: 40, height: 40,
+                decoration: BoxDecoration(
+                  color: isSel ? AppColors.brandGreen : AppColors.brandGreenSurface,
+                  shape: BoxShape.circle,
+                ),
+                child: Center(child: Text(
+                  p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
+                      color: isSel ? Colors.white : AppColors.brandGreen),
+                )),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(p.name,
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                if (p.relation != null && p.relation!.isNotEmpty)
+                  Text(p.relation!,
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+              ])),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                width: 20, height: 20,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: isSel ? AppColors.brandGreen : AppColors.divider,
+                    width: isSel ? 6 : 1.5,
+                  ),
+                  color: Colors.white,
+                ),
+              ),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildTestStep(ScrollController scroll) {
+    if (widget.allTests.isEmpty) {
+      return const Center(child: Text('No tests available.',
+          style: TextStyle(color: AppColors.textHint)));
+    }
+    return ListView.separated(
+      controller: scroll,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: widget.allTests.length,
+      separatorBuilder: (_, __) => const Divider(height: 1),
+      itemBuilder: (_, i) {
+        final t = widget.allTests[i];
+        final checked = _selectedTestIds.contains(t.id);
+        return CheckboxListTile(
+          value: checked,
+          onChanged: (v) => setState(() => v! ? _selectedTestIds.add(t.id) : _selectedTestIds.remove(t.id)),
+          activeColor: AppColors.brandGreen,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          title: Text(t.name,
+              style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+          subtitle: t.type == 'package'
+              ? const Text('Package', style: TextStyle(fontSize: 11, color: AppColors.brandGreen))
+              : null,
+          secondary: Text('₹${t.finalPrice.toInt()}',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          controlAffinity: ListTileControlAffinity.leading,
+        );
+      },
+    );
+  }
+
+  Widget _buildPrescriptionStep(ScrollController scroll) {
+    return SingleChildScrollView(
+      controller: scroll,
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Mandatory banner
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFF3E0),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFFFCC02)),
+          ),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Icon(Icons.description_outlined, size: 14, color: Color(0xFFE65100)),
+            const SizedBox(width: 8),
+            const Expanded(child: Text(
+              'A valid prescription is required for the selected test(s). Please upload before proceeding.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF795548), height: 1.4),
+            )),
+            if (_prescriptionBytes.isNotEmpty)
+              Text('${_prescriptionBytes.length}/5',
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
+          ]),
+        ),
+        const SizedBox(height: 14),
+        // Thumbnail horizontal strip
+        SizedBox(
+          height: 104,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.only(top: 8),
+            children: [
+              ..._prescriptionBytes.asMap().entries.map((e) => Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Stack(clipBehavior: Clip.none, children: [
+                  GestureDetector(
+                    onTap: () => _viewPresImage(e.key),
+                    child: Container(
+                      width: 88, height: 88,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: AppColors.divider),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.memory(e.value, fit: BoxFit.cover),
+                      ),
+                    ),
+                  ),
+                  Positioned(bottom: 4, right: 4,
+                    child: IgnorePointer(
+                      child: Container(
+                        width: 24, height: 24,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.45),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Icon(Icons.fullscreen_rounded, size: 15, color: Colors.white),
+                      ),
+                    ),
+                  ),
+                  Positioned(top: -6, right: -6, child: GestureDetector(
+                    onTap: () => setState(() => _prescriptionBytes.removeAt(e.key)),
+                    child: Container(
+                      width: 22, height: 22,
+                      decoration: const BoxDecoration(color: Color(0xFFD32F2F), shape: BoxShape.circle),
+                      child: const Icon(Icons.close_rounded, size: 13, color: Colors.white),
+                    ),
+                  )),
+                ]),
+              )),
+              if (_prescriptionBytes.length < 5)
+                GestureDetector(
+                  onTap: _isPicking ? null : _showPresSourcePicker,
+                  child: Container(
+                    width: 88, height: 88,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: _prescriptionBytes.isEmpty ? const Color(0xFFE65100) : const Color(0xFFFFCC02),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: _isPicking
+                        ? const Center(child: SizedBox(width: 20, height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
+                        : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                            Icon(
+                              _prescriptionBytes.isEmpty ? Icons.upload_file_outlined : Icons.add_photo_alternate_outlined,
+                              size: 26,
+                              color: _prescriptionBytes.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _prescriptionBytes.isEmpty ? 'Upload' : 'Add more',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w500,
+                                color: _prescriptionBytes.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                              ),
+                            ),
+                          ]),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          _prescriptionBytes.isEmpty
+              ? 'Tap the tile above to upload via camera or gallery'
+              : '${_prescriptionBytes.length} image${_prescriptionBytes.length == 1 ? '' : 's'} uploaded · tap to view',
+          style: const TextStyle(fontSize: 11, color: AppColors.textHint),
+        ),
+      ]),
+    );
+  }
+}
+
 // ─── Full-screen prescription viewer ─────────────────────────────────────────
 
 class _PresViewerPage extends StatefulWidget {
@@ -2015,4 +2814,85 @@ class _PresViewerPageState extends State<_PresViewerPage> {
             ),
         ]),
       );
+}
+
+// ─── Full-screen viewer for in-memory Uint8List images ────────────────────────
+
+class _BytesViewerPage extends StatefulWidget {
+  final List<Uint8List> images;
+  final int initialIndex;
+
+  const _BytesViewerPage({required this.images, required this.initialIndex});
+
+  @override
+  State<_BytesViewerPage> createState() => _BytesViewerPageState();
+}
+
+class _BytesViewerPageState extends State<_BytesViewerPage> {
+  late final PageController _pageCtrl;
+  late int _current;
+
+  @override
+  void initState() {
+    super.initState();
+    _current = widget.initialIndex;
+    _pageCtrl = PageController(initialPage: widget.initialIndex);
+  }
+
+  @override
+  void dispose() {
+    _pageCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: Text('${_current + 1} / ${widget.images.length}',
+            style: const TextStyle(fontSize: 14, color: Colors.white70)),
+        centerTitle: true,
+        elevation: 0,
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: PageView.builder(
+              controller: _pageCtrl,
+              itemCount: widget.images.length,
+              onPageChanged: (i) => setState(() => _current = i),
+              itemBuilder: (_, i) => InteractiveViewer(
+                minScale: 0.8,
+                maxScale: 4.0,
+                child: Center(
+                  child: Image.memory(widget.images[i], fit: BoxFit.contain),
+                ),
+              ),
+            ),
+          ),
+          if (widget.images.length > 1)
+            Padding(
+              padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(context).padding.bottom + 16, top: 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(widget.images.length, (i) => AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  width: i == _current ? 18 : 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: i == _current ? AppColors.brandGreen : Colors.white38,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                )),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 }

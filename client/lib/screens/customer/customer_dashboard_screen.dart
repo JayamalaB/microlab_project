@@ -1070,6 +1070,13 @@ class _LocationSheetState extends State<_LocationSheet> {
         _allBranches      = branches;
         _filteredBranches = branches;
         _searchingBranches = false;
+        // Re-sync _branch to the freshly loaded instance so DropdownButtonFormField value matches by reference
+        if (_branch != null) {
+          _branch = branches.cast<BranchModel?>().firstWhere(
+            (b) => b?.id == _branch!.id,
+            orElse: () => _branch,
+          );
+        }
       });
     } catch (_) {
       if (mounted) setState(() => _searchingBranches = false);

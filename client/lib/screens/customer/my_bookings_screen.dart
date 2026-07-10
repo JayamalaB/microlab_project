@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/razorpay_service.dart';
@@ -17,19 +19,14 @@ class MyBookingsScreen extends StatefulWidget {
   State<MyBookingsScreen> createState() => _MyBookingsScreenState();
 }
 
-class _MyBookingsScreenState extends State<MyBookingsScreen>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
+class _MyBookingsScreenState extends State<MyBookingsScreen> {
   List<BookingModel> _bookings = [];
   bool _isLoading = true;
   String? _error;
 
-  final List<String> _tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
-
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: _tabs.length, vsync: this);
     _loadBookings();
     widget.refreshTrigger?.addListener(_loadBookings);
   }
@@ -78,18 +75,19 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
   }
 
   static BookingModel _fromApi(Map<String, dynamic> b) {
-    // test_items format: "Name:::price:::type|||Name:::price:::type"
+    // test_items format: "productId:::Name:::price:::type|||..."
     final rawItems = (b['test_items'] as String? ?? '')
         .split('|||')
         .where((s) => s.isNotEmpty)
         .toList();
-    final tests = rawItems.asMap().entries.map((e) {
-      final parts = e.value.split(':::');
-      final name  = parts.isNotEmpty ? parts[0] : 'Unknown';
-      final price = parts.length > 1 ? (double.tryParse(parts[1]) ?? 0.0) : 0.0;
-      final type  = parts.length > 2 ? parts[2] : 'test';
+    final tests = rawItems.map((raw) {
+      final parts = raw.split(':::');
+      final productId = parts.isNotEmpty ? parts[0] : '0';
+      final name      = parts.length > 1 ? parts[1] : 'Unknown';
+      final price     = parts.length > 2 ? (double.tryParse(parts[2]) ?? 0.0) : 0.0;
+      final type      = parts.length > 3 ? parts[3] : 'test';
       return TestModel(
-        id: e.key.toString(),
+        id: productId,
         name: name,
         type: type == 'package' ? 'package' : 'single',
         category: '',
@@ -179,27 +177,24 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
     );
   }
 
-  List<BookingModel> _filtered(String tab) {
-    if (tab == 'All') return _bookings;
-    if (tab == 'Upcoming') {
-      return _bookings.where((b) =>
-        b.status == 'Pending' || b.status == 'Confirmed' ||
-        b.status == 'Technician Allocated' || b.status == 'In Progress'
-      ).toList();
+  List<({MemberModel member, List<BookingModel> bookings})> get _patientGroups {
+    final map = <String, List<BookingModel>>{};
+    final members = <String, MemberModel>{};
+    for (final b in _bookings) {
+      final id = b.member.id;
+      map.putIfAbsent(id, () => []).add(b);
+      members.putIfAbsent(id, () => b.member);
     }
-    if (tab == 'Completed') {
-      return _bookings.where((b) =>
-        b.status == 'Completed' || b.status == 'Sample Collected'
-      ).toList();
-    }
-    if (tab == 'Cancelled') return _bookings.where((b) => b.status == 'Cancelled').toList();
-    return _bookings;
+    final groups = map.entries
+        .map((e) => (member: members[e.key]!, bookings: e.value))
+        .toList()
+      ..sort((a, b) => b.bookings.first.createdAt.compareTo(a.bookings.first.createdAt));
+    return groups;
   }
 
   @override
   void dispose() {
     widget.refreshTrigger?.removeListener(_loadBookings);
-    _tabController.dispose();
     super.dispose();
   }
 
@@ -207,37 +202,24 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
   Widget build(BuildContext context) {
     if (widget.embedded) {
       return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
+            width: double.infinity,
             color: AppColors.brandGreen,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: EdgeInsets.fromLTRB(16, MediaQuery.of(context).padding.top + 14, 16, 8),
-                  child: const Text('My Bookings',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600)),
-                ),
-                TabBar(
-                  controller: _tabController,
-                  indicatorColor: Colors.white,
-                  indicatorWeight: 3,
-                  labelColor: Colors.white,
-                  unselectedLabelColor: Colors.white60,
-                  labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                  unselectedLabelStyle:
-                      const TextStyle(fontSize: 13, fontWeight: FontWeight.w400),
-                  isScrollable: true,
-                  tabAlignment: TabAlignment.start,
-                  tabs: _tabs.map((t) => Tab(text: t)).toList(),
-                ),
-              ],
+            padding: EdgeInsets.fromLTRB(
+                0, MediaQuery.of(context).padding.top + 16, 0, 18),
+            child: const Text(
+              'My Bookings',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.2),
             ),
           ),
-          Expanded(child: _buildTabBody()),
+          Expanded(child: _buildBody()),
         ],
       );
     }
@@ -253,24 +235,12 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
         ),
         title: const Text('My Bookings',
             style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
-        bottom: TabBar(
-          controller: _tabController,
-          indicatorColor: Colors.white,
-          indicatorWeight: 3,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white60,
-          labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          unselectedLabelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w400),
-          isScrollable: true,
-          tabAlignment: TabAlignment.start,
-          tabs: _tabs.map((t) => Tab(text: t)).toList(),
-        ),
       ),
-      body: _buildTabBody(),
+      body: _buildBody(),
     );
   }
 
-  Widget _buildTabBody() {
+  Widget _buildBody() {
     if (_isLoading) {
       return const ColoredBox(
         color: Color(0xFFF4F6F8),
@@ -297,22 +267,227 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
         ),
       );
     }
+
+    final groups = _patientGroups;
+    if (groups.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 72, height: 72,
+                decoration: const BoxDecoration(
+                    color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+                child: const Icon(Icons.calendar_today_outlined,
+                    size: 32, color: AppColors.brandGreen),
+              ),
+              const SizedBox(height: 16),
+              const Text('No bookings yet',
+                  style: TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+              const SizedBox(height: 8),
+              const Text(
+                'Your booked tests will appear here.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     return ColoredBox(
       color: const Color(0xFFF4F6F8),
-      child: TabBarView(
-        controller: _tabController,
-        children: _tabs.map((tab) {
-          final list = _filtered(tab);
-          if (list.isEmpty) return _emptyState(tab);
-          return ListView.builder(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-            itemCount: list.length,
-            itemBuilder: (_, i) => _BookingCard(
-              booking: list[i],
-              onTap: () => _showBookingDetail(list[i]),
-            ),
+      child: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        itemCount: groups.length,
+        itemBuilder: (_, i) {
+          final g = groups[i];
+          return _PatientCard(
+            member: g.member,
+            bookings: g.bookings,
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => _PatientBookingsPage(
+                    member: g.member,
+                    initialBookings: g.bookings,
+                  ),
+                ),
+              ).then((_) => _loadBookings());
+            },
           );
-        }).toList(),
+        },
+      ),
+    );
+  }
+}
+
+// ─── Patient Card ────────────────────────────────────────────────────────────
+
+class _PatientCard extends StatelessWidget {
+  final MemberModel member;
+  final List<BookingModel> bookings;
+  final VoidCallback onTap;
+
+  const _PatientCard({required this.member, required this.bookings, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final upcoming = bookings.where((b) =>
+        b.status == 'Pending' ||
+        b.status == 'Confirmed' ||
+        b.status == 'Technician Allocated' ||
+        b.status == 'In Progress').length;
+    final initial = member.name.isNotEmpty ? member.name[0].toUpperCase() : '?';
+
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.06),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: const BoxDecoration(
+              color: AppColors.brandGreenSurface,
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: Text(
+                initial,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.brandGreen,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  member.name,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '${bookings.length} booking${bookings.length == 1 ? '' : 's'}'
+                  '${upcoming > 0 ? ' · $upcoming upcoming' : ''}',
+                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          const Icon(Icons.chevron_right_rounded, color: AppColors.textHint, size: 22),
+        ]),
+      ),
+    );
+  }
+}
+
+// ─── Patient Bookings Page ───────────────────────────────────────────────────
+
+class _PatientBookingsPage extends StatefulWidget {
+  final MemberModel member;
+  final List<BookingModel> initialBookings;
+
+  const _PatientBookingsPage({required this.member, required this.initialBookings});
+
+  @override
+  State<_PatientBookingsPage> createState() => _PatientBookingsPageState();
+}
+
+class _PatientBookingsPageState extends State<_PatientBookingsPage>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabCtrl;
+  late List<BookingModel> _bookings;
+  bool _reloading = false;
+
+  static const _tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
+
+  @override
+  void initState() {
+    super.initState();
+    _bookings = List.from(widget.initialBookings);
+    _tabCtrl = TabController(length: _tabs.length, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _reload() async {
+    setState(() => _reloading = true);
+    try {
+      final raw = await ApiService.getMyBookings();
+      final all = raw.map((r) => _MyBookingsScreenState._fromApi(r)).toList();
+      if (mounted) {
+        setState(() {
+          _bookings = all.where((b) => b.member.id == widget.member.id).toList();
+          _reloading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _reloading = false);
+    }
+  }
+
+  List<BookingModel> _filtered(String tab) {
+    if (tab == 'All') return _bookings;
+    if (tab == 'Upcoming') {
+      return _bookings
+          .where((b) =>
+              b.status == 'Pending' ||
+              b.status == 'Confirmed' ||
+              b.status == 'Technician Allocated' ||
+              b.status == 'In Progress')
+          .toList();
+    }
+    if (tab == 'Completed') {
+      return _bookings
+          .where((b) => b.status == 'Completed' || b.status == 'Sample Collected')
+          .toList();
+    }
+    if (tab == 'Cancelled') {
+      return _bookings.where((b) => b.status == 'Cancelled').toList();
+    }
+    return _bookings;
+  }
+
+  void _showDetail(BookingModel booking) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _BookingDetailSheet(
+        booking: booking,
+        onPaymentSuccess: _reload,
       ),
     );
   }
@@ -325,7 +500,8 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 72, height: 72,
+              width: 72,
+              height: 72,
               decoration: const BoxDecoration(
                   color: AppColors.brandGreenSurface, shape: BoxShape.circle),
               child: const Icon(Icons.calendar_today_outlined,
@@ -339,7 +515,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
             ),
             const SizedBox(height: 8),
             const Text(
-              'Your booked tests will appear here.',
+              'Tests booked for this patient will appear here.',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
             ),
@@ -349,15 +525,52 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
     );
   }
 
-  void _showBookingDetail(BookingModel booking) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _BookingDetailSheet(
-        booking: booking,
-        onPaymentSuccess: _loadBookings,
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4F6F8),
+      appBar: AppBar(
+        backgroundColor: AppColors.brandGreen,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Text(
+          widget.member.name,
+          style: const TextStyle(
+              color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+        ),
+        bottom: TabBar(
+          controller: _tabCtrl,
+          indicatorColor: Colors.white,
+          indicatorWeight: 3,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white60,
+          labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w400),
+          isScrollable: true,
+          tabAlignment: TabAlignment.start,
+          tabs: _tabs.map((t) => Tab(text: t)).toList(),
+        ),
       ),
+      body: _reloading
+          ? const Center(child: CircularProgressIndicator(color: AppColors.brandGreen))
+          : TabBarView(
+              controller: _tabCtrl,
+              children: _tabs.map((tab) {
+                final list = _filtered(tab);
+                if (list.isEmpty) return _emptyState(tab);
+                return ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+                  itemCount: list.length,
+                  itemBuilder: (_, i) => _BookingCard(
+                    booking: list[i],
+                    onTap: () => _showDetail(list[i]),
+                  ),
+                );
+              }).toList(),
+            ),
     );
   }
 }
@@ -735,7 +948,39 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
     super.dispose();
   }
 
+  void _showEditTests() {
+    if (b.bookingIdNum == null) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _EditTestsSheet(
+        booking: b,
+        onSaved: () {
+          if (!mounted) return;
+          Navigator.pop(context);
+          widget.onPaymentSuccess?.call();
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('Booking updated successfully'),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        },
+      ),
+    );
+  }
+
   BookingModel get b => widget.booking;
+
+  bool get _canEditTests {
+    if (b.paymentStatus == 'paid') return false;
+    const blocked = {
+      'en_route', 'arrived', 'collection_started', 'sample_collected', 'handed_to_lab'
+    };
+    if (b.collectionStatus != null && blocked.contains(b.collectionStatus)) return false;
+    return b.status == 'Pending' || b.status == 'Confirmed';
+  }
 
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -865,7 +1110,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
                       if (b.isVip && b.selectedTechnician != null)
                         _DetailRow(Icons.medical_services_outlined, 'Technician', b.selectedTechnician!.name),
                       if (b.isVip)
-                        _DetailRow(Icons.star_rounded, 'Type', 'VIP Customer', valueColor: const Color(0xFFFFB300)),
+                        const _DetailRow(Icons.star_rounded, 'Type', 'VIP Customer', valueColor: Color(0xFFFFB300)),
                       if (b.mode == 'Home Collection') ...[
                         if (b.address != null && b.address!.isNotEmpty)
                           _DetailRow(Icons.home_outlined, 'Collection Address', b.address!),
@@ -919,6 +1164,30 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
                       t.name, '₹${t.finalPrice.toInt()}', valueBold: true,
                     )).toList(),
                   ),
+
+                  if (_canEditTests) ...[
+                    const SizedBox(height: 10),
+                    GestureDetector(
+                      onTap: _showEditTests,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: AppColors.brandGreen),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.edit_outlined, size: 16, color: AppColors.brandGreen),
+                            SizedBox(width: 8),
+                            Text('Edit Tests / Packages',
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                    color: AppColors.brandGreen)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
 
                   const SizedBox(height: 16),
 
@@ -1571,5 +1840,661 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     return '${d.day} ${months[d.month]} ${d.year}';
+  }
+}
+
+// ─── Edit Tests Sheet ─────────────────────────────────────────────────────────
+
+class _EditTestsSheet extends StatefulWidget {
+  final BookingModel booking;
+  final VoidCallback onSaved;
+  const _EditTestsSheet({required this.booking, required this.onSaved});
+
+  @override
+  State<_EditTestsSheet> createState() => _EditTestsSheetState();
+}
+
+class _EditTestsSheetState extends State<_EditTestsSheet> {
+  List<TestModel> _allTests = [];
+  final Set<String> _selectedIds = {};
+  Set<String> _initialIds = {};
+  bool _loading = true;
+  bool _saving = false;
+  final TextEditingController _searchCtrl = TextEditingController();
+  String _searchQuery = '';
+
+  // Prescription upload (only shown when a selected test needs it)
+  final List<Uint8List> _prescriptions = [];
+  bool _isPicking = false;
+  final ImagePicker _picker = ImagePicker();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTests();
+    _searchCtrl.addListener(() => setState(() => _searchQuery = _searchCtrl.text));
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadTests() async {
+    setState(() => _loading = true);
+    try {
+      final tests = await ApiService.getPackages();
+
+      // Real product_id matches (id != '0')
+      final realIds = widget.booking.tests
+          .where((t) => t.id != '0')
+          .map((t) => t.id)
+          .toSet();
+
+      // Fallback: old bookings with product_id=0 — match by name, first occurrence only
+      final fallbackNames = widget.booking.tests
+          .where((t) => t.id == '0')
+          .map((t) => t.name.toLowerCase())
+          .toSet();
+
+      final preselected = <String>{};
+      preselected.addAll(tests.where((t) => realIds.contains(t.id)).map((t) => t.id));
+      for (final name in fallbackNames) {
+        final match = tests.cast<TestModel?>().firstWhere(
+          (t) => t!.name.toLowerCase() == name,
+          orElse: () => null,
+        );
+        if (match != null) preselected.add(match.id);
+      }
+
+      setState(() {
+        _allTests = tests;
+        _selectedIds.addAll(preselected);
+        _initialIds = Set.from(preselected);
+        _loading = false;
+      });
+    } catch (_) {
+      setState(() => _loading = false);
+    }
+  }
+
+  List<TestModel> get _filtered {
+    if (_searchQuery.isEmpty) return _allTests;
+    final q = _searchQuery.toLowerCase();
+    return _allTests
+        .where((t) =>
+            t.name.toLowerCase().contains(q) ||
+            t.category.toLowerCase().contains(q))
+        .toList();
+  }
+
+  // Prescription is required only when the user added a NEW doc-required test
+  // that was not part of the original booking.
+  bool get _needsPrescription =>
+      _allTests
+          .where((t) => _selectedIds.contains(t.id) && !_initialIds.contains(t.id))
+          .any((t) => t.docRequired);
+
+  double get _itemsTotal => _allTests
+      .where((t) => _selectedIds.contains(t.id))
+      .fold(0.0, (s, t) => s + t.finalPrice);
+
+  double get _serviceCharge =>
+      widget.booking.mode == 'Home Collection' ? widget.booking.serviceCharge : 0.0;
+
+  double get _total => _itemsTotal + _serviceCharge;
+
+  void _showPresSourcePicker() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.only(bottom: 16),
+            decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+          ),
+          _EditPresSourceTile(
+            icon: Icons.camera_alt_outlined,
+            title: 'Camera',
+            subtitle: 'Take a photo now',
+            onTap: () { Navigator.pop(ctx); _pickPres(ImageSource.camera); },
+          ),
+          const SizedBox(height: 8),
+          _EditPresSourceTile(
+            icon: Icons.photo_library_outlined,
+            title: 'Gallery',
+            subtitle: 'Choose from your photos',
+            onTap: () { Navigator.pop(ctx); _pickPres(ImageSource.gallery); },
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _pickPres(ImageSource source) async {
+    if (_isPicking || _prescriptions.length >= 5) return;
+    setState(() => _isPicking = true);
+    try {
+      if (source == ImageSource.gallery) {
+        final images = await _picker.pickMultiImage(imageQuality: 80);
+        if (images.isNotEmpty) {
+          final toAdd = images.take(5 - _prescriptions.length);
+          final bytes = await Future.wait(toAdd.map((f) => f.readAsBytes()));
+          setState(() => _prescriptions.addAll(bytes));
+        }
+      } else {
+        final img = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
+        if (img != null) {
+          final bytes = await img.readAsBytes();
+          setState(() => _prescriptions.add(bytes));
+        }
+      }
+    } catch (_) {}
+    if (mounted) setState(() => _isPicking = false);
+  }
+
+  void _viewImage(int index) {
+    Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+      builder: (_) => _EditPresViewerPage(images: List.from(_prescriptions), initialIndex: index),
+    ));
+  }
+
+  Future<void> _save() async {
+    if (_selectedIds.isEmpty || _saving || widget.booking.bookingIdNum == null) return;
+    setState(() => _saving = true);
+    try {
+      final selectedTests = _allTests.where((t) => _selectedIds.contains(t.id)).toList();
+      final items = selectedTests.map((t) => {
+        'packageId':     t.id,
+        'originalPrice': t.originalPrice,
+        'finalPrice':    t.finalPrice,
+      }).toList();
+      final result = await ApiService.updateBookingItems(
+        bookingId:     widget.booking.bookingIdNum!,
+        items:         items,
+        serviceCharge: _serviceCharge,
+      );
+      if (!mounted) return;
+      if (result != null && result['success'] == true) {
+        // Upload any collected prescriptions (non-fatal if it fails)
+        if (_prescriptions.isNotEmpty) {
+          try {
+            final rawIds = result['docRequiredItemIds'];
+            final bookingItemId = (rawIds is List && rawIds.isNotEmpty)
+                ? rawIds[0] as int?
+                : null;
+            final urls = <String>[];
+            for (final bytes in _prescriptions) {
+              final url = await ApiService.uploadFile(
+                  bytes, 'pres_${DateTime.now().millisecondsSinceEpoch}.jpg');
+              if (url != null) urls.add(url);
+            }
+            if (urls.isNotEmpty) {
+              await ApiService.savePrescription(
+                bookingId:     widget.booking.bookingIdNum!,
+                patientId:     int.tryParse(widget.booking.member.id) ?? 0,
+                bookingItemId: bookingItemId,
+                imageUrls:     urls,
+              );
+            }
+          } catch (_) {}
+        }
+        if (!mounted) return;
+        Navigator.pop(context);
+        widget.onSaved();
+      } else {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(result?['message'] as String? ?? 'Failed to update booking'),
+          backgroundColor: Colors.red[700],
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (_) {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Widget _buildPrescriptionSection() {
+    return Container(
+      decoration: const BoxDecoration(
+        border: Border(top: BorderSide(color: Color(0xFFFFCC02))),
+        color: Color(0xFFFFF3E0),
+      ),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.description_outlined, size: 15, color: Color(0xFFE65100)),
+          const SizedBox(width: 6),
+          const Text('Prescription',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
+          const Text(' *',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFD32F2F))),
+          const Spacer(),
+          if (_prescriptions.isNotEmpty)
+            Text('${_prescriptions.length}/5',
+                style: const TextStyle(fontSize: 11, color: Color(0xFF795548))),
+        ]),
+        const SizedBox(height: 2),
+        const Text('Upload a valid prescription for the selected test(s)',
+            style: TextStyle(fontSize: 11, color: Color(0xFF795548), height: 1.3)),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 104,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.only(top: 8),
+            children: [
+              ..._prescriptions.asMap().entries.map((e) => Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Stack(clipBehavior: Clip.none, children: [
+                  GestureDetector(
+                    onTap: () => _viewImage(e.key),
+                    child: Container(
+                      width: 88, height: 88,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: AppColors.divider),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.memory(e.value, fit: BoxFit.cover),
+                      ),
+                    ),
+                  ),
+                  Positioned(bottom: 4, right: 4,
+                    child: IgnorePointer(
+                      child: Container(
+                        width: 24, height: 24,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.45),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Icon(Icons.fullscreen_rounded, size: 15, color: Colors.white),
+                      ),
+                    ),
+                  ),
+                  Positioned(top: -6, right: -6, child: GestureDetector(
+                    onTap: () => setState(() => _prescriptions.removeAt(e.key)),
+                    child: Container(
+                      width: 22, height: 22,
+                      decoration: const BoxDecoration(color: Color(0xFFD32F2F), shape: BoxShape.circle),
+                      child: const Icon(Icons.close_rounded, size: 13, color: Colors.white),
+                    ),
+                  )),
+                ]),
+              )),
+              if (_prescriptions.length < 5)
+                GestureDetector(
+                  onTap: _isPicking ? null : _showPresSourcePicker,
+                  child: Container(
+                    width: 88, height: 88,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: _prescriptions.isEmpty ? const Color(0xFFE65100) : const Color(0xFFFFCC02),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: _isPicking
+                        ? const Center(child: SizedBox(width: 20, height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
+                        : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                            Icon(
+                              _prescriptions.isEmpty ? Icons.upload_file_outlined : Icons.add_photo_alternate_outlined,
+                              size: 26,
+                              color: _prescriptions.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _prescriptions.isEmpty ? 'Upload' : 'Add more',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w500,
+                                color: _prescriptions.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                              ),
+                            ),
+                          ]),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+      child: Column(
+        children: [
+          Center(
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              width: 40, height: 4,
+              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Edit Tests / Packages',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
+                              color: AppColors.textPrimary)),
+                      Text('Tap to select or deselect',
+                          style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                    ],
+                  ),
+                ),
+                if (_selectedIds.isNotEmpty)
+                  Text('₹${_total.toInt()}',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                          color: AppColors.brandGreen)),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+            child: TextField(
+              controller: _searchCtrl,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Search tests...',
+                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+                prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
+                contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                filled: true,
+                fillColor: AppColors.background,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+            ),
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator(color: AppColors.brandGreen))
+                : _filtered.isEmpty
+                    ? const Center(
+                        child: Text('No tests found',
+                            style: TextStyle(color: AppColors.textSecondary)))
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                        itemCount: _filtered.length,
+                        itemBuilder: (_, i) {
+                          final t = _filtered[i];
+                          final selected = _selectedIds.contains(t.id);
+                          return GestureDetector(
+                            onTap: () => setState(() {
+                              selected ? _selectedIds.remove(t.id) : _selectedIds.add(t.id);
+                              if (!_needsPrescription) _prescriptions.clear();
+                            }),
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: selected
+                                    ? AppColors.brandGreenSurface
+                                    : AppColors.background,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: selected ? AppColors.brandGreen : AppColors.divider,
+                                  width: selected ? 1.5 : 1,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    t.type == 'package'
+                                        ? Icons.inventory_2_outlined
+                                        : Icons.science_outlined,
+                                    size: 18,
+                                    color: selected ? AppColors.brandGreen : AppColors.textHint,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(t.name,
+                                            style: TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w600,
+                                                color: selected
+                                                    ? AppColors.brandGreen
+                                                    : AppColors.textPrimary)),
+                                        if (t.category.isNotEmpty)
+                                          Text(t.category,
+                                              style: const TextStyle(
+                                                  fontSize: 11, color: AppColors.textSecondary)),
+                                      ],
+                                    ),
+                                  ),
+                                  Text('₹${t.finalPrice.toInt()}',
+                                      style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                          color: selected
+                                              ? AppColors.brandGreen
+                                              : AppColors.textPrimary)),
+                                  const SizedBox(width: 8),
+                                  Icon(
+                                    selected
+                                        ? Icons.check_circle_rounded
+                                        : Icons.circle_outlined,
+                                    size: 20,
+                                    color: selected ? AppColors.brandGreen : AppColors.divider,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+          ),
+          if (!_loading && _needsPrescription) _buildPrescriptionSection(),
+
+          Container(
+            padding: EdgeInsets.fromLTRB(
+                16, 12, 16, MediaQuery.of(context).padding.bottom + 16),
+            decoration: const BoxDecoration(
+              color: AppColors.white,
+              border: Border(top: BorderSide(color: AppColors.divider)),
+            ),
+            child: SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: _selectedIds.isEmpty || _saving ||
+                    (_needsPrescription && _prescriptions.isEmpty)
+                    ? null : _save,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.brandGreen,
+                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+                child: _saving
+                    ? const SizedBox(
+                        width: 20, height: 20,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
+                    : Text(
+                        _selectedIds.isEmpty
+                            ? 'Select at least one test'
+                            : (_needsPrescription && _prescriptions.isEmpty)
+                                ? 'Upload prescription to continue'
+                                : 'Update Booking · ₹${_total.toInt()}',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500),
+                      ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Prescription source picker tile ─────────────────────────────────────────
+
+class _EditPresSourceTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  const _EditPresSourceTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: AppColors.divider),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 44, height: 44,
+              decoration: BoxDecoration(
+                color: AppColors.brandGreenSurface,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: AppColors.brandGreen, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title,
+                      style: const TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                  Text(subtitle,
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, color: AppColors.textHint, size: 20),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Full-screen prescription image viewer ────────────────────────────────────
+
+class _EditPresViewerPage extends StatefulWidget {
+  final List<Uint8List> images;
+  final int initialIndex;
+
+  const _EditPresViewerPage({required this.images, required this.initialIndex});
+
+  @override
+  State<_EditPresViewerPage> createState() => _EditPresViewerPageState();
+}
+
+class _EditPresViewerPageState extends State<_EditPresViewerPage> {
+  late final PageController _pageCtrl;
+  late int _current;
+
+  @override
+  void initState() {
+    super.initState();
+    _current = widget.initialIndex;
+    _pageCtrl = PageController(initialPage: widget.initialIndex);
+  }
+
+  @override
+  void dispose() {
+    _pageCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: Text('${_current + 1} / ${widget.images.length}',
+            style: const TextStyle(fontSize: 14, color: Colors.white70)),
+        centerTitle: true,
+        elevation: 0,
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: PageView.builder(
+              controller: _pageCtrl,
+              itemCount: widget.images.length,
+              onPageChanged: (i) => setState(() => _current = i),
+              itemBuilder: (_, i) => InteractiveViewer(
+                minScale: 0.8,
+                maxScale: 4.0,
+                child: Center(
+                  child: Image.memory(widget.images[i], fit: BoxFit.contain),
+                ),
+              ),
+            ),
+          ),
+          if (widget.images.length > 1)
+            Padding(
+              padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(context).padding.bottom + 16, top: 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(widget.images.length, (i) => AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  width: i == _current ? 18 : 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: i == _current ? AppColors.brandGreen : Colors.white38,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                )),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
