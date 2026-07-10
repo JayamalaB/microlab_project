@@ -41,7 +41,7 @@ class _OtpScreenState extends State<OtpScreen> {
   String _errorMsg = '';
 
   // Countdown
-  int _secondsLeft = 30;
+  int _secondsLeft = 60;
   Timer? _timer;
   bool _canResend = false;
 
@@ -56,7 +56,7 @@ class _OtpScreenState extends State<OtpScreen> {
   }
 
   void _startTimer() {
-    _secondsLeft = 30;
+    _secondsLeft = 60;
     _canResend = false;
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (t) {

@@ -1,4 +1,5 @@
-const db = require('../config/db');
+const db       = require('../config/db');
+const settings = require('../config/settings');
 
 let _io = null;
 exports.setIo = (io) => { _io = io; };
@@ -278,8 +279,9 @@ exports.getMyBookings = async (req, res) => {
          GROUP_CONCAT(
            CASE WHEN bi.booking_item_id IS NOT NULL
            THEN CONCAT(
-             IFNULL(pkg.product_name, 'Test'), ':::',
-             IFNULL(bi.final_price, '0'),       ':::',
+             IFNULL(bi.product_id, '0'),                                          ':::',
+             IFNULL(bi.product_name_snapshot, IFNULL(pkg.product_name, 'Test')), ':::',
+             IFNULL(bi.final_price, '0'),                                         ':::',
              'test'
            ) END
            ORDER BY bi.booking_item_id SEPARATOR '|||'

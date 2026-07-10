@@ -145,9 +145,19 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                 style: TextStyle(color: AppColors.textSecondary)),
           ),
           TextButton(
-            onPressed: () {
-              setState(() => _members.removeWhere((m) => m.id == id));
+            onPressed: () async {
               Navigator.pop(context);
+              try {
+                await ApiService.deletePatient(id);
+                if (mounted) setState(() => _members.removeWhere((m) => m.id == id));
+              } catch (_) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('Could not remove customer. Please try again.'),
+                    backgroundColor: Color(0xFFD32F2F),
+                  ));
+                }
+              }
             },
             child: const Text('Remove',
                 style: TextStyle(
