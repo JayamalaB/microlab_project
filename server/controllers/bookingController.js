@@ -599,3 +599,330 @@ exports.updateLabStatus = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+exports.updateBookingItems = async (req, res) => {
+  const { bookingId } = req.params;
+  const { items = [], serviceCharge = 0 } = req.body;
+  const clientId = req.user.client_id;
+
+  if (!items.length) {
+    return res.status(400).json({ success: false, message: 'At least one item required' });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [[booking]] = await conn.execute(
+      `SELECT b.booking_id, b.patient_id, b.status, b.amount_paid, b.payment_status,
+              tc.collection_status
+       FROM ip_bookings b
+       LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       WHERE b.booking_id = ? AND b.client_id = ? AND b.deleted_at IS NULL`,
+      [bookingId, clientId]
+    );
+    if (!booking) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    // Dynamic rules from ip_settings (defaults match the seeded values)
+    const blockIfPaid    = settings.getBool('booking_edit_block_if_paid', true);
+    const blockedStatuses = settings.getList(
+      'booking_edit_block_collection_statuses',
+      ['en_route', 'arrived', 'collection_started', 'sample_collected', 'handed_to_lab']
+    );
+
+    if (blockIfPaid && booking.payment_status === 'paid') {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: 'Paid bookings cannot be edited' });
+    }
+    if (booking.collection_status && blockedStatuses.includes(booking.collection_status)) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: 'Technician is already on the way — booking cannot be edited' });
+    }
+
+    await conn.execute('DELETE FROM ip_booking_items WHERE booking_id = ?', [bookingId]);
+
+    let newTotal = 0;
+    for (const item of items) {
+      const rawId = item.packageId ? Number(item.packageId) : null;
+      let validProductId = 0;
+      let productName = null;
+      if (rawId) {
+        const [pkgCheck] = await conn.execute(
+          'SELECT product_id, product_name FROM ip_products WHERE product_id = ? LIMIT 1',
+          [rawId]
+        );
+        if (pkgCheck.length > 0) {
+          validProductId = rawId;
+          productName = pkgCheck[0].product_name ?? null;
+        }
+      }
+      const unitPrice  = item.originalPrice ?? item.finalPrice ?? 0;
+      const finalPrice = item.finalPrice ?? 0;
+      newTotal += finalPrice;
+      await conn.execute(
+        `INSERT INTO ip_booking_items
+           (booking_id, product_id, product_name_snapshot, patient_id, unit_price, final_price, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [bookingId, validProductId, productName, booking.patient_id, unitPrice, finalPrice]
+      );
+    }
+
+    newTotal += Number(serviceCharge) || 0;
+
+    const amountPaid   = Number(booking.amount_paid) || 0;
+    const newAmountDue = Math.max(0, newTotal - amountPaid);
+    await conn.execute(
+      `UPDATE ip_bookings SET total_amount = ?, amount_due = ?, updated_at = NOW() WHERE booking_id = ?`,
+      [newTotal, newAmountDue, bookingId]
+    );
+    await conn.execute(
+      `UPDATE ip_payment_transactions
+       SET net_amount = ?, amount_due = ?, updated_at = NOW()
+       WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
+      [newTotal, newAmountDue, bookingId]
+    );
+
+    // Find doc-required booking_item_ids in the new selection
+    const [docReqRows] = await conn.execute(
+      `SELECT bi.booking_item_id
+       FROM ip_booking_items bi
+       JOIN ip_products p ON p.product_id = bi.product_id
+       WHERE bi.booking_id = ?
+         AND p.document_required IN (1, '1', 'yes')`,
+      [bookingId]
+    );
+    const docRequiredItemIds = docReqRows.map(r => r.booking_item_id);
+
+    // If no doc-required tests remain, remove stale prescription documents
+    if (docRequiredItemIds.length === 0) {
+      await conn.execute(
+        `DELETE FROM ip_booking_documents WHERE booking_id = ? AND file_description = 'prescription'`,
+        [bookingId]
+      );
+    }
+
+    await conn.commit();
+    console.log(`✅ updateBookingItems → booking_id=${bookingId} new_total=₹${newTotal}`);
+    res.json({ success: true, newTotal, newAmountDue, docRequiredItemIds });
+  } catch (err) {
+    await conn.rollback();
+    console.error('❌ updateBookingItems FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error', detail: err.message });
+  } finally {
+    conn.release();
+  }
+};
+
+// ── POST /api/bookings/family ─────────────────────────────────────────────────
+// Creates multiple bookings in one transaction sharing the same slot/visit.
+// members[] = [{ patientId, items, totalAmount, serviceCharge }, ...]
+// First member carries the service charge; additional members have serviceCharge = 0.
+exports.createFamilyBooking = async (req, res) => {
+  console.log('\n🔵 [CREATE FAMILY BOOKING] ──────────────────────────');
+  const clientId = req.user.client_id;
+  const userId   = req.user.user_id;
+
+  const {
+    members           = [],
+    availableSlotId   = null,
+    collectionDate    = null,
+    bookingType       = 'home_collection',
+    collectionAddress = null,
+    collectionPincode = null,
+    collectionCity    = null,
+    collectionLatitude  = null,
+    collectionLongitude = null,
+    branchId          = null,
+    paymentType       = 'pay_later',
+    razorpayPaymentId = null,
+    razorpayOrderId   = null,
+  } = req.body;
+
+  if (!Array.isArray(members) || members.length < 2) {
+    return res.status(400).json({ success: false, message: 'At least 2 members required' });
+  }
+
+  if (!settings.getBool('family_booking_enabled', true)) {
+    return res.status(403).json({ success: false, message: 'Family booking is currently unavailable' });
+  }
+
+  const maxMembers = parseInt(settings.get('family_booking_max_members', '4'), 10);
+  if (members.length > maxMembers) {
+    return res.status(400).json({ success: false, message: `Maximum ${maxMembers} members allowed per visit` });
+  }
+
+  const isPaid       = paymentType === 'full' && razorpayPaymentId;
+  const visitGroupId = `VG${Date.now()}`;
+
+  // Resolve slot → lab_slot_id / technician_slot_id
+  let labSlotId  = null;
+  let techSlotId = null;
+  if (availableSlotId) {
+    try {
+      const [[avSlot]] = await db.execute(
+        `SELECT lab_slot_id, technician_slot_id FROM ip_available_slots WHERE available_slot_id = ?`,
+        [availableSlotId]
+      );
+      if (avSlot) { labSlotId = avSlot.lab_slot_id ?? null; techSlotId = avSlot.technician_slot_id ?? null; }
+    } catch (_) {}
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const createdBookings = [];
+
+    for (const member of members) {
+      const { patientId, items = [], totalAmount = 0, serviceCharge = 0 } = member;
+      if (!patientId) continue;
+
+      // Resolve patient_id_ref
+      let resolvedPatientIdRef = null;
+      const [[patRow]] = await conn.execute(
+        `SELECT patient_id_ref FROM ip_patients WHERE patient_id = ? LIMIT 1`, [patientId]
+      );
+      if (patRow?.patient_id_ref) resolvedPatientIdRef = patRow.patient_id_ref;
+
+      const bookingRef  = `BK${Date.now()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      const amountPaid  = isPaid ? totalAmount : 0;
+      const amountDue   = isPaid ? 0 : totalAmount;
+      const txPayType   = isPaid ? 'RAZORPAY' : 'PAY_LATER';
+
+      const [bResult] = await conn.execute(
+        `INSERT INTO ip_bookings
+           (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
+            booking_type, status, total_amount, discount_amount,
+            amount_paid, amount_due, source_channel, notes,
+            collection_address, postal_code, city,
+            patient_id, patient_id_ref, product_id,
+            payment_status, visit_group_id, start_datetime, end_datetime, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, 'mobile_app', NULL,
+                 ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), ?, NOW())`,
+        [bookingRef, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
+         bookingType, totalAmount, amountPaid, amountDue,
+         collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
+         patientId, resolvedPatientIdRef,
+         isPaid ? 'paid' : 'unpaid',
+         visitGroupId, userId ?? null]
+      );
+      const bookingId = bResult.insertId;
+
+      // Patient → booking link
+      await conn.execute(
+        `INSERT INTO ip_patient_bookings (booking_id, patient_id, patient_ref, created_at) VALUES (?, ?, ?, NOW())`,
+        [bookingId, patientId, resolvedPatientIdRef]
+      );
+
+      // Line items
+      for (const item of items) {
+        const rawId = item.packageId ? Number(item.packageId) : null;
+        let validProductId = 0; let productName = null;
+        if (rawId) {
+          const [pkgCheck] = await conn.execute(
+            'SELECT product_id, product_name FROM ip_products WHERE product_id = ? LIMIT 1', [rawId]
+          );
+          if (pkgCheck.length > 0) { validProductId = rawId; productName = pkgCheck[0].product_name ?? null; }
+        }
+        await conn.execute(
+          `INSERT INTO ip_booking_items (booking_id, product_id, product_name_snapshot, patient_id, unit_price, final_price, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+          [bookingId, validProductId, productName, patientId, item.finalPrice ?? 0, item.finalPrice ?? 0]
+        );
+      }
+
+      // Payment transaction
+      const txnRef = `TXN${Date.now()}${Math.random().toString(36).slice(2, 5)}`;
+      await conn.execute(
+        `INSERT INTO ip_payment_transactions
+           (transaction_ref, booking_id, patient_id, payment_type,
+            gross_amount, discount_amount, net_amount, amount_paid, amount_due,
+            currency, payment_status, transaction_status, is_refund,
+            gateway_transaction_id, gateway_order_id, gateway_status, paid_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'INR', ?, ?, 0, ?, ?, ?, ?)`,
+        [txnRef, bookingId, patientId, txPayType,
+         totalAmount, totalAmount, amountPaid, amountDue,
+         isPaid ? 'paid'      : 'pending',
+         isPaid ? 'completed' : 'pending',
+         razorpayPaymentId ?? null,
+         razorpayOrderId   ?? null,
+         isPaid ? 'success' : null,
+         isPaid ? new Date() : null]
+      );
+
+      if (isPaid) {
+        await conn.execute(
+          `UPDATE ip_bookings SET status = 'confirmed', updated_at = NOW() WHERE booking_id = ?`, [bookingId]
+        );
+      }
+
+      // Find booking_item_id for first doc-required item (for prescription linking)
+      const [docRows] = await conn.execute(
+        `SELECT bi.booking_item_id
+         FROM ip_booking_items bi
+         JOIN ip_products p ON p.product_id = bi.product_id
+         WHERE bi.booking_id = ? AND p.document_required IN (1, '1', 'yes')
+         LIMIT 1`,
+        [bookingId]
+      );
+      const docRequiredItemId = docRows.length > 0 ? docRows[0].booking_item_id : null;
+
+      createdBookings.push({ bookingId, bookingRef, docRequiredItemId });
+      console.log(`✅ family member booking_id=${bookingId} ref=${bookingRef} patient=${patientId} total=₹${totalAmount} docItemId=${docRequiredItemId}`);
+    }
+
+    // Mark slot used once for the whole group
+    if (availableSlotId) {
+      await conn.execute(
+        'UPDATE ip_available_slots SET is_available = 0, updated_at = NOW() WHERE available_slot_id = ?',
+        [availableSlotId]
+      );
+    }
+    if (labSlotId) {
+      await conn.execute('UPDATE ip_lab_slots SET booked_count = booked_count + 1 WHERE lab_slot_id = ?', [labSlotId]);
+    } else if (techSlotId) {
+      await conn.execute('UPDATE ip_technician_slots SET booked_count = booked_count + 1 WHERE tech_slot_id = ?', [techSlotId]);
+    }
+
+    await conn.commit();
+    console.log(`🎉 Family booking done — visitGroupId=${visitGroupId} members=${createdBookings.length}`);
+    console.log('─────────────────────────────────────────────────\n');
+    res.status(201).json({ success: true, visitGroupId, bookings: createdBookings });
+  } catch (err) {
+    await conn.rollback();
+    console.error('❌ createFamilyBooking FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error', detail: err.message });
+  } finally {
+    conn.release();
+  }
+};
+
+  try {
+    await db.execute(
+      `UPDATE ip_technician_collection
+       SET collection_status=?, updated_at=NOW()
+       WHERE booking_id=?`,
+      [status, bookingId]
+    );
+
+    if (status === 'report_ready') {
+      await db.execute(
+        `UPDATE ip_bookings SET status='completed', updated_at=NOW() WHERE booking_id=?`,
+        [bookingId]
+      );
+    }
+
+    const socketPayload = { bookingId: Number(bookingId) };
+    if (status === 'report_ready') {
+      socketPayload.reportUrl = reportUrl ?? null;
+      socketPayload.reportId  = reportId  ?? null;
+    }
+
+    _pushToPatient(bookingId, socketEventMap[status], socketPayload);
+    res.json({ success: true, status });
+  } catch (err) {
+    console.error('❌ updateLabStatus FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};

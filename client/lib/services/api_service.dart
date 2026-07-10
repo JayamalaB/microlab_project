@@ -585,6 +585,71 @@ class ApiService {
     return null;
   }
 
+  static Future<Map<String, dynamic>?> updateBookingItems({
+    required int bookingId,
+    required List<Map<String, dynamic>> items,
+    double serviceCharge = 0,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.put(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/items'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode({'items': items, 'serviceCharge': serviceCharge}),
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[updateBookingItems] ERROR: $e');
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> createFamilyBooking({
+    required List<Map<String, dynamic>> members,
+    int? availableSlotId,
+    String? collectionDate,
+    required String bookingType,
+    String? collectionAddress,
+    String? collectionPincode,
+    String? collectionCity,
+    double? collectionLatitude,
+    double? collectionLongitude,
+    int? branchId,
+    required String paymentType,
+    String? razorpayPaymentId,
+    String? razorpayOrderId,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final body = <String, dynamic>{
+        'members':     members,
+        'bookingType': bookingType,
+        'paymentType': paymentType,
+        if (availableSlotId     != null) 'availableSlotId':    availableSlotId,
+        if (collectionDate      != null) 'collectionDate':     collectionDate,
+        if (collectionAddress   != null) 'collectionAddress':  collectionAddress,
+        if (collectionPincode   != null) 'collectionPincode':  collectionPincode,
+        if (collectionCity      != null) 'collectionCity':     collectionCity,
+        if (collectionLatitude  != null) 'collectionLatitude': collectionLatitude,
+        if (collectionLongitude != null) 'collectionLongitude': collectionLongitude,
+        if (branchId            != null) 'branchId':           branchId,
+        if (razorpayPaymentId   != null) 'razorpayPaymentId':  razorpayPaymentId,
+        if (razorpayOrderId     != null) 'razorpayOrderId':    razorpayOrderId,
+      };
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/bookings/family'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[createFamilyBooking] ERROR: $e');
+      return null;
+    }
+  }
+
   static Future<List<BranchModel>> getBranches({String? pincode, String? city}) async {
     final params = <String, String>{};
     if (pincode != null && pincode.isNotEmpty) params['pincode'] = pincode;
