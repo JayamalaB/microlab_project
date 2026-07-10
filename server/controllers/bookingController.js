@@ -1,4 +1,5 @@
-const db = require('../config/db');
+const db       = require('../config/db');
+const settings = require('../config/settings');
 
 let _io = null;
 exports.setIo = (io) => { _io = io; };
@@ -895,34 +896,5 @@ exports.createFamilyBooking = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error', detail: err.message });
   } finally {
     conn.release();
-  }
-};
-
-  try {
-    await db.execute(
-      `UPDATE ip_technician_collection
-       SET collection_status=?, updated_at=NOW()
-       WHERE booking_id=?`,
-      [status, bookingId]
-    );
-
-    if (status === 'report_ready') {
-      await db.execute(
-        `UPDATE ip_bookings SET status='completed', updated_at=NOW() WHERE booking_id=?`,
-        [bookingId]
-      );
-    }
-
-    const socketPayload = { bookingId: Number(bookingId) };
-    if (status === 'report_ready') {
-      socketPayload.reportUrl = reportUrl ?? null;
-      socketPayload.reportId  = reportId  ?? null;
-    }
-
-    _pushToPatient(bookingId, socketEventMap[status], socketPayload);
-    res.json({ success: true, status });
-  } catch (err) {
-    console.error('❌ updateLabStatus FAILED:', err.message);
-    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
