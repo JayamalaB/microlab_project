@@ -4,6 +4,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const bookingSocket = require('./socket/bookingSocket');
 const bookingController = require('./controllers/bookingController');
+const settings = require('./config/settings');
 require('dotenv').config();
 
 const app = express();
@@ -44,6 +45,8 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+settings.init().then(() => {
+  httpServer.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
 });
