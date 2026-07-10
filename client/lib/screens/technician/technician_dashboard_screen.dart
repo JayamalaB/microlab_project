@@ -258,6 +258,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
           0,
           TechnicianBooking(
             id: booking.bookingId.toString(),
+            patientId: booking.patientId,
             customerName: booking.patientName,
             customerPhone: booking.patientMobile,
             address: booking.patientAddress,
@@ -417,6 +418,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
           return TechnicianBooking(
             id:                map['booking_id']?.toString() ?? '',
             bookingRef:        map['booking_ref']        as String?,
+            patientId:         int.tryParse(map['patient_id']?.toString() ?? ''),
             customerName:      map['patient_name']       as String? ?? 'Patient',
             customerPhone:     map['patient_mobile']     as String? ?? '',
             address:           map['collection_address'] as String? ?? '',
@@ -997,6 +999,9 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                                                   _bookings.insert(0, newBooking);
                                                   _cachedPending = null;
                                                 });
+                                                // Pull fresh list from server so the
+                                                // 60-second timer doesn't wipe the injection
+                                                _loadActiveBookings();
                                               },
                                             ),
                                           )).then((wasCompleted) {

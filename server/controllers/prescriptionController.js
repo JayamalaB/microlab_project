@@ -25,7 +25,8 @@ exports.savePrescription = async (req, res) => {
   }
 
   try {
-    const uploadedBy = req.user.user_id;
+    // Customer JWT uses 'user_id'; technician JWT uses 'userId' — handle both
+    const uploadedBy = req.user.user_id ?? req.user.userId ?? null;
     writeLog(`[savePrescription] uploadedBy=user_id:${uploadedBy}`);
 
     const insertedIds = [];
@@ -49,5 +50,64 @@ exports.savePrescription = async (req, res) => {
     writeLog(`[savePrescription] ERROR — ${err.message} | code=${err.code} | sql=${err.sql}`);
     console.error('savePrescription error:', err.message);
     res.status(500).json({ success: false, message: 'Server error', debug: err.message });
+  }
+};
+
+// ── GET /api/prescriptions/:bookingId ─────────────────────────────────────────
+exports.getByBooking = async (req, res) => {
+  const { bookingId } = req.params;
+  writeLog(`[getByBooking] bookingId=${bookingId}`);
+  try {
+    const [rows] = await db.execute(
+      `SELECT doc_id, file_path, file_name, file_description, doc_status, created_at
+       FROM ip_booking_documents
+       WHERE booking_id = ?
+       ORDER BY created_at ASC`,
+      [bookingId]
+    );
+    res.json({ success: true, docs: rows });
+  } catch (err) {
+    writeLog(`[getByBooking] ERROR — ${err.message}`);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── PATCH /api/prescriptions/:docId/verify ────────────────────────────────────
+exports.verifyDoc = async (req, res) => {
+  const { docId } = req.params;
+  writeLog(`[verifyDoc] docId=${docId}`);
+  try {
+    const [result] = await db.execute(
+      `UPDATE ip_booking_documents SET doc_status = 'verified' WHERE doc_id = ?`,
+      [docId]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Document not found' });
+    }
+    writeLog(`[verifyDoc] doc_id=${docId} marked verified`);
+    res.json({ success: true });
+  } catch (err) {
+    writeLog(`[verifyDoc] ERROR — ${err.message}`);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── DELETE /api/prescriptions/:docId ─────────────────────────────────────────
+exports.deleteDoc = async (req, res) => {
+  const { docId } = req.params;
+  writeLog(`[deleteDoc] docId=${docId}`);
+  try {
+    const [result] = await db.execute(
+      `DELETE FROM ip_booking_documents WHERE doc_id = ?`,
+      [docId]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Document not found' });
+    }
+    writeLog(`[deleteDoc] doc_id=${docId} deleted`);
+    res.json({ success: true });
+  } catch (err) {
+    writeLog(`[deleteDoc] ERROR — ${err.message}`);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };

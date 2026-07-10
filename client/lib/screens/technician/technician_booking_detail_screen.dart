@@ -4,34 +4,35 @@ import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/services/api_service.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'technician_active_job_screen.dart';
 
 // ─── Prescription doc model ──────────────────────────────────────────────────
 
 class _TechPresDoc {
-  final Uint8List bytes;
+  final int? docId;         // null while uploading; set once saved to server
+  final Uint8List? bytes;   // local bytes present only while uploading
+  final String? url;        // remote URL set after upload completes
   final String fileName;
   final DateTime uploadedAt;
-  _TechPresDoc({required this.bytes, required this.fileName, required this.uploadedAt});
+  bool isUploading;
+  String docStatus;
+
+  _TechPresDoc({
+    this.docId,
+    this.bytes,
+    this.url,
+    required this.fileName,
+    required this.uploadedAt,
+    this.isUploading = false,
+    this.docStatus = 'pending_review',
+  });
+
+  bool get isVerified => docStatus == 'verified';
 }
 
-// ─── Test catalogue ───────────────────────────────────────────────────────────
-
-const List<Map<String, String>> _testCatalogue = [
-  {'id': 't1',  'name': 'HbA1c',                    'category': 'Diabetes', 'price': '540'},
-  {'id': 't2',  'name': 'Complete Blood Count (CBC)','category': 'General',  'price': '350'},
-  {'id': 't3',  'name': 'Thyroid Profile',           'category': 'Thyroid',  'price': '765'},
-  {'id': 't4',  'name': 'Lipid Profile',             'category': 'Heart',    'price': '500'},
-  {'id': 't5',  'name': 'Fasting Glucose',           'category': 'Diabetes', 'price': '120'},
-  {'id': 't6',  'name': 'Kidney Function Test',      'category': 'Kidney',   'price': '450'},
-  {'id': 't7',  'name': 'Liver Function Test',       'category': 'Liver',    'price': '600'},
-  {'id': 't8',  'name': 'Vitamin D3',                'category': 'Vitamins', 'price': '900'},
-  {'id': 't9',  'name': 'Vitamin B12',               'category': 'Vitamins', 'price': '700'},
-  {'id': 't10', 'name': 'Urine Routine',             'category': 'General',  'price': '150'},
-  {'id': 't11', 'name': 'Diabetes Care Package',     'category': 'Package',  'price': '1440'},
-  {'id': 't12', 'name': 'Full Body Checkup',         'category': 'Package',  'price': '2625'},
-];
+// (Test catalogue is now loaded from the server — see _loadItems)
 
 // ─── Journey steps ────────────────────────────────────────────────────────────
 
@@ -119,7 +120,9 @@ class _TechnicianBookingDetailScreenState
     extends State<TechnicianBookingDetailScreen> {
 
   late String _currentStatus;
-  late List<Map<String, String>> _selectedTests;
+  List<Map<String, String>> _selectedTests = [];
+  bool _itemsLoading = true;
+  List<Map<String, String>> _catalogueItems = [];
   bool _showAddTest = false;
   String _searchQuery = '';
 
@@ -127,6 +130,7 @@ class _TechnicianBookingDetailScreenState
   final List<_TechPresDoc> _docUploads = [];
   bool _docIsPicking = false;
   bool _docVerified = false;
+  bool _docsLoading = true;
   static const int _docMaxFiles = 5;
   final ImagePicker _picker = ImagePicker();
 
@@ -136,6 +140,9 @@ class _TechnicianBookingDetailScreenState
 
   // New customer form
   bool _showNewCustomerForm = false;
+  bool _isSavingCustomer = false;
+  // Customers added this session (name, bookingRef)
+  final List<Map<String, String>> _savedCustomers = [];
   final _ncNameCtrl    = TextEditingController();
   final _ncMobileCtrl  = TextEditingController();
   final _ncEmailCtrl   = TextEditingController();
@@ -185,73 +192,160 @@ class _TechnicianBookingDetailScreenState
     super.initState();
     _currentStatus = widget.booking.status;
     _additionalCustomerTests = [];
-    _selectedTests = widget.booking.testNames.map((name) {
-      final match = _testCatalogue.firstWhere(
-        (t) => t['name'] == name,
-        orElse: () => {'id': name, 'name': name, 'category': 'General', 'price': '0'},
-      );
-      return Map<String, String>.from(match);
-    }).toList();
+    _loadItems();
+    _loadDocs();
   }
 
-  void _saveNewCustomer() {
-    final name    = _ncNameCtrl.text.trim();
-    final mobile  = _ncMobileCtrl.text.trim();
-    
+  Future<void> _loadDocs() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) {
+      if (mounted) setState(() => _docsLoading = false);
+      return;
+    }
+    try {
+      final docs = await ApiService.getPrescriptions(bookingId);
+      if (!mounted) return;
+      setState(() {
+        for (final d in docs) {
+          _docUploads.add(_TechPresDoc(
+            docId:      (d['doc_id'] as num?)?.toInt(),
+            url:        d['file_path'] as String?,
+            fileName:   d['file_name'] as String? ?? 'document',
+            uploadedAt: DateTime.tryParse(d['created_at']?.toString() ?? '') ?? DateTime.now(),
+            docStatus:  d['doc_status'] as String? ?? 'pending_review',
+          ));
+        }
+        _docVerified = _docUploads.isNotEmpty && _docUploads.every((d) => d.isVerified);
+        _docsLoading = false;
+      });
+    } catch (e) {
+      debugPrint('[_loadDocs] ERROR: $e');
+      if (mounted) setState(() => _docsLoading = false);
+    }
+  }
+
+  Future<void> _loadItems() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) {
+      if (mounted) setState(() => _itemsLoading = false);
+      return;
+    }
+    try {
+      // Both calls run in parallel
+      final results = await Future.wait([
+        ApiService.getBookingItems(bookingId),
+        ApiService.getTechTestCatalogue(),
+      ]);
+      if (!mounted) return;
+      final items     = results[0] as List<Map<String, dynamic>>;
+      final catalogue = results[1] as List<Map<String, String>>;
+      setState(() {
+        _selectedTests = items.map((i) => {
+          'bookingItemId': i['booking_item_id']?.toString() ?? '',
+          'id':            i['product_id']?.toString() ?? '',
+          'name':          i['name']?.toString()     ?? '',
+          'category':      i['category']?.toString() ?? 'General',
+          // MySQL DECIMAL comes back as a String from mysql2 — parse it safely
+          'price':         double.tryParse(i['price']?.toString() ?? '0')?.toStringAsFixed(0) ?? '0',
+        }).toList();
+        _catalogueItems = catalogue;
+        _itemsLoading = false;
+      });
+    } catch (e) {
+      debugPrint('[_loadItems] ERROR: $e');
+      if (mounted) setState(() => _itemsLoading = false);
+    }
+  }
+
+  Future<void> _saveNewCustomer() async {
+    final name   = _ncNameCtrl.text.trim();
+    final mobile = _ncMobileCtrl.text.trim();
+
     if (name.isEmpty || mobile.length != 10) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please fill all required fields'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Please fill all required fields'),
+        backgroundColor: Colors.red,
+      ));
       return;
     }
 
-    final tests   = List<Map<String, String>>.from(_additionalCustomerTests);
+    final tests      = List<Map<String, String>>.from(_additionalCustomerTests);
+    final productIds = tests
+        .map((t) => int.tryParse(t['id'] ?? ''))
+        .whereType<int>()
+        .toList();
 
-    final newBooking = TechnicianBooking(
-      id: 'BK${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}',
-      customerName: name,
-      customerPhone: mobile,
-      address: widget.booking.address,
-      city: widget.booking.city,
-      pincode: widget.booking.pincode,
-      date: widget.booking.date,
-      timeSlot: widget.booking.timeSlot,
-      testNames: tests.map((t) => t['name'] ?? '').toList(),
-      mode: widget.booking.mode,
-      status: 'Confirmed',
-      serviceChargePaid: 99.0,
-      testsTotal: tests.fold(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0)),
-      assignedAt: DateTime.now(),
-    );
+    setState(() => _isSavingCustomer = true);
 
-    widget.onNewBooking?.call(newBooking);
+    try {
+      final parentBookingId = int.tryParse(widget.booking.id) ?? 0;
 
-    setState(() {
-      _showNewCustomerForm = false;
-      _ncNameCtrl.clear();
-      _ncMobileCtrl.clear();
-      _ncEmailCtrl.clear();
-      _ncDobCtrl.clear();
-      _ncRelCtrl.clear();
-      _ncHealthCtrl.clear();
-      _ncDob = null;
-      _ncCalculatedAge = null;
-      _ncGender = null;
-      _additionalCustomerTests.clear();
-      _showAddCustTest = false;
-      _custTestSearch = '';
-    });
+      String? dobStr;
+      if (_ncDob != null) {
+        dobStr =
+            '${_ncDob!.year}-${_ncDob!.month.toString().padLeft(2, '0')}-${_ncDob!.day.toString().padLeft(2, '0')}';
+      }
 
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('$name added with ${tests.length} test(s) — visible in dashboard'),
-      backgroundColor: AppColors.brandGreen,
-      behavior: SnackBarBehavior.floating,
-      duration: const Duration(seconds: 3),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ));
+      final result = await ApiService.addCustomerBooking(
+        parentBookingId: parentBookingId,
+        name:        name,
+        mobile:      mobile,
+        email:       _ncEmailCtrl.text.trim().isEmpty ? null : _ncEmailCtrl.text.trim(),
+        dob:         dobStr,
+        age:         _ncCalculatedAge,
+        gender:      _ncGender,
+        relation:    _ncRelCtrl.text.isEmpty ? null : _ncRelCtrl.text,
+        healthNotes: _ncHealthCtrl.text.trim().isEmpty ? null : _ncHealthCtrl.text.trim(),
+        productIds:  productIds,
+      );
+
+      if (!mounted) return;
+
+      if (result != null) {
+        // Reload tests section — devid's items are now under this same booking
+        _loadItems();
+
+        setState(() {
+          _isSavingCustomer = false;
+          _showNewCustomerForm = false;
+          _savedCustomers.add({
+            'name':   name,
+            'mobile': mobile,
+          });
+          _ncNameCtrl.clear(); _ncMobileCtrl.clear();
+          _ncEmailCtrl.clear(); _ncDobCtrl.clear();
+          _ncRelCtrl.clear(); _ncHealthCtrl.clear();
+          _ncDob = null; _ncCalculatedAge = null;
+          _ncGender = null; _additionalCustomerTests.clear();
+          _showAddCustTest = false; _custTestSearch = '';
+        });
+
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('$name added successfully'),
+          backgroundColor: AppColors.brandGreen,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      } else {
+        setState(() => _isSavingCustomer = false);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to save customer — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (e) {
+      debugPrint('[_saveNewCustomer] ERROR: $e');
+      if (mounted) {
+        setState(() => _isSavingCustomer = false);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to save customer — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
   }
 
   @override
@@ -639,21 +733,56 @@ void _resumeJourney() {
 
   // ── Tests ─────────────────────────────────────────────────
 
-  void _removeTest(String id) =>
-      setState(() => _selectedTests.removeWhere((t) => t['id'] == id));
+  Future<void> _removeTest(String id) async {
+    final test          = _selectedTests.firstWhere((t) => t['id'] == id, orElse: () => {});
+    final bookingItemId = int.tryParse(test['bookingItemId'] ?? '');
+    // Remove from UI immediately (optimistic)
+    setState(() => _selectedTests.removeWhere((t) => t['id'] == id));
+    if (bookingItemId != null && bookingItemId > 0) {
+      final bookingId = int.tryParse(widget.booking.id) ?? 0;
+      await ApiService.removeBookingItem(bookingId: bookingId, bookingItemId: bookingItemId);
+    }
+  }
 
-  void _addTest(Map<String, String> t) {
+  Future<void> _addTest(Map<String, String> t) async {
     if (_selectedTests.any((x) => x['id'] == t['id'])) return;
+    // Add optimistically with empty bookingItemId while the API call is in flight
     setState(() {
-      _selectedTests.add(Map<String, String>.from(t));
+      _selectedTests.add({...Map<String, String>.from(t), 'bookingItemId': ''});
       _showAddTest = false;
       _searchQuery = '';
     });
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    final productId = int.tryParse(t['id'] ?? '') ?? 0;
+    if (bookingId == 0 || productId == 0) return;
+    final result = await ApiService.addBookingItem(bookingId: bookingId, productId: productId);
+    if (!mounted) return;
+    if (result != null) {
+      // Stamp the real bookingItemId on the optimistic entry
+      setState(() {
+        final idx = _selectedTests.indexWhere(
+            (x) => x['id'] == t['id'] && x['bookingItemId'] == '');
+        if (idx != -1) {
+          _selectedTests[idx]['bookingItemId'] =
+              (result['bookingItemId'] as num?)?.toInt().toString() ?? '';
+        }
+      });
+    } else {
+      setState(() => _selectedTests.removeWhere(
+          (x) => x['id'] == t['id'] && x['bookingItemId'] == ''));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to add test — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
   }
 
   List<Map<String, String>> get _filteredCatalogue {
     final already = _selectedTests.map((t) => t['id']).toSet();
-    return _testCatalogue.where((t) {
+    return _catalogueItems.where((t) {
       if (already.contains(t['id'])) return false;
       if (_searchQuery.isEmpty) return true;
       return (t['name']?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false) ||
@@ -663,7 +792,7 @@ void _resumeJourney() {
 
   List<Map<String, String>> get _filteredCustCatalogue {
     final already = _additionalCustomerTests.map((t) => t['id']).toSet();
-    return _testCatalogue.where((t) {
+    return _catalogueItems.where((t) {
       if (already.contains(t['id'])) return false;
       if (_custTestSearch.isEmpty) return true;
       return (t['name']?.toLowerCase().contains(_custTestSearch.toLowerCase()) ?? false) ||
@@ -708,18 +837,26 @@ void _resumeJourney() {
         final images = await _picker.pickMultiImage(imageQuality: 80);
         if (images.isNotEmpty) {
           final toAdd = images.take(_docMaxFiles - _docUploads.length);
-          final docs = await Future.wait(toAdd.map((f) async => _TechPresDoc(
-              bytes: await f.readAsBytes(),
-              fileName: f.name,
-              uploadedAt: DateTime.now())));
-          setState(() => _docUploads.addAll(docs));
+          for (final f in toAdd) {
+            final bytes = await f.readAsBytes();
+            final placeholder = _TechPresDoc(
+              bytes: bytes, fileName: f.name,
+              uploadedAt: DateTime.now(), isUploading: true,
+            );
+            setState(() => _docUploads.add(placeholder));
+            _uploadDoc(placeholder, bytes, f.name);
+          }
         }
       } else {
         final image = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
         if (image != null) {
           final bytes = await image.readAsBytes();
-          setState(() => _docUploads.add(_TechPresDoc(
-              bytes: bytes, fileName: image.name, uploadedAt: DateTime.now())));
+          final placeholder = _TechPresDoc(
+            bytes: bytes, fileName: image.name,
+            uploadedAt: DateTime.now(), isUploading: true,
+          );
+          setState(() => _docUploads.add(placeholder));
+          _uploadDoc(placeholder, bytes, image.name);
         }
       }
     } catch (e) {
@@ -728,16 +865,70 @@ void _resumeJourney() {
     setState(() => _docIsPicking = false);
   }
 
+  Future<void> _uploadDoc(_TechPresDoc placeholder, Uint8List bytes, String fileName) async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    final patientId = widget.booking.patientId ?? 0;
+    try {
+      // Step 1: upload file binary → get URL
+      final url = await ApiService.uploadFile(bytes.toList(), fileName);
+      if (url == null || !mounted) {
+        setState(() => _docUploads.remove(placeholder));
+        return;
+      }
+      // Step 2: save URL linked to booking → get docId
+      final docId = await ApiService.savePrescriptionDoc(
+        bookingId: bookingId, patientId: patientId, imageUrl: url,
+      );
+      if (!mounted) return;
+      setState(() {
+        final idx = _docUploads.indexOf(placeholder);
+        if (idx == -1) return;
+        if (docId != null) {
+          _docUploads[idx] = _TechPresDoc(
+            docId: docId, url: url, fileName: fileName,
+            uploadedAt: DateTime.now(), docStatus: 'pending_review',
+          );
+        } else {
+          _docUploads.removeAt(idx);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Upload failed — please retry'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ));
+        }
+      });
+    } catch (e) {
+      debugPrint('[_uploadDoc] ERROR: $e');
+      if (mounted) setState(() => _docUploads.remove(placeholder));
+    }
+  }
+
   void _viewDocImage(int index) {
     Navigator.push(context, MaterialPageRoute(
         builder: (_) => _DocImageViewerPage(images: _docUploads, initialIndex: index)));
   }
 
-  void _deleteDocImage(int index) {
+  Future<void> _deleteDocImage(int index) async {
+    final doc = _docUploads[index];
+    if (doc.isUploading) return; // wait for upload to finish first
+    if (doc.docId != null) {
+      final ok = await ApiService.deletePrescription(doc.docId!);
+      if (!ok || !mounted) return;
+    }
     setState(() {
       _docUploads.removeAt(index);
       if (_docUploads.isEmpty) _docVerified = false;
     });
+  }
+
+  Future<void> _markDocsVerified() async {
+    for (final doc in _docUploads) {
+      if (doc.docId != null && !doc.isVerified) {
+        final ok = await ApiService.verifyPrescription(doc.docId!);
+        if (ok && mounted) setState(() => doc.docStatus = 'verified');
+      }
+    }
+    if (mounted) setState(() => _docVerified = true);
   }
 
   // ── Payment ───────────────────────────────────────────────
@@ -1102,7 +1293,12 @@ void _resumeJourney() {
           _SectionCard(
             title: 'Tests & Packages',
             icon: Icons.science_outlined,
-            child: Column(
+            child: _itemsLoading
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24),
+                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                  )
+                : Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 ..._selectedTests.map((t) => Container(
@@ -1136,7 +1332,7 @@ void _resumeJourney() {
                     if (!_isCompleted) ...[
                       const SizedBox(width: 8),
                       GestureDetector(
-                        onTap: () => _removeTest(t['id'] ?? ''),
+                        onTap: () { _removeTest(t['id'] ?? ''); },
                         child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
                       ),
                     ],
@@ -1185,7 +1381,7 @@ void _resumeJourney() {
                   ),
                   const SizedBox(height: 8),
                   ..._filteredCatalogue.take(5).map((t) => GestureDetector(
-                    onTap: () => _addTest(t),
+                    onTap: () { _addTest(t); },
                     child: Container(
                       margin: const EdgeInsets.only(bottom: 6),
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1226,7 +1422,12 @@ void _resumeJourney() {
             title: 'Prescription / Document',
             icon: Icons.description_outlined,
             badge: widget.booking.docRequired ? 'REQUIRED' : null,
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            child: _docsLoading
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24),
+                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                  )
+                : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
@@ -1284,7 +1485,7 @@ void _resumeJourney() {
                       return _DocThumbnailCard(
                         doc: _docUploads[i],
                         onView: () => _viewDocImage(i),
-                        onDelete: () => _deleteDocImage(i),
+                        onDelete: () { _deleteDocImage(i); },
                       );
                     },
                   ),
@@ -1339,7 +1540,7 @@ void _resumeJourney() {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: () => setState(() => _docVerified = true),
+                    onPressed: _markDocsVerified,
                     icon: const Icon(Icons.verified_outlined, size: 16),
                     label: const Text('Mark as Verified',
                         style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
@@ -1427,6 +1628,33 @@ void _resumeJourney() {
                   style: TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
                 ),
                 const SizedBox(height: 12),
+
+                // Show already-added customers this session
+                if (_savedCustomers.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  ..._savedCustomers.map((c) => Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreenSurface,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: AppColors.brandGreenLight),
+                    ),
+                    child: Row(children: [
+                      const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(
+                        '${c['name']}  ·  ${c['mobile']}',
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                      )),
+                      Text(
+                        c['ref'] ?? '',
+                        style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                      ),
+                    ]),
+                  )),
+                  const SizedBox(height: 4),
+                ],
 
                 if (!_showNewCustomerForm)
                   GestureDetector(
@@ -1711,10 +1939,11 @@ void _resumeJourney() {
                     const SizedBox(width: 10),
                     Expanded(
                       child: ElevatedButton(
-                        onPressed: (_ncNameCtrl.text.trim().isNotEmpty &&
-                                _ncMobileCtrl.text.trim().length == 10)
-                            ? () => _saveNewCustomer()
-                            : null,
+                        onPressed: (_isSavingCustomer ||
+                                !(_ncNameCtrl.text.trim().isNotEmpty &&
+                                    _ncMobileCtrl.text.trim().length == 10))
+                            ? null
+                            : () { _saveNewCustomer(); },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppColors.brandGreen,
                           foregroundColor: Colors.white,
@@ -1722,8 +1951,13 @@ void _resumeJourney() {
                           padding: const EdgeInsets.symmetric(vertical: 12),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                         ),
-                        child: const Text('Save Customer',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                        child: _isSavingCustomer
+                            ? const SizedBox(
+                                width: 18, height: 18,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: Colors.white))
+                            : const Text('Save Customer',
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
                       ),
                     ),
                   ]),
@@ -2044,7 +2278,17 @@ class _DocThumbnailCard extends StatelessWidget {
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(10),
-              child: Image.memory(doc.bytes, fit: BoxFit.cover),
+              child: doc.isUploading
+                  ? const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
+                  : doc.bytes != null
+                      ? Image.memory(doc.bytes!, fit: BoxFit.cover)
+                      : Image.network(
+                          doc.url!,
+                          fit: BoxFit.cover,
+                          loadingBuilder: (_, child, progress) =>
+                              progress == null ? child : const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                          errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: AppColors.textHint),
+                        ),
             ),
           ),
           Positioned(
@@ -2193,12 +2437,25 @@ class _DocImageViewerPageState extends State<_DocImageViewerPage> {
               controller: _pageCtrl,
               itemCount: widget.images.length,
               onPageChanged: (i) => setState(() => _current = i),
-              itemBuilder: (_, i) => InteractiveViewer(
-                maxScale: 5.0,
-                child: Center(
-                  child: Image.memory(widget.images[i].bytes, fit: BoxFit.contain),
-                ),
-              ),
+              itemBuilder: (_, i) {
+                final doc = widget.images[i];
+                return InteractiveViewer(
+                  maxScale: 5.0,
+                  child: Center(
+                    child: doc.bytes != null
+                        ? Image.memory(doc.bytes!, fit: BoxFit.contain)
+                        : Image.network(
+                            doc.url!,
+                            fit: BoxFit.contain,
+                            loadingBuilder: (_, child, progress) => progress == null
+                                ? child
+                                : const CircularProgressIndicator(color: Colors.white),
+                            errorBuilder: (_, __, ___) => const Icon(
+                                Icons.broken_image, color: Colors.white54, size: 48),
+                          ),
+                  ),
+                );
+              },
             ),
           ),
           if (widget.images.length > 1)

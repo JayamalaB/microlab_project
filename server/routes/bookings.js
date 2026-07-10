@@ -15,6 +15,13 @@ router.get('/patient/:patientId', bookingController.getPatientBookings);
 // GET /api/bookings/:bookingId — single booking detail
 router.get('/:bookingId', bookingController.getBooking);
 
+// GET  /api/bookings/:bookingId/items   — list booking test items
+router.get('/:bookingId/items',                    auth, bookingController.getItems);
+// POST /api/bookings/:bookingId/items   — add a test to a booking
+router.post('/:bookingId/items',                   auth, bookingController.addItem);
+// DELETE /api/bookings/:bookingId/items/:id — remove a test from a booking
+router.delete('/:bookingId/items/:bookingItemId',  auth, bookingController.removeItem);
+
 // POST /api/bookings/:bookingId/pay — pay a pending booking via Razorpay
 router.post('/:bookingId/pay', auth, bookingController.payBooking);
 

@@ -238,8 +238,9 @@ exports.createBooking = async (req, res) => {
 
 // ── GET /api/bookings/mine ─────────────────────────────────────────────────────
 exports.getMyBookings = async (req, res) => {
-  const clientId = req.user.client_id;
-  console.log(`\n🔍 [GET MY BOOKINGS] client_id=${clientId}`);
+  const clientId  = req.user.client_id;
+  const patientId = req.user.id;
+  console.log(`\n🔍 [GET MY BOOKINGS] client_id=${clientId} patient_id=${patientId}`);
   try {
     const [rows] = await db.execute(
       `SELECT
@@ -311,12 +312,17 @@ exports.getMyBookings = async (req, res) => {
        LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
        LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id
        LEFT JOIN ip_users u          ON u.user_id = tech.user_id
-       WHERE b.client_id = ?
+       WHERE (
+         b.client_id = ?
+         OR b.booking_id IN (
+           SELECT pb.booking_id FROM ip_patient_bookings pb WHERE pb.patient_id = ?
+         )
+       )
          AND b.deleted_at IS NULL
        GROUP BY b.booking_id
        ORDER BY b.created_at DESC
        LIMIT 50`,
-      [clientId]
+      [clientId, patientId]
     );
     console.log(`✅ Found ${rows.length} booking(s) for client ${clientId}`);
     res.json({ success: true, bookings: rows });
@@ -452,6 +458,96 @@ exports.getBooking = async (req, res) => {
     res.json({ success: true, booking: rows[0] });
   } catch (err) {
     console.error('❌ getBooking FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── GET /api/bookings/:bookingId/items ────────────────────────────────────────
+exports.getItems = async (req, res) => {
+  const { bookingId } = req.params;
+  try {
+    const [rows] = await db.execute(
+      `SELECT bi.booking_item_id,
+              bi.product_id,
+              COALESCE(bi.product_name_snapshot, p.product_name) AS name,
+              COALESCE(p.product_category, 'General')            AS category,
+              bi.final_price                                      AS price
+       FROM ip_booking_items bi
+       LEFT JOIN ip_products p ON p.product_id = bi.product_id
+       WHERE bi.booking_id = ?
+       ORDER BY bi.booking_item_id ASC`,
+      [bookingId]
+    );
+    res.json({ success: true, items: rows });
+  } catch (err) {
+    console.error('❌ getItems FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── POST /api/bookings/:bookingId/items ───────────────────────────────────────
+exports.addItem = async (req, res) => {
+  const { bookingId } = req.params;
+  const { productId }  = req.body;
+  if (!productId) {
+    return res.status(400).json({ success: false, message: 'productId is required' });
+  }
+  try {
+    // Get product details
+    const [[product]] = await db.execute(
+      `SELECT product_id, product_name, product_category, product_price
+       FROM ip_products WHERE product_id = ? AND product_active = 1 LIMIT 1`,
+      [productId]
+    );
+    if (!product) {
+      return res.status(404).json({ success: false, message: 'Product not found' });
+    }
+    // Get patient_id from the booking
+    const [[booking]] = await db.execute(
+      `SELECT patient_id FROM ip_bookings WHERE booking_id = ? LIMIT 1`,
+      [bookingId]
+    );
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    const price = parseFloat(product.product_price ?? 0) || 0;
+    const [result] = await db.execute(
+      `INSERT INTO ip_booking_items
+         (booking_id, product_id, product_name_snapshot, patient_id, unit_price, final_price, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+      [bookingId, product.product_id, product.product_name, booking.patient_id, price, price]
+    );
+    res.status(201).json({
+      success: true,
+      item: {
+        bookingItemId: result.insertId,
+        productId:     product.product_id,
+        name:          product.product_name,
+        category:      product.product_category ?? 'General',
+        price:         price,
+      },
+    });
+  } catch (err) {
+    console.error('❌ addItem FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── DELETE /api/bookings/:bookingId/items/:bookingItemId ──────────────────────
+exports.removeItem = async (req, res) => {
+  const { bookingId, bookingItemId } = req.params;
+  try {
+    const [result] = await db.execute(
+      `DELETE FROM ip_booking_items
+       WHERE booking_item_id = ? AND booking_id = ?`,
+      [bookingItemId, bookingId]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ removeItem FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
