@@ -53,6 +53,10 @@ const DB_KEYWORDS = [
     // Patient/account terms (ip_patients / ip_clients)
     'family member', 'my patients', 'patient profile', 'my profile', 'my subscription',
     'subscription tier', 'subscription plan', 'my account', 'account status', 'blood group',
+    'my information', 'my data', 'my details', 'my records', 'my family',
+    'family information', 'family details', 'family data',
+    'my mother', 'my father', 'my spouse', 'my wife', 'my husband',
+    'my child', 'my children', 'my son', 'my daughter', 'my sister', 'my brother',
 ];
 
 const SITE_TERMS = [

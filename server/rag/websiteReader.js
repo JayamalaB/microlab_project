@@ -2,11 +2,9 @@
 
 const https = require('https');
 const http  = require('http');
-const cache = require('../services/cacheService');
 require('dotenv').config();
 
 const ROOT_URL = process.env.WEBSITE_URL || 'https://microlabdiagnostics.com';
-const PAGE_CACHE_TTL = 60 * 60; // 1 hour
 
 // microlabindia.com is a single-page app — all content is on the homepage.
 // Playwright renders the full SPA; keyword matching picks the right context.
@@ -140,21 +138,11 @@ async function getLiveContent(question) {
     console.log(`🌐 Live pages selected for "${question}": ${pages.map(p => p.id).join(', ')}`);
 
     for (const pageDef of pages) {
-        const cacheKey = `website_page:${pageDef.id}`;
-
-        const cached = await cache.get(cacheKey);
-        if (cached) {
-            console.log(`🎯 Page cache HIT: ${pageDef.id}`);
-            result.push({ url: pageDef.url, title: pageDef.id, text: cached });
-            continue;
-        }
-
         console.log(`🔗 Fetching live: ${pageDef.url}`);
         const text = await fetchPageLive(pageDef.url);
 
         if (text && text.length > 50) {
-            await cache.set(cacheKey, text, PAGE_CACHE_TTL);
-            console.log(`✅ Fetched & cached: ${pageDef.id} (${text.length} chars)`);
+            console.log(`✅ Fetched: ${pageDef.id} (${text.length} chars)`);
             result.push({ url: pageDef.url, title: pageDef.id, text });
         } else {
             console.warn(`⚠️  Thin or no content from ${pageDef.url}`);
@@ -164,9 +152,4 @@ async function getLiveContent(question) {
     return result;
 }
 
-async function clearPageCache() {
-    await cache.flush('website_page:*');
-    console.log('🗑️  Website page cache cleared');
-}
-
-module.exports = { getLiveContent, clearPageCache, selectPages };
+module.exports = { getLiveContent, selectPages };

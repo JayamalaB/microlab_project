@@ -2,7 +2,6 @@
 
 const db             = require('../db/database');
 const llmService     = require('../services/llmService');
-const cache          = require('../services/cacheService');
 const { resolveKnowledge } = require('../services/knowledgeService');
 
 const PRONOUN_PATTERN = /\b(he|she|his|her|their|they|this (branch|test)|that (branch|test))\b/i;
@@ -20,10 +19,59 @@ const PATIENT_COLS = [
 ];
 const CLIENT_COLS = ['client_name', 'client_mobile_no', 'subscription_tier', 'client_account_status'];
 
-// Intents that expose personal data — require a verified patientId and are never
-// served from (or written to) the question-text keyed answer cache.
-const PERSONAL_INTENTS = new Set(['sample_status_query', 'patient_profile_query', 'client_account_query']);
-const PERSONAL_QUESTION_PATTERN = /\b(my sample|my report|my result|track my|sample status|where is my|my famil|family member|my patients?|patient profile|my profile|my subscription|my account|blood group)\b/i;
+// Intents that expose personal data — require a verified patientId.
+const PERSONAL_INTENTS = new Set(['sample_status_query', 'patient_profile_query', 'client_account_query', 'booking_query']);
+const RELATION_WORDS = 'mother|father|spouse|wife|husband|child|children|son|daughter|sister|brother';
+// Generic nouns patients use instead of the word "profile" — "my information", "my
+// data", "my details", "my record(s)". Requires "my" directly before the word so it
+// doesn't hijack unrelated phrases like "my booking information".
+const INFO_WORDS = 'info|information|data|details|records?';
+const PATIENT_PROFILE_PATTERN = new RegExp(
+    `\\b(family members?|my patients?|patients? (on|under|in) my account|my profile|patient profile|` +
+    `my (${INFO_WORDS})|my (blood group|dob|date of birth)|my (${RELATION_WORDS})'?s?|` +
+    `my family|family (${INFO_WORDS}))\\b`, 'i'
+);
+const CLIENT_ACCOUNT_PATTERN  = /\b(my subscription|subscription (tier|plan)|my (account status|membership)|is my account active|client account)\b/i;
+// Narrower subset of PATIENT_PROFILE_PATTERN — questions that ask about someone OTHER
+// than (or in addition to) the logged-in patient. Anything not matching this (e.g. plain
+// "my profile", "my data", "my blood group") is scoped to the logged-in patient's own row.
+const FAMILY_SCOPE_PATTERN = new RegExp(
+    `\\b(family members?|patients? (on|under|in) my account|who(?:'s| is| are) (on|in|under) my account|` +
+    `my (${RELATION_WORDS})'?s?|my family|family (${INFO_WORDS}))\\b`, 'i'
+);
+// Matches a message that is essentially ONLY a relation word ("sister", "mother?") or
+// "family" — a natural short follow-up after the bot lists family members with their
+// relation labels (e.g. "2. rajesh (Daughter)"). Anchored to the whole message so it
+// can't hijack unrelated sentences that merely contain a relation word, e.g. "child
+// health checkup".
+const BARE_RELATION_PATTERN = new RegExp(`^\\s*(${RELATION_WORDS}|family)'?s?\\s*[?.!]?\\s*$`, 'i');
+// "my sister" or bare "sister" — used to extract which relation was asked about.
+const RELATION_PATTERN = new RegExp(`\\b(?:my\\s+)?(${RELATION_WORDS})'?s?\\b`, 'i');
+
+// Booking questions — "my booking(s)", "booking details/info/status", "latest/recent
+// booking(s)", "last/past/previous [N] bookings", "track my booking". Deliberately
+// excludes bare "book" / "book a test" so it doesn't collide with the Book Test flow.
+const COUNT_WORD = '\\d+|one|two|three|four|five|six|seven|eight|nine|ten|couple(?: of)?|few';
+const BOOKING_QUERY_PATTERN = new RegExp(
+    `\\b(my bookings?|bookings?\\s*(details|info(rmation)?|status|history)|` +
+    `(latest|recent)\\s*bookings?|(last|past|previous)\\s*(${COUNT_WORD})?\\s*bookings?|` +
+    `track my booking|booking ref(erence)?|(all|show|list)\\s*(my\\s*)?bookings)\\b`, 'i'
+);
+// Subset of BOOKING_QUERY_PATTERN meaning "show more than just the latest one" — either
+// an explicit request for everything, or any "last/past/previous/recent bookings" phrasing
+// (with or without an explicit count, which is separately extracted below).
+const BOOKING_HISTORY_PATTERN = new RegExp(
+    `\\b(booking history|all (my )?bookings|past bookings|previous bookings|list (my )?bookings|` +
+    `show (all )?(my )?bookings|(latest|recent) bookings|(last|past|previous)\\s*(${COUNT_WORD})?\\s*bookings)\\b`, 'i'
+);
+// Extracts an explicit count from "last two bookings" / "past 3 bookings" / "last couple
+// of bookings" etc., so we return exactly that many rather than defaulting to 20.
+const BOOKING_LIMIT_PATTERN = new RegExp(`\\b(?:last|latest|past|previous|recent)\\s+(${COUNT_WORD})\\s+bookings?\\b`, 'i');
+const BOOKING_NUMBER_WORDS = {
+    one: 1, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+    couple: 2, few: 3,
+};
 
 class LLMRetriever {
     constructor() {
@@ -85,25 +133,12 @@ class LLMRetriever {
         const skipKnowledge = opts.skipKnowledge === true;
         const patientId     = opts.patientId || null;
 
-        // ── 1. LLM answer cache — skip for personal (patient/account-specific) queries,
-        //      since the cache is keyed by question text only and would otherwise leak
-        //      one patient's data to another patient asking the same phrasing.
-        const isPersonalQuestion = PERSONAL_QUESTION_PATTERN.test(question);
-        if (!isPronoun && !isPersonalQuestion) {
-            const hit = await cache.getLLMAnswer(question);
-            if (hit) {
-                console.log(`🎯 Cache HIT: "${question}"`);
-                this._updateSession(sessionId, hit.context_used.intent, hit.context_used.entities || {});
-                return { ...hit, context_used: { ...hit.context_used, from_cache: true } };
-            }
-        }
-
-        // ── 2. Parse intent ────────────────────────────────────────────────────
+        // ── 1. Parse intent ────────────────────────────────────────────────────
         const intentData = !isPronoun ? await llmService.parseIntent(question) : null;
-        const DB_INTENTS = new Set(['test_query', 'branch_query', 'sample_status_query', 'patient_profile_query', 'client_account_query']);
+        const DB_INTENTS = new Set(['test_query', 'branch_query', 'sample_status_query', 'patient_profile_query', 'client_account_query', 'booking_query']);
         const isDBIntent = intentData && DB_INTENTS.has(intentData.intent);
 
-        // ── 3. Quick return for general greeting/chitchat ─────────────────────
+        // ── 2. Quick return for general greeting/chitchat ─────────────────────
         if (intentData?.intent === 'general' && intentData.general_response) {
             return {
                 question,
@@ -112,7 +147,7 @@ class LLMRetriever {
             };
         }
 
-        // ── 4. Knowledge base (static QA + website) — skipped for DB intents ─
+        // ── 3. Knowledge base (static QA + website) — skipped for DB intents ─
         if (!isPronoun && !skipKnowledge && !isDBIntent) {
             const knowledge = await resolveKnowledge(question);
             if (knowledge) {
@@ -134,13 +169,20 @@ class LLMRetriever {
         const qLow   = question.toLowerCase();
         let intent   = intentData?.intent || 'test_query';
 
-        if (intent === 'general') {
+        // Personal-data phrasing always overrides the LLM's guess, regardless of what
+        // it classified the question as. GPT-3.5 was found to misclassify these newer
+        // intents as test_query outright (not just 'general'), so gating this behind
+        // `intent === 'general'` let questions like "show my profile" fall through to
+        // buildTestQuery and return a random test list instead of the patient's data.
+        if (PATIENT_PROFILE_PATTERN.test(question) || BARE_RELATION_PATTERN.test(question)) {
+            intent = 'patient_profile_query';
+        } else if (CLIENT_ACCOUNT_PATTERN.test(question)) {
+            intent = 'client_account_query';
+        } else if (BOOKING_QUERY_PATTERN.test(question)) {
+            intent = 'booking_query';
+        } else if (intent === 'general') {
             if (/\b(my sample|my report|my result|track my|sample status|where is my (report|result|sample))\b/i.test(question)) {
                 intent = 'sample_status_query';
-            } else if (/\b(family member|my patients?|patients? (on|under|in) my account|my profile|patient profile|my (blood group|dob|date of birth)|my (mother|father|spouse|wife|husband|child|children|son|daughter|sister|brother)'?s?\b)\b/i.test(question)) {
-                intent = 'patient_profile_query';
-            } else if (/\b(my subscription|subscription (tier|plan)|my (account status|membership)|is my account active|client account)\b/i.test(question)) {
-                intent = 'client_account_query';
             } else if (/\b(package[s]?|test[s]?|panel|checkup|health screen)\b/.test(qLow)) {
                 intent = 'test_query';
             } else if (/\b(branch|location|centre|center|address|coimbatore|trichy)\b/.test(qLow)) {
@@ -164,6 +206,7 @@ class LLMRetriever {
                 sample_status_query:   '🔐 To check your sample status, please make sure you are logged in. Your patient account is needed to retrieve personal test results.',
                 patient_profile_query: '🔐 To view patient/family profile details, please make sure you are logged in.',
                 client_account_query:  '🔐 To view your account/subscription details, please make sure you are logged in.',
+                booking_query:         '🔐 To view your booking details, please make sure you are logged in.',
             };
             return {
                 question,
@@ -172,12 +215,43 @@ class LLMRetriever {
             };
         }
 
+        // Bookings span 3 tables (ip_bookings + ip_available_slots for the exact slot
+        // time, ip_booking_items, ip_booking_documents) and need multiple queries, so it
+        // gets its own handler instead of the single-SQL build/execute/format pipeline
+        // used below for the other intents.
+        if (intent === 'booking_query') {
+            const explicitLimit = this._extractBookingLimit(question);
+            const isHistory = !!explicitLimit || BOOKING_HISTORY_PATTERN.test(question) || entities.booking_history === true;
+            const { answer, dataFound } = await this.answerBookingQuery(patientId, isHistory, explicitLimit);
+            this._updateSession(sessionId, intent, entities);
+            llmService.saveToMemory(sessionId, question, answer);
+            return {
+                question,
+                answer,
+                context_used: {
+                    intent, entities: { booking_history: isHistory }, data_found: dataFound,
+                    used_llm: false, is_general: false, from_cache: false, session_id: sessionId
+                }
+            };
+        }
+
+        // "my profile" / "my blood group" → the logged-in patient's own row only.
+        // "family members" / "my mother's ..." → join across client_id to include
+        // everyone registered under the same account. GPT's entity extraction for
+        // relation/person_name isn't reliable enough alone, so fall back to a regex.
+        if (intent === 'patient_profile_query' && !entities.relation) {
+            const relMatch = question.match(RELATION_PATTERN);
+            if (relMatch) entities.relation = relMatch[1];
+        }
+        const isFamilyScope = intent === 'patient_profile_query' &&
+            (FAMILY_SCOPE_PATTERN.test(question) || !!entities.relation || !!entities.person_name);
+
         const sql = intent === 'branch_query'
             ? this.buildBranchQuery(entities)
             : intent === 'sample_status_query'
                 ? this.buildSampleQuery(entities, patientId)
                 : intent === 'patient_profile_query'
-                    ? this.buildPatientProfileQuery(entities, patientId)
+                    ? this.buildPatientProfileQuery(entities, patientId, isFamilyScope)
                     : intent === 'client_account_query'
                         ? this.buildClientAccountQuery(patientId)
                         : this.buildTestQuery(entities);
@@ -187,21 +261,14 @@ class LLMRetriever {
         let error = null;
 
         if (sql) {
-            const cachedRows = await cache.getQueryResult(sql);
-            if (cachedRows) {
-                data = cachedRows;
-                console.log(`🎯 Query cache HIT (${data.length} rows)`);
-            } else {
-                try {
-                    console.log(`🔍 SQL: ${sql}`);
-                    const [rows] = await db.pool.execute(sql);
-                    data = rows;
-                    console.log(`✅ ${data.length} results`);
-                    await cache.setQueryResult(sql, rows);
-                } catch (err) {
-                    error = err.message;
-                    console.error('Query error:', err);
-                }
+            try {
+                console.log(`🔍 SQL: ${sql}`);
+                const [rows] = await db.pool.execute(sql);
+                data = rows;
+                console.log(`✅ ${data.length} results`);
+            } catch (err) {
+                error = err.message;
+                console.error('Query error:', err);
             }
         }
 
@@ -210,7 +277,7 @@ class LLMRetriever {
         const formattedResponse = (intent === 'sample_status_query')
             ? this.formatSampleStatus(data, error)
             : (intent === 'patient_profile_query')
-                ? this.formatPatientProfile(data, error)
+                ? this.formatPatientProfile(data, error, isFamilyScope)
                 : (intent === 'client_account_query')
                     ? this.formatClientAccount(data, error)
                     : await llmService.formatResponse(question, intent, entities, data, error);
@@ -228,10 +295,6 @@ class LLMRetriever {
             }
         };
 
-        // Only cache successful, non-personal answers — never cache "not found" responses
-        // so bad results don't get served to the same question on retry, and never cache
-        // personal data so a different patient asking the same phrasing can't reuse it.
-        if (!isPronoun && !isPersonalQuestion && data.length > 0 && !error) await cache.setLLMAnswer(question, result);
         return result;
     }
 
@@ -283,12 +346,20 @@ class LLMRetriever {
         return `SELECT ${cols} FROM ip_sample_tracking WHERE patient_id = '${pid}' ORDER BY collected_at DESC LIMIT 10`;
     }
 
-    // Resolves the logged-in patient's client_id via a self-join, then returns every
-    // (non-deleted) patient row under that same client_id — i.e. the account holder
-    // plus any family members they registered. Never exposes another client's patients.
-    buildPatientProfileQuery(entities, patientId) {
+    // "my profile" (familyScope=false) → just the logged-in patient's own row.
+    // "family members" / "my mother's ..." (familyScope=true) → resolves the client_id
+    // via a self-join and returns every (non-deleted) patient row under that same
+    // client_id — i.e. the account holder plus any family members they registered.
+    // Never exposes another client's patients either way.
+    buildPatientProfileQuery(entities, patientId, familyScope) {
         if (!patientId) return null;
-        const pid  = String(patientId).replace(/'/g, "''");
+        const pid = String(patientId).replace(/'/g, "''");
+
+        if (!familyScope) {
+            const cols = PATIENT_COLS.map(c => `p.${c}`).join(', ');
+            return `SELECT ${cols} FROM ip_patients p WHERE p.patient_id = '${pid}' AND p.deleted_at IS NULL LIMIT 1`;
+        }
+
         const cols = PATIENT_COLS.map(c => `p2.${c}`).join(', ');
         const conditions = [`p1.patient_id = '${pid}'`, 'p2.deleted_at IS NULL'];
 
@@ -313,6 +384,137 @@ class LLMRetriever {
         return `SELECT ${cols} FROM ip_clients c ` +
                `JOIN ip_patients p ON p.client_id = c.client_id ` +
                `WHERE p.patient_id = '${pid}' LIMIT 1`;
+    }
+
+    // Parses an explicit count out of "last two bookings" / "past 3 bookings" / "last
+    // couple of bookings" — returns null if the question didn't name a specific count
+    // (caller then falls back to 1 for the latest, or 20 for a full history).
+    _extractBookingLimit(question) {
+        const m = question.match(BOOKING_LIMIT_PATTERN);
+        if (!m) return null;
+        const raw = m[1].toLowerCase().replace(/\s+of$/, '');
+        const n = /^\d+$/.test(raw) ? parseInt(raw, 10) : BOOKING_NUMBER_WORDS[raw];
+        return (n && n > 0) ? Math.min(n, 20) : null;
+    }
+
+    // Bookings, scoped strictly to this patient_id (not the whole family/client_id —
+    // per spec, only the particular patient's own bookings). Resolves the exact
+    // appointment slot via ip_available_slots (ip_bookings only stores the slot id),
+    // then pulls the line items and a document count for each booking found. Runs as
+    // several queries rather than one big join so item/document rows never duplicate
+    // the booking row (and so "no items" doesn't silently drop a booking via INNER JOIN).
+    async answerBookingQuery(patientId, isHistory, explicitLimit) {
+        if (!patientId) return { answer: '🔐 To view your booking details, please make sure you are logged in.', dataFound: 0 };
+        const pid = String(patientId).replace(/'/g, "''");
+        const limit = explicitLimit || (isHistory ? 20 : 1);
+
+        const bookingCols = 'b.booking_id, b.booking_ref, b.booking_date, b.booking_type, b.status, ' +
+            'b.payment_status, b.amount_paid, b.amount_due, b.total_amount, b.discount_amount, ' +
+            'b.discount_reason, b.city, b.postal_code, avs.slot_date, avs.slot_time';
+        // booking_date alone is not a reliable "latest" key — multiple bookings can share
+        // the same booking_date, and MySQL's tie-break order for equal ORDER BY values is
+        // undefined, so LIMIT 1 could return any of them. created_at is the actual
+        // insertion timestamp; booking_id (auto-increment PK) is a secondary tie-break for
+        // the rare case two rows share the same created_at.
+        const bookingSql = `SELECT ${bookingCols} FROM ip_bookings b ` +
+            `LEFT JOIN ip_available_slots avs ON avs.available_slot_id = b.available_slot_id ` +
+            `WHERE b.patient_id = '${pid}' AND b.deleted_at IS NULL ` +
+            `ORDER BY b.created_at DESC, b.booking_id DESC LIMIT ${limit}`;
+
+        let bookings = [];
+        try {
+            console.log(`🔍 SQL: ${bookingSql}`);
+            const [rows] = await db.pool.execute(bookingSql);
+            bookings = rows;
+        } catch (err) {
+            console.error('Booking query error:', err);
+            return { answer: `⚠️ Could not fetch booking information. Please try again or call 0422 4354242.`, dataFound: 0 };
+        }
+
+        if (bookings.length === 0) {
+            return { answer: `🔍 No booking found for your account. Please contact us at 0422 4354242.`, dataFound: 0 };
+        }
+
+        const idList = bookings.map(b => `'${String(b.booking_id).replace(/'/g, "''")}'`).join(',');
+        const itemsByBooking = new Map();
+        const docCountByBooking = new Map();
+
+        try {
+            const itemsSql = 'SELECT booking_id, product_name_snapshot, quantity, unit_price, ' +
+                'offer_price_snapshot, discount_amount, final_price, tat_hours_snapshot, item_status ' +
+                `FROM ip_booking_items WHERE booking_id IN (${idList}) AND patient_id = '${pid}' ` +
+                'ORDER BY booking_id, booking_item_id';
+            console.log(`🔍 SQL: ${itemsSql}`);
+            const [itemRows] = await db.pool.execute(itemsSql);
+            for (const it of itemRows) {
+                if (!itemsByBooking.has(it.booking_id)) itemsByBooking.set(it.booking_id, []);
+                itemsByBooking.get(it.booking_id).push(it);
+            }
+        } catch (err) {
+            console.error('Booking items query error:', err);
+        }
+
+        try {
+            const docsSql = 'SELECT booking_id, COUNT(*) AS doc_count FROM ip_booking_documents ' +
+                `WHERE booking_id IN (${idList}) AND patient_id = '${pid}' GROUP BY booking_id`;
+            console.log(`🔍 SQL: ${docsSql}`);
+            const [docRows] = await db.pool.execute(docsSql);
+            for (const d of docRows) docCountByBooking.set(d.booking_id, Number(d.doc_count) || 0);
+        } catch (err) {
+            console.error('Booking documents query error:', err);
+        }
+
+        return {
+            answer: this.formatBookingDetails(bookings, itemsByBooking, docCountByBooking, isHistory),
+            dataFound: bookings.length,
+        };
+    }
+
+    _renderBooking(b, itemsByBooking, docCountByBooking, numbered) {
+        const items    = itemsByBooking.get(b.booking_id) || [];
+        const docCount = docCountByBooking.get(b.booking_id) || 0;
+        const label    = b.booking_ref || `#${b.booking_id}`;
+
+        const lines = [numbered ? `${numbered}. Booking ${label}` : `🧾 Booking ${label}`];
+        lines.push(`   • Status: ${b.status || 'N/A'}${b.payment_status ? ` | Payment: ${b.payment_status}` : ''}`);
+        if (b.booking_type) lines.push(`   • Type: ${b.booking_type}`);
+        if (b.slot_date || b.slot_time) {
+            lines.push(`   • Scheduled: ${[this._fmtDateOnly(b.slot_date), b.slot_time].filter(Boolean).join(' ')}`);
+        }
+        if (b.booking_date) lines.push(`   • Booked on: ${this._fmtDateOnly(b.booking_date)}`);
+        if (b.city) lines.push(`   • Location: ${b.city}${b.postal_code ? ` - ${b.postal_code}` : ''}`);
+        if (b.total_amount != null) {
+            let amtLine = `   • Amount: ₹${b.total_amount}`;
+            if (b.discount_amount) amtLine += ` (Discount: ₹${b.discount_amount}${b.discount_reason ? ` — ${b.discount_reason}` : ''})`;
+            lines.push(amtLine);
+        }
+        if (b.amount_paid != null || b.amount_due != null) {
+            lines.push(`   • Paid: ₹${b.amount_paid || 0} | Due: ₹${b.amount_due || 0}`);
+        }
+        if (items.length > 0) {
+            lines.push('   • Tests/Items:');
+            for (const it of items) {
+                const price = it.final_price ?? it.offer_price_snapshot ?? it.unit_price;
+                let itLine = `      - ${it.product_name_snapshot || 'Item'}`;
+                if (it.quantity > 1) itLine += ` x${it.quantity}`;
+                if (price != null) itLine += ` — ₹${price}`;
+                if (it.item_status) itLine += ` (${it.item_status})`;
+                lines.push(itLine);
+            }
+        }
+        if (docCount > 0) lines.push(`   • 📎 Documents: ${docCount} uploaded`);
+        return lines.join('\n');
+    }
+
+    formatBookingDetails(bookings, itemsByBooking, docCountByBooking, isHistory) {
+        if (!bookings || bookings.length === 0) {
+            return `🔍 No booking found for your account. Please contact us at 0422 4354242.`;
+        }
+        if (!isHistory) {
+            return `🧾 Your latest booking:\n\n${this._renderBooking(bookings[0], itemsByBooking, docCountByBooking, null)}`;
+        }
+        const rendered = bookings.map((b, i) => this._renderBooking(b, itemsByBooking, docCountByBooking, i + 1));
+        return `📋 Your booking history:\n\n${rendered.join('\n\n')}`;
     }
 
     // Maps each sample_status to the date column that is most meaningful for it.
@@ -378,15 +580,17 @@ class LLMRetriever {
         return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
     }
 
-    formatPatientProfile(data, error) {
+    formatPatientProfile(data, error, familyScope) {
         if (error) return `⚠️ Could not fetch patient information. Please try again or call 0422 4354242.`;
         if (!data || data.length === 0) {
-            return `🔍 No patient records found for your account. Please contact us at 0422 4354242.`;
+            return `🔍 No patient record found${familyScope ? ' for your account' : ''}. Please contact us at 0422 4354242.`;
         }
 
         const lines = data.map((row, i) => {
             const name = [row.patient_name, row.patient_surname].filter(Boolean).join(' ') || 'Unnamed';
-            let line = `${i + 1}. ${name}${row.patient_relation ? ` (${row.patient_relation})` : ''}`;
+            let line = familyScope
+                ? `${i + 1}. ${name}${row.patient_relation ? ` (${row.patient_relation})` : ''}`
+                : name;
             if (row.patient_gender)      line += `\n   • Gender: ${row.patient_gender}`;
             if (row.patient_age != null) line += `\n   • Age: ${row.patient_age}`;
             if (row.patient_dob)         line += `\n   • DOB: ${this._fmtDateOnly(row.patient_dob)}`;
@@ -398,7 +602,8 @@ class LLMRetriever {
             return line;
         });
 
-        return `👨‍👩‍👧‍👦 Patients on your account:\n\n${lines.join('\n\n')}`;
+        const heading = familyScope ? '👨‍👩‍👧‍👦 Patients on your account:' : '👤 Your profile:';
+        return `${heading}\n\n${lines.join('\n\n')}`;
     }
 
     formatClientAccount(data, error) {

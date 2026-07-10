@@ -4,9 +4,7 @@ const path    = require('path');
 require('dotenv').config();
 
 const app = express();
-const cache = require('./services/cacheService');
 const { init: initKnowledge, reloadQA } = require('./services/knowledgeService');
-const { clearPageCache } = require('./rag/websiteReader');
 
 app.use(cors());
 app.use(express.json());
@@ -24,7 +22,7 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', cache: cache.isConnected ? 'redis' : 'disabled' });
+  res.json({ status: 'ok' });
 });
 
 // Hot-reload FAQ without restarting
@@ -33,23 +31,9 @@ app.post('/api/reload-qa', (req, res) => {
   res.json({ success: true, ...result });
 });
 
-// Invalidate cached website pages (call after site update)
-app.post('/api/clear-site-cache', async (req, res) => {
-  await clearPageCache();
-  res.json({ success: true, message: 'Website page cache cleared' });
-});
-
-// Flush Redis cache by pattern
-app.delete('/api/cache', async (req, res) => {
-  const { pattern = '*' } = req.query;
-  await cache.flush(pattern);
-  res.json({ success: true, message: `Cache flushed (pattern: ${pattern})` });
-});
-
 const PORT = process.env.PORT || 3000;
 
 async function start() {
-  await cache.connect();
   await initKnowledge();
   app.listen(PORT, () => {
     console.log(`🚀 MicroLab server running on http://localhost:${PORT}`);

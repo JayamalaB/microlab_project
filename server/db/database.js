@@ -2,7 +2,6 @@
 
 const mysql        = require('mysql2');
 require('dotenv').config();
-const cache        = require('../services/cacheService');
 
 // ── Chatbot database: adminmicro (ip_products, ip_branches, history, bookings) ─
 const pool = mysql.createPool({
@@ -19,9 +18,6 @@ const pool = mysql.createPool({
 const promisePool = pool.promise();
 
 async function getTableSchemas() {
-    const cached = await cache.getSchema();
-    if (cached) return cached;
-
     try {
         const [tables] = await promisePool.execute(
             'SELECT table_name FROM information_schema.tables WHERE table_schema = ?',
@@ -35,7 +31,6 @@ async function getTableSchemas() {
             );
             schemas[table.table_name] = columns;
         }
-        await cache.setSchema(schemas);
         return schemas;
     } catch (error) {
         return {};
@@ -48,7 +43,6 @@ async function saveConversation(question, answer, contextUsed) {
             'INSERT INTO conversation_history (question, answer, context_used) VALUES (?, ?, ?)',
             [question, answer, JSON.stringify(contextUsed)]
         );
-        await cache.del('conversation:history');
     } catch (error) {
         console.error('Save error:', error);
     }

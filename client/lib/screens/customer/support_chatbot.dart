@@ -509,6 +509,48 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
     caseSensitive: false,
   ).hasMatch(text);
 
+  // Matches questions about the patient's own profile/family members (ip_patients) or
+  // account/subscription (ip_clients) — mirrors PATIENT_PROFILE_PATTERN,
+  // FAMILY_SCOPE_PATTERN, and BARE_RELATION_PATTERN in server/rag/llmRetriever.js so
+  // both layers agree on what needs authentication. Includes plain-language synonyms
+  // for "profile" ("my information", "my data", "my details") since patients don't
+  // always use that exact word, and a bare relation word/"family" as a short follow-up
+  // after the bot lists family members (e.g. just typing "sister" or "mother").
+  static bool _isPatientAccountQuery(String text) {
+    const relationWords =
+        'mother|father|spouse|wife|husband|child|children|son|daughter|sister|brother';
+    const infoWords = 'info|information|data|details|records?';
+
+    final isBareRelation = RegExp(
+      "^\\s*($relationWords|family)'?s?\\s*[?.!]?\\s*\$",
+      caseSensitive: false,
+    ).hasMatch(text);
+    if (isBareRelation) return true;
+
+    return RegExp(
+      "\\b(family members?|my patients?|patients? (on|under|in) my account|my profile|patient profile|"
+      "my ($infoWords)|my (blood group|dob|date of birth)|"
+      "my ($relationWords)'?s?|my family|family ($infoWords)|"
+      "my subscription|subscription (tier|plan)|my (account status|membership)|is my account active|client account)\\b",
+      caseSensitive: false,
+    ).hasMatch(text);
+  }
+
+  // Matches questions about the patient's own bookings (ip_bookings) — mirrors
+  // BOOKING_QUERY_PATTERN in server/rag/llmRetriever.js, including "last/past/previous
+  // [N] bookings" phrasing. Deliberately requires "booking(s)" so it doesn't collide
+  // with the Book Test flow ("book a test").
+  static bool _isBookingQuery(String text) {
+    const countWord =
+        r'\d+|one|two|three|four|five|six|seven|eight|nine|ten|couple(?: of)?|few';
+    return RegExp(
+      "\\b(my bookings?|bookings?\\s*(details|info(rmation)?|status|history)|"
+      "(latest|recent)\\s*bookings?|(last|past|previous)\\s*($countWord)?\\s*bookings?|"
+      "track my booking|booking ref(erence)?|(all|show|list)\\s*(my\\s*)?bookings)\\b",
+      caseSensitive: false,
+    ).hasMatch(text);
+  }
+
   // ── Mic / STT ──────────────────────────────────────────────────────────────
   late final AudioRecorder _recorder;
   _MicState _micState = _MicState.idle;
@@ -953,8 +995,11 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
       return;
     }
 
-    // If asking about personal sample/report and not yet authenticated, show login form
-    if (_isSampleQuery(text) && _verifiedPatientId == null) {
+    // If asking about personal sample/report, profile/family, account/subscription, or
+    // booking data and not yet authenticated, show the login form instead of sending to
+    // the server (which would just reply with a plain "please log in" text bubble).
+    if ((_isSampleQuery(text) || _isPatientAccountQuery(text) || _isBookingQuery(text)) &&
+        _verifiedPatientId == null) {
       await Future.delayed(const Duration(milliseconds: 300));
       if (!mounted) return;
       setState(() => _msgs.add(_Msg(

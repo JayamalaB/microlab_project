@@ -1,6 +1,5 @@
 const OpenAI = require('openai');
 require('dotenv').config();
-const cache = require('./cacheService');
 
 class LLMService {
     constructor() {
@@ -82,12 +81,6 @@ Try asking:
             }
         }
 
-        const cachedIntent = await cache.getIntent(question);
-        if (cachedIntent) {
-            console.log('🎯 Intent cache HIT for:', question);
-            return cachedIntent;
-        }
-
         try {
             const prompt = `You are a database query assistant for MicroLab, a diagnostic laboratory. Be precise and concise.
 
@@ -102,6 +95,10 @@ Database Schema (ONLY these tables exist — never reference any other table):
   (the logged-in patient's own profile PLUS family members registered under the same account — ONLY use when patient asks about THEIR OWN profile, a family member/relative, or "who is on my account")
 - ip_clients: client_name, client_mobile_no, subscription_tier, client_account_status
   (the logged-in patient's account/subscription info — ONLY use when patient asks about THEIR OWN subscription plan or account status)
+- ip_bookings + ip_booking_items + ip_booking_documents + ip_available_slots
+  (the logged-in patient's OWN bookings — status, payment, appointment slot date/time, the tests/items
+  booked, and how many documents are attached. ONLY use when patient asks about THEIR OWN booking(s),
+  e.g. "my booking", "booking details", "booking status", "track my booking", "booking history")
 
 Intent rules:
 - "show all tests", "list tests", "available tests", "what tests do you have" → test_query, keyword: null (list all)
@@ -111,13 +108,15 @@ Intent rules:
 - "my sample status", "where is my report", "track my test", "my result", "has my sample been collected" → sample_status_query
 - "who are my family members", "list patients on my account", "my profile", "my blood group", "my mother's details" → patient_profile_query
 - "my subscription", "my plan", "my account status", "is my account active" → client_account_query
+- "my booking", "booking details", "booking status", "track my booking", "latest booking" → booking_query, booking_history: false
+- "booking history", "all my bookings", "past bookings", "show my bookings" → booking_query, booking_history: true
 - NEVER set keyword to "available tests", "all tests", "show all" — those mean list everything
 
 User Question: "${question}"
 
 Respond with ONLY a JSON object (no extra text):
 {
-    "intent": "test_query|branch_query|sample_status_query|patient_profile_query|client_account_query|general",
+    "intent": "test_query|branch_query|sample_status_query|patient_profile_query|client_account_query|booking_query|general",
     "entities": {
         "product_name": "specific test or package name, or null",
         "keyword": "category/type to search (e.g. thyroid, blood, vitamin), or null",
@@ -127,7 +126,8 @@ Respond with ONLY a JSON object (no extra text):
         "fasting_query": true/false,
         "booking_id": "booking ID if patient mentions one, or null",
         "relation": "family relation mentioned, e.g. mother, father, spouse, child, self, or null",
-        "person_name": "specific family member's name mentioned, or null"
+        "person_name": "specific family member's name mentioned, or null",
+        "booking_history": true/false
     },
     "is_general": true/false
 }`;
@@ -142,7 +142,6 @@ Respond with ONLY a JSON object (no extra text):
             const result = JSON.parse(response.choices[0].message.content);
             console.log('🧠 LLM Intent:', result);
 
-            await cache.setIntent(question, result);
             return result;
 
         } catch (error) {
