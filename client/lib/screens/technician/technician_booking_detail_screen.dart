@@ -121,6 +121,9 @@ class _TechnicianBookingDetailScreenState
 
   late String _currentStatus;
   List<Map<String, String>> _selectedTests = [];
+  // IDs of tests that existed in the booking at screen open — used to block
+  // deletion of paid original tests without affecting newly added ones.
+  Set<String> _originalItemIds = {};
   bool _itemsLoading = true;
   List<Map<String, String>> _catalogueItems = [];
   bool _showAddTest = false;
@@ -134,29 +137,14 @@ class _TechnicianBookingDetailScreenState
   static const int _docMaxFiles = 5;
   final ImagePicker _picker = ImagePicker();
 
-  // Payment
+  // Payment — live values fetched from server in initState, overriding immutable widget.booking fields
   bool _isProcessingPayment = false;
-  bool _paymentDone = false;
+  double _sessionPaymentCollected = 0.0;
+  late String _livePaymentStatus;  // refreshed from server; starts from widget value
+  late double _liveAmountPaid;     // refreshed from server; starts from widget value
 
-  // New customer form
-  bool _showNewCustomerForm = false;
-  bool _isSavingCustomer = false;
-  // Customers added this session (name, bookingRef)
-  final List<Map<String, String>> _savedCustomers = [];
-  final _ncNameCtrl    = TextEditingController();
-  final _ncMobileCtrl  = TextEditingController();
-  final _ncEmailCtrl   = TextEditingController();
-  final _ncDobCtrl     = TextEditingController();
-  final _ncRelCtrl     = TextEditingController();
-  final _ncHealthCtrl  = TextEditingController();
-  DateTime? _ncDob;
-  int? _ncCalculatedAge;
-  String? _ncGender;
-  final List<String> _ncGenders = ['Male', 'Female', 'Other'];
-  final List<String> _ncRelations = ['Self','Spouse','Father','Mother','Son','Daughter','Brother','Sister','Other'];
-  late List<Map<String, String>> _additionalCustomerTests;
-  bool _showAddCustTest = false;
-  String _custTestSearch = '';
+  // Visit members linked to this booking (refreshed after each add)
+  List<Map<String, dynamic>> _linkedPatients = [];
 
   // OTP
   final List<TextEditingController> _otpControllers =
@@ -173,7 +161,22 @@ class _TechnicianBookingDetailScreenState
 
   double get _serviceChargePaid => widget.booking.serviceChargePaid;
 
-  double get _amountDue => _testsTotal;
+  double get _amountDue {
+    final due = _testsTotal - (_liveAmountPaid + _sessionPaymentCollected);
+    return due < 0.0 ? 0.0 : due;
+  }
+
+  bool get _paymentDone => _amountDue <= 0.0;
+
+  // A test is locked when it was already paid for:
+  // - original tests on a booking whose payment_status is 'paid', OR
+  // - tests that existed in the booking when the technician collected payment
+  //   this session (captured in _paidTestIds at the moment of collection).
+  Set<String> _paidTestIds = {};
+
+  bool _isTestLocked(String testId) =>
+      (_livePaymentStatus == 'paid' && _originalItemIds.contains(testId)) ||
+      _paidTestIds.contains(testId);
 
   int get _currentStepIndex =>
       _journeySteps.indexWhere((s) => s.status == _currentStatus);
@@ -190,10 +193,30 @@ class _TechnicianBookingDetailScreenState
   @override
   void initState() {
     super.initState();
-    _currentStatus = widget.booking.status;
-    _additionalCustomerTests = [];
+    _currentStatus        = widget.booking.status;
+    _livePaymentStatus    = widget.booking.paymentStatus;
+    _liveAmountPaid       = widget.booking.amountPaid;
     _loadItems();
     _loadDocs();
+    _loadLinkedPatients();
+    _refreshPaymentInfo();
+  }
+
+  // Fetches fresh payment_status + amount_paid from the server so the screen
+  // never shows stale data from the time the dashboard last loaded bookings.
+  Future<void> _refreshPaymentInfo() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) return;
+    try {
+      final data = await ApiService.getBookingPaymentInfo(bookingId);
+      if (!mounted || data == null) return;
+      setState(() {
+        _livePaymentStatus = data['payment_status'] as String? ?? _livePaymentStatus;
+        _liveAmountPaid    = double.tryParse(data['amount_paid']?.toString() ?? '') ?? _liveAmountPaid;
+      });
+    } catch (e) {
+      debugPrint('[_refreshPaymentInfo] $e');
+    }
   }
 
   Future<void> _loadDocs() async {
@@ -248,6 +271,7 @@ class _TechnicianBookingDetailScreenState
           // MySQL DECIMAL comes back as a String from mysql2 — parse it safely
           'price':         double.tryParse(i['price']?.toString() ?? '0')?.toStringAsFixed(0) ?? '0',
         }).toList();
+        _originalItemIds = items.map((i) => i['product_id']?.toString() ?? '').toSet();
         _catalogueItems = catalogue;
         _itemsLoading = false;
       });
@@ -257,92 +281,51 @@ class _TechnicianBookingDetailScreenState
     }
   }
 
-  Future<void> _saveNewCustomer() async {
-    final name   = _ncNameCtrl.text.trim();
-    final mobile = _ncMobileCtrl.text.trim();
-
-    if (name.isEmpty || mobile.length != 10) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Please fill all required fields'),
-        backgroundColor: Colors.red,
-      ));
-      return;
-    }
-
-    final tests      = List<Map<String, String>>.from(_additionalCustomerTests);
-    final productIds = tests
-        .map((t) => int.tryParse(t['id'] ?? ''))
-        .whereType<int>()
-        .toList();
-
-    setState(() => _isSavingCustomer = true);
-
+  Future<void> _loadLinkedPatients() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) return;
     try {
-      final parentBookingId = int.tryParse(widget.booking.id) ?? 0;
+      final patients = await ApiService.getLinkedPatients(bookingId);
+      if (mounted) setState(() => _linkedPatients = patients);
+    } catch (e) {
+      debugPrint('[_loadLinkedPatients] ERROR: $e');
+    }
+  }
 
-      String? dobStr;
-      if (_ncDob != null) {
-        dobStr =
-            '${_ncDob!.year}-${_ncDob!.month.toString().padLeft(2, '0')}-${_ncDob!.day.toString().padLeft(2, '0')}';
-      }
-
-      final result = await ApiService.addCustomerBooking(
+  Future<void> _openAddVisitMemberSheet() async {
+    final parentBookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (parentBookingId == 0) return;
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _AddVisitMemberSheet(
         parentBookingId: parentBookingId,
-        name:        name,
-        mobile:      mobile,
-        email:       _ncEmailCtrl.text.trim().isEmpty ? null : _ncEmailCtrl.text.trim(),
-        dob:         dobStr,
-        age:         _ncCalculatedAge,
-        gender:      _ncGender,
-        relation:    _ncRelCtrl.text.isEmpty ? null : _ncRelCtrl.text,
-        healthNotes: _ncHealthCtrl.text.trim().isEmpty ? null : _ncHealthCtrl.text.trim(),
-        productIds:  productIds,
-      );
-
-      if (!mounted) return;
-
-      if (result != null) {
-        // Reload tests section — devid's items are now under this same booking
-        _loadItems();
-
-        setState(() {
-          _isSavingCustomer = false;
-          _showNewCustomerForm = false;
-          _savedCustomers.add({
-            'name':   name,
-            'mobile': mobile,
-          });
-          _ncNameCtrl.clear(); _ncMobileCtrl.clear();
-          _ncEmailCtrl.clear(); _ncDobCtrl.clear();
-          _ncRelCtrl.clear(); _ncHealthCtrl.clear();
-          _ncDob = null; _ncCalculatedAge = null;
-          _ncGender = null; _additionalCustomerTests.clear();
-          _showAddCustTest = false; _custTestSearch = '';
-        });
-
+        catalogueItems: _catalogueItems,
+      ),
+    );
+    if (result != null && mounted) {
+      final name       = result['name']       as String? ?? '';
+      final mobile     = result['mobile']     as String? ?? '';
+      final bookingRef = result['bookingRef'] as String?;
+      setState(() {
+        _linkedPatients = [
+          ..._linkedPatients,
+          {
+            'patient_name':   name,
+            'patient_mobile': mobile,
+            if (bookingRef != null) 'booking_ref': bookingRef,
+          },
+        ];
+      });
+      _loadLinkedPatients();
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('$name added successfully'),
+          content: Text(bookingRef != null ? '$name added · $bookingRef' : '$name added'),
           backgroundColor: AppColors.brandGreen,
           behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 4),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
-      } else {
-        setState(() => _isSavingCustomer = false);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to save customer — please retry'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-        ));
-      }
-    } catch (e) {
-      debugPrint('[_saveNewCustomer] ERROR: $e');
-      if (mounted) {
-        setState(() => _isSavingCustomer = false);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to save customer — please retry'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
         ));
       }
     }
@@ -351,55 +334,15 @@ class _TechnicianBookingDetailScreenState
   @override
   void dispose() {
     clearRazorpay();
-    _ncNameCtrl.dispose();
-    _ncMobileCtrl.dispose();
-    _ncEmailCtrl.dispose();
-    _ncDobCtrl.dispose();
-    _ncRelCtrl.dispose();
-    _ncHealthCtrl.dispose();
     for (final c in _otpControllers) c.dispose();
     for (final f in _otpFocusNodes) f.dispose();
     super.dispose();
   }
 
-  // ── New customer DOB picker ───────────────────────────────
-
-  Future<void> _pickNcDate() async {
-    final now = DateTime.now();
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: _ncDob ?? DateTime(now.year - 30),
-      firstDate: DateTime(now.year - 120),
-      lastDate: now,
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.light(primary: AppColors.brandGreen),
-        ),
-        child: child!,
-      ),
-    );
-    if (picked != null) {
-      int age = now.year - picked.year;
-      if (now.month < picked.month ||
-          (now.month == picked.month && now.day < picked.day)) age--;
-      setState(() {
-        _ncDob = picked;
-        _ncCalculatedAge = age;
-        _ncDobCtrl.text =
-            '${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}';
-      });
-    }
-  }
-
   // ── Journey advance ───────────────────────────────────────
 
-// ── Journey advance ───────────────────────────────────────
-
 void _advanceStatus() {
-  if (_currentStatus == 'Handed to Lab') {
-    Navigator.of(context).pop(true);
-    return;
-  }
+  if (_currentStatus == 'Handed to Lab') return;
 
   final next = _nextStatus;
   if (next == null) return;
@@ -419,12 +362,15 @@ void _advanceStatus() {
     return;
   }
 
-  // Final step: emit handed_to_lab and close screen
+  // Final step: payment check, then emit handed_to_lab and close screen
   if (next == 'Handed to Lab') {
+    if (!_paymentDone && _amountDue > 0) {
+      _showCompleteSheet();
+      return;
+    }
     final bookingId = int.tryParse(widget.booking.id) ?? 0;
     SocketService.instance.emitHandedToLab(bookingId: bookingId);
     setState(() => _currentStatus = 'Handed to Lab');
-    Navigator.of(context).pop(true);
     return;
   }
 
@@ -489,10 +435,7 @@ void _handleStatusTransition(String next) {
         // If OTP was verified inside, propagate the completion signal up to
         // whoever opened this Manage Booking screen (e.g. the dashboard).
         if (wasCompleted == true && mounted) {
-          // CRITICAL: Set status to Completed before popping
           setState(() => _currentStatus = 'Handed to Lab');
-          // Pop with true to signal completion to parent
-          Navigator.of(context).pop(true);
         } else if (wasCompleted == false && mounted) {
           // If not completed, make sure status is still Journey Started
           // This handles the case where user came back without completing
@@ -541,13 +484,8 @@ void _resumeJourney() {
     ),
   ).then((wasCompleted) {
     if (wasCompleted == true && mounted) {
-      // CRITICAL: Set status to Completed before popping
-      setState(() => _currentStatus = 'Completed');
-      // Signal completion to parent screen
-      Navigator.of(context).pop(true);
+      setState(() => _currentStatus = 'Handed to Lab');
     } else if (wasCompleted == false && mounted) {
-      // If not completed, status stays as Journey Started
-      // This handles the case where user came back without completing
       setState(() => _currentStatus = 'Journey Started');
     }
   });
@@ -734,6 +672,14 @@ void _resumeJourney() {
   // ── Tests ─────────────────────────────────────────────────
 
   Future<void> _removeTest(String id) async {
+    if (_isTestLocked(id)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Tests cannot be removed after payment has been collected.'),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
     final test          = _selectedTests.firstWhere((t) => t['id'] == id, orElse: () => {});
     final bookingItemId = int.tryParse(test['bookingItemId'] ?? '');
     // Remove from UI immediately (optimistic)
@@ -787,16 +733,6 @@ void _resumeJourney() {
       if (_searchQuery.isEmpty) return true;
       return (t['name']?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false) ||
           (t['category']?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false);
-    }).toList();
-  }
-
-  List<Map<String, String>> get _filteredCustCatalogue {
-    final already = _additionalCustomerTests.map((t) => t['id']).toSet();
-    return _catalogueItems.where((t) {
-      if (already.contains(t['id'])) return false;
-      if (_custTestSearch.isEmpty) return true;
-      return (t['name']?.toLowerCase().contains(_custTestSearch.toLowerCase()) ?? false) ||
-          (t['category']?.toLowerCase().contains(_custTestSearch.toLowerCase()) ?? false);
     }).toList();
   }
 
@@ -970,7 +906,11 @@ void _resumeJourney() {
               _CompleteStep(
                 number: '1',
                 title: 'Collect Payment',
-                subtitle: 'Collect ₹${_amountDue.toInt()} from customer (tests amount)',
+                subtitle: _paymentDone
+                    ? 'All payments collected'
+                    : _livePaymentStatus == 'paid'
+                        ? 'Original ₹${_liveAmountPaid.toInt()} paid. Collect additional: ₹${_amountDue.toInt()}'
+                        : 'Collect ₹${_amountDue.toInt()} from customer (tests amount)',
                 done: _paymentDone,
                 locked: false,
                 buttonLabel: _paymentDone ? 'Paid ✓' : 'Make Payment  ₹${_amountDue.toInt()}',
@@ -980,7 +920,6 @@ void _resumeJourney() {
                     : () {
                         Navigator.pop(ctx);
                         _collectPayment(onDone: () {
-                          setState(() => _paymentDone = true);
                           Future.delayed(
                               const Duration(milliseconds: 300), _showCompleteSheet);
                         });
@@ -994,11 +933,11 @@ void _resumeJourney() {
                 number: '2',
                 title: 'Verify OTP',
                 subtitle: 'Ask customer for the OTP sent to their phone',
-                done: _isCompleted,
+                done: _currentStatus == 'OTP Verified' || _isCompleted,
                 locked: !_paymentDone,
-                buttonLabel: _isCompleted ? 'Verified ✓' : 'Verify OTP',
+                buttonLabel: (_currentStatus == 'OTP Verified' || _isCompleted) ? 'Verified ✓' : 'Verify OTP',
                 buttonColor: AppColors.brandGreen,
-                onTap: (!_paymentDone || _isCompleted)
+                onTap: (!_paymentDone || _currentStatus == 'OTP Verified' || _isCompleted)
                     ? null
                     : () {
                         Navigator.pop(ctx);
@@ -1054,17 +993,39 @@ void _resumeJourney() {
     openRazorpay(
       options: options,
       onSuccess: (paymentId) {
+        // Capture amount + test IDs before state changes
+        final paidAmount      = _amountDue;
+        final bookingId       = int.tryParse(widget.booking.id) ?? 0;
+        final nowPaidTestIds  = _selectedTests.map((t) => t['id'] ?? '').toSet();
         setState(() {
-          _isProcessingPayment = false;
-          _paymentDone = true;
+          _isProcessingPayment     = false;
+          _sessionPaymentCollected += paidAmount;
+          _livePaymentStatus       = 'paid';
+          _paidTestIds             = {..._paidTestIds, ...nowPaidTestIds};
         });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Payment of ₹${_amountDue.toInt()} received · $paymentId'),
+          content: Text('Payment of ₹${paidAmount.toInt()} received · $paymentId'),
           backgroundColor: AppColors.brandGreen,
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ));
         onDone?.call();
+        // Persist payment to DB — async but with error feedback
+        () async {
+          final ok = await ApiService.collectPayment(
+            bookingId: bookingId,
+            razorpayPaymentId: paymentId,
+            amount: paidAmount,
+          );
+          if (!ok && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Payment saved locally but server sync failed — contact support'),
+              backgroundColor: Colors.orange,
+              behavior: SnackBarBehavior.floating,
+              duration: Duration(seconds: 6),
+            ));
+          }
+        }();
       },
       onError: (msg) {
         setState(() => _isProcessingPayment = false);
@@ -1085,7 +1046,12 @@ void _resumeJourney() {
       orElse: () => _journeySteps.first,
     );
 
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) Navigator.of(context).pop(_isCompleted ? true : null);
+      },
+      child: Scaffold(
       backgroundColor: const Color(0xFFF4F6F8),
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
@@ -1333,7 +1299,9 @@ void _resumeJourney() {
                       const SizedBox(width: 8),
                       GestureDetector(
                         onTap: () { _removeTest(t['id'] ?? ''); },
-                        child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                        child: _isTestLocked(t['id'] ?? '')
+                            ? const Icon(Icons.lock_outline_rounded, size: 16, color: AppColors.textHint)
+                            : const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
                       ),
                     ],
                   ]),
@@ -1583,7 +1551,11 @@ void _resumeJourney() {
                     const Icon(Icons.info_outline_rounded, size: 14, color: AppColors.brandGreen),
                     const SizedBox(width: 8),
                     Expanded(child: Text(
-                      'Service charge ₹${_serviceChargePaid.toInt()} paid at booking. Collect tests amount: ₹${_amountDue.toInt()}',
+                      _paymentDone
+                          ? 'Service charge ₹${_serviceChargePaid.toInt()} paid at booking. All tests also paid.'
+                          : _livePaymentStatus == 'paid'
+                              ? 'Original booking (₹${_liveAmountPaid.toInt()}) paid. Collect additional tests: ₹${_amountDue.toInt()}'
+                              : 'Service charge ₹${_serviceChargePaid.toInt()} paid at booking. Collect tests amount: ₹${_amountDue.toInt()}',
                       style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
                     )),
                   ]),
@@ -1592,18 +1564,18 @@ void _resumeJourney() {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: _isProcessingPayment || _amountDue == 0 ? null : () => _collectPayment(onDone: null),
+                    onPressed: _isProcessingPayment || _paymentDone ? null : () => _collectPayment(onDone: null),
                     icon: _isProcessingPayment
                         ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                         : const Icon(Icons.payment_outlined, size: 18),
                     label: Text(
-                      _amountDue == 0 
-                          ? 'No Payment Required' 
+                      _paymentDone
+                          ? 'Paid ✓'
                           : (_isProcessingPayment ? 'Processing…' : 'Collect ₹${_amountDue.toInt()} via Razorpay'),
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: _amountDue == 0 ? AppColors.brandGreen : const Color(0xFF1565C0), 
+                      backgroundColor: _paymentDone ? AppColors.brandGreen : const Color(0xFF1565C0),
                       foregroundColor: Colors.white,
                       elevation: 0, 
                       padding: const EdgeInsets.symmetric(vertical: 12),
@@ -1616,23 +1588,21 @@ void _resumeJourney() {
 
           const SizedBox(height: 14),
 
-          // ── Add New Customer ──────────────────────────────
+          // ── Visit Members (Same Location) ─────────────────
           _SectionCard(
-            title: 'Add New Customer',
-            icon: Icons.person_add_outlined,
+            title: 'Visit Members',
+            icon: Icons.group_outlined,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'If another person at this location also needs a blood test, add their details here.',
+                  'Add family members at this address who also need a blood test during this visit.',
                   style: TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
                 ),
                 const SizedBox(height: 12),
 
-                // Show already-added customers this session
-                if (_savedCustomers.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  ..._savedCustomers.map((c) => Container(
+                if (_linkedPatients.isNotEmpty) ...[
+                  ..._linkedPatients.map((c) => Container(
                     margin: const EdgeInsets.only(bottom: 8),
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                     decoration: BoxDecoration(
@@ -1643,334 +1613,44 @@ void _resumeJourney() {
                     child: Row(children: [
                       const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
                       const SizedBox(width: 8),
-                      Expanded(child: Text(
-                        '${c['name']}  ·  ${c['mobile']}',
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                      Expanded(child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                          ),
+                          if ((c['booking_ref'] as String?) != null)
+                            Text(c['booking_ref'] as String,
+                                style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                        ],
                       )),
-                      Text(
-                        c['ref'] ?? '',
-                        style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
-                      ),
                     ]),
                   )),
-                  const SizedBox(height: 4),
-                ],
-
-                if (!_showNewCustomerForm)
-                  GestureDetector(
-                    onTap: () => setState(() => _showNewCustomerForm = true),
-                    child: Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      decoration: BoxDecoration(
-                        color: AppColors.brandGreenSurface,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: AppColors.brandGreenLight),
-                      ),
-                      child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                        Icon(Icons.add_rounded, size: 18, color: AppColors.brandGreen),
-                        SizedBox(width: 6),
-                        Text('Add New Customer',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-                      ]),
-                    ),
-                  ),
-
-                if (_showNewCustomerForm) ...[
-                  _FormField(
-                    label: 'Full Name *',
-                    controller: _ncNameCtrl,
-                    hint: 'Enter customer name',
-                    icon: Icons.person_outline,
-                    keyboardType: TextInputType.name,
-                  ),
-                  const SizedBox(height: 10),
-
-                  _FormField(
-                    label: 'Mobile Number *',
-                    controller: _ncMobileCtrl,
-                    hint: '10-digit mobile number',
-                    icon: Icons.phone_outlined,
-                    keyboardType: TextInputType.phone,
-                    maxLength: 10,
-                  ),
-                  const SizedBox(height: 10),
-
-                  _FormField(
-                    label: 'Email Address',
-                    controller: _ncEmailCtrl,
-                    hint: 'example@email.com',
-                    icon: Icons.email_outlined,
-                    keyboardType: TextInputType.emailAddress,
-                  ),
-                  const SizedBox(height: 10),
-
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Date of Birth',
-                          style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                      const SizedBox(height: 6),
-                      GestureDetector(
-                        onTap: _pickNcDate,
-                        child: Container(
-                          height: 50,
-                          padding: const EdgeInsets.symmetric(horizontal: 14),
-                          decoration: BoxDecoration(
-                            color: AppColors.background,
-                            border: Border.all(color: AppColors.divider),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Row(children: [
-                            const Icon(Icons.cake_outlined, size: 18, color: AppColors.textHint),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                _ncDobCtrl.text.isEmpty ? 'DD/MM/YYYY' : _ncDobCtrl.text,
-                                style: TextStyle(
-                                    fontSize: 14,
-                                    color: _ncDobCtrl.text.isEmpty
-                                        ? AppColors.textHint
-                                        : AppColors.textPrimary),
-                              ),
-                            ),
-                            if (_ncCalculatedAge != null)
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: AppColors.brandGreenSurface,
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                                child: Text('$_ncCalculatedAge yrs',
-                                    style: const TextStyle(
-                                        fontSize: 12,
-                                        color: AppColors.brandGreen,
-                                        fontWeight: FontWeight.w600)),
-                              ),
-                            const SizedBox(width: 6),
-                            const Icon(Icons.calendar_month_outlined,
-                                size: 18, color: AppColors.textSecondary),
-                          ]),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Gender',
-                          style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                      const SizedBox(height: 6),
-                      Wrap(
-                        spacing: 8, runSpacing: 6,
-                        children: ['Male', 'Female', 'Other'].map((g) => GestureDetector(
-                          onTap: () => setState(() => _ncGender = g),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 150),
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: _ncGender == g ? AppColors.brandGreen : Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: _ncGender == g ? AppColors.brandGreen : AppColors.divider),
-                            ),
-                            child: Text(g,
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                    color: _ncGender == g ? Colors.white : AppColors.textSecondary)),
-                          ),
-                        )).toList(),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-
-                  DropdownButtonFormField<String>(
-                    value: _ncRelCtrl.text.isEmpty ? null : _ncRelCtrl.text,
-                    isExpanded: true,
-                    hint: const Text('Relation to patient',
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 13, color: AppColors.textHint)),
-                    decoration: InputDecoration(
-                      prefixIcon: const Icon(Icons.group_outlined, size: 18, color: AppColors.textHint),
-                      filled: true, fillColor: AppColors.background,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    ),
-                    items: _ncRelations.map((r) => DropdownMenuItem(value: r, child: Text(r, style: const TextStyle(fontSize: 13)))).toList(),
-                    onChanged: (v) => setState(() => _ncRelCtrl.text = v ?? ''),
-                  ),
-                  const SizedBox(height: 12),
-
-                  _FormField(
-                    label: 'Health Condition / Notes',
-                    controller: _ncHealthCtrl,
-                    hint: 'e.g. Diabetes, Hypertension, Thyroid…',
-                    icon: Icons.medical_information_outlined,
-                    maxLines: 2,
-                  ),
-                  const SizedBox(height: 12),
-
-                  const Text('Tests for this customer',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                   const SizedBox(height: 8),
-
-                  if (_additionalCustomerTests.isEmpty)
-                    const Text('No tests added yet.',
-                        style: TextStyle(fontSize: 12, color: AppColors.textHint)),
-
-                  ..._additionalCustomerTests.map((t) => Container(
-                    margin: const EdgeInsets.only(bottom: 6),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: AppColors.divider),
-                    ),
-                    child: Row(children: [
-                      Expanded(child: Text(t['name'] ?? '',
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500))),
-                      Text('₹${t['price'] ?? '0'}',
-                          style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-                      const SizedBox(width: 8),
-                      GestureDetector(
-                        onTap: () => setState(() => _additionalCustomerTests.removeWhere((x) => x['id'] == t['id'])),
-                        child: const Icon(Icons.close_rounded, size: 16, color: AppColors.textHint),
-                      ),
-                    ]),
-                  )),
-
-                  const SizedBox(height: 6),
-                  if (!_showAddCustTest)
-                    GestureDetector(
-                      onTap: () => setState(() => _showAddCustTest = true),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: AppColors.brandGreenLight),
-                        ),
-                        child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                          Icon(Icons.add_circle_outline, size: 15, color: AppColors.brandGreen),
-                          SizedBox(width: 6),
-                          Text('Add Test', style: TextStyle(fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w500)),
-                        ]),
-                      ),
-                    ),
-
-                  if (_showAddCustTest) ...[
-                    const SizedBox(height: 8),
-                    TextField(
-                      autofocus: true,
-                      onChanged: (v) => setState(() => _custTestSearch = v),
-                      style: const TextStyle(fontSize: 14),
-                      decoration: InputDecoration(
-                        hintText: 'Search test…',
-                        hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
-                        prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
-                        suffixIcon: GestureDetector(
-                          onTap: () => setState(() { _showAddCustTest = false; _custTestSearch = ''; }),
-                          child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
-                        ),
-                        filled: true, fillColor: AppColors.background,
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                        contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    ..._filteredCustCatalogue.take(5).map((t) => GestureDetector(
-                      onTap: () => setState(() {
-                        _additionalCustomerTests.add(Map<String, String>.from(t));
-                        _showAddCustTest = false;
-                        _custTestSearch = '';
-                      }),
-                      child: Container(
-                        margin: const EdgeInsets.only(bottom: 6),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: AppColors.divider),
-                        ),
-                        child: Row(children: [
-                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Text(t['name'] ?? '', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                            Text(t['category'] ?? '', style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                          ])),
-                          Text('₹${t['price']}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen)),
-                          const SizedBox(width: 8),
-                          const Icon(Icons.add_circle_outline, size: 18, color: AppColors.brandGreen),
-                        ]),
-                      ),
-                    )),
-                  ],
-
-                  const SizedBox(height: 14),
-
-                  Row(children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () => setState(() {
-                          _showNewCustomerForm = false;
-                          _ncNameCtrl.clear(); _ncMobileCtrl.clear();
-                          _ncEmailCtrl.clear(); _ncDobCtrl.clear();
-                          _ncRelCtrl.clear(); _ncHealthCtrl.clear();
-                          _ncDob = null; _ncCalculatedAge = null;
-                          _ncGender = null; _additionalCustomerTests.clear();
-                          _showAddCustTest = false; _custTestSearch = '';
-                        }),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.textSecondary,
-                          side: const BorderSide(color: AppColors.divider),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                        child: const Text('Cancel'),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: (_isSavingCustomer ||
-                                !(_ncNameCtrl.text.trim().isNotEmpty &&
-                                    _ncMobileCtrl.text.trim().length == 10))
-                            ? null
-                            : () { _saveNewCustomer(); },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.brandGreen,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                        child: _isSavingCustomer
-                            ? const SizedBox(
-                                width: 18, height: 18,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: Colors.white))
-                            : const Text('Save Customer',
-                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                      ),
-                    ),
-                  ]),
                 ],
+
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _openAddVisitMemberSheet,
+                    icon: const Icon(Icons.person_add_outlined, size: 16),
+                    label: const Text('Add Visit Member'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.brandGreen,
+                      side: const BorderSide(color: AppColors.brandGreen),
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
         ],
       ),
 
-      bottomNavigationBar: _isCompleted  // null when Handed to Lab — no further action needed
-          ? null
-          : Container(
+      bottomNavigationBar: Container(
               padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
               decoration: const BoxDecoration(
                 color: Colors.white,
@@ -1981,15 +1661,15 @@ void _resumeJourney() {
                 child: ElevatedButton(
                   onPressed: () {
                     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: const Text('Changes saved'),
+                      content: Text(_isCompleted ? 'Booking handed to lab — completed' : 'Changes saved'),
                       backgroundColor: AppColors.brandGreen,
                       behavior: SnackBarBehavior.floating,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ));
-                    Navigator.pop(context);
+                    Navigator.pop(context, _isCompleted ? true : null);
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen, 
+                    backgroundColor: AppColors.brandGreen,
                     foregroundColor: Colors.white,
                     elevation: 0,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -1998,7 +1678,8 @@ void _resumeJourney() {
                 ),
               ),
             ),
-    );
+      ),   // Scaffold
+    );     // PopScope
   }
 
   String _formatDate(DateTime d) {
@@ -2203,7 +1884,6 @@ class _FormField extends StatelessWidget {
   final String hint;
   final IconData icon;
   final TextInputType keyboardType;
-  final int? maxLength;
   final int maxLines;
 
   const _FormField({
@@ -2212,7 +1892,6 @@ class _FormField extends StatelessWidget {
     required this.hint,
     required this.icon,
     this.keyboardType = TextInputType.text,
-    this.maxLength,
     this.maxLines = 1,
   });
 
@@ -2226,7 +1905,7 @@ class _FormField extends StatelessWidget {
           TextField(
             controller: controller,
             keyboardType: keyboardType,
-            maxLength: maxLength,
+
             maxLines: maxLines,
             style: const TextStyle(fontSize: 14),
             decoration: InputDecoration(
@@ -2477,4 +2156,766 @@ class _DocImageViewerPageState extends State<_DocImageViewerPage> {
             ),
         ]),
       );
+}
+
+// ─── Add Visit Member bottom sheet ───────────────────────────────────────────
+
+class _AddVisitMemberSheet extends StatefulWidget {
+  final int parentBookingId;
+  final List<Map<String, String>> catalogueItems;
+
+  const _AddVisitMemberSheet({
+    required this.parentBookingId,
+    required this.catalogueItems,
+  });
+
+  @override
+  State<_AddVisitMemberSheet> createState() => _AddVisitMemberSheetState();
+}
+
+class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
+  // 0 = select/patient-info, 1 = select tests
+  int _step = 0;
+  // 'select' shows family cards; 'newPatient' shows the mobile+form
+  String _mode = 'select';
+
+  // ── Family members (loaded on init) ─────────────────────────────────────
+  bool _loadingFamily = true;
+  List<Map<String, dynamic>> _familyMembers = [];
+  Map<String, dynamic>? _selectedFamilyMember;
+
+  // ── New patient form ─────────────────────────────────────────────────────
+  final _mobileCtrl = TextEditingController();
+  bool _isSearching = false;
+  Map<String, dynamic>? _foundPatient;
+  bool _searchedWithNoResult = false;
+  final _nameCtrl   = TextEditingController();
+  final _dobCtrl    = TextEditingController();
+  final _healthCtrl = TextEditingController();
+  DateTime? _dob;
+  int? _age;
+  String? _gender;
+  String? _relation;
+
+  // ── Test selection ───────────────────────────────────────────────────────
+  final Set<String> _selectedTestIds = {};
+  String _testSearch = '';
+  bool _isSaving = false;
+
+  static const _relations = [
+    'Self','Spouse','Father','Mother','Son','Daughter','Brother','Sister','Other',
+  ];
+
+  static const _avatarColors = [
+    Color(0xFF1565C0), Color(0xFF2E7D32), Color(0xFFE65100),
+    Color(0xFF6A1B9A), Color(0xFFC62828), Color(0xFF00695C),
+    Color(0xFF4527A0), Color(0xFF558B2F), Color(0xFF00838F),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _nameCtrl.addListener(_onFormChanged);
+    _mobileCtrl.addListener(_onFormChanged);
+    _loadFamilyMembers();
+  }
+
+  void _onFormChanged() { if (mounted) setState(() {}); }
+
+  Future<void> _loadFamilyMembers() async {
+    try {
+      final members = await ApiService.getBookingFamily(widget.parentBookingId);
+      if (!mounted) return;
+      setState(() {
+        _familyMembers = members;
+        _loadingFamily = false;
+        if (members.isEmpty) _mode = 'newPatient';
+      });
+    } catch (_) {
+      if (mounted) setState(() { _loadingFamily = false; _mode = 'newPatient'; });
+    }
+  }
+
+  @override
+  void dispose() {
+    _mobileCtrl.dispose();
+    _nameCtrl.dispose();
+    _dobCtrl.dispose();
+    _healthCtrl.dispose();
+    super.dispose();
+  }
+
+  Color _avatarColor(String name) {
+    if (name.isEmpty) return _avatarColors[0];
+    return _avatarColors[name.codeUnitAt(0) % _avatarColors.length];
+  }
+
+  double get _selectedTotal => widget.catalogueItems
+      .where((t) => _selectedTestIds.contains(t['id']))
+      .fold(0.0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
+
+  List<Map<String, String>> get _filteredTests {
+    if (_testSearch.isEmpty) return widget.catalogueItems;
+    final q = _testSearch.toLowerCase();
+    return widget.catalogueItems.where((t) =>
+        (t['name']?.toLowerCase().contains(q) ?? false) ||
+        (t['category']?.toLowerCase().contains(q) ?? false)).toList();
+  }
+
+  void _selectFamilyMember(Map<String, dynamic> m) {
+    setState(() {
+      _selectedFamilyMember = m;
+      _foundPatient = m;
+      _nameCtrl.text   = (m['patient_name']   as String?) ?? '';
+      _mobileCtrl.text = (m['patient_mobile'] as String?) ?? '';
+    });
+  }
+
+  Future<void> _searchPatient() async {
+    final mobile = _mobileCtrl.text.trim();
+    if (mobile.length != 10) return;
+    setState(() { _isSearching = true; _foundPatient = null; _searchedWithNoResult = false; });
+    try {
+      final result = await ApiService.lookupPatientByMobile(
+        mobile: mobile,
+        bookingId: widget.parentBookingId,
+      );
+      if (!mounted) return;
+      setState(() {
+        _foundPatient = result;
+        _isSearching = false;
+        _searchedWithNoResult = result == null;
+        if (result != null && _nameCtrl.text.trim().isEmpty) {
+          _nameCtrl.text = result['patient_name'] as String? ?? '';
+        }
+      });
+    } catch (_) {
+      if (mounted) setState(() { _isSearching = false; _searchedWithNoResult = true; });
+    }
+  }
+
+  Future<void> _pickDob() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _dob ?? DateTime(now.year - 30),
+      firstDate: DateTime(now.year - 120),
+      lastDate: now,
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+            colorScheme: const ColorScheme.light(primary: AppColors.brandGreen)),
+        child: child!,
+      ),
+    );
+    if (picked != null && mounted) {
+      int age = now.year - picked.year;
+      if (now.month < picked.month ||
+          (now.month == picked.month && now.day < picked.day)) { age--; }
+      setState(() {
+        _dob = picked;
+        _age = age;
+        _dobCtrl.text =
+            '${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}';
+      });
+    }
+  }
+
+  void _onNextStep() {
+    if (_mode == 'select') {
+      if (_selectedFamilyMember == null) return;
+    } else {
+      if (_nameCtrl.text.trim().isEmpty || _mobileCtrl.text.trim().length != 10) return;
+    }
+    setState(() => _step = 1);
+  }
+
+  Future<void> _confirm() async {
+    final String name;
+    final String mobile;
+    int? patientId;
+
+    if (_mode == 'select') {
+      name     = (_selectedFamilyMember?['patient_name'] as String? ?? '').trim();
+      mobile   = (_selectedFamilyMember?['patient_mobile'] as String? ?? '').trim();
+      patientId = (_selectedFamilyMember?['patient_id'] as num?)?.toInt();
+    } else {
+      name   = _nameCtrl.text.trim();
+      mobile = _mobileCtrl.text.trim();
+      patientId = (_foundPatient?['patient_id'] as num?)?.toInt();
+    }
+
+    if (name.isEmpty || mobile.length != 10 || _selectedTestIds.isEmpty) return;
+    setState(() => _isSaving = true);
+
+    final tests = widget.catalogueItems
+        .where((t) => _selectedTestIds.contains(t['id']))
+        .map((t) => <String, dynamic>{
+              'productId': int.tryParse(t['id'] ?? '0') ?? 0,
+              'price': double.tryParse(t['price'] ?? '0') ?? 0.0,
+            })
+        .where((t) => (t['productId'] as int) > 0)
+        .toList();
+
+    String? dobStr;
+    if (_dob != null) {
+      dobStr =
+          '${_dob!.year}-${_dob!.month.toString().padLeft(2, '0')}-${_dob!.day.toString().padLeft(2, '0')}';
+    }
+
+    try {
+      final result = await ApiService.addVisitMember(
+        parentBookingId: widget.parentBookingId,
+        patientId: patientId,
+        name: name,
+        mobile: mobile,
+        dob: dobStr,
+        age: _mode == 'select'
+            ? (_selectedFamilyMember?['patient_age'] as num?)?.toInt()
+            : _age,
+        gender: _mode == 'select'
+            ? (_selectedFamilyMember?['patient_gender'] as String?)
+            : _gender,
+        relation: _mode == 'select'
+            ? (_selectedFamilyMember?['patient_relation'] as String?)
+            : _relation,
+        healthNotes: _healthCtrl.text.trim().isEmpty ? null : _healthCtrl.text.trim(),
+        tests: tests,
+      );
+      if (!mounted) return;
+      if (result != null) {
+        Navigator.pop(context, {
+          'name':       name,
+          'mobile':     mobile,
+          'bookingRef': result['bookingRef'],
+        });
+      } else {
+        setState(() => _isSaving = false);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to add member — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (e) {
+      debugPrint('[_AddVisitMemberSheet._confirm] ERROR: $e');
+      if (mounted) {
+        setState(() => _isSaving = false);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to add member — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
+  }
+
+  // ── Build ────────────────────────────────────────────────────────────────
+
+  bool get _canProceed {
+    if (_step == 1) return _selectedTestIds.isNotEmpty;
+    if (_mode == 'select') return _selectedFamilyMember != null;
+    return _nameCtrl.text.trim().isNotEmpty && _mobileCtrl.text.trim().length == 10;
+  }
+
+  String get _headerTitle {
+    if (_step == 1) return 'Select Tests for ${_nameCtrl.text.trim()}';
+    if (_mode == 'newPatient' && _familyMembers.isNotEmpty) return 'Add New Customer';
+    return 'Add Visit Member';
+  }
+
+  bool get _showBackArrow =>
+      _step == 1 || (_mode == 'newPatient' && _familyMembers.isNotEmpty);
+
+  void _onBack() {
+    if (_step == 1) {
+      setState(() { _step = 0; _selectedTestIds.clear(); _testSearch = ''; });
+    } else {
+      setState(() { _mode = 'select'; _mobileCtrl.clear(); _nameCtrl.clear();
+                    _foundPatient = null; _searchedWithNoResult = false; });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.of(context).padding.bottom;
+    return DraggableScrollableSheet(
+      initialChildSize: 0.85,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (_, scroll) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: Column(children: [
+          Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.only(top: 12, bottom: 4),
+            decoration: BoxDecoration(
+                color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Row(children: [
+              if (_showBackArrow) ...[
+                GestureDetector(
+                  onTap: _onBack,
+                  child: const Icon(Icons.arrow_back_rounded, size: 20,
+                      color: AppColors.textPrimary),
+                ),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: Text(
+                  _headerTitle,
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 12),
+          const Divider(height: 1),
+          Expanded(child: _step == 0 ? _buildStep0(scroll) : _buildTestStep(scroll)),
+          Padding(
+            padding: EdgeInsets.fromLTRB(16, 8, 16, bottom + 12),
+            child: SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: _isSaving ? null : (_step == 0 ? _onNextStep : _confirm),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _canProceed
+                      ? AppColors.brandGreen
+                      : AppColors.brandGreen.withValues(alpha: 0.35),
+                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: _isSaving
+                    ? const SizedBox(width: 20, height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : Text(
+                        _step == 0
+                            ? 'Next: Select Tests'
+                            : (_selectedTestIds.isEmpty
+                                ? 'Select at least one test'
+                                : 'Add to Visit · ₹${_selectedTotal.toInt()}'),
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                      ),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildStep0(ScrollController scroll) =>
+      _mode == 'select' ? _buildSelectMode(scroll) : _buildNewPatientForm(scroll);
+
+  // ── Step 0-A: Family member cards ────────────────────────────────────────
+
+  Widget _buildSelectMode(ScrollController scroll) {
+    if (_loadingFamily) {
+      return const Center(
+        child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+      );
+    }
+    return SingleChildScrollView(
+      controller: scroll,
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Select a family member',
+            style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+        const SizedBox(height: 12),
+
+        ..._familyMembers.map(_buildFamilyCard),
+
+        const SizedBox(height: 4),
+        const Divider(height: 24),
+
+        // Add new customer option
+        GestureDetector(
+          onTap: () => setState(() => _mode = 'newPatient'),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.divider),
+            ),
+            child: Row(children: [
+              Container(
+                width: 44, height: 44,
+                decoration: BoxDecoration(
+                  color: AppColors.brandGreenSurface,
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: const Icon(Icons.person_add_rounded,
+                    size: 20, color: AppColors.brandGreen),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Add New Customer',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                          color: AppColors.textPrimary)),
+                  SizedBox(height: 2),
+                  Text('Search or create a new patient',
+                      style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ]),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: AppColors.textHint),
+            ]),
+          ),
+        ),
+        const SizedBox(height: 8),
+      ]),
+    );
+  }
+
+  Widget _buildFamilyCard(Map<String, dynamic> m) {
+    final name     = (m['patient_name']   as String?) ?? '';
+    final relation = (m['patient_relation'] as String?) ?? '';
+    final mobile   = (m['patient_mobile'] as String?) ?? '';
+    final isSelected = _selectedFamilyMember == m;
+    final initial  = name.isNotEmpty ? name[0].toUpperCase() : '?';
+    final color    = _avatarColor(name);
+
+    return GestureDetector(
+      onTap: () => _selectFamilyMember(m),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: isSelected ? AppColors.brandGreenSurface : Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: isSelected ? AppColors.brandGreen : AppColors.divider,
+            width: isSelected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(children: [
+          CircleAvatar(
+            radius: 22,
+            backgroundColor: color.withValues(alpha: 0.15),
+            child: Text(initial,
+                style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 17)),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(name, style: const TextStyle(
+                fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            const SizedBox(height: 3),
+            Row(children: [
+              if (relation.isNotEmpty) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(relation, style: TextStyle(
+                      fontSize: 11, color: color, fontWeight: FontWeight.w500)),
+                ),
+                const SizedBox(width: 6),
+              ],
+              if (mobile.isNotEmpty)
+                Text(mobile, style: const TextStyle(
+                    fontSize: 12, color: AppColors.textSecondary)),
+            ]),
+          ])),
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            width: 20, height: 20,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: isSelected ? AppColors.brandGreen : AppColors.divider,
+                width: isSelected ? 2 : 1.5,
+              ),
+              color: Colors.white,
+            ),
+            child: isSelected
+                ? Center(child: Container(
+                    width: 10, height: 10,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppColors.brandGreen,
+                    ),
+                  ))
+                : null,
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // ── Step 0-B: New patient form ────────────────────────────────────────────
+
+  Widget _buildNewPatientForm(ScrollController scroll) {
+    return SingleChildScrollView(
+      controller: scroll,
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Mobile Number *',
+            style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+        const SizedBox(height: 6),
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _mobileCtrl,
+              keyboardType: TextInputType.phone,
+              maxLength: 10,
+              autofocus: true,
+              style: const TextStyle(fontSize: 15),
+              decoration: InputDecoration(
+                hintText: '10-digit mobile number',
+                hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 14),
+                prefixIcon: const Icon(Icons.phone_outlined, size: 18, color: AppColors.textHint),
+                counterText: '',
+                filled: true, fillColor: AppColors.background,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: AppColors.divider)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: AppColors.divider)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                contentPadding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            height: 50,
+            child: ElevatedButton(
+              onPressed: _isSearching ? null : _searchPatient,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.brandGreen,
+                disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.5),
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              child: _isSearching
+                  ? const SizedBox(width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.search_rounded, size: 20, color: Colors.white),
+            ),
+          ),
+        ]),
+
+        if (_foundPatient != null) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.brandGreenSurface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.brandGreenLight),
+            ),
+            child: Row(children: [
+              const Icon(Icons.person_pin_rounded, size: 16, color: AppColors.brandGreen),
+              const SizedBox(width: 8),
+              Expanded(child: Text(
+                _foundPatient!['patient_name'] as String? ?? '',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                    color: AppColors.brandGreen),
+              )),
+              const Text('Existing patient',
+                  style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+            ]),
+          ),
+        ] else if (_searchedWithNoResult) ...[
+          const SizedBox(height: 8),
+          const Row(children: [
+            Icon(Icons.person_add_outlined, size: 14, color: AppColors.textSecondary),
+            SizedBox(width: 6),
+            Text('New patient — fill details below',
+                style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+          ]),
+        ],
+
+        const SizedBox(height: 14),
+
+        _FormField(
+          label: 'Full Name *',
+          controller: _nameCtrl,
+          hint: 'Enter full name',
+          icon: Icons.person_outline,
+          keyboardType: TextInputType.name,
+        ),
+        const SizedBox(height: 10),
+
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Date of Birth',
+              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+          const SizedBox(height: 6),
+          GestureDetector(
+            onTap: _pickDob,
+            child: Container(
+              height: 50,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: AppColors.background,
+                border: Border.all(color: AppColors.divider),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(children: [
+                const Icon(Icons.cake_outlined, size: 18, color: AppColors.textHint),
+                const SizedBox(width: 10),
+                Expanded(child: Text(
+                  _dobCtrl.text.isEmpty ? 'DD / MM / YYYY' : _dobCtrl.text,
+                  style: TextStyle(fontSize: 14,
+                      color: _dobCtrl.text.isEmpty
+                          ? AppColors.textHint : AppColors.textPrimary),
+                )),
+                if (_age != null)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreenSurface,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text('$_age yrs', style: const TextStyle(
+                        fontSize: 12, color: AppColors.brandGreen,
+                        fontWeight: FontWeight.w600)),
+                  ),
+                const SizedBox(width: 6),
+                const Icon(Icons.calendar_month_outlined, size: 18,
+                    color: AppColors.textSecondary),
+              ]),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 10),
+
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Gender',
+              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8, runSpacing: 6,
+            children: ['Male', 'Female', 'Other'].map((g) => GestureDetector(
+              onTap: () => setState(() => _gender = g),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: _gender == g ? AppColors.brandGreen : Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                      color: _gender == g ? AppColors.brandGreen : AppColors.divider),
+                ),
+                child: Text(g, style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w500,
+                    color: _gender == g ? Colors.white : AppColors.textSecondary)),
+              ),
+            )).toList(),
+          ),
+        ]),
+        const SizedBox(height: 10),
+
+        Container(
+          height: 50,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: AppColors.background,
+            border: Border.all(color: AppColors.divider),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(children: [
+            const Icon(Icons.group_outlined, size: 18, color: AppColors.textHint),
+            const SizedBox(width: 8),
+            Expanded(
+              child: DropdownButton<String>(
+                value: _relation,
+                isExpanded: true,
+                underline: const SizedBox(),
+                hint: const Text('Relation to primary patient',
+                    style: TextStyle(fontSize: 13, color: AppColors.textHint)),
+                style: const TextStyle(fontSize: 13, color: AppColors.textPrimary),
+                items: _relations.map((r) =>
+                    DropdownMenuItem(value: r, child: Text(r))).toList(),
+                onChanged: (v) => setState(() => _relation = v),
+              ),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 10),
+
+        _FormField(
+          label: 'Health Condition / Notes',
+          controller: _healthCtrl,
+          hint: 'e.g. Diabetes, Hypertension, Thyroid…',
+          icon: Icons.medical_information_outlined,
+          maxLines: 2,
+        ),
+        const SizedBox(height: 20),
+      ]),
+    );
+  }
+
+  // ── Step 1: Test selection ────────────────────────────────────────────────
+
+  Widget _buildTestStep(ScrollController scroll) {
+    final filtered = _filteredTests;
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+        child: TextField(
+          onChanged: (v) => setState(() => _testSearch = v),
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(
+            hintText: 'Search test or package…',
+            hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
+            prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
+            filled: true, fillColor: AppColors.background,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.divider)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.divider)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+            contentPadding: const EdgeInsets.symmetric(vertical: 10),
+          ),
+        ),
+      ),
+      Expanded(
+        child: ListView.separated(
+          controller: scroll,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          itemCount: filtered.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (_, i) {
+            final t = filtered[i];
+            final checked = _selectedTestIds.contains(t['id']);
+            return CheckboxListTile(
+              value: checked,
+              onChanged: (v) => setState(() {
+                if (v!) { _selectedTestIds.add(t['id']!); }
+                else     { _selectedTestIds.remove(t['id']); }
+              }),
+              activeColor: AppColors.brandGreen,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              title: Text(t['name'] ?? '',
+                  style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+              subtitle: (t['category'] ?? '').isNotEmpty
+                  ? Text(t['category']!,
+                      style: const TextStyle(fontSize: 11, color: AppColors.brandGreen))
+                  : null,
+              secondary: Text('₹${t['price'] ?? '0'}',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary)),
+              controlAffinity: ListTileControlAffinity.leading,
+            );
+          },
+        ),
+      ),
+    ]);
+  }
 }

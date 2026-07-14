@@ -378,6 +378,80 @@ class ApiService {
     return false;
   }
 
+  // Records on-site payment collected by technician and marks booking paid in DB
+  static Future<bool> collectPayment({
+    required int bookingId,
+    required String razorpayPaymentId,
+    required double amount,
+  }) async {
+    final token = await getToken();
+    if (token == null) return false;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/technicians/collect-payment'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'bookingId': bookingId,
+          'razorpayPaymentId': razorpayPaymentId,
+          'amount': amount,
+        }),
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return true;
+      debugPrint('[collectPayment] failed: ${body['message']}');
+    } catch (e) {
+      debugPrint('[collectPayment] ERROR: $e');
+    }
+    return false;
+  }
+
+  // Returns [{patientId, patientName, patientMobile}] for additional patients linked to a booking
+  // Returns {payment_status, amount_paid, amount_due} for a booking — used by
+  // the technician detail screen to get fresh payment info on every open.
+  static Future<Map<String, dynamic>?> getBookingPaymentInfo(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/bookings/$bookingId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        final b = body['booking'] as Map<String, dynamic>;
+        return {
+          'payment_status': b['payment_status'],
+          'amount_paid':    b['amount_paid'],
+          'amount_due':     b['amount_due'],
+        };
+      }
+    } catch (e) {
+      debugPrint('[getBookingPaymentInfo] ERROR: $e');
+    }
+    return null;
+  }
+
+  static Future<List<Map<String, dynamic>>> getLinkedPatients(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return [];
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/linked-patients'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        return (body['patients'] as List).cast<Map<String, dynamic>>();
+      }
+    } catch (e) {
+      debugPrint('[getLinkedPatients] ERROR: $e');
+    }
+    return [];
+  }
+
   // Fetches /api/tests and maps to {id, name, category, price} for the technician catalogue
   static Future<List<Map<String, String>>> getTechTestCatalogue() async {
     try {
@@ -583,6 +657,94 @@ class ApiService {
       debugPrint('[addCustomerBooking] ERROR: $e');
     }
     return null;
+  }
+
+  /// Search for an existing patient by mobile within the booking's client scope.
+  /// Returns the patient map if found, or null if not found / on error.
+  static Future<Map<String, dynamic>?> lookupPatientByMobile({
+    required String mobile,
+    required int bookingId,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/technicians/patient-lookup?mobile=$mobile&bookingId=$bookingId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return body['patient'] as Map<String, dynamic>?;
+      debugPrint('[lookupPatientByMobile] failed: ${body['message']}');
+    } catch (e) {
+      debugPrint('[lookupPatientByMobile] ERROR: $e');
+    }
+    return null;
+  }
+
+  /// Creates a sibling booking for an on-site family member, linked via visit_group_id.
+  /// Pass [patientId] when the patient was found via lookupPatientByMobile; otherwise
+  /// pass [name] + [mobile] and the server will find-or-create the patient.
+  static Future<Map<String, dynamic>?> addVisitMember({
+    required int parentBookingId,
+    int? patientId,
+    String? name,
+    String? mobile,
+    String? email,
+    String? dob,
+    int? age,
+    String? gender,
+    String? relation,
+    String? healthNotes,
+    required List<Map<String, dynamic>> tests,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/technicians/add-visit-member'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'parentBookingId': parentBookingId,
+          if (patientId != null) 'patientId': patientId,
+          if (name != null && name.isNotEmpty) 'name': name,
+          if (mobile != null && mobile.isNotEmpty) 'mobile': mobile,
+          if (email != null && email.isNotEmpty) 'email': email,
+          if (dob != null) 'dob': dob,
+          if (age != null) 'age': age,
+          if (gender != null) 'gender': gender,
+          if (relation != null && relation.isNotEmpty) 'relation': relation,
+          if (healthNotes != null && healthNotes.isNotEmpty) 'healthNotes': healthNotes,
+          'tests': tests,
+        }),
+      ).timeout(const Duration(seconds: 20));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return body;
+      debugPrint('[addVisitMember] failed: ${body['message']} | detail: ${body['detail']}');
+    } catch (e) {
+      debugPrint('[addVisitMember] ERROR: $e');
+    }
+    return null;
+  }
+
+  static Future<List<Map<String, dynamic>>> getBookingFamily(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return [];
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/technicians/booking-family?bookingId=$bookingId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        return (body['members'] as List).cast<Map<String, dynamic>>();
+      }
+    } catch (e) {
+      debugPrint('[getBookingFamily] ERROR: $e');
+    }
+    return [];
   }
 
   static Future<Map<String, dynamic>?> updateBookingItems({

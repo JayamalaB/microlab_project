@@ -193,7 +193,10 @@ exports.getActiveBookings = async (req, res) => {
          tc.assigned_at,
          b.city,
          b.postal_code,
+         b.visit_group_id,
          b.amount_due            AS amount_paid,
+         b.amount_paid           AS booking_amount_paid,
+         b.payment_status,
          b.collection_latitude   AS patient_lat,
          b.collection_longitude  AS patient_lng,
          p.patient_name,
@@ -207,7 +210,7 @@ exports.getActiveBookings = async (req, res) => {
        LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
        LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
        WHERE tc.technician_id = ?
-         AND tc.collection_status IN ('assigned','en_route','arrived','collected')
+         AND tc.collection_status IN ('assigned','en_route','arrived','collection_started','sample_collected','otp_verified','collected')
        ORDER BY tc.assigned_at ASC`,
       [technicianId]
     );
@@ -436,6 +439,72 @@ exports.getAll = async (req, res) => {
 // ── POST /api/technicians/add-customer ────────────────────────────────────────
 // Called by the technician app to add a walk-in patient at the same location.
 // Inherits date/address/coords from the parent booking so the new job appears
+// ── POST /api/technicians/collect-payment ─────────────────────────────────────
+// Records a payment collected on-site by the technician and marks the booking paid
+exports.collectPayment = async (req, res) => {
+  const technicianId = req.user.id;
+  const { bookingId, razorpayPaymentId, amount } = req.body;
+
+  if (!bookingId || !razorpayPaymentId || !amount) {
+    return res.status(400).json({ success: false, message: 'bookingId, razorpayPaymentId and amount are required' });
+  }
+
+  try {
+    // Single JOIN UPDATE — verifies technician assignment and marks paid atomically
+    const [result] = await db.execute(
+      `UPDATE ip_bookings b
+       INNER JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       SET b.payment_status = 'paid', b.amount_paid = b.amount_paid + ?, b.amount_due = 0, b.updated_at = NOW()
+       WHERE b.booking_id = ? AND tc.technician_id = ?`,
+      [amount, bookingId, technicianId]
+    );
+
+    if (result.affectedRows === 0) {
+      console.warn(`⚠️  collectPayment — no rows updated for booking_id=${bookingId} technician_id=${technicianId}`);
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
+    }
+
+    // Update payment transaction record if one exists (best-effort, no-op if absent)
+    await db.execute(
+      `UPDATE ip_payment_transactions
+       SET payment_status = 'paid', transaction_status = 'completed',
+           amount_paid = ?, amount_due = 0,
+           gateway_transaction_id = ?, gateway_status = 'success',
+           paid_at = NOW(), updated_at = NOW()
+       WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
+      [amount, razorpayPaymentId, bookingId]
+    );
+
+    // Cascade paid status to any sibling bookings linked via visit_group_id
+    await db.execute(
+      `UPDATE ip_bookings sib
+       JOIN ip_bookings parent ON parent.booking_id = ? AND parent.visit_group_id IS NOT NULL
+                               AND sib.visit_group_id = parent.visit_group_id
+       SET sib.payment_status = 'paid', sib.amount_paid = sib.total_amount, sib.amount_due = 0, sib.updated_at = NOW()
+       WHERE sib.booking_id != ?`,
+      [bookingId, bookingId]
+    );
+    await db.execute(
+      `UPDATE ip_payment_transactions pt
+       JOIN ip_bookings sib ON sib.booking_id = pt.booking_id
+       JOIN ip_bookings parent ON parent.booking_id = ? AND parent.visit_group_id IS NOT NULL
+                               AND sib.visit_group_id = parent.visit_group_id
+       SET pt.payment_status = 'paid', pt.transaction_status = 'completed',
+           pt.amount_paid = pt.net_amount, pt.amount_due = 0,
+           pt.gateway_transaction_id = ?, pt.gateway_status = 'success',
+           pt.paid_at = NOW(), pt.updated_at = NOW()
+       WHERE sib.booking_id != ? AND (pt.is_refund = 0 OR pt.is_refund IS NULL)`,
+      [bookingId, razorpayPaymentId, bookingId]
+    );
+
+    console.log(`✅ collectPayment — booking_id=${bookingId} paid ₹${amount} by technician_id=${technicianId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ collectPayment FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 // in the same slot without requiring a fresh booking flow on the patient side.
 exports.addCustomerBooking = async (req, res) => {
   const technicianId = req.user.id;
@@ -553,5 +622,283 @@ exports.addCustomerBooking = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error', detail: err.message });
   } finally {
     conn.release();
+  }
+};
+
+// ── GET /api/technicians/patient-lookup ───────────────────────────────────────
+// Search for an existing patient by mobile within the booking's client scope.
+// Returns { patient } or { patient: null } — never leaks cross-client data.
+exports.lookupPatient = async (req, res) => {
+  const { mobile, bookingId } = req.query;
+  if (!mobile || !bookingId) {
+    return res.status(400).json({ success: false, message: 'mobile and bookingId are required' });
+  }
+  try {
+    const [[booking]] = await db.execute(
+      `SELECT client_id FROM ip_bookings WHERE booking_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [bookingId]
+    );
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    const [[patient]] = await db.execute(
+      `SELECT patient_id, patient_name, patient_mobile, patient_email,
+              patient_dob, patient_age, patient_gender
+       FROM ip_patients
+       WHERE patient_mobile = ? AND client_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [mobile, booking.client_id]
+    );
+    res.json({ success: true, patient: patient || null });
+  } catch (err) {
+    console.error('❌ lookupPatient FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── POST /api/technicians/add-visit-member ────────────────────────────────────
+// On-site: technician adds a family member at the same address as a sibling
+// booking. Creates a NEW confirmed booking linked via visit_group_id — bypasses
+// the normal dispatch flow entirely. Inserts ip_technician_collection directly
+// with collection_status='arrived' so the job is immediately manageable.
+exports.addVisitMember = async (req, res) => {
+  const technicianId = req.user.id;
+  const {
+    parentBookingId,
+    patientId: existingPatientId,
+    name, mobile, email, dob, age, gender, relation, healthNotes,
+    tests = [],
+  } = req.body;
+
+  if (!parentBookingId) {
+    return res.status(400).json({ success: false, message: 'parentBookingId is required' });
+  }
+  if (!existingPatientId && (!name || !mobile)) {
+    return res.status(400).json({ success: false, message: 'Either patientId or (name + mobile) is required' });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // Step 1: Fetch parent context + verify this technician is assigned to it
+    const [[parent]] = await conn.execute(
+      `SELECT b.client_id, b.booking_date, b.collection_address, b.postal_code,
+              b.city, b.collection_latitude, b.collection_longitude,
+              b.available_slot_id, b.visit_group_id
+       FROM ip_bookings b
+       INNER JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       WHERE b.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL LIMIT 1`,
+      [parentBookingId, technicianId]
+    );
+    if (!parent) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Parent booking not found or not assigned to you' });
+    }
+
+    // Step 2: Find or create patient
+    let patientId = existingPatientId || null;
+    if (!patientId) {
+      const [[existing]] = await conn.execute(
+        `SELECT patient_id FROM ip_patients
+         WHERE patient_mobile = ? AND client_id = ? AND deleted_at IS NULL LIMIT 1`,
+        [mobile, parent.client_id]
+      );
+      if (existing) {
+        patientId = existing.patient_id;
+        await conn.execute(
+          `UPDATE ip_patients
+           SET patient_name=?, patient_email=?, patient_dob=?, patient_age=?,
+               patient_gender=?, patient_relation=?, health_conditions=?, updated_at=NOW()
+           WHERE patient_id=?`,
+          [name, email || null, dob || null, age || null,
+           gender || null, relation || null, healthNotes || null, patientId]
+        );
+      } else {
+        const [pRes] = await conn.execute(
+          `INSERT INTO ip_patients
+             (client_id, patient_name, patient_mobile, patient_email, patient_dob,
+              patient_age, patient_gender, patient_relation, health_conditions, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [parent.client_id, name, mobile, email || null, dob || null,
+           age || null, gender || null, relation || null, healthNotes || null,
+           `technician_${technicianId}`]
+        );
+        patientId = pRes.insertId;
+      }
+    }
+
+    // Step 2b: Fetch patient_id_ref for linking records correctly
+    let patientIdRef = null;
+    const [[patRefRow]] = await conn.execute(
+      `SELECT patient_id_ref FROM ip_patients WHERE patient_id = ? LIMIT 1`, [patientId]
+    );
+    if (patRefRow?.patient_id_ref) patientIdRef = patRefRow.patient_id_ref;
+
+    // Step 3: Determine visit_group_id — backfill parent if it has none yet
+    let visitGroupId = parent.visit_group_id;
+    if (!visitGroupId) {
+      visitGroupId = `VG${Date.now()}`;
+      await conn.execute(
+        `UPDATE ip_bookings SET visit_group_id = ?, updated_at = NOW() WHERE booking_id = ?`,
+        [visitGroupId, parentBookingId]
+      );
+    }
+
+    // Step 4: Resolve products and compute total
+    let totalAmount = 0;
+    const resolvedProducts = [];
+    for (const t of tests) {
+      if (!t.productId) continue;
+      const [[prod]] = await conn.execute(
+        `SELECT product_id, product_name, product_price, offer, discount_percent
+         FROM ip_products WHERE product_id = ? LIMIT 1`,
+        [t.productId]
+      );
+      if (prod) {
+        // Use client-provided final_price when valid (accounts for offers/discounts).
+        // Fallback: compute final price from DB same way the catalogue does.
+        let price;
+        if (t.price && parseFloat(t.price) > 0) {
+          price = parseFloat(t.price);
+        } else {
+          const original     = parseFloat(prod.product_price ?? 0) || 0;
+          const hasOffer     = prod.offer === 'yes' || prod.offer === '1' || prod.offer == 1;
+          const discountPct  = hasOffer ? (parseFloat(prod.discount_percent) || 0) : 0;
+          price = hasOffer && discountPct > 0
+            ? Math.round(original * (1 - discountPct / 100) * 100) / 100
+            : original;
+        }
+        totalAmount += price;
+        resolvedProducts.push({ product_id: prod.product_id, product_name: prod.product_name, price });
+      }
+    }
+
+    // Step 5: INSERT new booking — status='confirmed' bypasses dispatch entirely
+    const bookingRef = `BC${Date.now()}`;
+    const txnRef    = `TXN${Date.now()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+    const [bRes] = await conn.execute(
+      `INSERT INTO ip_bookings
+         (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
+          booking_type, status, total_amount, discount_amount,
+          amount_paid, amount_due, source_channel, notes,
+          collection_address, postal_code, city,
+          collection_latitude, collection_longitude,
+          patient_id, patient_id_ref, product_id,
+          payment_status, visit_group_id, start_datetime, end_datetime, created_by, created_at)
+       VALUES (?, ?, NULL, ?, NULL, ?, 'home_collection', 'confirmed', ?, 0, 0, ?,
+               'technician_app', NULL, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, NOW(), NOW(), ?, NOW())`,
+      [bookingRef, parent.client_id, parent.booking_date, parent.available_slot_id || null,
+       totalAmount, totalAmount,
+       parent.collection_address, parent.postal_code, parent.city,
+       parent.collection_latitude, parent.collection_longitude,
+       patientId, patientIdRef,
+       visitGroupId, technicianId]
+    );
+    const newBookingId = bRes.insertId;
+
+    // Step 6: Link patient to new booking
+    await conn.execute(
+      `INSERT INTO ip_patient_bookings (booking_id, patient_id, patient_ref, created_at) VALUES (?, ?, ?, NOW())`,
+      [newBookingId, patientId, patientIdRef]
+    );
+
+    // Step 7: INSERT items into sibling booking (lab tracking) AND into parent booking (payment display)
+    for (const prod of resolvedProducts) {
+      await conn.execute(
+        `INSERT INTO ip_booking_items
+           (booking_id, product_id, product_name_snapshot, patient_id, unit_price, final_price, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [newBookingId, prod.product_id, prod.product_name, patientId, prod.price, prod.price]
+      );
+      // Mirror to parent so the technician's payment screen sees the full combined total
+      await conn.execute(
+        `INSERT INTO ip_booking_items
+           (booking_id, product_id, product_name_snapshot, patient_id, unit_price, final_price, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [parentBookingId, prod.product_id, prod.product_name, patientId, prod.price, prod.price]
+      );
+    }
+
+    // Step 7b: Bump parent booking totals so collect-payment amount is correct
+    if (totalAmount > 0) {
+      await conn.execute(
+        `UPDATE ip_bookings SET total_amount = total_amount + ?, amount_due = amount_due + ?, updated_at = NOW()
+         WHERE booking_id = ?`,
+        [totalAmount, totalAmount, parentBookingId]
+      );
+    }
+
+    // Step 8: INSERT payment transaction (pay-later, unpaid)
+    await conn.execute(
+      `INSERT INTO ip_payment_transactions
+         (transaction_ref, booking_id, patient_id, payment_type,
+          gross_amount, discount_amount, net_amount, amount_paid, amount_due,
+          currency, payment_status, transaction_status, is_refund,
+          gateway_transaction_id, gateway_order_id, gateway_status, paid_at)
+       VALUES (?, ?, ?, 'PAY_LATER', ?, 0, ?, 0, ?, 'INR', 'pending', 'pending', 0, NULL, NULL, NULL, NULL)`,
+      [txnRef, newBookingId, patientId, totalAmount, totalAmount, totalAmount]
+    );
+
+    await conn.commit();
+    console.log(`✅ addVisitMember — new booking_id=${newBookingId} ref=${bookingRef} parent=${parentBookingId} visit_group=${visitGroupId}`);
+    res.status(201).json({
+      success:      true,
+      newBookingId,
+      bookingRef,
+      patientId,
+      visitGroupId,
+      totalAmount,
+    });
+  } catch (err) {
+    await conn.rollback();
+    const detail = err.sqlMessage || err.message || String(err);
+    console.error('❌ addVisitMember FAILED:', detail);
+    res.status(500).json({ success: false, message: 'Server error', detail });
+  } finally {
+    conn.release();
+  }
+};
+
+// ── GET /api/technicians/booking-family ───────────────────────────────────────
+// Returns patients that have been in previous bookings alongside the primary
+// patient of this booking — used to display "family member" cards in the sheet.
+exports.getBookingFamily = async (req, res) => {
+  const technicianId = req.user?.id;
+  const bookingId    = parseInt(req.query.bookingId);
+  if (!bookingId) {
+    return res.status(400).json({ success: false, message: 'bookingId is required' });
+  }
+  try {
+    const [[booking]] = await db.execute(
+      `SELECT b.patient_id, b.client_id
+       FROM ip_bookings b
+       INNER JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       WHERE b.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL LIMIT 1`,
+      [bookingId, technicianId]
+    );
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    const [members] = await db.execute(
+      `SELECT DISTINCT p.patient_id, p.patient_name, p.patient_mobile,
+                       p.patient_relation, p.patient_age, p.patient_gender
+       FROM ip_patient_bookings pb
+       JOIN ip_patients p ON p.patient_id = pb.patient_id
+       WHERE pb.booking_id IN (
+         SELECT pb2.booking_id FROM ip_patient_bookings pb2 WHERE pb2.patient_id = ?
+       )
+       AND pb.patient_id != ?
+       AND p.client_id = ?
+       AND p.deleted_at IS NULL
+       ORDER BY p.patient_name ASC
+       LIMIT 10`,
+      [booking.patient_id, booking.patient_id, booking.client_id]
+    );
+
+    res.json({ success: true, members });
+  } catch (err) {
+    console.error('❌ getBookingFamily FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };

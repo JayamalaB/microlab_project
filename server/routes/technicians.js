@@ -3,9 +3,12 @@ const router = express.Router();
 const technicianController = require('../controllers/technicianController');
 const auth = require('../middleware/auth');
 
-// POST /api/technicians/add-customer — technician adds a walk-in patient on-site
-// Must be registered BEFORE /:technicianId routes to avoid path collision
-router.post('/add-customer', auth, technicianController.addCustomerBooking);
+// Static POST/GET routes must be registered BEFORE /:technicianId to avoid path collision
+router.post('/add-customer',       auth, technicianController.addCustomerBooking);
+router.post('/collect-payment',    auth, technicianController.collectPayment);
+router.post('/add-visit-member',   auth, technicianController.addVisitMember);
+router.get('/patient-lookup',      auth, technicianController.lookupPatient);
+router.get('/booking-family',      auth, technicianController.getBookingFamily);
 
 // GET /api/technicians/:technicianId/profile — profile + today's stats
 router.get('/:technicianId/profile', technicianController.getProfile);
