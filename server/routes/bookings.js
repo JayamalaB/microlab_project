@@ -20,6 +20,8 @@ router.get('/:bookingId', bookingController.getBooking);
 
 // GET  /api/bookings/:bookingId/items   — list booking test items
 router.get('/:bookingId/items',                    auth, bookingController.getItems);
+// GET  /api/bookings/:bookingId/linked-patients — additional patients added by technician
+router.get('/:bookingId/linked-patients',          auth, bookingController.getLinkedPatients);
 // POST /api/bookings/:bookingId/items   — add a test to a booking
 router.post('/:bookingId/items',                   auth, bookingController.addItem);
 // DELETE /api/bookings/:bookingId/items/:id — remove a test from a booking

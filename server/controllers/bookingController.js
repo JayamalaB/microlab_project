@@ -574,6 +574,43 @@ exports.removeItem = async (req, res) => {
   }
 };
 
+// ── GET /api/bookings/:bookingId/linked-patients ─────────────────────────────
+// Returns additional patients linked to this booking by the technician
+exports.getLinkedPatients = async (req, res) => {
+  const { bookingId } = req.params;
+  try {
+    // UNION: (1) old approach — patients added to ip_patient_bookings of parent
+    //        (2) new approach — sibling bookings linked via visit_group_id
+    const [rows] = await db.execute(
+      `SELECT p.patient_id, p.patient_name, p.patient_mobile, NULL AS booking_ref
+       FROM ip_patient_bookings pb
+       JOIN ip_patients p ON p.patient_id = pb.patient_id
+       WHERE pb.booking_id = ?
+         AND pb.patient_id != COALESCE(
+           (SELECT patient_id FROM ip_bookings WHERE booking_id = ? LIMIT 1), 0
+         )
+
+       UNION
+
+       SELECT p.patient_id, p.patient_name, p.patient_mobile, b2.booking_ref
+       FROM ip_bookings b1
+       JOIN ip_bookings b2 ON b2.visit_group_id = b1.visit_group_id
+                           AND b2.booking_id != b1.booking_id
+                           AND b2.deleted_at IS NULL
+       JOIN ip_patients p ON p.patient_id = b2.patient_id
+       WHERE b1.booking_id = ?
+         AND b1.visit_group_id IS NOT NULL
+
+       ORDER BY patient_id ASC`,
+      [bookingId, bookingId, bookingId]
+    );
+    res.json({ success: true, patients: rows });
+  } catch (err) {
+    console.error('❌ getLinkedPatients FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 // ── PUT /api/bookings/:bookingId/lab-status ────────────────────────────────────
 exports.updateLabStatus = async (req, res) => {
   const { status, reportUrl, reportId } = req.body;

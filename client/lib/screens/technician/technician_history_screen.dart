@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models/technician_booking.dart';
+import 'package:microlab/services/api_service.dart';
 
 class TechnicianHistoryScreen extends StatefulWidget {
   final String mobile;
@@ -266,8 +267,214 @@ class _BookingList extends StatelessWidget {
       child: ListView.builder(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
         itemCount: bookings.length,
-        itemBuilder: (_, i) =>
-            _HistoryCard(booking: bookings[i], formatDate: formatDate),
+        itemBuilder: (_, i) => GestureDetector(
+          onTap: () => showModalBottomSheet(
+            context: context,
+            isScrollControlled: true,
+            backgroundColor: Colors.transparent,
+            builder: (_) => _TechHistoryDetailSheet(booking: bookings[i]),
+          ),
+          child: _HistoryCard(booking: bookings[i], formatDate: formatDate),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── History Detail Sheet ─────────────────────────────────────────────────────
+
+class _TechHistoryDetailSheet extends StatefulWidget {
+  final TechnicianBooking booking;
+  const _TechHistoryDetailSheet({required this.booking});
+
+  @override
+  State<_TechHistoryDetailSheet> createState() => _TechHistoryDetailSheetState();
+}
+
+class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
+  List<Map<String, dynamic>> _items = [];
+  bool _itemsLoading = true;
+
+  TechnicianBooking get b => widget.booking;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchItems();
+  }
+
+  Future<void> _fetchItems() async {
+    final rawId = b.id.startsWith('BK') ? b.id.substring(2) : b.id;
+    final bookingId = int.tryParse(rawId) ?? 0;
+    if (bookingId == 0) {
+      if (mounted) setState(() => _itemsLoading = false);
+      return;
+    }
+    try {
+      final items = await ApiService.getBookingItems(bookingId);
+      if (mounted) setState(() { _items = items; _itemsLoading = false; });
+    } catch (_) {
+      if (mounted) setState(() => _itemsLoading = false);
+    }
+  }
+
+  String _fmt(DateTime d) {
+    const m = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const w = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    return '${w[d.weekday - 1]}, ${d.day} ${m[d.month]} ${d.year}';
+  }
+
+  double get _testsTotal => _items.isEmpty
+      ? b.testsTotal
+      : _items.fold(0.0, (s, i) => s + (double.tryParse(i['price']?.toString() ?? '0') ?? 0));
+
+  @override
+  Widget build(BuildContext context) {
+    final isCompleted = b.status == 'Completed';
+    final statusColor = isCompleted ? AppColors.brandGreen : const Color(0xFFD32F2F);
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+      child: Column(
+        children: [
+          // Handle
+          Center(
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                  color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+
+          // Header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+            child: Row(children: [
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('Booking Details',
+                      style: TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                  Text(b.id,
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ]),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: statusColor.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: statusColor.withValues(alpha: 0.3)),
+                ),
+                child: Text(b.status,
+                    style: TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.w600, color: statusColor)),
+              ),
+            ]),
+          ),
+          const Divider(height: 1),
+
+          // Scrollable content
+          Flexible(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+
+                  // Appointment
+                  _HDetailSection(title: 'Appointment', rows: [
+                    _HDetailRow(Icons.person_outline, 'Customer', b.customerName),
+                    _HDetailRow(Icons.event_outlined, 'Date', _fmt(b.date)),
+                    _HDetailRow(Icons.schedule_outlined, 'Time', b.timeSlot),
+                    _HDetailRow(Icons.home_outlined, 'Mode', b.mode),
+                    if (b.address.isNotEmpty)
+                      _HDetailRow(Icons.home_outlined, 'Collection Address', b.address),
+                    if (b.city.isNotEmpty || b.pincode.isNotEmpty)
+                      _HDetailRow(Icons.location_on_outlined, 'Area',
+                          [b.city, b.pincode].where((s) => s.isNotEmpty).join(', ')),
+                  ]),
+
+                  const SizedBox(height: 16),
+
+                  // Tests & Packages
+                  Text(
+                    'Tests & Packages${_itemsLoading ? '' : ' (${_items.length})'}',
+                    style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600,
+                        color: AppColors.textSecondary, letterSpacing: 0.3),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.background,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.divider),
+                    ),
+                    child: _itemsLoading
+                        ? const Center(
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation(AppColors.brandGreen)),
+                            ),
+                          )
+                        : _items.isEmpty
+                            ? const Text('No test details available',
+                                style: TextStyle(fontSize: 12, color: AppColors.textHint))
+                            : Column(
+                                children: _items.map((item) => Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 6),
+                                  child: Row(children: [
+                                    const Icon(Icons.science_outlined,
+                                        size: 14, color: AppColors.brandGreen),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(item['name']?.toString() ?? '',
+                                          style: const TextStyle(
+                                              fontSize: 12, color: AppColors.textPrimary)),
+                                    ),
+                                    Text(
+                                      '₹${(double.tryParse(item['price']?.toString() ?? '0') ?? 0).toInt()}',
+                                      style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600,
+                                          color: AppColors.textPrimary),
+                                    ),
+                                  ]),
+                                )).toList(),
+                              ),
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  // Payment
+                  _HDetailSection(title: 'Payment', rows: [
+                    _HDetailRow(Icons.receipt_outlined, 'Tests Total',
+                        '₹${_testsTotal.toInt()}'),
+                    if (b.serviceChargePaid > 0)
+                      _HDetailRow(Icons.delivery_dining_outlined, 'Service Charge',
+                          '₹${b.serviceChargePaid.toInt()}'),
+                    _HDetailRow(
+                      Icons.check_circle_outline,
+                      isCompleted ? 'Collected' : 'Amount',
+                      '₹${b.testsTotal.toInt()}',
+                      valueBold: true,
+                      valueColor: isCompleted ? AppColors.brandGreen : null,
+                    ),
+                  ]),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -386,4 +593,67 @@ class _HistoryCard extends StatelessWidget {
       ),
     );
   }
+}
+
+// ─── Detail sheet helpers ─────────────────────────────────────────────────────
+
+class _HDetailSection extends StatelessWidget {
+  final String title;
+  final List<_HDetailRow> rows;
+  const _HDetailSection({required this.title, required this.rows});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title,
+            style: const TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w600,
+                color: AppColors.textSecondary, letterSpacing: 0.3)),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppColors.background,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.divider),
+          ),
+          child: Column(
+            children: rows.map((r) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Icon(r.icon, size: 14, color: AppColors.brandGreen),
+                const SizedBox(width: 10),
+                Expanded(
+                  flex: 2,
+                  child: Text(r.label,
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ),
+                Expanded(
+                  flex: 3,
+                  child: Text(r.value,
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: r.valueBold ? FontWeight.w600 : FontWeight.w500,
+                          color: r.valueColor ?? AppColors.textPrimary),
+                      textAlign: TextAlign.end),
+                ),
+              ]),
+            )).toList(),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _HDetailRow {
+  final IconData icon;
+  final String label;
+  final String value;
+  final bool valueBold;
+  final Color? valueColor;
+  const _HDetailRow(this.icon, this.label, this.value,
+      {this.valueBold = false, this.valueColor});
 }
