@@ -650,6 +650,56 @@ class ApiService {
     }
   }
 
+  static Future<Map<String, dynamic>> submitPrescriptionRequest(
+      List<String> filePaths, {String? patientId, String? notes}) async {
+    final token = await getToken();
+    if (token == null) throw Exception('Not authenticated');
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/prescription-requests'),
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'file_paths': filePaths,
+        if (patientId != null) 'patient_id': int.tryParse(patientId) ?? patientId,
+        if (notes != null && notes.isNotEmpty) 'notes': notes,
+      }),
+    ).timeout(const Duration(seconds: 15));
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  static Future<List<Map<String, dynamic>>> getMyPrescriptionRequests({String? patientId}) async {
+    final token = await getToken();
+    if (token == null) return [];
+    try {
+      final uri = Uri.parse('$baseUrl/api/prescription-requests/mine')
+          .replace(queryParameters: patientId != null ? {'patient_id': patientId} : null);
+      final res = await http.get(
+        uri,
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        return List<Map<String, dynamic>>.from(body['requests'] as List);
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  static Future<Map<String, dynamic>> submitFeedback(
+      int bookingIdNum, int rating, String comment) async {
+    final token = await getToken();
+    if (token == null) throw Exception('Not authenticated');
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/feedback'),
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'booking_id':        bookingIdNum,
+        'overall_rating':    rating,
+        'feedback_comments': comment.isEmpty ? null : comment,
+      }),
+    ).timeout(const Duration(seconds: 15));
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   static Future<List<BranchModel>> getBranches({String? pincode, String? city}) async {
     final params = <String, String>{};
     if (pincode != null && pincode.isNotEmpty) params['pincode'] = pincode;

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/razorpay_service.dart';
@@ -58,6 +59,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
 
   static String _mapStatus(String raw) {
     switch (raw) {
+      case 'scheduled':  return 'Scheduled';
       case 'confirmed':  return 'Confirmed';
       case 'collected':  return 'Sample Collected';
       case 'completed':  return 'Completed';
@@ -174,6 +176,8 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
       technicianId:        b['technician_id'] != null ? (b['technician_id'] as num).toInt() : null,
       patientLat:          b['collection_latitude']  != null ? double.tryParse(b['collection_latitude'].toString())  : null,
       patientLng:          b['collection_longitude'] != null ? double.tryParse(b['collection_longitude'].toString()) : null,
+      rating:              b['overall_rating'] != null ? (b['overall_rating'] as num).toInt() : null,
+      feedbackComment:     b['feedback_comments'] as String?,
     );
   }
 
@@ -463,6 +467,7 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
     if (tab == 'Upcoming') {
       return _bookings
           .where((b) =>
+              b.status == 'Scheduled' ||
               b.status == 'Pending' ||
               b.status == 'Confirmed' ||
               b.status == 'Technician Allocated' ||
@@ -567,6 +572,7 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
                   itemBuilder: (_, i) => _BookingCard(
                     booking: list[i],
                     onTap: () => _showDetail(list[i]),
+                    onFeedbackSubmitted: _reload,
                   ),
                 );
               }).toList(),
@@ -575,27 +581,38 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
   }
 }
 
-void _showFeedback(BuildContext context, BookingModel booking) {
+void _showFeedback(BuildContext context, BookingModel booking, {VoidCallback? onRefresh}) {
   showModalBottomSheet(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
     builder: (_) => _FeedbackSheet(
       booking: booking,
-      onSubmit: (rating, comment) {
-        // TODO: POST /api/bookings/${booking.id}/feedback { rating, comment }
-        // For now show a snackbar; in real app update state with new rating
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Row(children: [
-            ...List.generate(rating, (_) => const Icon(Icons.star_rounded, color: Colors.white, size: 14)),
-            const SizedBox(width: 8),
-            const Expanded(child: Text('Thank you for your feedback!')),
-          ]),
-          backgroundColor: AppColors.brandGreen,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+      onSubmit: (rating, comment) async {
+        final result = await ApiService.submitFeedback(
+          booking.bookingIdNum!, rating, comment);
+        if (!context.mounted) return;
+        if (result['success'] == true) {
+          Navigator.pop(context);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Row(children: [
+              ...List.generate(rating, (_) => const Icon(Icons.star_rounded, color: Colors.white, size: 14)),
+              const SizedBox(width: 8),
+              const Expanded(child: Text('Thank you for your feedback!')),
+            ]),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+          onRefresh?.call();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(result['message'] ?? 'Could not submit feedback'),
+            backgroundColor: const Color(0xFFD32F2F),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
       },
     ),
   );
@@ -620,7 +637,8 @@ void _downloadReport(BuildContext context, BookingModel booking) {
 class _BookingCard extends StatelessWidget {
   final BookingModel booking;
   final VoidCallback onTap;
-  const _BookingCard({required this.booking, required this.onTap});
+  final VoidCallback? onFeedbackSubmitted;
+  const _BookingCard({required this.booking, required this.onTap, this.onFeedbackSubmitted});
 
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -630,23 +648,25 @@ class _BookingCard extends StatelessWidget {
 
   Color _statusColor(String s) {
     switch (s) {
-      case 'Completed':       return AppColors.brandGreen;
+      case 'Completed':        return AppColors.brandGreen;
       case 'Sample Collected': return const Color(0xFF2E7D32);
-      case 'Confirmed':       return const Color(0xFF1565C0);
-      case 'In Progress':     return const Color(0xFF1565C0);
-      case 'Cancelled':       return const Color(0xFFD32F2F);
-      default:                return const Color(0xFFE65100); // Pending
+      case 'Confirmed':        return const Color(0xFF1565C0);
+      case 'In Progress':      return const Color(0xFF1565C0);
+      case 'Cancelled':        return const Color(0xFFD32F2F);
+      case 'Scheduled':        return const Color(0xFF6A1B9A);
+      default:                 return const Color(0xFFE65100); // Pending
     }
   }
 
   IconData _statusIcon(String s) {
     switch (s) {
-      case 'Completed':       return Icons.check_circle_outline;
+      case 'Completed':        return Icons.check_circle_outline;
       case 'Sample Collected': return Icons.science_outlined;
-      case 'Confirmed':       return Icons.event_available_outlined;
-      case 'In Progress':     return Icons.directions_run_rounded;
-      case 'Cancelled':       return Icons.cancel_outlined;
-      default:                return Icons.hourglass_empty_rounded; // Pending
+      case 'Confirmed':        return Icons.event_available_outlined;
+      case 'In Progress':      return Icons.directions_run_rounded;
+      case 'Cancelled':        return Icons.cancel_outlined;
+      case 'Scheduled':        return Icons.event_outlined;
+      default:                 return Icons.hourglass_empty_rounded; // Pending
     }
   }
 
@@ -796,7 +816,7 @@ class _BookingCard extends StatelessWidget {
                     if (booking.status == 'Completed' && booking.rating == null) ...[
                       const SizedBox(height: 10),
                       GestureDetector(
-                        onTap: () => _showFeedback(context, booking),
+                        onTap: () => _showFeedback(context, booking, onRefresh: onFeedbackSubmitted),
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 9),
                           decoration: BoxDecoration(
@@ -979,7 +999,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
       'en_route', 'arrived', 'collection_started', 'sample_collected', 'handed_to_lab'
     };
     if (b.collectionStatus != null && blocked.contains(b.collectionStatus)) return false;
-    return b.status == 'Pending' || b.status == 'Confirmed';
+    return b.status == 'Pending' || b.status == 'Confirmed' || b.status == 'Scheduled';
   }
 
   String _formatDate(DateTime d) {
@@ -1531,16 +1551,11 @@ class _TechnicianCard extends StatelessWidget {
             ],
           ),
         ),
-        if (mobile != null && mobile!.isNotEmpty)
+        if (mobile != null && mobile!.isNotEmpty &&
+            collectionStatus != 'sample_collected' &&
+            collectionStatus != 'handed_to_lab')
           GestureDetector(
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text('Technician mobile: $mobile'),
-                action: SnackBarAction(label: 'OK', onPressed: () {}),
-                behavior: SnackBarBehavior.floating,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ));
-            },
+            onTap: () => launchUrl(Uri(scheme: 'tel', path: mobile)),
             child: Container(
               width: 40, height: 40,
               decoration: BoxDecoration(
@@ -1622,7 +1637,7 @@ class _DetailRow {
 
 class _FeedbackSheet extends StatefulWidget {
   final BookingModel booking;
-  final void Function(int rating, String comment) onSubmit;
+  final Future<void> Function(int rating, String comment) onSubmit;
   const _FeedbackSheet({required this.booking, required this.onSubmit});
 
   @override
@@ -1667,12 +1682,15 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
   Future<void> _submit() async {
     if (_rating == 0) return;
     setState(() => _submitting = true);
-    await Future.delayed(const Duration(milliseconds: 600));
     final comment = [
       ..._selectedTags,
       if (_commentCtrl.text.trim().isNotEmpty) _commentCtrl.text.trim(),
     ].join(', ');
-    widget.onSubmit(_rating, comment);
+    try {
+      await widget.onSubmit(_rating, comment);
+    } catch (_) {
+      if (mounted) setState(() => _submitting = false);
+    }
   }
 
   @override

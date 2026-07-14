@@ -23,6 +23,15 @@ exports.getSlots = async (req, res) => {
     });
   }
 
+  // Compute today's date and cutoff time in IST (UTC+5:30) with 1-hour buffer.
+  // Passed as SQL params so no reliance on MySQL timezone config.
+  const istOffsetMs = (5 * 60 + 30) * 60 * 1000;
+  const istNow      = new Date(Date.now() + istOffsetMs);
+  const todayIST    = istNow.toISOString().slice(0, 10); // 'YYYY-MM-DD'
+  const cutoff      = new Date(istNow.getTime() + 30 * 60 * 1000); // +30 min buffer
+  const cutoffTime  = `${String(cutoff.getUTCHours()).padStart(2, '0')}:${String(cutoff.getUTCMinutes()).padStart(2, '0')}:00`;
+  writeLog(`[getSlots] today_IST=${todayIST} cutoff=${cutoffTime}`);
+
   try {
     let rows;
 
@@ -60,8 +69,9 @@ exports.getSlots = async (req, res) => {
            AND ts.branch_id    = ?
            AND av.is_available = 1
            AND ts.booked_count < ts.max_bookings
+           AND (? != ? OR av.slot_time > ?)
          ORDER BY av.slot_time`,
-        [date, branch_id]
+        [date, branch_id, date, todayIST, cutoffTime]
       );
     } else {
       if (!branch_id) {
@@ -87,9 +97,10 @@ exports.getSlots = async (req, res) => {
            AND ls.branch_id    = ?
            AND av.is_available = 1
            AND ls.booked_count < ls.max_bookings
+           AND (? != ? OR av.slot_time > ?)
          GROUP BY av.slot_time
          ORDER BY av.slot_time`,
-        [date, branch_id]
+        [date, branch_id, date, todayIST, cutoffTime]
       );
     }
 
