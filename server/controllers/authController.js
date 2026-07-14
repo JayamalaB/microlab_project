@@ -21,7 +21,7 @@ const generateOtp = () => Math.floor(1000 + Math.random() * 9000).toString();
 
 function sendSms(mobile, otp) {
   const message = encodeURIComponent(
-    `Alert Detected in MicroLab : Temp is ${otp}°C. Location : Login -MICROLABS`
+    `Your OTP for Login is ${otp}. Valid for 10 minutes. Do not share this code with anyone. - Microlab`
   );
   const url =
     `http://site.ping4sms.com/api/smsapi` +
@@ -30,7 +30,7 @@ function sendSms(mobile, otp) {
     `&sender=MICROB` +
     `&number=91${mobile}` +
     `&sms=${message}` +
-    `&templateid=1707170202637594495`;
+    `&templateid=1607100000000384872`;
 
   return new Promise((resolve, reject) => {
     http.get(url, (res) => {
@@ -87,7 +87,7 @@ exports.sendOtp = async (req, res) => {
     }
 
     const otp = generateOtp();
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     step = 'select_user';
     writeLog(`[sendOtp] SELECT ip_users — ${elapsed()}`);

@@ -1,34 +1,38 @@
-// Runtime settings with DB-backed overrides (falls back to defaults if table absent)
 const db = require('./db');
 
 let _cache = {};
-let _loaded = false;
 
-async function init() {
+async function refresh() {
   try {
     const [rows] = await db.execute('SELECT setting_key, setting_value FROM ip_settings');
-    rows.forEach(r => { _cache[r.setting_key] = r.setting_value; });
-    _loaded = true;
-    console.log(`[settings] loaded ${rows.length} setting(s) from DB`);
-  } catch (_) {
-    // Table may not exist yet — use defaults silently
-    _loaded = true;
+    const next = {};
+    for (const row of rows) next[row.setting_key] = row.setting_value;
+    _cache = next;
+    console.log(`[settings] refreshed — ${rows.length} key(s)`);
+  } catch (err) {
+    console.error('[settings] refresh FAILED:', err.message);
   }
 }
 
 function get(key, defaultValue = null) {
-  return _cache.hasOwnProperty(key) ? _cache[key] : defaultValue;
+  return key in _cache ? _cache[key] : defaultValue;
 }
 
 function getBool(key, defaultValue = false) {
-  if (!_cache.hasOwnProperty(key)) return defaultValue;
-  const v = _cache[key];
-  return v === true || v === 1 || v === '1' || v === 'true';
+  const val = get(key);
+  if (val === null) return defaultValue;
+  return val === 'true' || val === '1';
 }
 
 function getList(key, defaultValue = []) {
-  if (!_cache.hasOwnProperty(key)) return defaultValue;
-  try { return JSON.parse(_cache[key]); } catch (_) { return defaultValue; }
+  const val = get(key);
+  if (!val) return defaultValue;
+  return val.split(',').map(s => s.trim()).filter(Boolean);
 }
 
-module.exports = { init, get, getBool, getList };
+async function init(intervalMs = 5 * 60 * 1000) {
+  await refresh();
+  setInterval(refresh, intervalMs);
+}
+
+module.exports = { init, refresh, get, getBool, getList };

@@ -49,6 +49,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
   // ── Collection mode ───────────────────────────────────────
   String _mode = 'Home Collection'; // or 'Lab Test'
+  bool _modeChosen = false;         // true once user explicitly taps a mode
   final List<String> _modes = ['Home Collection', 'Lab Test'];
 
   // ── Location fields ───────────────────────────────────────
@@ -252,6 +253,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           debugPrint('\n🔄 [MODE CHANGE] $prev → $m');
           setState(() {
             _mode = m;
+            _modeChosen = true;
             // Only clear branch when SWITCHING from Lab Test → Home Collection.
             // If mode hasn't changed (sheet re-confirmed same mode), keep state.
             if (m == 'Home Collection' && prev == 'Lab Test') {
@@ -664,7 +666,25 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 const SizedBox(height: 20),
 
                 // ── Content ───────────────────────────────
-                if (_loadingTests)
+                if (!_modeChosen)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 40, horizontal: 16),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.touch_app_outlined, size: 36, color: AppColors.brandGreen),
+                          SizedBox(height: 12),
+                          Text(
+                            'Select a booking type to see available tests',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 14, color: AppColors.textSecondary, height: 1.5),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                else if (_loadingTests)
                   const Padding(
                     padding: EdgeInsets.symmetric(vertical: 60),
                     child: Center(
@@ -2699,22 +2719,24 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
   static const int _maxFiles = 5;
   final List<_PresDoc> _uploads = [];
   bool _isPicking = false;
+  bool _isSubmitting = false;
+  List<Map<String, dynamic>> _previous = [];
+  bool _loadingHistory = true;
 
-  // Mock previous prescriptions
-  final List<Map<String, dynamic>> _previous = [
-    {
-      'date': '08 May 2026',
-      'file': 'prescription_ravi_08may.jpg',
-      'status': 'Tests assigned by technician',
-      'action': 'Technician assigned CBC + Lipid Profile based on prescription',
-    },
-    {
-      'date': '15 Apr 2026',
-      'file': 'prescription_ravi_15apr.jpg',
-      'status': 'Reviewed',
-      'action': 'Technician called and confirmed HbA1c test',
-    },
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _loadHistory();
+  }
+
+  Future<void> _loadHistory() async {
+    final requests = await ApiService.getMyPrescriptionRequests(patientId: widget.member.id);
+    if (!mounted) return;
+    setState(() {
+      _previous = requests;
+      _loadingHistory = false;
+    });
+  }
 
   // ── Image picking ─────────────────────────────────────────
   void _showSourcePicker() {
@@ -2825,31 +2847,68 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
     ));
   }
 
-  void _submit() {
-    if (_uploads.isEmpty) return;
-    Navigator.pop(context);
-    // TODO: POST /api/prescriptions with _uploads.map((d) => d.bytes)
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Row(children: [
-        const Icon(Icons.check_circle_outline, color: Colors.white, size: 16),
-        const SizedBox(width: 8),
-        Expanded(
-            child: Text(
-                '${_uploads.length} prescription image${_uploads.length > 1 ? 's' : ''} submitted. Our technician will review and contact you.')),
-      ]),
-      backgroundColor: AppColors.brandGreen,
-      behavior: SnackBarBehavior.floating,
-      duration: const Duration(seconds: 4),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ));
+  Future<void> _submit() async {
+    if (_uploads.isEmpty || _isSubmitting) return;
+    setState(() => _isSubmitting = true);
+    try {
+      // Upload each image and collect URLs
+      final filePaths = <String>[];
+      for (final doc in _uploads) {
+        final url = await ApiService.uploadPhoto(doc.bytes, doc.fileName);
+        if (url != null) filePaths.add(url);
+      }
+      if (filePaths.isEmpty) throw Exception('Upload failed');
+
+      await ApiService.submitPrescriptionRequest(filePaths, patientId: widget.member.id);
+      if (!mounted) return;
+
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Row(children: [
+          const Icon(Icons.check_circle_outline, color: Colors.white, size: 16),
+          const SizedBox(width: 8),
+          Expanded(child: Text(
+              '${filePaths.length} prescription image${filePaths.length > 1 ? 's' : ''} submitted. Our team will review and contact you.')),
+        ]),
+        backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('Could not submit. Please try again.'),
+        backgroundColor: const Color(0xFFD32F2F),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+    }
   }
 
   Color _statusColor(String s) {
-    if (s.contains('assigned') || s.contains('Reviewed')) {
-      return AppColors.brandGreen;
+    switch (s) {
+      case 'reviewed':  return AppColors.brandGreen;
+      case 'converted': return const Color(0xFF1565C0);
+      default:          return const Color(0xFFE65100); // pending
     }
-    if (s.contains('Pending')) return const Color(0xFFE65100);
-    return const Color(0xFF1565C0);
+  }
+
+  String _statusLabel(String s) {
+    switch (s) {
+      case 'reviewed':  return 'Reviewed';
+      case 'converted': return 'Booking Created';
+      default:          return 'Pending Review';
+    }
+  }
+
+  String _formatDate(String iso) {
+    try {
+      final d = DateTime.parse(iso);
+      const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return '${d.day} ${months[d.month]} ${d.year}';
+    } catch (_) { return iso; }
   }
 
   @override
@@ -3081,7 +3140,13 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                   ],
 
                   // ── Previous prescriptions ───────────────
-                  if (_previous.isNotEmpty) ...[
+                  if (_loadingHistory)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Center(child: CircularProgressIndicator(
+                          strokeWidth: 2, color: AppColors.brandGreen)),
+                    )
+                  else if (_previous.isNotEmpty) ...[
                     const SizedBox(height: 24),
                     const Text('Previous Uploads',
                         style: TextStyle(
@@ -3089,77 +3154,106 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                             fontWeight: FontWeight.w600,
                             color: AppColors.textPrimary)),
                     const SizedBox(height: 10),
-                    ..._previous.map((p) => Container(
-                          margin: const EdgeInsets.only(bottom: 10),
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: AppColors.background,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: AppColors.divider),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(children: [
-                                const Icon(
-                                    Icons.insert_drive_file_outlined,
-                                    size: 16,
-                                    color: AppColors.textHint),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(p['file'],
-                                      style: const TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w500,
-                                          color: AppColors.textPrimary),
-                                      overflow: TextOverflow.ellipsis),
+                    ..._previous.map((p) {
+                      final paths  = (p['file_paths'] as List?)?.cast<String>() ?? [];
+                      final status = (p['status'] as String?) ?? 'pending';
+                      final date   = _formatDate((p['created_at'] as String?) ?? '');
+                      final note   = (p['admin_notes'] as String?);
+                      final sc     = _statusColor(status);
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: AppColors.background,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.divider),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Patient name + date
+                            Row(children: [
+                              const Icon(Icons.person_outline,
+                                  size: 14, color: AppColors.textHint),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  (p['patient_name'] as String?) ?? 'Patient',
+                                  style: const TextStyle(fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.textPrimary),
                                 ),
-                              ]),
-                              const SizedBox(height: 6),
-                              Row(children: [
-                                const Icon(Icons.calendar_today_outlined,
-                                    size: 11, color: AppColors.textHint),
-                                const SizedBox(width: 4),
-                                Text(p['date'],
-                                    style: const TextStyle(
-                                        fontSize: 11,
-                                        color: AppColors.textSecondary)),
-                              ]),
-                              const SizedBox(height: 6),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: _statusColor(p['status'])
-                                      .withValues(alpha: 0.1),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Text(p['status'],
-                                    style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w600,
-                                        color: _statusColor(p['status']))),
                               ),
+                              const Icon(Icons.calendar_today_outlined,
+                                  size: 11, color: AppColors.textHint),
+                              const SizedBox(width: 4),
+                              Text(date,
+                                  style: const TextStyle(fontSize: 11,
+                                      color: AppColors.textSecondary)),
+                            ]),
+                            // Image thumbnails
+                            if (paths.isNotEmpty) ...[
+                              const SizedBox(height: 10),
+                              SizedBox(
+                                height: 72,
+                                child: ListView.separated(
+                                  scrollDirection: Axis.horizontal,
+                                  itemCount: paths.length,
+                                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                                  itemBuilder: (_, i) => ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Image.network(
+                                      paths[i],
+                                      width: 72, height: 72,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => Container(
+                                        width: 72, height: 72,
+                                        decoration: BoxDecoration(
+                                          color: AppColors.background,
+                                          borderRadius: BorderRadius.circular(8),
+                                          border: Border.all(color: AppColors.divider),
+                                        ),
+                                        child: const Icon(Icons.broken_image_outlined,
+                                            size: 28, color: AppColors.textHint),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 6),
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: sc.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(_statusLabel(status),
+                                  style: TextStyle(fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: sc)),
+                            ),
+                            if (note != null && note.isNotEmpty) ...[
                               const SizedBox(height: 6),
                               Row(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const Icon(Icons.check_circle_outline,
-                                      size: 13,
-                                      color: AppColors.brandGreen),
+                                      size: 13, color: AppColors.brandGreen),
                                   const SizedBox(width: 6),
-                                  Expanded(
-                                    child: Text(p['action'],
-                                        style: const TextStyle(
-                                            fontSize: 11,
-                                            color: AppColors.textSecondary,
-                                            height: 1.4)),
-                                  ),
+                                  Expanded(child: Text(note,
+                                      style: const TextStyle(fontSize: 11,
+                                          color: AppColors.textSecondary,
+                                          height: 1.4))),
                                 ],
                               ),
                             ],
-                          ),
-                        )),
+                          ],
+                        ),
+                      );
+                    }),
                   ],
 
                   const SizedBox(height: 16),
