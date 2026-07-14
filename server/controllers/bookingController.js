@@ -1,5 +1,6 @@
 const db       = require('../config/db');
 const settings = require('../config/settings');
+const { syncBookingToClient } = require('../services/clientSync');
 
 let _io = null;
 exports.setIo = (io) => { _io = io; };
@@ -211,6 +212,15 @@ exports.createBooking = async (req, res) => {
     await conn.commit();
     console.log(`🎉 Booking created — booking_id=${bookingId} ref=${bookingRef}`);
     console.log('─────────────────────────────────────────────────\n');
+
+    // Sync to client server for paid bookings (fire-and-forget)
+    if (isPaid) {
+      syncBookingToClient(bookingId, {
+        mobile: req.user.mobile,
+        type:   req.user.user_type ?? 'customer',
+      }).catch(err => console.error('[clientSync] unhandled:', err.message));
+    }
+
     res.status(201).json({
       success:     true,
       bookingId,
@@ -298,7 +308,9 @@ exports.getMyBookings = async (req, res) => {
          tc.completed_at,
          u.user_name        AS tech_name,
          u.user_mobile_no   AS tech_mobile,
-         tech.tech_photo    AS tech_photo
+         tech.tech_photo    AS tech_photo,
+         f.overall_rating,
+         f.feedback_comments
        FROM ip_bookings b
        LEFT JOIN ip_patients pat       ON pat.patient_id  = b.patient_id
        LEFT JOIN ip_branches br        ON br.branch_id    = b.branch_id
@@ -314,6 +326,7 @@ exports.getMyBookings = async (req, res) => {
        LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
        LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id
        LEFT JOIN ip_users u          ON u.user_id = tech.user_id
+       LEFT JOIN ip_feedback f        ON f.booking_id = b.booking_id
        WHERE (
          b.client_id = ?
          OR b.booking_id IN (
@@ -380,6 +393,13 @@ exports.payBooking = async (req, res) => {
 
     await conn.commit();
     console.log(`✅ payBooking → booking_id=${bookingId} paid ₹${amount}`);
+
+    // Sync to client server now that payment is confirmed (fire-and-forget)
+    syncBookingToClient(Number(bookingId), {
+      mobile: req.user.mobile,
+      type:   req.user.user_type ?? 'customer',
+    }).catch(err => console.error('[clientSync] unhandled:', err.message));
+
     res.json({ success: true });
   } catch (err) {
     await conn.rollback();
@@ -890,6 +910,16 @@ exports.createFamilyBooking = async (req, res) => {
     await conn.commit();
     console.log(`🎉 Family booking done — visitGroupId=${visitGroupId} members=${createdBookings.length}`);
     console.log('─────────────────────────────────────────────────\n');
+
+    if (isPaid) {
+      for (const { bookingId } of createdBookings) {
+        syncBookingToClient(bookingId, {
+          mobile: req.user.mobile,
+          type:   req.user.user_type ?? 'customer',
+        }).catch(err => console.error('[clientSync] unhandled:', err.message));
+      }
+    }
+
     res.status(201).json({ success: true, visitGroupId, bookings: createdBookings });
   } catch (err) {
     await conn.rollback();
