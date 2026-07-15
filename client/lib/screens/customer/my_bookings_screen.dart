@@ -573,6 +573,7 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
                     booking: list[i],
                     onTap: () => _showDetail(list[i]),
                     onFeedbackSubmitted: _reload,
+                    onCancelled: _reload,
                   ),
                 );
               }).toList(),
@@ -618,6 +619,43 @@ void _showFeedback(BuildContext context, BookingModel booking, {VoidCallback? on
   );
 }
 
+void _showCancelSheet(BuildContext context, BookingModel booking, VoidCallback? onCancelled) {
+  showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => _CancelSheet(
+      booking: booking,
+      onConfirm: (reason) async {
+        final result = await ApiService.cancelBooking(booking.bookingIdNum!, reason: reason);
+        if (!context.mounted) return;
+        if (result['success'] == true) {
+          Navigator.pop(context);
+          final refund = (result['refund_amount'] as num?)?.toDouble() ?? 0;
+          final charge = (result['service_charge_applied'] as num?)?.toDouble() ?? 0;
+          String msg = 'Booking cancelled.';
+          if (refund > 0) msg += ' Refund of ₹${refund.toInt()} will be processed.';
+          if (charge > 0) msg += ' ₹${charge.toInt()} service charge deducted.';
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(msg),
+            backgroundColor: const Color(0xFFD32F2F),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+          onCancelled?.call();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(result['message'] ?? 'Could not cancel booking'),
+            backgroundColor: const Color(0xFFD32F2F),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
+      },
+    ),
+  );
+}
+
 void _downloadReport(BuildContext context, BookingModel booking) {
   // TODO: url_launcher → launch(booking.reportUrl!)
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -638,7 +676,8 @@ class _BookingCard extends StatelessWidget {
   final BookingModel booking;
   final VoidCallback onTap;
   final VoidCallback? onFeedbackSubmitted;
-  const _BookingCard({required this.booking, required this.onTap, this.onFeedbackSubmitted});
+  final VoidCallback? onCancelled;
+  const _BookingCard({required this.booking, required this.onTap, this.onFeedbackSubmitted, this.onCancelled});
 
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -863,6 +902,37 @@ class _BookingCard extends StatelessWidget {
                       ),
                     ],
 
+                    // Cancel button — only for pending/scheduled/confirmed, future dates,
+                    // and before technician starts collection
+                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
+                        !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
+                        !const {'collection_started', 'otp_verified', 'sample_collected',
+                                 'handed_to_lab', 'collected', 'completed',
+                                 'all_collected', 'cancelled'}
+                            .contains(booking.collectionStatus)) ...[
+                      const SizedBox(height: 10),
+                      GestureDetector(
+                        onTap: () => _showCancelSheet(context, booking, onCancelled),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 9),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFF8F8),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFFEF9A9A)),
+                          ),
+                          child: const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.cancel_outlined, size: 15, color: Color(0xFFD32F2F)),
+                              SizedBox(width: 6),
+                              Text('Cancel Booking',
+                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFFD32F2F))),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+
                     // Download report for completed bookings
                     if (booking.status == 'Completed' && booking.reportUrl != null) ...[
                       const SizedBox(height: 10),
@@ -1008,7 +1078,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
     return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
   }
 
-  bool get _paymentPending => b.paymentStatus != 'paid' && b.grandTotal > 0;
+  bool get _paymentPending => b.status != 'Cancelled' && b.paymentStatus != 'paid' && b.grandTotal > 0;
   bool get _prescriptionBlocking =>
       b.prescriptionImages.isNotEmpty && b.prescriptionStatus != 'verified';
 
@@ -1631,6 +1701,151 @@ class _DetailRow {
   final bool valueBold;
   final Color? valueColor;
   const _DetailRow(this.icon, this.label, this.value, {this.valueBold = false, this.valueColor});
+}
+
+// ─── Feedback Sheet ───────────────────────────────────────────────────────────
+
+// ─── Cancel Sheet ─────────────────────────────────────────────────────────────
+
+class _CancelSheet extends StatefulWidget {
+  final BookingModel booking;
+  final Future<void> Function(String? reason) onConfirm;
+  const _CancelSheet({required this.booking, required this.onConfirm});
+
+  @override
+  State<_CancelSheet> createState() => _CancelSheetState();
+}
+
+class _CancelSheetState extends State<_CancelSheet> {
+  static const _reasons = ['Changed plans', 'Emergency', 'Wrong booking', 'Other'];
+  String? _reason;
+  bool _submitting = false;
+
+  Future<void> _submit() async {
+    setState(() => _submitting = true);
+    try {
+      await widget.onConfirm(_reason);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final arrivedWarning = widget.booking.collectionStatus == 'arrived';
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      padding: EdgeInsets.fromLTRB(20, 16, 20, MediaQuery.of(context).viewInsets.bottom + 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 36, height: 4,
+              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(children: [
+            const Icon(Icons.cancel_outlined, color: Color(0xFFD32F2F), size: 20),
+            const SizedBox(width: 8),
+            const Text('Cancel Booking',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          ]),
+          const SizedBox(height: 4),
+          Text('${widget.booking.member.name} · ${widget.booking.id}',
+              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+          const SizedBox(height: 14),
+          if (arrivedWarning) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF3E0),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFFCC02)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.info_outline, size: 16, color: Color(0xFFE65100)),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'The technician has arrived. A service charge will be deducted from your refund.',
+                      style: TextStyle(fontSize: 12, color: Color(0xFFE65100)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+          ],
+          const Text('Reason (optional)',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _reasons.map((r) {
+              final selected = _reason == r;
+              return GestureDetector(
+                onTap: () => setState(() => _reason = selected ? null : r),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: selected ? const Color(0xFFFFEBEE) : AppColors.background,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                        color: selected ? const Color(0xFFD32F2F) : AppColors.divider),
+                  ),
+                  child: Text(r,
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: selected ? const Color(0xFFD32F2F) : AppColors.textSecondary,
+                          fontWeight: selected ? FontWeight.w600 : FontWeight.w400)),
+                ),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 20),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _submitting ? null : () => Navigator.pop(context),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: AppColors.divider),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                ),
+                child: const Text('Go Back',
+                    style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600)),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _submitting ? null : _submit,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFD32F2F),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                ),
+                child: _submitting
+                    ? const SizedBox(width: 18, height: 18,
+                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                    : const Text('Confirm Cancel',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+              ),
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
 }
 
 // ─── Feedback Sheet ───────────────────────────────────────────────────────────

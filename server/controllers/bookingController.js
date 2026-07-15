@@ -347,6 +347,128 @@ exports.getMyBookings = async (req, res) => {
   }
 };
 
+// ── POST /api/bookings/:bookingId/cancel ──────────────────────────────────────
+exports.cancelBooking = async (req, res) => {
+  const clientId  = req.user.client_id;
+  const patientId = req.user.id;
+  const bookingId = parseInt(req.params.bookingId, 10);
+  const { reason } = req.body;
+
+  try {
+    const allowedBookingStatuses    = settings.getList('cancel_allowed_booking_statuses',    ['pending', 'scheduled']);
+    const allowedCollectionStatuses = settings.getList('cancel_allowed_collection_statuses', ['assigned', 'en_route', 'arrived']);
+    const chargeStatuses            = settings.getList('cancel_charge_trigger_statuses',     ['arrived']);
+    const serviceCharge             = parseFloat(settings.get('cancel_service_charge_amount', '0')) || 0;
+    const cutoffMinutes             = parseInt(settings.get('cancel_cutoff_minutes', '0'), 10) || 0;
+
+    // Verify booking ownership
+    const [[booking]] = await db.execute(
+      `SELECT b.booking_id, b.status, b.booking_type, b.total_amount, b.available_slot_id, b.booking_date,
+              b.visit_group_id,
+              COALESCE(pt.amount_paid, 0) AS amount_paid
+       FROM ip_bookings b
+       LEFT JOIN ip_payment_transactions pt
+         ON pt.booking_id = b.booking_id AND (pt.is_refund = 0 OR pt.is_refund IS NULL)
+       WHERE b.booking_id = ?
+         AND (b.client_id = ? OR b.patient_id = ?)
+         AND b.deleted_at IS NULL
+       ORDER BY pt.created_at DESC
+       LIMIT 1`,
+      [bookingId, clientId, patientId]
+    );
+
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    if (!allowedBookingStatuses.includes(booking.status)) {
+      return res.status(400).json({ success: false, message: `Cannot cancel a booking with status: ${booking.status}` });
+    }
+
+    // Enforce slot cutoff if configured
+    if (cutoffMinutes > 0 && booking.available_slot_id) {
+      const [[slot]] = await db.execute(
+        `SELECT slot_time FROM ip_available_slots WHERE available_slot_id = ?`,
+        [booking.available_slot_id]
+      );
+      if (slot) {
+        const istOffsetMs      = (5 * 60 + 30) * 60 * 1000;
+        const istNow           = new Date(Date.now() + istOffsetMs);
+        const slotDate         = new Date(booking.booking_date);
+        const [h, m]           = slot.slot_time.split(':');
+        slotDate.setUTCHours(parseInt(h, 10) - 5, parseInt(m, 10) - 30, 0, 0);
+        const minutesUntilSlot = (slotDate - istNow) / 60000;
+        if (minutesUntilSlot < cutoffMinutes) {
+          return res.status(400).json({
+            success: false,
+            message: `Cancellation is not allowed within ${cutoffMinutes} minutes of the slot time`,
+          });
+        }
+      }
+    }
+
+    // Technician collection checks only apply to home collection
+    const isHomeCollection = booking.booking_type === 'home_collection';
+    let tc = null;
+    if (isHomeCollection) {
+      const [[row]] = await db.execute(
+        `SELECT collection_status, arrived_at FROM ip_technician_collection WHERE booking_id = ? LIMIT 1`,
+        [bookingId]
+      );
+      tc = row ?? null;
+      if (tc && !allowedCollectionStatuses.includes(tc.collection_status)) {
+        return res.status(400).json({ success: false, message: 'Cannot cancel — sample collection has already started' });
+      }
+    }
+
+    // Calculate refund — service charge only applies to home collection when technician has arrived
+    const amountPaid     = parseFloat(booking.amount_paid) || 0;
+    let   techHasArrived = isHomeCollection && tc && chargeStatuses.includes(tc.collection_status);
+
+    // For family visits: service charge only applies if ALL siblings are also cancelled
+    // (technician's trip is fully wasted only when no one in the group continues)
+    if (techHasArrived && booking.visit_group_id) {
+      const [[{ activeSiblings }]] = await db.execute(
+        `SELECT COUNT(*) AS activeSiblings
+         FROM ip_bookings
+         WHERE visit_group_id = ?
+           AND booking_id != ?
+           AND status != 'cancelled'
+           AND deleted_at IS NULL`,
+        [booking.visit_group_id, bookingId]
+      );
+      if (activeSiblings > 0) techHasArrived = false;
+    }
+
+    const refundAmount  = techHasArrived ? Math.max(0, amountPaid - serviceCharge) : amountPaid;
+    const refundStatus  = amountPaid > 0 ? 'pending' : 'none';
+    const chargeApplied = techHasArrived ? serviceCharge : 0;
+
+    await db.execute(
+      `UPDATE ip_bookings
+       SET status = 'cancelled',
+           cancelled_at = NOW(),
+           cancelled_by = 'customer',
+           cancellation_reason = ?,
+           refund_amount = ?,
+           refund_status = ?
+       WHERE booking_id = ?`,
+      [reason ?? null, refundAmount, refundStatus, bookingId]
+    );
+
+    syncBookingToClient(bookingId, {
+      mobile: req.user.mobile,
+      type:   req.user.user_type ?? 'customer',
+    }).catch(err => console.error('[clientSync] cancel sync failed:', err.message));
+
+    console.log(`✅ Booking ${bookingId} cancelled. Refund: ₹${refundAmount}, Charge: ₹${chargeApplied}`);
+    res.json({ success: true, refund_amount: refundAmount, refund_status: refundStatus, service_charge_applied: chargeApplied });
+  } catch (err) {
+    console.error('❌ cancelBooking FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 // ── POST /api/bookings/:bookingId/pay ─────────────────────────────────────────
 exports.payBooking = async (req, res) => {
   const { bookingId } = req.params;
@@ -570,6 +692,43 @@ exports.removeItem = async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('❌ removeItem FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── GET /api/bookings/:bookingId/linked-patients ─────────────────────────────
+// Returns additional patients linked to this booking by the technician
+exports.getLinkedPatients = async (req, res) => {
+  const { bookingId } = req.params;
+  try {
+    // UNION: (1) old approach — patients added to ip_patient_bookings of parent
+    //        (2) new approach — sibling bookings linked via visit_group_id
+    const [rows] = await db.execute(
+      `SELECT p.patient_id, p.patient_name, p.patient_mobile, NULL AS booking_ref
+       FROM ip_patient_bookings pb
+       JOIN ip_patients p ON p.patient_id = pb.patient_id
+       WHERE pb.booking_id = ?
+         AND pb.patient_id != COALESCE(
+           (SELECT patient_id FROM ip_bookings WHERE booking_id = ? LIMIT 1), 0
+         )
+
+       UNION
+
+       SELECT p.patient_id, p.patient_name, p.patient_mobile, b2.booking_ref
+       FROM ip_bookings b1
+       JOIN ip_bookings b2 ON b2.visit_group_id = b1.visit_group_id
+                           AND b2.booking_id != b1.booking_id
+                           AND b2.deleted_at IS NULL
+       JOIN ip_patients p ON p.patient_id = b2.patient_id
+       WHERE b1.booking_id = ?
+         AND b1.visit_group_id IS NOT NULL
+
+       ORDER BY patient_id ASC`,
+      [bookingId, bookingId, bookingId]
+    );
+    res.json({ success: true, patients: rows });
+  } catch (err) {
+    console.error('❌ getLinkedPatients FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

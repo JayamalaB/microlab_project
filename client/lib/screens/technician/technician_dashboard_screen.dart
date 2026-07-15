@@ -51,6 +51,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   // Availability — technician starts Offline after login
   bool _isOnline = false;
   bool _isTogglingOnline = false;
+  bool _isRefreshing = false;
   StreamSubscription<Position>? _locationSub;
   Timer? _refreshTimer;
 
@@ -354,7 +355,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
     _bookings = [];
     _loadActiveBookings();
     _refreshTimer = Timer.periodic(const Duration(seconds: 60), (_) {
-      if (mounted) _loadActiveBookings();
+      if (mounted && !_isRefreshing) _loadActiveBookings();
     });
   }
 
@@ -408,9 +409,10 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
               ? (DateTime.tryParse(dateStr)?.toLocal() ?? DateTime.now())
               : DateTime.now();
           final cs = map['collection_status'] as String? ?? '';
-          final status = cs == 'en_route'             ? 'En Route'
-              : cs == 'arrived'             ? 'Arrived'
+          final status = cs == 'en_route'             ? 'Journey Started'
+              : cs == 'arrived'             ? 'Destination Reached'
               : cs == 'collection_started'  ? 'Collection Started'
+              : cs == 'collected'           ? 'Sample Collected'
               : cs == 'sample_collected'    ? 'Sample Collected'
               : cs == 'otp_verified'        ? 'OTP Verified'
               : 'Confirmed';
@@ -432,7 +434,10 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
             status:            status,
             serviceChargePaid: 0,
             testsTotal:        double.tryParse(map['amount_paid']?.toString() ?? '') ?? 0,
+            amountPaid:        double.tryParse(map['booking_amount_paid']?.toString() ?? '') ?? 0.0,
+            paymentStatus:     map['payment_status'] as String? ?? 'pending',
             assignedAt:        date,
+            visitGroupId:      map['visit_group_id'] as String?,
             patientLat:        double.tryParse(map['patient_lat']?.toString() ?? ''),
             patientLng:        double.tryParse(map['patient_lng']?.toString() ?? ''),
           );
@@ -444,6 +449,13 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
       debugPrint('🔴 [ACTIVE-BOOKINGS] EXCEPTION type=${e.runtimeType}  msg=$e');
       debugPrint('   stacktrace: ${st.toString().split('\n').take(4).join(' | ')}');
     }
+  }
+
+  Future<void> _manualRefresh() async {
+    if (_isRefreshing) return;
+    setState(() => _isRefreshing = true);
+    await _loadActiveBookings();
+    if (mounted) setState(() => _isRefreshing = false);
   }
 
   // ── Online / Offline toggle ────────────────────────────────────────────────
@@ -805,6 +817,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
             docVerified: booking.docVerified,
             serviceChargePaid: booking.serviceChargePaid,
             testsTotal: booking.testsTotal,
+            amountPaid: booking.amountPaid,
             assignedAt: booking.assignedAt,
             patientLat: booking.patientLat,
             patientLng: booking.patientLng,
@@ -905,6 +918,16 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                   ],
                 ),
                 actions: [
+                  IconButton(
+                    icon: _isRefreshing
+                        ? const SizedBox(
+                            width: 18, height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white))
+                        : const Icon(Icons.refresh_rounded, color: Colors.white70),
+                    onPressed: _isRefreshing ? null : _manualRefresh,
+                    tooltip: 'Refresh bookings',
+                  ),
                   Padding(
                     padding: const EdgeInsets.only(right: 8),
                     child: _isTogglingOnline
