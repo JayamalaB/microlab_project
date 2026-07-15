@@ -80,7 +80,7 @@ async function syncBookingToClient(bookingId, initiator) {
     // 1. Booking + slot time
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date,
-              b.total_amount, b.patient_id,
+              b.total_amount, b.patient_id, b.status,
               TIME_FORMAT(av.slot_time, '%h:%i %p') AS slot_time
        FROM ip_bookings b
        LEFT JOIN ip_available_slots av ON av.available_slot_id = b.available_slot_id
@@ -189,7 +189,7 @@ async function syncBookingToClient(bookingId, initiator) {
     writeLog(`[clientSync] response — ${JSON.stringify(result)}`);
 
     if (result.status === 'success') {
-      if (result.bill_id) {
+      if (result.bill_id && booking.status !== 'cancelled') {
         await db.execute(
           `UPDATE ip_bookings SET bill_id = ? WHERE booking_id = ?`,
           [String(result.bill_id), bookingId]

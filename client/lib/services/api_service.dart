@@ -846,6 +846,17 @@ class ApiService {
     return [];
   }
 
+  static Future<Map<String, dynamic>> cancelBooking(int bookingIdNum, {String? reason}) async {
+    final token = await getToken();
+    if (token == null) throw Exception('Not authenticated');
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/bookings/$bookingIdNum/cancel'),
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode({'reason': reason}),
+    ).timeout(const Duration(seconds: 15));
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   static Future<Map<String, dynamic>> submitFeedback(
       int bookingIdNum, int rating, String comment) async {
     final token = await getToken();
