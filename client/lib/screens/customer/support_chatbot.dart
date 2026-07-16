@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/gestures.dart' show TapGestureRecognizer;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:audioplayers/audioplayers.dart';
@@ -451,7 +452,7 @@ class SupportChatbotButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(28),
         child: Container(
           height: 44,
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          width: 44,
           decoration: BoxDecoration(
             color: AppColors.brandGreen,
             borderRadius: BorderRadius.circular(28),
@@ -463,19 +464,7 @@ class SupportChatbotButton extends StatelessWidget {
               ),
             ],
           ),
-          child: const Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.support_agent_rounded, color: Colors.white, size: 20),
-              SizedBox(width: 7),
-              Text('Help',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.2)),
-            ],
-          ),
+          child: const Icon(Icons.support_agent_rounded, color: Colors.white, size: 22),
         ),
       ),
     );
@@ -551,6 +540,14 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
     ).hasMatch(text);
   }
 
+  // Matches questions about the technician assigned to a booking (ip_technicians) —
+  // mirrors TECHNICIAN_QUERY_PATTERN in server/rag/llmRetriever.js.
+  static bool _isTechnicianQuery(String text) => RegExp(
+    r"\b(technician\s*(info(rmation)?|details|name|contact|status)|who(?:'s| is) my technician|"
+    r'which technician|assigned technician|my technician)\b',
+    caseSensitive: false,
+  ).hasMatch(text);
+
   // ── Mic / STT ──────────────────────────────────────────────────────────────
   late final AudioRecorder _recorder;
   _MicState _micState = _MicState.idle;
@@ -569,7 +566,10 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   @override
   void initState() {
     super.initState();
-    _verifiedPatientId = widget.patientId; // use app-level patient ID if available
+    // TEMPORARY: hardcoded fallback patient_id for testing until real app-level login
+    // wiring is in place. Remove the `?? '51'` once dynamic patient IDs are available —
+    // the login-form fallback below still fires normally whenever this ends up null.
+    _verifiedPatientId = widget.patientId ?? '51';
     _recorder  = AudioRecorder();
     _ttsPlayer = AudioPlayer();
     _msgs.add(const _Msg(
@@ -995,10 +995,12 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
       return;
     }
 
-    // If asking about personal sample/report, profile/family, account/subscription, or
-    // booking data and not yet authenticated, show the login form instead of sending to
-    // the server (which would just reply with a plain "please log in" text bubble).
-    if ((_isSampleQuery(text) || _isPatientAccountQuery(text) || _isBookingQuery(text)) &&
+    // If asking about personal sample/report, profile/family, account/subscription,
+    // booking, or technician data and not yet authenticated, show the login form instead
+    // of sending to the server (which would just reply with a plain "please log in" text
+    // bubble).
+    if ((_isSampleQuery(text) || _isPatientAccountQuery(text) || _isBookingQuery(text) ||
+            _isTechnicianQuery(text)) &&
         _verifiedPatientId == null) {
       await Future.delayed(const Duration(milliseconds: 300));
       if (!mounted) return;
@@ -1037,6 +1039,26 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           final answer  = (body['data']?['answer'] as String?)?.trim() ?? 'No response.';
           final src     = body['data']?['context_used']?['source'] as String? ?? _layer.apiKey;
           final intent  = body['data']?['context_used']?['intent'] as String?;
+          final errCode = body['data']?['context_used']?['error'] as String?;
+
+          // Server says this needs a verified patient (sample/profile/account/booking)
+          // but we sent none — show the login form instead of a dead-end text reply.
+          // This is a safety net for phrasing the client-side pre-checks miss (e.g. a
+          // bare "bookings"), since the server always sets this flag for any
+          // personal-data intent regardless of exact wording.
+          if (errCode == 'no_patient_id') {
+            setState(() {
+              _loading = false;
+              _msgs.add(_Msg(
+                kind: _MsgKind.patientLoginForm,
+                text: text, // original question, so the form can retry it after auth
+                isBot: true,
+                layer: _layer == _Layer.all ? _Layer.db : _layer,
+              ));
+            });
+            _scrollBottom();
+            return;
+          }
 
           final dispLayer = (src == 'default_qa' || src == 'general_knowledge')
               ? _Layer.staticInfo
@@ -1590,8 +1612,8 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                     ),
                     boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)],
                   ),
-                  child: Text(msg.text,
-                      style: const TextStyle(fontSize: 13, height: 1.65, color: AppColors.textPrimary)),
+                  child: _linkifyText(msg.text,
+                      const TextStyle(fontSize: 13, height: 1.65, color: AppColors.textPrimary)),
                 ),
                 const SizedBox(height: 8),
                 const Text('TRY ANOTHER LAYER:',
@@ -1650,6 +1672,33 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
         _Layer.book       => '🩺 Book Test',
         _Layer.all        => '🔍 Everything',
       };
+
+  static final RegExp _urlPattern = RegExp(r'(https?://\S+)');
+
+  // Renders text with any http(s) URL (e.g. a test report link) as a tappable, underlined
+  // link that opens in the device's browser. Falls back to a plain Text when there's no
+  // URL, so this is safe to use everywhere a bot bubble renders msg.text.
+  Widget _linkifyText(String text, TextStyle style) {
+    final matches = _urlPattern.allMatches(text).toList();
+    if (matches.isEmpty) return Text(text, style: style);
+
+    final spans = <InlineSpan>[];
+    var last = 0;
+    for (final m in matches) {
+      if (m.start > last) spans.add(TextSpan(text: text.substring(last, m.start)));
+      final url = m.group(0)!;
+      spans.add(TextSpan(
+        text: url,
+        style: style.copyWith(color: AppColors.brandGreen, decoration: TextDecoration.underline),
+        recognizer: TapGestureRecognizer()
+          ..onTap = () => launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication),
+      ));
+      last = m.end;
+    }
+    if (last < text.length) spans.add(TextSpan(text: text.substring(last)));
+
+    return Text.rich(TextSpan(style: style, children: spans));
+  }
 
   Widget _buildBubble(_Msg msg, int idx) {
     // User bubble
@@ -1752,8 +1801,8 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                     ),
                     boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)],
                   ),
-                  child: Text(msg.text,
-                      style: const TextStyle(fontSize: 13, height: 1.65, color: AppColors.textPrimary)),
+                  child: _linkifyText(msg.text,
+                      const TextStyle(fontSize: 13, height: 1.65, color: AppColors.textPrimary)),
                 ),
                 if (msg.chips != null && msg.chips!.isNotEmpty) ...[
                   const SizedBox(height: 8),

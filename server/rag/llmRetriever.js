@@ -20,7 +20,7 @@ const PATIENT_COLS = [
 const CLIENT_COLS = ['client_name', 'client_mobile_no', 'subscription_tier', 'client_account_status'];
 
 // Intents that expose personal data — require a verified patientId.
-const PERSONAL_INTENTS = new Set(['sample_status_query', 'patient_profile_query', 'client_account_query', 'booking_query']);
+const PERSONAL_INTENTS = new Set(['sample_status_query', 'patient_profile_query', 'client_account_query', 'booking_query', 'technician_info_query']);
 const RELATION_WORDS = 'mother|father|spouse|wife|husband|child|children|son|daughter|sister|brother';
 // Generic nouns patients use instead of the word "profile" — "my information", "my
 // data", "my details", "my record(s)". Requires "my" directly before the word so it
@@ -72,6 +72,21 @@ const BOOKING_NUMBER_WORDS = {
     six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
     couple: 2, few: 3,
 };
+
+// ip_technicians — the technician assigned to one of the patient's own bookings, joined
+// via ip_bookings.technician_id. Never selected without a patientId, and always scoped to
+// a booking that belongs to that patient (see answerTechnicianQuery).
+const TECHNICIAN_COLS = [
+    'technician_code', 'specialization', 'certifications', 'tech_age',
+    'tech_city', 'is_available', 'technician_active',
+];
+// "technician info", "who is my technician", "which technician", "assigned technician".
+const TECHNICIAN_QUERY_PATTERN = /\b(technician\s*(info(rmation)?|details|name|contact|status)|who(?:'s| is) my technician|which technician|assigned technician|my technician)\b/i;
+// A booking reference ("BK1783658584549", "BK-2026-101") mentioned in the question — used
+// to scope a technician (or booking) lookup to that specific booking instead of the latest.
+const BOOKING_REF_PATTERN = /\bBK[-A-Z0-9]*\d+\b/i;
+// A bare booking id mentioned as "booking 87" / "booking id 101" / "booking #101".
+const BOOKING_ID_MENTION_PATTERN = /\bbooking\s*(?:id|#)?\s*[:#]?\s*(\d+)\b/i;
 
 class LLMRetriever {
     constructor() {
@@ -135,7 +150,7 @@ class LLMRetriever {
 
         // ── 1. Parse intent ────────────────────────────────────────────────────
         const intentData = !isPronoun ? await llmService.parseIntent(question) : null;
-        const DB_INTENTS = new Set(['test_query', 'branch_query', 'sample_status_query', 'patient_profile_query', 'client_account_query', 'booking_query']);
+        const DB_INTENTS = new Set(['test_query', 'branch_query', 'sample_status_query', 'patient_profile_query', 'client_account_query', 'booking_query', 'technician_info_query']);
         const isDBIntent = intentData && DB_INTENTS.has(intentData.intent);
 
         // ── 2. Quick return for general greeting/chitchat ─────────────────────
@@ -178,6 +193,8 @@ class LLMRetriever {
             intent = 'patient_profile_query';
         } else if (CLIENT_ACCOUNT_PATTERN.test(question)) {
             intent = 'client_account_query';
+        } else if (TECHNICIAN_QUERY_PATTERN.test(question)) {
+            intent = 'technician_info_query';
         } else if (BOOKING_QUERY_PATTERN.test(question)) {
             intent = 'booking_query';
         } else if (intent === 'general') {
@@ -207,6 +224,7 @@ class LLMRetriever {
                 patient_profile_query: '🔐 To view patient/family profile details, please make sure you are logged in.',
                 client_account_query:  '🔐 To view your account/subscription details, please make sure you are logged in.',
                 booking_query:         '🔐 To view your booking details, please make sure you are logged in.',
+                technician_info_query: '🔐 To view technician details, please make sure you are logged in.',
             };
             return {
                 question,
@@ -230,6 +248,25 @@ class LLMRetriever {
                 answer,
                 context_used: {
                     intent, entities: { booking_history: isHistory }, data_found: dataFound,
+                    used_llm: false, is_general: false, from_cache: false, session_id: sessionId
+                }
+            };
+        }
+
+        // Technician info joins ip_bookings (to find/verify the booking + its
+        // technician_id, scoped to this patient) with ip_technicians (the actual profile)
+        // — a second table the generic single-SQL pipeline below doesn't support.
+        if (intent === 'technician_info_query') {
+            const bookingRef = question.match(BOOKING_REF_PATTERN)?.[0] || null;
+            const bookingIdMention = bookingRef ? null : (question.match(BOOKING_ID_MENTION_PATTERN)?.[1] || null);
+            const { answer, dataFound } = await this.answerTechnicianQuery(patientId, bookingRef, bookingIdMention);
+            this._updateSession(sessionId, intent, entities);
+            llmService.saveToMemory(sessionId, question, answer);
+            return {
+                question,
+                answer,
+                context_used: {
+                    intent, entities: { booking_ref: bookingRef, booking_id: bookingIdMention }, data_found: dataFound,
                     used_llm: false, is_general: false, from_cache: false, session_id: sessionId
                 }
             };
@@ -410,7 +447,8 @@ class LLMRetriever {
 
         const bookingCols = 'b.booking_id, b.booking_ref, b.booking_date, b.booking_type, b.status, ' +
             'b.payment_status, b.amount_paid, b.amount_due, b.total_amount, b.discount_amount, ' +
-            'b.discount_reason, b.city, b.postal_code, avs.slot_date, avs.slot_time';
+            'b.discount_reason, b.city, b.postal_code, b.technician_id, b.technician_name, ' +
+            'avs.slot_date, avs.slot_time';
         // booking_date alone is not a reliable "latest" key — multiple bookings can share
         // the same booking_date, and MySQL's tie-break order for equal ORDER BY values is
         // undefined, so LIMIT 1 could return any of them. created_at is the actual
@@ -440,8 +478,7 @@ class LLMRetriever {
         const docCountByBooking = new Map();
 
         try {
-            const itemsSql = 'SELECT booking_id, product_name_snapshot, quantity, unit_price, ' +
-                'offer_price_snapshot, discount_amount, final_price, tat_hours_snapshot, item_status ' +
+            const itemsSql = 'SELECT booking_id, product_name_snapshot, quantity ' +
                 `FROM ip_booking_items WHERE booking_id IN (${idList}) AND patient_id = '${pid}' ` +
                 'ORDER BY booking_id, booking_item_id';
             console.log(`🔍 SQL: ${itemsSql}`);
@@ -464,24 +501,43 @@ class LLMRetriever {
             console.error('Booking documents query error:', err);
         }
 
+        const reportsByBooking = new Map();
+        try {
+            const reportsSql = 'SELECT booking_id, test_name, report_url, result_status ' +
+                `FROM ip_test_results WHERE booking_id IN (${idList}) AND patient_id = '${pid}' ` +
+                "AND report_url IS NOT NULL AND report_url != '' " +
+                'ORDER BY booking_id, result_id';
+            console.log(`🔍 SQL: ${reportsSql}`);
+            const [reportRows] = await db.pool.execute(reportsSql);
+            for (const rr of reportRows) {
+                if (!reportsByBooking.has(rr.booking_id)) reportsByBooking.set(rr.booking_id, []);
+                reportsByBooking.get(rr.booking_id).push(rr);
+            }
+        } catch (err) {
+            console.error('Test results query error:', err);
+        }
+
         return {
-            answer: this.formatBookingDetails(bookings, itemsByBooking, docCountByBooking, isHistory),
+            answer: this.formatBookingDetails(bookings, itemsByBooking, docCountByBooking, reportsByBooking, isHistory),
             dataFound: bookings.length,
         };
     }
 
-    _renderBooking(b, itemsByBooking, docCountByBooking, numbered) {
+    _renderBooking(b, itemsByBooking, docCountByBooking, reportsByBooking, numbered) {
         const items    = itemsByBooking.get(b.booking_id) || [];
         const docCount = docCountByBooking.get(b.booking_id) || 0;
+        const reports  = reportsByBooking.get(b.booking_id) || [];
         const label    = b.booking_ref || `#${b.booking_id}`;
 
         const lines = [numbered ? `${numbered}. Booking ${label}` : `🧾 Booking ${label}`];
-        lines.push(`   • Status: ${b.status || 'N/A'}${b.payment_status ? ` | Payment: ${b.payment_status}` : ''}`);
+        lines.push(`   • Status: ${b.status || 'N/A'}`);
+        if (b.payment_status) lines.push(`   • Payment Status: ${b.payment_status}`);
         if (b.booking_type) lines.push(`   • Type: ${b.booking_type}`);
         if (b.slot_date || b.slot_time) {
             lines.push(`   • Scheduled: ${[this._fmtDateOnly(b.slot_date), b.slot_time].filter(Boolean).join(' ')}`);
         }
         if (b.booking_date) lines.push(`   • Booked on: ${this._fmtDateOnly(b.booking_date)}`);
+        lines.push(`   • Technician: ${b.technician_name || 'Nil'}`);
         if (b.city) lines.push(`   • Location: ${b.city}${b.postal_code ? ` - ${b.postal_code}` : ''}`);
         if (b.total_amount != null) {
             let amtLine = `   • Amount: ₹${b.total_amount}`;
@@ -494,27 +550,91 @@ class LLMRetriever {
         if (items.length > 0) {
             lines.push('   • Tests/Items:');
             for (const it of items) {
-                const price = it.final_price ?? it.offer_price_snapshot ?? it.unit_price;
-                let itLine = `      - ${it.product_name_snapshot || 'Item'}`;
-                if (it.quantity > 1) itLine += ` x${it.quantity}`;
-                if (price != null) itLine += ` — ₹${price}`;
-                if (it.item_status) itLine += ` (${it.item_status})`;
-                lines.push(itLine);
+                const name = `${it.product_name_snapshot || 'Item'}${it.quantity > 1 ? ` x${it.quantity}` : ''}`;
+                lines.push(`      - ${name}`);
             }
         }
         if (docCount > 0) lines.push(`   • 📎 Documents: ${docCount} uploaded`);
+        if (reports.length === 0) {
+            lines.push('   • 📄 Report: Nil');
+        } else {
+            const uniqueUrls = [...new Set(reports.map(r => r.report_url))];
+            if (uniqueUrls.length === 1) {
+                lines.push(`   • 📄 Report: ${uniqueUrls[0]}`);
+            } else {
+                lines.push('   • 📄 Reports:');
+                for (const rr of reports) {
+                    lines.push(`      - ${rr.test_name || 'Test'}: ${rr.report_url}`);
+                }
+            }
+        }
         return lines.join('\n');
     }
 
-    formatBookingDetails(bookings, itemsByBooking, docCountByBooking, isHistory) {
+    formatBookingDetails(bookings, itemsByBooking, docCountByBooking, reportsByBooking, isHistory) {
         if (!bookings || bookings.length === 0) {
             return `🔍 No booking found for your account. Please contact us at 0422 4354242.`;
         }
         if (!isHistory) {
-            return `🧾 Your latest booking:\n\n${this._renderBooking(bookings[0], itemsByBooking, docCountByBooking, null)}`;
+            return `🧾 Your latest booking:\n\n${this._renderBooking(bookings[0], itemsByBooking, docCountByBooking, reportsByBooking, null)}`;
         }
-        const rendered = bookings.map((b, i) => this._renderBooking(b, itemsByBooking, docCountByBooking, i + 1));
+        const rendered = bookings.map((b, i) => this._renderBooking(b, itemsByBooking, docCountByBooking, reportsByBooking, i + 1));
         return `📋 Your booking history:\n\n${rendered.join('\n\n')}`;
+    }
+
+    // Technician assigned to one of the patient's bookings — defaults to the latest
+    // booking, or a specific one if the patient names a booking_ref ("BK...") or a bare
+    // booking id ("booking 87"). Always re-verifies the booking belongs to this patient_id
+    // before joining ip_technicians, so a booking_ref can't be used to probe another
+    // patient's technician.
+    async answerTechnicianQuery(patientId, bookingRef, bookingIdMention) {
+        if (!patientId) return { answer: '🔐 To view technician details, please make sure you are logged in.', dataFound: 0 };
+        const pid = String(patientId).replace(/'/g, "''");
+
+        const conditions = [`b.patient_id = '${pid}'`, 'b.deleted_at IS NULL'];
+        if (bookingRef) {
+            conditions.push(`b.booking_ref = '${bookingRef.replace(/'/g, "''")}'`);
+        } else if (bookingIdMention) {
+            conditions.push(`b.booking_id = '${String(bookingIdMention).replace(/'/g, "''")}'`);
+        }
+
+        const techCols = TECHNICIAN_COLS.map(c => `t.${c}`).join(', ');
+        const sql = `SELECT b.booking_id, b.booking_ref, b.technician_id, b.technician_name, ${techCols} ` +
+            `FROM ip_bookings b LEFT JOIN ip_technicians t ON t.technician_id = b.technician_id ` +
+            `WHERE ${conditions.join(' AND ')} ` +
+            `ORDER BY b.created_at DESC, b.booking_id DESC LIMIT 1`;
+
+        let rows = [];
+        try {
+            console.log(`🔍 SQL: ${sql}`);
+            [rows] = await db.pool.execute(sql);
+        } catch (err) {
+            console.error('Technician query error:', err);
+            return { answer: `⚠️ Could not fetch technician information. Please try again or call 0422 4354242.`, dataFound: 0 };
+        }
+
+        if (rows.length === 0) {
+            const scope = bookingRef ? `booking ${bookingRef}` : bookingIdMention ? `booking #${bookingIdMention}` : 'your account';
+            return { answer: `🔍 No booking found for ${scope}. Please contact us at 0422 4354242.`, dataFound: 0 };
+        }
+
+        return { answer: this.formatTechnicianInfo(rows[0]), dataFound: 1 };
+    }
+
+    formatTechnicianInfo(row) {
+        const label = row.booking_ref || `#${row.booking_id}`;
+        if (!row.technician_id) {
+            return `🔍 No technician has been assigned yet for booking ${label}.`;
+        }
+
+        const lines = [`👷 Technician for booking ${label}:`];
+        lines.push(`   • Name: ${row.technician_name || 'Nil'}`);
+        if (row.technician_code)   lines.push(`   • Technician Code: ${row.technician_code}`);
+        if (row.specialization)    lines.push(`   • Specialization: ${row.specialization}`);
+        if (row.certifications)    lines.push(`   • Certifications: ${row.certifications}`);
+        if (row.tech_age != null)  lines.push(`   • Age: ${row.tech_age}`);
+        if (row.tech_city)         lines.push(`   • Based in: ${row.tech_city}`);
+        return lines.join('\n');
     }
 
     // Maps each sample_status to the date column that is most meaningful for it.

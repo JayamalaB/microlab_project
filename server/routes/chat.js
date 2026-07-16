@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const llmRetriever = require('../rag/llmRetriever');
 const db = require('../db/database');
-const { resolveKnowledge, matchDefaultQA, isDBQuestion } = require('../services/knowledgeService');
+const { resolveKnowledge, matchDefaultQA, matchDefaultQASemantic, isDBQuestion } = require('../services/knowledgeService');
 const { getLiveContent } = require('../rag/websiteReader');
 const OpenAI = require('openai');
 
@@ -30,9 +30,16 @@ router.post('/ask', async (req, res) => {
         let result;
 
         if (searchLayer === 'static') {
-            const answer = matchDefaultQA(question);
+            let answer = matchDefaultQA(question);
+            let intent = 'default_qa';
+
+            if (!answer) {
+                answer = await matchDefaultQASemantic(question);
+                if (answer) intent = 'default_qa_semantic';
+            }
+
             result = answer
-                ? { question, answer, context_used: { intent: 'default_qa', source: 'default_qa', from_cache: false, session_id: sessionId } }
+                ? { question, answer, context_used: { intent, source: 'default_qa', used_llm: intent === 'default_qa_semantic', from_cache: false, session_id: sessionId } }
                 : { question, answer: "ℹ️ No static Q&A match found. Try a different question or call 1800-XXX-XXXX.", context_used: { intent: 'no_match', source: 'default_qa', session_id: sessionId } };
 
         } else if (searchLayer === 'db') {

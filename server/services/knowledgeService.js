@@ -37,6 +37,60 @@ function matchDefaultQA(question) {
     return null;
 }
 
+// Fallback for when matchDefaultQA's substring match misses because the patient phrased
+// it differently (e.g. "lab timings" instead of "working hours", "how can I book test"
+// instead of "how to book a lab test"). Only called on a miss, so it doesn't add latency
+// to the common case. GPT is restricted to the FAQ corpus only — it must not invent facts
+// or answer from outside knowledge, and must say NO_MATCH if nothing genuinely fits.
+async function matchDefaultQASemantic(question) {
+    if (!defaultQA?.faqs?.length) return null;
+
+    const corpus = defaultQA.faqs
+        .map((f, i) => `${i + 1}. Q: ${f.questions[0]}\nA: ${f.answer}`)
+        .join('\n\n');
+
+    try {
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const res = await openai.chat.completions.create({
+            model: 'gpt-3.5-turbo',
+            messages: [
+                {
+                    role: 'system',
+                    content: `You are MicroLab's FAQ assistant. The FAQ Knowledge Base below is the ONLY information you know.
+
+STRICT RULES:
+1. Find the FAQ entry whose meaning is the closest match to the user's question, even if worded
+   differently (e.g. "lab timings" means "working hours"; "how can I book test" means "how to
+   book a lab test"; "my mother's blood group" is NOT a match — that needs patient records, not FAQ).
+2. If you find a genuine match, answer using ONLY that entry's information. Do not invent facts,
+   add details not present in the entry, or combine multiple unrelated entries.
+3. If none of the entries are a reasonable match, respond with EXACTLY: NO_MATCH
+4. Never mention "FAQ", "entry", "knowledge base", or any internal terms — answer naturally,
+   like a MicroLab team member would.
+
+FAQ Knowledge Base:
+${corpus}`
+                },
+                { role: 'user', content: question }
+            ],
+            temperature: 0.2,
+            max_tokens: 300
+        });
+
+        const answer = res.choices[0].message.content.trim();
+        if (!answer || answer === 'NO_MATCH') {
+            console.log(`ℹ️  Semantic FAQ match: no fit for "${question}"`);
+            return null;
+        }
+        console.log(`✅ Semantic FAQ match found for: "${question}"`);
+        return answer;
+
+    } catch (err) {
+        console.error('❌ Semantic FAQ match error:', err.message);
+        return null;
+    }
+}
+
 // Keywords that indicate a question belongs to the DB pipeline — skip website layer
 const DB_KEYWORDS = [
     'product', 'price', 'stock', 'customer', 'order', 'warehouse', 'inventory',
@@ -57,6 +111,8 @@ const DB_KEYWORDS = [
     'family information', 'family details', 'family data',
     'my mother', 'my father', 'my spouse', 'my wife', 'my husband',
     'my child', 'my children', 'my son', 'my daughter', 'my sister', 'my brother',
+    // Technician terms (ip_technicians)
+    'technician', 'my technician', 'assigned technician', 'which technician',
 ];
 
 const SITE_TERMS = [
@@ -171,4 +227,4 @@ function reloadQA() {
     return { reloaded: true, count: defaultQA?.faqs?.length || 0 };
 }
 
-module.exports = { init, resolveKnowledge, reloadQA, matchDefaultQA, isDBQuestion };
+module.exports = { init, resolveKnowledge, reloadQA, matchDefaultQA, matchDefaultQASemantic, isDBQuestion };

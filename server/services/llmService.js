@@ -99,6 +99,11 @@ Database Schema (ONLY these tables exist — never reference any other table):
   (the logged-in patient's OWN bookings — status, payment, appointment slot date/time, the tests/items
   booked, and how many documents are attached. ONLY use when patient asks about THEIR OWN booking(s),
   e.g. "my booking", "booking details", "booking status", "track my booking", "booking history")
+- ip_technicians (joined via ip_bookings.technician_id)
+  (the technician assigned to one of the patient's OWN bookings — name, specialization, certifications,
+  availability. ONLY use when patient asks "technician info", "who is my technician", "which technician",
+  "assigned technician". Defaults to the LATEST booking unless the patient names a specific booking
+  reference/id.)
 
 Intent rules:
 - "show all tests", "list tests", "available tests", "what tests do you have" → test_query, keyword: null (list all)
@@ -110,13 +115,14 @@ Intent rules:
 - "my subscription", "my plan", "my account status", "is my account active" → client_account_query
 - "my booking", "booking details", "booking status", "track my booking", "latest booking" → booking_query, booking_history: false
 - "booking history", "all my bookings", "past bookings", "show my bookings" → booking_query, booking_history: true
+- "technician info", "who is my technician", "which technician", "assigned technician" → technician_info_query
 - NEVER set keyword to "available tests", "all tests", "show all" — those mean list everything
 
 User Question: "${question}"
 
 Respond with ONLY a JSON object (no extra text):
 {
-    "intent": "test_query|branch_query|sample_status_query|patient_profile_query|client_account_query|booking_query|general",
+    "intent": "test_query|branch_query|sample_status_query|patient_profile_query|client_account_query|booking_query|technician_info_query|general",
     "entities": {
         "product_name": "specific test or package name, or null",
         "keyword": "category/type to search (e.g. thyroid, blood, vitamin), or null",
@@ -124,7 +130,7 @@ Respond with ONLY a JSON object (no extra text):
         "city": "city name (e.g. Coimbatore, Trichy), or null",
         "price_query": true/false,
         "fasting_query": true/false,
-        "booking_id": "booking ID if patient mentions one, or null",
+        "booking_id": "booking ID or booking reference if patient mentions one, or null",
         "relation": "family relation mentioned, e.g. mother, father, spouse, child, self, or null",
         "person_name": "specific family member's name mentioned, or null",
         "booking_history": true/false
