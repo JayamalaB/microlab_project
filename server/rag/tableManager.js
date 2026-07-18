@@ -11,11 +11,6 @@ class TableManager {
                 name:       'ip_branches',
                 key_fields: ['branch_name', 'branch_address', 'branch_city', 'branch_state',
                              'branch_pincode', 'branch_mobile', 'branch_email']
-            },
-            ip_sample_tracking: {
-                name:       'ip_sample_tracking',
-                key_fields: ['sample_id', 'sample_barcode', 'booking_id', 'sample_type',
-                             'sample_status', 'collected_at', 'results_ready_at', 'reported_at', 'notes']
             }
         };
     }

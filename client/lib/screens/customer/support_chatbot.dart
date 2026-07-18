@@ -143,7 +143,7 @@ final Set<String> _kLocalChips = {
   '← Back',
   // Static info layer FAQ chips — answered locally, no server needed
   for (final qs in _kFaqCategories.values) ...qs,
-  // Sample follow-up chips — answered locally
+  // Report follow-up chips — answered locally
   'When will my report be ready?', 'How do I download my report?', 'Contact support',
   // About Lab layer chips — answered locally so web scraping failure never shows "no info"
   'What is Microbiological Laboratory (MBL)?',
@@ -358,7 +358,7 @@ const _kLayerQs = <_Layer, List<String>>{
     'Show all available tests', 'What is the price of CBC test?',
     'List all branch locations', 'What tests are available for thyroid?',
     'Show Coimbatore branch details', 'Which tests require fasting?',
-    'Track my sample status', 'Where is my report?',
+    'My booking', 'Booking history',
   ],
   _Layer.web: [
     'What is Microbiological Laboratory (MBL)?',
@@ -384,13 +384,6 @@ const _kIntentFollowUps = <String, List<String>>{
   'website_live':  ["What are MicroLab's accreditations?", 'Tell me about home collection', 'Contact support'],
   'general':       ['General Info', 'Show all branch locations', 'Book Test'],
 };
-
-const _kSampleFollowUps = [
-  'When will my report be ready?',
-  'How do I download my report?',
-  'Contact support',
-  'Show all available tests',
-];
 
 const _kTestPackages = [
   'Complete Blood Count (CBC)',
@@ -432,7 +425,7 @@ class _Msg {
 // ── FAB ───────────────────────────────────────────────────────────────────────
 class SupportChatbotButton extends StatelessWidget {
   /// Pass the logged-in patient's mobile / patient ID so the chatbot can
-  /// filter sample-status queries to only this patient's records.
+  /// scope profile, booking, and technician queries to this patient's own records.
   final String? patientId;
   const SupportChatbotButton({super.key, this.patientId});
 
@@ -489,14 +482,6 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
 
   // Patient auth — set from widget.patientId (app login) or from inline form
   String? _verifiedPatientId;
-
-  // Only matches questions specifically asking to TRACK/CHECK personal sample data.
-  // Deliberately excludes "my report" alone to avoid catching FAQ follow-ups like
-  // "When will my report be ready?" or "How do I download my report?".
-  static bool _isSampleQuery(String text) => RegExp(
-    r'\b(track my (sample|test|report)|sample status|check my sample|my sample status|where is my (sample|result)|my test result)\b',
-    caseSensitive: false,
-  ).hasMatch(text);
 
   // Matches questions about the patient's own profile/family members (ip_patients) or
   // account/subscription (ip_clients) — mirrors PATIENT_PROFILE_PATTERN,
@@ -995,12 +980,10 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
       return;
     }
 
-    // If asking about personal sample/report, profile/family, account/subscription,
-    // booking, or technician data and not yet authenticated, show the login form instead
-    // of sending to the server (which would just reply with a plain "please log in" text
-    // bubble).
-    if ((_isSampleQuery(text) || _isPatientAccountQuery(text) || _isBookingQuery(text) ||
-            _isTechnicianQuery(text)) &&
+    // If asking about personal profile/family, account/subscription, booking, or
+    // technician data and not yet authenticated, show the login form instead of sending
+    // to the server (which would just reply with a plain "please log in" text bubble).
+    if ((_isPatientAccountQuery(text) || _isBookingQuery(text) || _isTechnicianQuery(text)) &&
         _verifiedPatientId == null) {
       await Future.delayed(const Duration(milliseconds: 300));
       if (!mounted) return;
@@ -1041,7 +1024,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           final intent  = body['data']?['context_used']?['intent'] as String?;
           final errCode = body['data']?['context_used']?['error'] as String?;
 
-          // Server says this needs a verified patient (sample/profile/account/booking)
+          // Server says this needs a verified patient (profile/account/booking/technician)
           // but we sent none — show the login form instead of a dead-end text reply.
           // This is a safety net for phrasing the client-side pre-checks miss (e.g. a
           // bare "bookings"), since the server always sets this flag for any
@@ -1092,11 +1075,9 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
 
           final fus = isNoMatch
               ? <String>[]
-              : intent == 'sample_status_query'
-                  ? _filterChips(List<String>.from(_kSampleFollowUps))
-                  : _layer != _Layer.all
-                      ? _filterChips(List<String>.from(_kFollowUps[_layer] ?? []))
-                      : _filterChips(List<String>.from(_kIntentFollowUps[intent] ?? []));
+              : _layer != _Layer.all
+                  ? _filterChips(List<String>.from(_kFollowUps[_layer] ?? []))
+                  : _filterChips(List<String>.from(_kIntentFollowUps[intent] ?? []));
 
           final newMsgIdx = _msgs.length;
 
@@ -1183,7 +1164,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               '• Molecular Biology, Cytogenetics — 48–72 hrs\n\n'
               'You will receive an SMS once your report is ready.',
           isBot: true, layer: _Layer.staticInfo,
-          chips: ['How do I download my report?', 'Track my sample status', 'Contact support'],
+          chips: ['How do I download my report?', 'My booking', 'Contact support'],
         );
       case 'How do I download my report?':
         return const _Msg(
@@ -1194,7 +1175,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               '4. Tap "Download Report" to save as PDF\n\n'
               'You can also collect a physical copy at any branch.',
           isBot: true, layer: _Layer.staticInfo,
-          chips: ['When will my report be ready?', 'Track my sample status', 'Contact support'],
+          chips: ['When will my report be ready?', 'My booking', 'Contact support'],
         );
       case 'Contact support':
         return const _Msg(
@@ -1205,7 +1186,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               '• Email: microlabcbe@microlabindia.com\n\n'
               '🕐 Support hours: Mon–Sat 7:00 AM – 8:00 PM',
           isBot: true, layer: _Layer.staticInfo,
-          chips: ['Track my sample status', 'Show all available tests', '← Back'],
+          chips: ['My booking', 'Show all available tests', '← Back'],
         );
       // ── About Lab local answers ───────────────────────────────────────────
       case 'What is Microbiological Laboratory (MBL)?':
@@ -1290,7 +1271,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               '4. Tap "Download Report" to save as PDF\n\n'
               '💬 You also receive an SMS notification when the report is ready.',
           isBot: true, layer: _Layer.web,
-          chips: ['When will my report be ready?', 'Track my sample status', 'Contact support'],
+          chips: ['When will my report be ready?', 'My booking', 'Contact support'],
         );
       case 'What is the home sample collection process?':
       case 'How do I book a home collection?':
@@ -2890,7 +2871,7 @@ class _PatientLoginFormState extends State<_PatientLoginForm> {
           children: [
             Icon(Icons.check_circle_rounded, color: AppColors.brandGreen, size: 18),
             SizedBox(width: 8),
-            Flexible(child: Text('Verified! Fetching your sample status…',
+            Flexible(child: Text('Verified! Fetching your details…',
                 style: TextStyle(color: AppColors.brandGreen, fontSize: 13, fontWeight: FontWeight.w500))),
           ],
         ),
