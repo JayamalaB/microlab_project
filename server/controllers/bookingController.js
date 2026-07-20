@@ -1216,3 +1216,227 @@ exports.dispatchBooking = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+// ── POST /api/bookings/admin ───────────────────────────────────────────────────
+// Creates a booking from the admin portal and auto-dispatches for same-day bookings.
+// Protected by adminAuth middleware (HMAC-SHA256). No patient JWT required.
+// clientId must be provided in the request body (no req.user available).
+exports.createAdminBooking = async (req, res) => {
+  console.log('\n🔵 [ADMIN CREATE BOOKING] ─────────────────────────────');
+
+  const {
+    clientId,
+    patientId,
+    bookingType         = 'home_collection',
+    totalAmount         = 0,
+    discountAmount      = 0,
+    notes               = null,
+    items               = [],
+    branchId            = null,
+    collectionDate      = null,
+    availableSlotId     = null,
+    collectionAddress   = null,
+    collectionPincode   = null,
+    collectionCity      = null,
+    collectionLatitude  = null,
+    collectionLongitude = null,
+    paymentType         = 'pay_later',
+    razorpayPaymentId   = null,
+    razorpayOrderId     = null,
+  } = req.body;
+
+  if (!clientId)  return res.status(400).json({ success: false, message: 'clientId is required' });
+  if (!patientId) return res.status(400).json({ success: false, message: 'patientId is required' });
+
+  const isPaid        = paymentType === 'full' && razorpayPaymentId;
+  const amountPaid    = isPaid ? totalAmount : 0;
+  const amountDue     = isPaid ? 0 : totalAmount;
+  const txPaymentType = isPaid ? 'RAZORPAY' : 'PAY_LATER';
+
+  const todayIST      = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const bookingStatus = (collectionDate && collectionDate > todayIST) ? 'scheduled' : 'pending';
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // Resolve patient details (name + mobile needed for dispatch)
+    const [[patientRow]] = await conn.execute(
+      `SELECT patient_id_ref, patient_name, patient_mobile FROM ip_patients WHERE patient_id = ? LIMIT 1`,
+      [patientId]
+    );
+    const resolvedPatientIdRef = patientRow?.patient_id_ref ?? null;
+
+    // Resolve slot IDs from ip_available_slots
+    let labSlotId  = null;
+    let techSlotId = null;
+    if (availableSlotId) {
+      const [[avSlot]] = await conn.execute(
+        `SELECT lab_slot_id, technician_slot_id FROM ip_available_slots WHERE available_slot_id = ?`,
+        [availableSlotId]
+      );
+      if (avSlot) {
+        labSlotId  = avSlot.lab_slot_id        ?? null;
+        techSlotId = avSlot.technician_slot_id  ?? null;
+      }
+    }
+
+    // 1. Master booking record
+    const bookingRef = `BK${Date.now()}`;
+    const [bResult] = await conn.execute(
+      `INSERT INTO ip_bookings
+         (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
+          booking_type, status, total_amount, discount_amount,
+          amount_paid, amount_due, source_channel, notes,
+          collection_address, postal_code, city,
+          collection_latitude, collection_longitude,
+          patient_id, patient_id_ref, product_id,
+          payment_status, start_datetime, end_datetime, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin_panel', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), NULL, NOW())`,
+      [bookingRef, clientId, branchId ?? null, collectionDate ?? null,
+       labSlotId ?? null, availableSlotId ?? null,
+       bookingType, bookingStatus, totalAmount, discountAmount ?? 0,
+       amountPaid, amountDue,
+       notes ?? null,
+       collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
+       collectionLatitude ?? null, collectionLongitude ?? null,
+       patientId, resolvedPatientIdRef,
+       isPaid ? 'paid' : 'unpaid']
+    );
+    const bookingId = bResult.insertId;
+    console.log(`✅ [ADMIN] ip_bookings inserted → booking_id=${bookingId} status=${bookingStatus}`);
+
+    // 2. Patient → booking link
+    await conn.execute(
+      `INSERT INTO ip_patient_bookings (booking_id, patient_id, patient_ref, created_at)
+       VALUES (?, ?, ?, NOW())`,
+      [bookingId, patientId, resolvedPatientIdRef]
+    );
+
+    // 3. Line items
+    const bookingItemsInserted = [];
+    for (const item of items) {
+      const rawId = item.packageId ? Number(item.packageId) : null;
+      let validProductId = 0;
+      let productName    = null;
+      let docRequired    = false;
+      if (rawId) {
+        const [pkgCheck] = await conn.execute(
+          'SELECT product_id, product_name, document_required FROM ip_products WHERE product_id = ? LIMIT 1',
+          [rawId]
+        );
+        if (pkgCheck.length > 0) {
+          validProductId = rawId;
+          productName    = pkgCheck[0].product_name ?? null;
+          const rawDocReq = pkgCheck[0].document_required;
+          docRequired    = rawDocReq === 1 || rawDocReq === '1' || rawDocReq === 'yes';
+        }
+      }
+      const unitPrice  = item.originalPrice ?? item.finalPrice ?? 0;
+      const finalPrice = item.finalPrice ?? 0;
+      const [biResult] = await conn.execute(
+        `INSERT INTO ip_booking_items
+           (booking_id, product_id, product_name_snapshot, patient_id, unit_price, final_price, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [bookingId, validProductId, productName, patientId, unitPrice, finalPrice]
+      );
+      bookingItemsInserted.push({ bookingItemId: biResult.insertId, productId: validProductId, docRequired });
+    }
+
+    // 4. Mark slot unavailable and increment booked count
+    if (availableSlotId) {
+      await conn.execute(
+        'UPDATE ip_available_slots SET is_available = 0, updated_at = NOW() WHERE available_slot_id = ?',
+        [availableSlotId]
+      );
+    }
+    if (labSlotId) {
+      await conn.execute(
+        'UPDATE ip_lab_slots SET booked_count = booked_count + 1 WHERE lab_slot_id = ?',
+        [labSlotId]
+      );
+    } else if (techSlotId) {
+      await conn.execute(
+        'UPDATE ip_technician_slots SET booked_count = booked_count + 1 WHERE tech_slot_id = ?',
+        [techSlotId]
+      );
+    }
+
+    // 5. Payment transaction record
+    const txnRef = `TXN${Date.now()}`;
+    await conn.execute(
+      `INSERT INTO ip_payment_transactions
+         (transaction_ref, booking_id, patient_id, payment_type,
+          gross_amount, discount_amount, net_amount, amount_paid, amount_due,
+          currency, payment_status, transaction_status, is_refund,
+          gateway_transaction_id, gateway_order_id, gateway_status, paid_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INR', ?, ?, 0, ?, ?, ?, ?)`,
+      [txnRef, bookingId, patientId, txPaymentType,
+       totalAmount, discountAmount ?? 0, totalAmount - (discountAmount ?? 0),
+       amountPaid, amountDue,
+       isPaid ? 'paid'      : 'pending',
+       isPaid ? 'completed' : 'pending',
+       razorpayPaymentId ?? null,
+       razorpayOrderId   ?? null,
+       isPaid ? 'success' : null,
+       isPaid ? new Date() : null]
+    );
+
+    await conn.commit();
+    console.log(`🎉 [ADMIN] Booking created — booking_id=${bookingId} ref=${bookingRef}`);
+
+    // Auto-dispatch for same-day bookings
+    let dispatched = false;
+    if (bookingStatus === 'pending' && _io) {
+      const [[dispRow]] = await db.execute(
+        `SELECT COALESCE(ts.slot_id, ls.slot_id) AS slot_id, ias.slot_time
+         FROM ip_bookings b
+         LEFT JOIN ip_available_slots  ias ON ias.available_slot_id = b.available_slot_id
+         LEFT JOIN ip_technician_slots ts  ON ts.tech_slot_id       = ias.technician_slot_id
+         LEFT JOIN ip_lab_slots        ls  ON ls.lab_slot_id        = ias.lab_slot_id
+         WHERE b.booking_id = ? LIMIT 1`,
+        [bookingId]
+      );
+      const slotTime     = dispRow?.slot_time ? String(dispRow.slot_time).substring(0, 5) : null;
+      const dispatchType = bookingType === 'home_collection' ? 'lab' : (bookingType ?? 'lab');
+
+      triggerScheduledDispatch({
+        bookingId,
+        patientId,
+        patientName:     patientRow?.patient_name   ?? 'Patient',
+        patientMobile:   patientRow?.patient_mobile ?? '',
+        patientAddress:  collectionAddress   ?? 'Home Collection',
+        patientLat:      collectionLatitude  ?? null,
+        patientLng:      collectionLongitude ?? null,
+        hospital:        'MicroLab Home Collection',
+        bookingType:     dispatchType,
+        branchId:        branchId            ?? null,
+        slotId:          dispRow?.slot_id    ?? null,
+        slotLabel:       null,
+        appointmentTime: slotTime,
+      }, _io);
+
+      dispatched = true;
+      console.log(`🚀 [ADMIN] Auto-dispatch fired for booking_id=${bookingId}`);
+    }
+
+    res.status(201).json({
+      success:     true,
+      bookingId,
+      bookingRef,
+      isScheduled: bookingStatus === 'scheduled',
+      dispatched,
+      bookingItems: bookingItemsInserted.map(i => ({
+        bookingItemId: i.bookingItemId,
+        productId:     i.productId,
+        docRequired:   i.docRequired,
+      })),
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('❌ createAdminBooking FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error', detail: err.message });
+  } finally {
+    conn.release();
+  }
+};

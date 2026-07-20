@@ -285,6 +285,36 @@ exports.saveSlots = async (req, res) => {
     if (!tech) return res.status(404).json({ success: false, message: 'Technician not found' });
     const branchId = tech.branch_id;
 
+    // For today (IST), reject slot_ids whose slot_start has already been reached.
+    // Protects against raw API calls (Postman, modified clients) sending past slots.
+    // Tomorrow and future dates are skipped — all their slots remain editable.
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const istNow   = new Date(Date.now() + 5.5 * 60 * 60 * 1000); // UTC → IST
+    const nowISTMinutes = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
+
+    for (const day of slots) {
+      if (day.date !== todayIST || !Array.isArray(day.slot_ids) || day.slot_ids.length === 0) continue;
+      const placeholders = day.slot_ids.map(() => '?').join(',');
+      const [slotDefs] = await db.query(
+        `SELECT slot_id, slot_start FROM ip_slots WHERE slot_id IN (${placeholders})`,
+        day.slot_ids
+      );
+      const validIds = new Set(
+        slotDefs
+          .filter(r => {
+            const [h = 0, m = 0] = String(r.slot_start).split(':').map(Number);
+            return (h * 60 + m) > nowISTMinutes; // slot_start strictly after now
+          })
+          .map(r => r.slot_id)
+      );
+      const removed = day.slot_ids.filter(id => !validIds.has(id));
+      day.slot_ids  = day.slot_ids.filter(id =>  validIds.has(id));
+      if (day.durations) removed.forEach(id => delete day.durations[String(id)]);
+      if (removed.length > 0) {
+        console.log(`[saveSlots] Rejected ${removed.length} past slot(s) for today: [${removed}] nowIST=${istNow.getUTCHours()}:${String(istNow.getUTCMinutes()).padStart(2, '0')}`);
+      }
+    }
+
     const connection = await db.getConnection();
     try {
       await connection.beginTransaction();

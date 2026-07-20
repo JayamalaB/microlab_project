@@ -42,6 +42,11 @@ router.put('/:bookingId/lab-status',    bookingController.updateLabStatus);
 // No auth middleware — called from admin panel which does not send a JWT
 router.put('/:bookingId/admin-status',  bookingController.updateAdminStatus);
 
+// POST /api/bookings/admin — create booking from admin portal + auto-dispatch same-day
+// Secured by HMAC-SHA256 shared secret (adminAuth middleware), not JWT
+// Signing payload: "|timestamp"  (no bookingId in URL — bookingId param is empty string)
+router.post('/admin', adminAuth, bookingController.createAdminBooking);
+
 // POST /api/bookings/:bookingId/dispatch — trigger dispatch from admin portal
 // Secured by HMAC-SHA256 shared secret (adminAuth middleware), not JWT
 router.post('/:bookingId/dispatch', adminAuth, bookingController.dispatchBooking);

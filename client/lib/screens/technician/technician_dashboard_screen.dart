@@ -113,7 +113,11 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
     //    but the overlay never appeared. Now that the tech is back in the app
     //    (via app icon, not the notification), show the overlay so they can
     //    still Accept or Decline within the 40-second server window.
-    _showPendingBackgroundBooking();
+    //    First drain any booking the FCM background isolate persisted to
+    //    SharedPreferences — that isolate cannot write to main-isolate memory.
+    BookingNotificationService.instance
+        .checkAndSetFcmPendingBooking()
+        .then((_) => _showPendingBackgroundBooking());
   }
 
   void _showPendingBackgroundBooking() {
@@ -314,10 +318,14 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
       });
     }
 
-    // Case 2 — Body tap (or background booking pending from a previous session)
+    // Case 2 — Body tap (or background booking pending from a previous session).
     // addPostFrameCallback defers until after the first frame so context and
     // Navigator are ready for showBookingRequestOverlay().
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    // Drain FCM-isolate prefs first — background isolate writes there, not to
+    // main-isolate memory, so we must promote it before showing the overlay.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      await BookingNotificationService.instance.checkAndSetFcmPendingBooking();
       if (mounted) _showPendingBackgroundBooking();
     });
   }

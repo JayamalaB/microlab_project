@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'booking_notification_service.dart';
 import 'socket_service.dart';
@@ -86,6 +87,13 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     ),
     payload: jsonEncode(data),
   );
+
+  // Bridge to main isolate: SharedPreferences is the only cross-isolate
+  // store available here. The main isolate reads and clears this on resume.
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('pending_fcm_booking', jsonEncode(data));
+  } catch (_) {}
 }
 
 // ─── NotificationService ──────────────────────────────────────────────────────
