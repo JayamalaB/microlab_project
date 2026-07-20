@@ -729,6 +729,35 @@ class ApiService {
     return null;
   }
 
+  // Sends 1–4 members in one call; server creates one booking per member.
+  // members: [{ patientId?, name, mobile, dob?, age?, gender?, relation?, healthNotes?, tests:[{productId, price?}] }]
+  static Future<Map<String, dynamic>?> addVisitMembers({
+    required int parentBookingId,
+    required List<Map<String, dynamic>> members,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/technicians/add-visit-member'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'parentBookingId': parentBookingId,
+          'members': members,
+        }),
+      ).timeout(const Duration(seconds: 30));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return body;
+      debugPrint('[addVisitMembers] failed: ${body['message']} | detail: ${body['detail']}');
+    } catch (e) {
+      debugPrint('[addVisitMembers] ERROR: $e');
+    }
+    return null;
+  }
+
   static Future<List<Map<String, dynamic>>> getBookingFamily(int bookingId) async {
     final token = await getToken();
     if (token == null) return [];
@@ -745,6 +774,59 @@ class ApiService {
       debugPrint('[getBookingFamily] ERROR: $e');
     }
     return [];
+  }
+
+  // ── Booking OTP (sample-collection handoff) ──────────────────────────────
+
+  static Future<Map<String, dynamic>?> generateBookingOtp(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/technicians/booking-otp/generate'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode({'bookingId': bookingId}),
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[generateBookingOtp] ERROR: $e');
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> verifyBookingOtp({
+    required int bookingId,
+    required String otp,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/technicians/booking-otp/verify'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode({'bookingId': bookingId, 'otp': otp}),
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[verifyBookingOtp] ERROR: $e');
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>?> resendBookingOtp(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/technicians/booking-otp/resend'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode({'bookingId': bookingId}),
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[resendBookingOtp] ERROR: $e');
+      return null;
+    }
   }
 
   static Future<Map<String, dynamic>?> updateBookingItems({

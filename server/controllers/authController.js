@@ -1,6 +1,5 @@
 const db = require('../config/db');
 const jwt = require('jsonwebtoken');
-const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -17,35 +16,15 @@ function writeLog(msg) {
   fs.appendFileSync(LOG_FILE, line, 'utf8');
 }
 
+const sms = require('../utils/sms');
+
 const generateOtp = () => Math.floor(1000 + Math.random() * 9000).toString();
-
-function sendSms(mobile, otp) {
-  const message = encodeURIComponent(
-    `Your OTP for Login is ${otp}. Valid for 10 minutes. Do not share this code with anyone. - Microlab`
-  );
-  const url =
-    `http://site.ping4sms.com/api/smsapi` +
-    `?key=b12545cc4804680c6878ec8de0420d28` +
-    `&route=2` +
-    `&sender=MICROB` +
-    `&number=91${mobile}` +
-    `&sms=${message}` +
-    `&templateid=1607100000000384872`;
-
-  return new Promise((resolve, reject) => {
-    http.get(url, (res) => {
-      let data = '';
-      res.on('data', (chunk) => (data += chunk));
-      res.on('end', () => resolve(data));
-    }).on('error', reject);
-  });
-}
 
 exports.testSms = async (req, res) => {
   const { mobile } = req.query;
   if (!mobile) return res.json({ error: 'Pass ?mobile=10digitnumber' });
   try {
-    const response = await sendSms(mobile, '25.5');
+    const response = await sms.sendLoginOtp(mobile, '25.5');
     res.json({ success: true, sms_response: response });
   } catch (err) {
     res.json({ success: false, error: err.message });
@@ -141,7 +120,7 @@ exports.sendOtp = async (req, res) => {
     step = 'sms';
     try {
       writeLog(`[sendOtp] calling SMS gateway — ${elapsed()}`);
-      const smsResponse = await sendSms(mobile, otp);
+      const smsResponse = await sms.sendLoginOtp(mobile, otp);
       writeLog(`[sendOtp] SMS done — ${elapsed()} | response: ${smsResponse}`);
     } catch (smsErr) {
       writeLog(`[sendOtp] SMS failed (non-fatal) — ${elapsed()} | ${smsErr.message}`);

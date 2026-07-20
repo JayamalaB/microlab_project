@@ -4,11 +4,16 @@ const technicianController = require('../controllers/technicianController');
 const auth = require('../middleware/auth');
 
 // Static POST/GET routes must be registered BEFORE /:technicianId to avoid path collision
-router.post('/add-customer',       auth, technicianController.addCustomerBooking);
-router.post('/collect-payment',    auth, technicianController.collectPayment);
-router.post('/add-visit-member',   auth, technicianController.addVisitMember);
-router.get('/patient-lookup',      auth, technicianController.lookupPatient);
-router.get('/booking-family',      auth, technicianController.getBookingFamily);
+router.post('/add-customer',            auth, technicianController.addCustomerBooking);
+router.post('/collect-payment',         auth, technicianController.collectPayment);
+router.post('/add-visit-member',        auth, technicianController.addVisitMember);
+router.get('/patient-lookup',           auth, technicianController.lookupPatient);
+router.get('/booking-family',           auth, technicianController.getBookingFamily);
+
+// Booking OTP (sample-collection handoff)
+router.post('/booking-otp/generate',    auth, technicianController.generateBookingOtp);
+router.post('/booking-otp/verify',      auth, technicianController.verifyBookingOtp);
+router.post('/booking-otp/resend',      auth, technicianController.resendBookingOtp);
 
 // GET /api/technicians/:technicianId/profile — profile + today's stats
 router.get('/:technicianId/profile', technicianController.getProfile);

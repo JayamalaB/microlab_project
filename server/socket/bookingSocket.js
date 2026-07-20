@@ -32,6 +32,14 @@ function clog(msg) {
   fs.appendFileSync(COLLECTION_LOG, line, 'utf8');
 }
 
+const DISPATCH_LOG = path.join(__dirname, '..', 'logs', 'dispatch.log');
+function dlog(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
+  const line = `[${ist}] ${msg}\n`;
+  process.stdout.write(line);
+  fs.appendFileSync(DISPATCH_LOG, line, 'utf8');
+}
+
 // "06:30:00" → "6:30 AM"
 function _fmtTimeLabel(timeStr) {
   const [h, m] = timeStr.split(':').map(Number);
@@ -194,6 +202,28 @@ function _freeTechnician(technicianId, bookingId) {
   );
 }
 
+// Cascade a technician-collection status to all sibling bookings sharing the
+// same visit_group_id. No-op when visit_group_id IS NULL (normal bookings).
+async function _cascadeTcStatus(bookingId, status, timestampCol) {
+  try {
+    const [[row]] = await db.execute(
+      'SELECT visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
+      [bookingId]
+    );
+    if (!row?.visit_group_id) return;
+    const vgId = row.visit_group_id;
+    dbRun(
+      `UPDATE ip_technician_collection tc
+       JOIN ip_bookings b ON b.booking_id = tc.booking_id
+       SET tc.collection_status = ?, tc.${timestampCol} = NOW(), tc.updated_at = NOW()
+       WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+      [status, vgId, bookingId]
+    );
+  } catch (e) {
+    console.error(`❌ [_cascadeTcStatus] booking=${bookingId} status=${status}: ${e.message}`);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  QUEUE BUILDERS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -337,8 +367,10 @@ async function dispatchAttempt(io, bookingId) {
 
         // All slot-matched techs exhausted → tell patient to choose another slot.
         // Generic exhaustion → booking_timeout.
+        dlog(`[DISPATCH] ALL TECHS EXHAUSTED — bookingId=${bookingId} triedIds=[${[...dispatch.triedIds].join(',')}] slotId=${dispatch.slotId ?? 'none'}`);
         dispatchQueues.delete(bookingId);
         if (dispatch.slotId != null) {
+          dlog(`[DISPATCH] SLOT_EXHAUSTED — bookingId=${bookingId} slot=${dispatch.slotId} — emitting slot_no_availability to patient`);
           await _notifySlotNoAvailability(
             io, bookingId, dispatch.slotId, bookingData.branchId, dispatch.bookingDate, dispatch.appointmentTime
           );
@@ -346,6 +378,7 @@ async function dispatchAttempt(io, bookingId) {
           log('🕐', 'SLOT_EXHAUSTED', bookingId,
             `slot=${dispatch.slotId} — all matched techs rejected/timed out → slot_no_availability sent`);
         } else {
+          dlog(`[DISPATCH] BOOKING_TIMEOUT — bookingId=${bookingId} no techs responded — emitting booking_timeout to patient`);
           _notifyPatient(io, bookingId, 'booking_timeout', { bookingId });
           bookingRooms.delete(bookingId);
           logBlock('⏰', `Booking Timeout  booking=${bookingId}`, [
@@ -384,10 +417,14 @@ async function dispatchAttempt(io, bookingId) {
     // Skipped for offline/FCM-only dispatch entries (socketId is null).
     if (online.socketId) {
       io.to(online.socketId).emit('booking_request', bookingData);
+      dlog(`[DISPATCH] socket sent — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} socketId=${online.socketId} attempt=${dispatch.attemptNum}/${MAX_ATTEMPTS}`);
+    } else {
+      dlog(`[DISPATCH] socket skipped (no socketId) — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} → FCM only attempt=${dispatch.attemptNum}/${MAX_ATTEMPTS}`);
     }
 
     // FCM push — delivers even when the tech is offline / app is killed.
     sendFcmPush(online.fcmToken, bookingData);
+    dlog(`[DISPATCH] FCM push sent — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} fcmToken=${online.fcmToken ? online.fcmToken.slice(0, 20) + '...' : 'NULL'}`);
 
     const distLabel = actor.dist === Infinity
       ? 'no GPS'
@@ -420,12 +457,14 @@ async function dispatchAttempt(io, bookingId) {
 
       if (dispatch.attemptNum < MAX_ATTEMPTS) {
         dispatch.attemptNum++;
+        dlog(`[DISPATCH] TIMEOUT_RETRY — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} retry=${dispatch.attemptNum}/${MAX_ATTEMPTS} gap=${RETRY_GAP_MS}ms`);
         log('🔁', 'TECH_TIMEOUT_RETRY', bookingId,
           `tech=${actor.name} retry=${dispatch.attemptNum}/${MAX_ATTEMPTS} ` +
           `gap=${RETRY_GAP_MS}ms`
         );
         dispatch.handle = setTimeout(() => dispatchAttempt(io, bookingId), RETRY_GAP_MS);
       } else {
+        dlog(`[DISPATCH] TIMEOUT_EXHAUSTED — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} all ${MAX_ATTEMPTS} attempts failed → moving to next tech`);
         const actorEntry = actorMap.get(actor.id);
         if (actorEntry?.socketId) {
           io.to(actorEntry.socketId).emit('booking_cancelled', { bookingId });
@@ -704,7 +743,10 @@ async function _handleBookingRequest(io, socket, data = {}) {
     appointmentTime = null, // "HH:MM" — exact time within slot
   } = data;
 
+  dlog(`[DISPATCH] ── booking_request received ── bookingId=${bookingId} patientId=${patientId} patientName=${patientName} branchId=${branchId} slotId=${slotId ?? 'none'} appointmentTime=${appointmentTime ?? 'none'} bookingType=${bookingType}`);
+
   if (!bookingId || !patientId) {
+    dlog(`[DISPATCH] GUARD FAILED — missing bookingId or patientId | bookingId=${bookingId} patientId=${patientId}`);
     console.warn('booking_request: missing bookingId or patientId',
       { bookingId, patientId });
     return;
@@ -722,6 +764,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
       : String(bRowDate.booking_date)).split('T')[0];
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     if (bDate > todayIST) {
+      dlog(`[DISPATCH] DEFERRED — bookingId=${bookingId} booking_date=${bDate} is future (today=${todayIST}) — waiting for cron scheduler`);
       log('📅', 'SCHEDULED_DEFER', bookingId,
         `booking_date=${bDate} is future — dispatch deferred to cron`);
       socket.emit('booking_scheduled', { bookingId });
@@ -729,8 +772,12 @@ async function _handleBookingRequest(io, socket, data = {}) {
     }
   }
 
+  dlog(`[DISPATCH] booking_date check passed — proceeding with live dispatch for bookingId=${bookingId}`);
   socket.patientId = patientId;
-  patientSockets.set(patientId, socket.id);
+  // Virtual sockets (cron/admin dispatch) must not overwrite a real patient socket ID.
+  if (!socket.isVirtual) {
+    patientSockets.set(patientId, socket.id);
+  }
   bookingRooms.set(bookingId, patientId);
 
   if (dispatchQueues.has(bookingId)) {
@@ -957,6 +1004,8 @@ async function _handleBookingRequest(io, socket, data = {}) {
     '',
     `Online: ${totalOnline}   Available: ${available}   Queued: ${queue.length}`,
   ]);
+
+  dlog(`[DISPATCH] queue built — bookingId=${bookingId} totalOnline=${totalOnline} available=${available} queued=${queue.length} techs=[${queue.map(t => `${t.name}(id=${t.id} dist=${t.dist === Infinity ? 'noGPS' : t.dist.toFixed(1) + 'km'})`).join(', ')}]`);
 
   dispatchQueues.set(bookingId, {
     bookingData,
@@ -1229,11 +1278,14 @@ module.exports = function bookingSocket(io, socket) {
       driverId,  driverName,  sessionId,
     } = data;
 
+    dlog(`[DISPATCH] booking_accepted received — bookingId=${bookingId} technicianId=${technicianId} technicianName=${technicianName} driverId=${driverId ?? 'none'}`);
+
     if (!bookingId) { console.warn('booking_accepted: missing bookingId'); return; }
 
     if (acceptedBookings.has(bookingId)) {
       const who = driverName ?? technicianName ??
                   String(driverId ?? technicianId ?? '?');
+      dlog(`[DISPATCH] DUPLICATE_BLOCKED — bookingId=${bookingId} actor=${who} booking already claimed`);
       log('🚫', 'DUPLICATE_BLOCKED', bookingId,
         `actor=${who} — booking already claimed by another`);
       return;
@@ -1289,20 +1341,64 @@ module.exports = function bookingSocket(io, socket) {
       const bd = dispatch?.bookingData ?? {};
       db.execute(
         `INSERT INTO ip_technician_collection
-           (booking_id, technician_id, collection_status, collection_date,
+           (booking_id, technician_id, technician_name, collection_status, collection_date,
             collection_address, collection_latitude, collection_longitude,
-            assigned_at, created_at, updated_at)
-         VALUES (?, ?, 'assigned', CURDATE(), ?, ?, ?, NOW(), NOW(), NOW())
+            patient_id, slot_id, assigned_at, created_at, updated_at)
+         VALUES (?, ?, ?, 'assigned', CURDATE(), ?, ?, ?, ?, ?, NOW(), NOW(), NOW())
          ON DUPLICATE KEY UPDATE
            technician_id     = VALUES(technician_id),
+           technician_name   = VALUES(technician_name),
            collection_status = 'assigned',
            assigned_at       = NOW(),
            updated_at        = NOW()`,
-        [bookingId, actorId,
-         bd.patientAddress ?? null, bd.patientLat ?? null, bd.patientLng ?? null]
+        [bookingId, actorId, actorName || null,
+         bd.patientAddress ?? null, bd.patientLat ?? null, bd.patientLng ?? null,
+         bd.patientId ? Number(bd.patientId) : null,
+         bd.slotId   ? Number(bd.slotId)   : null]
       ).then(([r]) => {
         log('💾', 'TCB_CREATED', bookingId,
           `tech=${actorName} rows=${r.affectedRows}`);
+        // Cascade assignment to sibling bookings in the same visit group
+        ;(async () => {
+          try {
+            const [[parentRow]] = await db.execute(
+              'SELECT visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
+              [bookingId]
+            );
+            if (!parentRow?.visit_group_id) return;
+            const vgId = parentRow.visit_group_id;
+            await db.execute(
+              `INSERT INTO ip_technician_collection
+                 (booking_id, technician_id, technician_name, collection_status, collection_date,
+                  collection_address, collection_latitude, collection_longitude,
+                  patient_id, slot_id, assigned_at, created_at, updated_at)
+               SELECT b.booking_id, ?, ?, 'assigned', CURDATE(), ?, ?, ?, pb.patient_id, ?, NOW(), NOW(), NOW()
+               FROM ip_bookings b
+               LEFT JOIN ip_patient_bookings pb ON pb.booking_id = b.booking_id
+               WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL
+               ON DUPLICATE KEY UPDATE
+                 technician_id     = VALUES(technician_id),
+                 technician_name   = VALUES(technician_name),
+                 collection_status = 'assigned',
+                 assigned_at       = NOW(),
+                 updated_at        = NOW()`,
+              [actorId, actorName || null,
+               bd.patientAddress ?? null, bd.patientLat ?? null, bd.patientLng ?? null,
+               bd.slotId ? Number(bd.slotId) : null,
+               vgId, bookingId]
+            );
+            dbRun(
+              `UPDATE ip_bookings
+               SET technician_id = ?, technician_name = ?, updated_at = NOW()
+               WHERE visit_group_id = ? AND booking_id != ? AND deleted_at IS NULL`,
+              [actorId, actorName || null, vgId, bookingId]
+            );
+            log('💾', 'TCB_SIBLING_CASCADE', bookingId,
+              `visit_group=${vgId} tech=${actorName}`);
+          } catch (e) {
+            console.error(`❌ [TCB SIBLING CASCADE FAILED] booking=${bookingId}: ${e.message}`);
+          }
+        })();
       }).catch(e => {
         console.error(
           `❌ [TCB INSERT FAILED] booking=${bookingId} tech=${actorId}: ${e.message}`
@@ -1311,9 +1407,9 @@ module.exports = function bookingSocket(io, socket) {
 
       dbRun(
         `UPDATE ip_bookings
-         SET status = 'confirmed', updated_at = NOW()
+         SET status = 'confirmed', technician_id = ?, technician_name = ?, updated_at = NOW()
          WHERE booking_id = ?`,
-        [bookingId]
+        [actorId, actorName || null, bookingId]
       );
 
       dbRun(
@@ -1373,6 +1469,7 @@ module.exports = function bookingSocket(io, socket) {
       trackingId:   String(bookingId),
     });
 
+    dlog(`[DISPATCH] ACCEPTED — bookingId=${bookingId} techId=${actorId} techName=${actorName} | dispatch stopped | patient notified | other techs cancelled`);
     log('👤', 'PATIENT_NOTIFIED', bookingId, 'booking_accepted sent');
 
     queuedActors.forEach(qa => {
@@ -1380,6 +1477,7 @@ module.exports = function bookingSocket(io, socket) {
       const entry = actorMap.get(qa.id);
       if (entry?.socketId) {
         io.to(entry.socketId).emit('booking_cancelled', { bookingId });
+        dlog(`[DISPATCH] booking_cancelled sent to techId=${qa.id} techName=${qa.name} (not the acceptor)`);
       }
     });
   });
@@ -1387,6 +1485,7 @@ module.exports = function bookingSocket(io, socket) {
   // ── Technician rejects (active decline) ─────────────────────────────────────
   socket.on('booking_rejected', (data = {}) => {
     const { bookingId, technicianId } = data;
+    dlog(`[DISPATCH] booking_rejected received — bookingId=${bookingId} techId=${technicianId} → moving to next tech`);
     if (!bookingId || !technicianId) return;
 
     log('❌', 'TECH_REJECTED', bookingId, `tech_id=${technicianId} → next actor`);
@@ -1421,6 +1520,7 @@ module.exports = function bookingSocket(io, socket) {
        WHERE booking_id = ?`,
       [bookingId]
     );
+    _cascadeTcStatus(bookingId, 'en_route', 'en_route_at');
     dbRun(
       `UPDATE ip_technician_live_location
        SET task_status = 'en_route', updated_at = NOW()
@@ -1440,6 +1540,7 @@ module.exports = function bookingSocket(io, socket) {
        WHERE booking_id = ?`,
       [bookingId]
     );
+    _cascadeTcStatus(bookingId, 'arrived', 'arrived_at');
     dbRun(
       `UPDATE ip_technician_live_location
        SET task_status = 'arrived', updated_at = NOW()
@@ -1463,6 +1564,7 @@ module.exports = function bookingSocket(io, socket) {
        WHERE booking_id = ?`,
       [bookingId]
     );
+    _cascadeTcStatus(bookingId, 'all_collected', 'collected_at');
     dbRun(
       `UPDATE ip_bookings
        SET status = 'collected', updated_at = NOW()
@@ -1513,6 +1615,7 @@ module.exports = function bookingSocket(io, socket) {
     .catch(e => {
       clog(`[collection_started] DB ERROR — booking_id=${bookingId}  error="${e.message}"  code=${e.code}`);
     });
+    _cascadeTcStatus(bookingId, 'collection_started', 'collection_started_at');
     _notifyPatient(io, bookingId, 'collection_started', { bookingId });
   });
 
@@ -1541,6 +1644,7 @@ module.exports = function bookingSocket(io, socket) {
     .catch(e => {
       clog(`[sample_collected] DB ERROR — booking_id=${bookingId}  error="${e.message}"  code=${e.code}`);
     });
+    _cascadeTcStatus(bookingId, 'sample_collected', 'collected_at');
     _notifyPatient(io, bookingId, 'sample_collected', { bookingId });
   });
 
@@ -1569,6 +1673,35 @@ module.exports = function bookingSocket(io, socket) {
        WHERE booking_id = ?`,
       [bookingId]
     );
+
+    // Cascade to sibling bookings in the same visit group (technician-added members)
+    ;(async () => {
+      try {
+        const [[parentRow]] = await db.execute(
+          'SELECT visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
+          [bookingId]
+        );
+        if (parentRow?.visit_group_id) {
+          const vgId = parentRow.visit_group_id;
+          dbRun(
+            `UPDATE ip_technician_collection tc
+             JOIN ip_bookings b ON b.booking_id = tc.booking_id
+             SET tc.collection_status = 'handed_to_lab', tc.completed_at = NOW(), tc.updated_at = NOW()
+             WHERE b.visit_group_id = ? AND b.booking_id != ?`,
+            [vgId, bookingId]
+          );
+          dbRun(
+            `UPDATE ip_bookings
+             SET status = 'collected', updated_at = NOW()
+             WHERE visit_group_id = ? AND booking_id != ?`,
+            [vgId, bookingId]
+          );
+          clog(`[handed_to_lab] sibling cascade — visit_group=${vgId} booking=${bookingId}`);
+        }
+      } catch (e) {
+        console.error(`[handed_to_lab] sibling cascade error: ${e.message}`);
+      }
+    })();
 
     const tech = onlineTechnicians.get(technicianId);
     if (tech?.sessionId) {
@@ -1751,6 +1884,48 @@ module.exports = function bookingSocket(io, socket) {
     patientSockets.set(patientId, socket.id);
     bookingRooms.set(bookingId, patientId);
     log('👤', 'PATIENT_REGISTERED', bookingId, `patient=${patientId}`);
+
+    // Catch-up: patient may be reconnecting after a technician was already assigned
+    // (admin booking, or patient lost connection mid-journey).
+    // Query once and push the current state so they don't have to wait for the next event.
+    db.execute(
+      `SELECT technician_id, technician_name, collection_status
+       FROM ip_technician_collection
+       WHERE booking_id = ?
+         AND collection_status NOT IN ('handed_to_lab', 'completed')
+       LIMIT 1`,
+      [bookingId]
+    ).then(([[row]]) => {
+      if (!row) return; // no assignment yet — normal patient flow, nothing to send
+
+      // Tell the patient a technician is already assigned
+      socket.emit('booking_accepted', {
+        bookingId,
+        technicianId:   row.technician_id,
+        technicianName: row.technician_name,
+        driverId:       row.technician_id,
+        driverName:     row.technician_name,
+        trackingId:     String(bookingId),
+      });
+
+      // Re-send last known location if cached within the last 5 minutes
+      const lastLoc = lastTechLocation.get(String(bookingId));
+      if (lastLoc && Date.now() - lastLoc._cachedAt < 300_000) {
+        socket.emit('location_update', lastLoc);
+      }
+
+      // Re-send the current journey stage so UI moves to the right screen
+      const s = row.collection_status;
+      if      (s === 'en_route')          socket.emit('technician_en_route',  { bookingId });
+      else if (s === 'arrived')           socket.emit('technician_arrived',   { bookingId });
+      else if (s === 'collection_started') socket.emit('collection_started',  { bookingId });
+      else if (s === 'sample_collected')  socket.emit('sample_collected',     { bookingId });
+
+      log('📡', 'PATIENT_CATCHUP', bookingId,
+        `status=${s} tech=${row.technician_id} (${row.technician_name})`);
+    }).catch(e =>
+      console.error(`[register_patient_socket] catch-up query failed booking=${bookingId}: ${e.message}`)
+    );
   });
 
   socket.on('join_tracking', (payload) => {
@@ -1960,6 +2135,7 @@ module.exports.triggerScheduledDispatch = async function(bookingData, io) {
   const { bookingId } = bookingData;
   const virtualSocket = {
     id:        `sched_${bookingId}_${Date.now()}`,
+    isVirtual: true, // prevents _handleBookingRequest from clobbering a real patient socket
     patientId: null,
     emit(event, payload) {
       ioRef.to(String(bookingId)).emit(event, payload);

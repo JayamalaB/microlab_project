@@ -151,8 +151,10 @@ class _TechnicianBookingDetailScreenState
       List.generate(4, (_) => TextEditingController());
   final List<FocusNode> _otpFocusNodes =
       List.generate(4, (_) => FocusNode());
-  bool _isVerifyingOtp = false;
-  bool _otpError = false;
+  bool _isVerifyingOtp  = false;
+  bool _isResendingOtp  = false;
+  bool _otpError        = false;
+  String _otpErrorText  = 'Invalid OTP. Please try again.';
 
   // ── Computed ──────────────────────────────────────────────
 
@@ -168,6 +170,12 @@ class _TechnicianBookingDetailScreenState
 
   bool get _paymentDone => _amountDue <= 0.0;
 
+  // True when any sibling booking added this session still has an unpaid balance.
+  bool get _hasUnpaidSiblings => _linkedPatients.any((c) {
+    final due = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+    return due > 0 && c['payment_status'] != 'paid';
+  });
+
   // A test is locked when it was already paid for:
   // - original tests on a booking whose payment_status is 'paid', OR
   // - tests that existed in the booking when the technician collected payment
@@ -182,7 +190,9 @@ class _TechnicianBookingDetailScreenState
       _journeySteps.indexWhere((s) => s.status == _currentStatus);
 
   bool get _isCompleted => _currentStatus == 'Handed to Lab';
-  bool get _canAdvance => !_isCompleted;
+  // Visit is finalized after OTP Verified — no more edits allowed from this point.
+  bool get _isFinalized => _currentStatus == 'OTP Verified' || _currentStatus == 'Handed to Lab';
+  bool get _canAdvance  => !_isCompleted;
 
   String? get _nextStatus {
     final idx = _currentStepIndex;
@@ -293,6 +303,8 @@ class _TechnicianBookingDetailScreenState
   }
 
   Future<void> _openAddVisitMemberSheet() async {
+    // Block adding family members once OTP has been verified — visit is finalized.
+    if (_isFinalized) return;
     final parentBookingId = int.tryParse(widget.booking.id) ?? 0;
     if (parentBookingId == 0) return;
     final result = await showModalBottomSheet<Map<String, dynamic>>(
@@ -302,26 +314,26 @@ class _TechnicianBookingDetailScreenState
       builder: (_) => _AddVisitMemberSheet(
         parentBookingId: parentBookingId,
         catalogueItems: _catalogueItems,
+        parentTestIds: _originalItemIds,
+        linkedPatientIds: _linkedPatients
+            .map((p) => (p['patient_id'] as num?)?.toInt() ?? 0)
+            .where((id) => id > 0)
+            .toSet(),
       ),
     );
     if (result != null && mounted) {
-      final name       = result['name']       as String? ?? '';
-      final mobile     = result['mobile']     as String? ?? '';
-      final bookingRef = result['bookingRef'] as String?;
-      setState(() {
-        _linkedPatients = [
-          ..._linkedPatients,
-          {
-            'patient_name':   name,
-            'patient_mobile': mobile,
-            if (bookingRef != null) 'booking_ref': bookingRef,
-          },
-        ];
-      });
+      final count     = result['count'] as int? ?? 1;
+      final firstName = result['firstName'] as String? ?? '';
+      // Reload items, payment info, and linked patients so all sections are fresh
+      _loadItems();
+      _refreshPaymentInfo();
       _loadLinkedPatients();
       if (mounted) {
+        final msg = count > 1
+            ? '$count members added — collect payment below'
+            : '$firstName added — collect payment below';
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(bookingRef != null ? '$name added · $bookingRef' : '$name added'),
+          content: Text(msg),
           backgroundColor: AppColors.brandGreen,
           behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 4),
@@ -347,14 +359,9 @@ void _advanceStatus() {
   final next = _nextStatus;
   if (next == null) return;
 
-  if (next == 'Journey Started' && _currentStatus == 'Journey Started') {
-    _resumeJourney();
-    return;
-  }
-
-  // OTP step: payment check first, then OTP dialog
+  // OTP step: all payments (parent + siblings) must be settled first
   if (next == 'OTP Verified') {
-    if (!_paymentDone && _amountDue > 0) {
+    if ((_amountDue > 0) || _hasUnpaidSiblings) {
       _showCompleteSheet();
     } else {
       _showOtpDialog();
@@ -362,15 +369,43 @@ void _advanceStatus() {
     return;
   }
 
-  // Final step: payment check, then emit handed_to_lab and close screen
+  // Final step: payment check, then confirm, then emit handed_to_lab
   if (next == 'Handed to Lab') {
-    if (!_paymentDone && _amountDue > 0) {
+    if (_amountDue > 0 || _hasUnpaidSiblings) {
       _showCompleteSheet();
       return;
     }
-    final bookingId = int.tryParse(widget.booking.id) ?? 0;
-    SocketService.instance.emitHandedToLab(bookingId: bookingId);
-    setState(() => _currentStatus = 'Handed to Lab');
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Hand Over to Lab?',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        content: const Text(
+          'This will complete the visit and cannot be undone.',
+          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              final bookingId = int.tryParse(widget.booking.id) ?? 0;
+              SocketService.instance.emitHandedToLab(bookingId: bookingId);
+              setState(() => _currentStatus = 'Handed to Lab');
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.brandGreen, elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('Confirm', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
     return;
   }
 
@@ -432,14 +467,8 @@ void _handleStatusTransition(String next) {
           ),
         ),
       ).then((wasCompleted) {
-        // If OTP was verified inside, propagate the completion signal up to
-        // whoever opened this Manage Booking screen (e.g. the dashboard).
         if (wasCompleted == true && mounted) {
           setState(() => _currentStatus = 'Handed to Lab');
-        } else if (wasCompleted == false && mounted) {
-          // If not completed, make sure status is still Journey Started
-          // This handles the case where user came back without completing
-          setState(() => _currentStatus = 'Journey Started');
         }
       });
       break;
@@ -485,17 +514,36 @@ void _resumeJourney() {
   ).then((wasCompleted) {
     if (wasCompleted == true && mounted) {
       setState(() => _currentStatus = 'Handed to Lab');
-    } else if (wasCompleted == false && mounted) {
-      setState(() => _currentStatus = 'Journey Started');
     }
   });
 }
  // ── OTP dialog ────────────────────────────────────────────
 
-  void _showOtpDialog() {
-    for (final c in _otpControllers) c.clear();
-    setState(() => _otpError = false);
+  Future<void> _showOtpDialog() async {
+    for (final c in _otpControllers) { c.clear(); }
+    setState(() { _otpError = false; _otpErrorText = 'Invalid OTP. Please try again.'; });
 
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+
+    // Generate OTP on server and send SMS before opening the dialog
+    final genResult = await ApiService.generateBookingOtp(bookingId);
+    if (!mounted) return;
+
+    if (genResult == null || genResult['success'] != true) {
+      final msg = genResult?['message'] as String? ?? 'Failed to send OTP. Please try again.';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+      return;
+    }
+
+    final maskedMobile = genResult['maskedMobile'] as String? ??
+        widget.booking.customerPhone.replaceRange(3, 7, '****');
+
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -519,7 +567,7 @@ void _resumeJourney() {
                     style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 6),
                 Text(
-                  'An OTP has been sent to ${widget.booking.customerPhone.replaceRange(3, 7, '****')}. Ask the customer to share it.',
+                  'OTP sent to $maskedMobile. Ask the customer to share it.',
                   textAlign: TextAlign.center,
                   style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
                 ),
@@ -579,20 +627,37 @@ void _resumeJourney() {
 
                 if (_otpError) ...[
                   const SizedBox(height: 8),
-                  const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    Icon(Icons.error_outline, size: 13, color: Color(0xFFD32F2F)),
-                    SizedBox(width: 4),
-                    Text('Invalid OTP. Please try again.',
-                        style: TextStyle(fontSize: 12, color: Color(0xFFD32F2F))),
+                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    const Icon(Icons.error_outline, size: 13, color: Color(0xFFD32F2F)),
+                    const SizedBox(width: 4),
+                    Flexible(child: Text(_otpErrorText,
+                        style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)))),
                   ]),
                 ],
 
-                const SizedBox(height: 20),
+                const SizedBox(height: 8),
+
+                // Resend OTP
+                Center(
+                  child: _isResendingOtp
+                      ? const SizedBox(width: 14, height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 1.5, color: AppColors.textSecondary))
+                      : TextButton(
+                          onPressed: () => _resendOtp(setDialogState),
+                          style: TextButton.styleFrom(
+                            foregroundColor: AppColors.textSecondary,
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          ),
+                          child: const Text('Resend OTP', style: TextStyle(fontSize: 12)),
+                        ),
+                ),
+
+                const SizedBox(height: 12),
 
                 Row(children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(ctx),
+                      onPressed: _isVerifyingOtp ? null : () => Navigator.pop(ctx),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: AppColors.textSecondary,
                         side: const BorderSide(color: AppColors.divider),
@@ -631,7 +696,7 @@ void _resumeJourney() {
     );
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _otpFocusNodes[0].requestFocus();
+      if (mounted) _otpFocusNodes[0].requestFocus();
     });
   }
 
@@ -642,36 +707,79 @@ void _resumeJourney() {
       return;
     }
 
-    setState(() => _isVerifyingOtp = true);
+    setState(() { _isVerifyingOtp = true; _otpError = false; });
     setDialogState(() {});
 
-    // Mock: any non-'0000' OTP succeeds
-    await Future.delayed(const Duration(milliseconds: 1000));
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    final result = await ApiService.verifyBookingOtp(bookingId: bookingId, otp: otp);
 
-    if (otp == '0000') {
-      setState(() { _isVerifyingOtp = false; _otpError = true; });
-      setDialogState(() {});
+    if (!mounted) return;
+
+    if (result?['success'] == true) {
+      setState(() { _isVerifyingOtp = false; _currentStatus = 'OTP Verified'; });
+      if (ctx.mounted) Navigator.pop(ctx);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('OTP verified — tap "Hand Over to Lab" to complete'),
+        backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        duration: const Duration(seconds: 3),
+      ));
     } else {
+      final msg = result?['message'] as String? ?? 'Invalid OTP. Please try again.';
       setState(() {
         _isVerifyingOtp = false;
-        _currentStatus = 'OTP Verified';
+        _otpError       = true;
+        _otpErrorText   = msg;
       });
-      Navigator.pop(ctx);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text('OTP verified — tap "Hand Over to Lab" to complete'),
-          backgroundColor: AppColors.brandGreen,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          duration: const Duration(seconds: 3),
-        ));
-      }
+      setDialogState(() {});
+    }
+  }
+
+  Future<void> _resendOtp(StateSetter setDialogState) async {
+    setState(() => _isResendingOtp = true);
+    setDialogState(() {});
+
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    final result    = await ApiService.resendBookingOtp(bookingId);
+
+    if (!mounted) return;
+    setState(() => _isResendingOtp = false);
+    setDialogState(() {});
+
+    if (result?['success'] == true) {
+      for (final c in _otpControllers) { c.clear(); }
+      setState(() { _otpError = false; _otpErrorText = 'Invalid OTP. Please try again.'; });
+      setDialogState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('OTP resent successfully'),
+        backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+    } else {
+      final msg = result?['message'] as String? ?? 'Failed to resend OTP. Please try again.';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
     }
   }
 
   // ── Tests ─────────────────────────────────────────────────
 
   Future<void> _removeTest(String id) async {
+    // Block all removals once OTP has been verified — visit is finalized at that point.
+    if (_isFinalized) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Tests cannot be changed after OTP verification.'),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
     if (_isTestLocked(id)) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('Tests cannot be removed after payment has been collected.'),
@@ -691,6 +799,8 @@ void _resumeJourney() {
   }
 
   Future<void> _addTest(Map<String, String> t) async {
+    // Block new tests once OTP has been verified — visit is finalized at that point.
+    if (_isFinalized) return;
     if (_selectedTests.any((x) => x['id'] == t['id'])) return;
     // Add optimistically with empty bookingItemId while the API call is in flight
     setState(() {
@@ -934,10 +1044,10 @@ void _resumeJourney() {
                 title: 'Verify OTP',
                 subtitle: 'Ask customer for the OTP sent to their phone',
                 done: _currentStatus == 'OTP Verified' || _isCompleted,
-                locked: !_paymentDone,
+                locked: !_paymentDone || _hasUnpaidSiblings,
                 buttonLabel: (_currentStatus == 'OTP Verified' || _isCompleted) ? 'Verified ✓' : 'Verify OTP',
                 buttonColor: AppColors.brandGreen,
-                onTap: (!_paymentDone || _currentStatus == 'OTP Verified' || _isCompleted)
+                onTap: (!_paymentDone || _hasUnpaidSiblings || _currentStatus == 'OTP Verified' || _isCompleted)
                     ? null
                     : () {
                         Navigator.pop(ctx);
@@ -1010,13 +1120,14 @@ void _resumeJourney() {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ));
         onDone?.call();
-        // Persist payment to DB — async but with error feedback
+        // Persist to DB and refresh live payment state from server
         () async {
           final ok = await ApiService.collectPayment(
             bookingId: bookingId,
             razorpayPaymentId: paymentId,
             amount: paidAmount,
           );
+          if (mounted) _refreshPaymentInfo();
           if (!ok && mounted) {
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
               content: Text('Payment saved locally but server sync failed — contact support'),
@@ -1035,6 +1146,175 @@ void _resumeJourney() {
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ));
+      },
+    );
+  }
+
+  // Collect payment for a visit-member's sibling booking (separate from the parent's payment)
+  void _collectVisitMemberPayment({
+    required int siblingBookingId,
+    required double amountDue,
+    required String patientName,
+  }) {
+    if (amountDue <= 0) return;
+    final options = {
+      'key': 'rzp_test_SonqjjPurqlLci',
+      'amount': (amountDue * 100).toInt(),
+      'name': 'MicroLab',
+      'description': 'Tests for $patientName',
+      'prefill': {
+        'contact': widget.booking.customerPhone,
+        'name': patientName,
+      },
+      'notes': {
+        'booking_id': siblingBookingId.toString(),
+        'note': 'Visit member payment',
+      },
+      'theme': {'color': '#0A5C4A'},
+    };
+
+    openRazorpay(
+      options: options,
+      onSuccess: (paymentId) async {
+        // Optimistic UI update: mark this sibling as paid in the local list
+        if (mounted) {
+          setState(() {
+            _linkedPatients = _linkedPatients.map((p) {
+              if ((p['booking_id'] as num?)?.toInt() == siblingBookingId) {
+                return {...p, 'payment_status': 'paid', 'amount_due': 0.0};
+              }
+              return p;
+            }).toList();
+          });
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('₹${amountDue.toInt()} received for $patientName · $paymentId'),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
+        final ok = await ApiService.collectPayment(
+          bookingId: siblingBookingId,
+          razorpayPaymentId: paymentId,
+          amount: amountDue,
+        );
+        if (!ok && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Payment saved locally but server sync failed — contact support'),
+            backgroundColor: Colors.orange,
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 6),
+          ));
+        }
+        // Refresh the list to get accurate server state
+        if (mounted) _loadLinkedPatients();
+      },
+      onError: (msg) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Failed: $msg'),
+            backgroundColor: Colors.red[700],
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
+      },
+    );
+  }
+
+  // Collects a single combined Razorpay payment for all unpaid bookings (parent + siblings).
+  // Each booking's ip_payment_transactions row is updated individually using the same
+  // Razorpay payment ID — existing per-booking data structure is not changed.
+  void _collectAllPayment() {
+    final unpaidItems = <Map<String, dynamic>>[];
+
+    if (!_paymentDone && _amountDue > 0) {
+      unpaidItems.add({
+        'bookingId': int.tryParse(widget.booking.id) ?? 0,
+        'amount':    _amountDue,
+        'name':      widget.booking.customerName,
+        'isParent':  true,
+      });
+    }
+    for (final p in _linkedPatients) {
+      final sibId = (p['booking_id'] as num?)?.toInt();
+      final due   = double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0;
+      if (sibId != null && due > 0 && p['payment_status'] != 'paid') {
+        unpaidItems.add({
+          'bookingId': sibId,
+          'amount':    due,
+          'name':      p['patient_name'] as String? ?? 'Visit Member',
+          'isParent':  false,
+        });
+      }
+    }
+    if (unpaidItems.length < 2) return;
+
+    final totalAmount = unpaidItems.fold<double>(0, (s, i) => s + (i['amount'] as double));
+
+    setState(() => _isProcessingPayment = true);
+
+    openRazorpay(
+      options: {
+        'key':         'rzp_test_SonqjjPurqlLci',
+        'amount':      (totalAmount * 100).toInt(),
+        'name':        'MicroLab',
+        'description': 'Combined payment · ${unpaidItems.length} members',
+        'prefill': {
+          'contact': widget.booking.customerPhone,
+          'name':    widget.booking.customerName,
+        },
+        'notes': {
+          'booking_ids': unpaidItems.map((i) => i['bookingId'].toString()).join(','),
+          'note':        'Combined visit payment',
+        },
+        'theme': {'color': '#0A5C4A'},
+      },
+      onSuccess: (paymentId) async {
+        if (!mounted) return;
+        setState(() {
+          _isProcessingPayment = false;
+          final parentItem = unpaidItems.where((i) => i['isParent'] == true).toList();
+          if (parentItem.isNotEmpty) {
+            _sessionPaymentCollected += parentItem.first['amount'] as double;
+            _livePaymentStatus        = 'paid';
+            _paidTestIds              = {..._paidTestIds, ..._selectedTests.map((t) => t['id'] ?? '').toSet()};
+          }
+          _linkedPatients = _linkedPatients.map((p) {
+            final sibId = (p['booking_id'] as num?)?.toInt();
+            final inList = unpaidItems.any((i) => i['bookingId'] == sibId && i['isParent'] == false);
+            return inList ? {...p, 'payment_status': 'paid', 'amount_due': 0.0} : p;
+          }).toList();
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content:         Text('Combined ₹${totalAmount.toInt()} received · $paymentId'),
+          backgroundColor: AppColors.brandGreen,
+          behavior:        SnackBarBehavior.floating,
+          shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+        // Persist each booking's record individually with the same Razorpay ID
+        for (final item in unpaidItems) {
+          await ApiService.collectPayment(
+            bookingId:         item['bookingId'] as int,
+            razorpayPaymentId: paymentId,
+            amount:            item['amount']    as double,
+          );
+        }
+        if (mounted) {
+          _refreshPaymentInfo();
+          _loadLinkedPatients();
+        }
+      },
+      onError: (msg) {
+        if (mounted) {
+          setState(() => _isProcessingPayment = false);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content:         Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Failed: $msg'),
+            backgroundColor: Colors.red[700],
+            behavior:        SnackBarBehavior.floating,
+            shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
       },
     );
   }
@@ -1295,7 +1575,8 @@ void _resumeJourney() {
                     ),
                     Text('₹${t['price'] ?? '0'}',
                         style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                    if (!_isCompleted) ...[
+                    // Hide the remove control entirely once the visit is finalized (OTP Verified or Handed to Lab).
+                    if (!_isFinalized) ...[
                       const SizedBox(width: 8),
                       GestureDetector(
                         onTap: () { _removeTest(t['id'] ?? ''); },
@@ -1307,21 +1588,34 @@ void _resumeJourney() {
                   ]),
                 )),
 
+                // Always visible; shows a lock icon and disabled style once the visit is finalized.
                 if (!_isCompleted && !_showAddTest)
                   GestureDetector(
-                    onTap: () => setState(() => _showAddTest = true),
+                    onTap: _isFinalized ? null : () => setState(() => _showAddTest = true),
                     child: Container(
                       padding: const EdgeInsets.symmetric(vertical: 10),
                       decoration: BoxDecoration(
-                        color: AppColors.brandGreenSurface,
+                        color: _isFinalized ? AppColors.background : AppColors.brandGreenSurface,
                         borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: AppColors.brandGreenLight),
+                        border: Border.all(
+                          color: _isFinalized ? AppColors.divider : AppColors.brandGreenLight,
+                        ),
                       ),
-                      child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                        Icon(Icons.add_circle_outline, size: 15, color: AppColors.brandGreen),
-                        SizedBox(width: 6),
-                        Text('Add Test / Package',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen)),
+                      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                        Icon(
+                          _isFinalized ? Icons.lock_outline_rounded : Icons.add_circle_outline,
+                          size: 15,
+                          color: _isFinalized ? AppColors.textHint : AppColors.brandGreen,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          _isFinalized ? 'Tests Locked' : 'Add Test / Package',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: _isFinalized ? AppColors.textHint : AppColors.brandGreen,
+                          ),
+                        ),
                       ]),
                     ),
                   ),
@@ -1539,7 +1833,10 @@ void _resumeJourney() {
             _SectionCard(
               title: 'Collect Payment',
               icon: Icons.payment_outlined,
-              child: Column(children: [
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                // Info banner
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -1561,25 +1858,209 @@ void _resumeJourney() {
                   ]),
                 ),
                 const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: _isProcessingPayment || _paymentDone ? null : () => _collectPayment(onDone: null),
-                    icon: _isProcessingPayment
-                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                        : const Icon(Icons.payment_outlined, size: 18),
-                    label: Text(
-                      _paymentDone
-                          ? 'Paid ✓'
-                          : (_isProcessingPayment ? 'Processing…' : 'Collect ₹${_amountDue.toInt()} via Razorpay'),
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+
+                // Billing Summary — per-person breakdown before collect buttons
+                ...() {
+                  final rows = <Map<String, dynamic>>[];
+                  if (!_paymentDone && _amountDue > 0) {
+                    rows.add({
+                      'name':   '${widget.booking.customerName} (Tests)',
+                      'amount': _amountDue,
+                    });
+                  }
+                  for (final p in _linkedPatients) {
+                    final due = double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0;
+                    if (p['payment_status'] != 'paid' && due > 0) {
+                      rows.add({
+                        'name':   p['patient_name'] as String? ?? 'Visit Member',
+                        'amount': due,
+                      });
+                    }
+                  }
+                  if (rows.isEmpty) return <Widget>[];
+                  final totalDue = rows.fold<double>(0, (s, r) => s + (r['amount'] as double));
+                  return [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5F7FA),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFE0E4EA)),
+                      ),
+                      child: Column(
+                        children: [
+                          ...rows.map<Widget>((r) => Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(r['name'] as String,
+                                    style: const TextStyle(fontSize: 13, color: Color(0xFF555555))),
+                                Text('₹${(r['amount'] as double).toInt()}',
+                                    style: const TextStyle(fontSize: 13, color: Color(0xFF333333))),
+                              ],
+                            ),
+                          )),
+                          const Divider(height: 16, thickness: 1),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('Total Due',
+                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+                              Text('₹${totalDue.toInt()}',
+                                  style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF1565C0))),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _paymentDone ? AppColors.brandGreen : const Color(0xFF1565C0),
-                      foregroundColor: Colors.white,
-                      elevation: 0, 
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    const SizedBox(height: 12),
+                  ];
+                }(),
+
+                // Collect All — single Razorpay transaction when 2+ bookings are unpaid
+                ...() {
+                  final parentUnpaid    = !_paymentDone && _amountDue > 0;
+                  final unpaidSiblings  = _linkedPatients.where((c) {
+                    final due = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+                    return (c['booking_id'] as num?) != null && due > 0 && c['payment_status'] != 'paid';
+                  }).toList();
+                  final totalUnpaid     = (parentUnpaid ? 1 : 0) + unpaidSiblings.length;
+                  if (totalUnpaid < 2) return <Widget>[];
+                  final totalAmount     = (parentUnpaid ? _amountDue : 0.0) +
+                      unpaidSiblings.fold<double>(0, (s, c) =>
+                          s + (double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0));
+                  return [
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _isProcessingPayment ? null : _collectAllPayment,
+                        icon: _isProcessingPayment
+                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                            : const Icon(Icons.payments_outlined, size: 18),
+                        label: Text(
+                          _isProcessingPayment
+                              ? 'Processing…'
+                              : 'Collect All ₹${totalAmount.toInt()} · $totalUnpaid members',
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.brandGreen,
+                          foregroundColor: Colors.white,
+                          elevation:       0,
+                          padding:         const EdgeInsets.symmetric(vertical: 14),
+                          shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ),
+                  ];
+                }(),
+
+                // Single-booking button — shown only when exactly one booking is unpaid
+                // (Collect All handles the 2+ case above)
+                ...() {
+                  final parentUnpaid   = !_paymentDone && _amountDue > 0;
+                  final unpaidSiblings = _linkedPatients.where((c) {
+                    final sibId = (c['booking_id'] as num?)?.toInt();
+                    final due   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+                    return sibId != null && due > 0 && c['payment_status'] != 'paid';
+                  }).toList();
+                  if ((parentUnpaid ? 1 : 0) + unpaidSiblings.length >= 2) return <Widget>[];
+
+                  final widgets = <Widget>[];
+
+                  if (parentUnpaid) {
+                    widgets.add(SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _isProcessingPayment ? null : () => _collectPayment(onDone: null),
+                        icon: _isProcessingPayment
+                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                            : const Icon(Icons.payment_outlined, size: 18),
+                        label: Text(
+                          _isProcessingPayment
+                              ? 'Processing…'
+                              : 'Collect ₹${_amountDue.toInt()} · ${widget.booking.customerName}',
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF1565C0),
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ));
+                  }
+
+                  for (final c in unpaidSiblings) {
+                    final sibId = (c['booking_id'] as num?)!.toInt();
+                    final due   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+                    final mName = c['patient_name'] as String? ?? 'Visit Member';
+                    widgets.add(Padding(
+                      padding: EdgeInsets.only(top: widgets.isEmpty ? 0 : 8),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: () => _collectVisitMemberPayment(
+                            siblingBookingId: sibId,
+                            amountDue: due,
+                            patientName: mName,
+                          ),
+                          icon: const Icon(Icons.payment_outlined, size: 18),
+                          label: Text('Collect ₹${due.toInt()} · $mName',
+                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF1565C0),
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                      ),
+                    ));
+                  }
+
+                  if (widgets.isEmpty && _paymentDone) {
+                    widgets.add(SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: null,
+                        icon: const Icon(Icons.check_circle_outline, size: 18),
+                        label: const Text('Booking Paid ✓',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.brandGreen,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ));
+                  }
+
+                  return widgets;
+                }(),
+
+                // Refresh row
+                const SizedBox(height: 4),
+                Center(
+                  child: TextButton.icon(
+                    onPressed: () {
+                      _refreshPaymentInfo();
+                      _loadLinkedPatients();
+                    },
+                    icon: const Icon(Icons.refresh_rounded, size: 15),
+                    label: const Text('Refresh payment status', style: TextStyle(fontSize: 12)),
+                    style: TextButton.styleFrom(
+                      foregroundColor: AppColors.textSecondary,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     ),
                   ),
                 ),
@@ -1602,43 +2083,75 @@ void _resumeJourney() {
                 const SizedBox(height: 12),
 
                 if (_linkedPatients.isNotEmpty) ...[
-                  ..._linkedPatients.map((c) => Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppColors.brandGreenLight),
-                    ),
-                    child: Row(children: [
-                      const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
-                      const SizedBox(width: 8),
-                      Expanded(child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
-                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                          ),
-                          if ((c['booking_ref'] as String?) != null)
-                            Text(c['booking_ref'] as String,
-                                style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                        ],
-                      )),
-                    ]),
-                  )),
+                  ..._linkedPatients.map((c) {
+                    final amountDue   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+                    final totalAmount = double.tryParse(c['total_amount']?.toString() ?? '0') ?? 0.0;
+                    final isPaid      = c['payment_status'] == 'paid' || amountDue <= 0;
+                    final hasPayment  = (c['booking_id'] as num?) != null && totalAmount > 0;
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: AppColors.brandGreenSurface,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppColors.brandGreenLight),
+                      ),
+                      child: Row(children: [
+                        const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
+                        const SizedBox(width: 8),
+                        Expanded(child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
+                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                            ),
+                            if ((c['booking_ref'] as String?) != null)
+                              Text(c['booking_ref'] as String,
+                                  style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                          ],
+                        )),
+                        if (hasPayment)
+                          isPaid
+                            ? Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: AppColors.brandGreen.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: const Text('Paid ✓',
+                                    style: TextStyle(fontSize: 11, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
+                              )
+                            : Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFE3F2FD),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text('₹${amountDue.toInt()} due',
+                                    style: const TextStyle(fontSize: 11, color: Color(0xFF1565C0), fontWeight: FontWeight.w600)),
+                              ),
+                      ]),
+                    );
+                  }),
                   const SizedBox(height: 8),
                 ],
 
+                // Disabled with lock icon once visit is finalized — no new family members after OTP.
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton.icon(
-                    onPressed: _openAddVisitMemberSheet,
-                    icon: const Icon(Icons.person_add_outlined, size: 16),
-                    label: const Text('Add Visit Member'),
+                    onPressed: _isFinalized ? null : _openAddVisitMemberSheet,
+                    icon: Icon(
+                      _isFinalized ? Icons.lock_outline_rounded : Icons.person_add_outlined,
+                      size: 16,
+                    ),
+                    label: Text(_isFinalized ? 'Visit Member Locked' : 'Add Visit Member'),
                     style: OutlinedButton.styleFrom(
-                      foregroundColor: AppColors.brandGreen,
-                      side: const BorderSide(color: AppColors.brandGreen),
+                      foregroundColor: _isFinalized ? AppColors.textHint : AppColors.brandGreen,
+                      side: BorderSide(
+                        color: _isFinalized ? AppColors.divider : AppColors.brandGreen,
+                      ),
                       padding: const EdgeInsets.symmetric(vertical: 11),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                     ),
@@ -1660,12 +2173,14 @@ void _resumeJourney() {
                 height: 50,
                 child: ElevatedButton(
                   onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(_isCompleted ? 'Booking handed to lab — completed' : 'Changes saved'),
-                      backgroundColor: AppColors.brandGreen,
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    ));
+                    if (!_isCompleted) {
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: const Text('Changes saved'),
+                        backgroundColor: AppColors.brandGreen,
+                        behavior: SnackBarBehavior.floating,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ));
+                    }
                     Navigator.pop(context, _isCompleted ? true : null);
                   },
                   style: ElevatedButton.styleFrom(
@@ -1674,7 +2189,10 @@ void _resumeJourney() {
                     elevation: 0,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
-                  child: const Text('Save Changes', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+                  child: Text(
+                    _isCompleted ? 'Done' : 'Save Changes',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+                  ),
                 ),
               ),
             ),
@@ -2163,10 +2681,16 @@ class _DocImageViewerPageState extends State<_DocImageViewerPage> {
 class _AddVisitMemberSheet extends StatefulWidget {
   final int parentBookingId;
   final List<Map<String, String>> catalogueItems;
+  final Set<String> parentTestIds;
+  // Patient IDs already linked to this visit — excluded from the picker
+  // so the technician cannot add the same person twice.
+  final Set<int> linkedPatientIds;
 
   const _AddVisitMemberSheet({
     required this.parentBookingId,
     required this.catalogueItems,
+    required this.parentTestIds,
+    required this.linkedPatientIds,
   });
 
   @override
@@ -2174,10 +2698,13 @@ class _AddVisitMemberSheet extends StatefulWidget {
 }
 
 class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
-  // 0 = select/patient-info, 1 = select tests
+  // 0 = patient info, 1 = test selection, 2 = queue review
   int _step = 0;
   // 'select' shows family cards; 'newPatient' shows the mobile+form
   String _mode = 'select';
+
+  // ── Queued members awaiting Submit All ──────────────────────────────────
+  final List<Map<String, dynamic>> _queuedMembers = [];
 
   // ── Family members (loaded on init) ─────────────────────────────────────
   bool _loadingFamily = true;
@@ -2222,6 +2749,18 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
 
   void _onFormChanged() { if (mounted) setState(() {}); }
 
+  // Family members minus anyone already on this visit or already queued this session.
+  List<Map<String, dynamic>> get _availableMembers {
+    final queuedIds = _queuedMembers
+        .map((m) => (m['patientId'] as num?)?.toInt() ?? 0)
+        .where((id) => id > 0)
+        .toSet();
+    return _familyMembers.where((m) {
+      final id = (m['patient_id'] as num?)?.toInt() ?? 0;
+      return !widget.linkedPatientIds.contains(id) && !queuedIds.contains(id);
+    }).toList();
+  }
+
   Future<void> _loadFamilyMembers() async {
     try {
       final members = await ApiService.getBookingFamily(widget.parentBookingId);
@@ -2229,7 +2768,8 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
       setState(() {
         _familyMembers = members;
         _loadingFamily = false;
-        if (members.isEmpty) _mode = 'newPatient';
+        // Switch to form if no selectable members remain after filtering
+        if (_availableMembers.isEmpty) _mode = 'newPatient';
       });
     } catch (_) {
       if (mounted) setState(() { _loadingFamily = false; _mode = 'newPatient'; });
@@ -2254,10 +2794,16 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
       .where((t) => _selectedTestIds.contains(t['id']))
       .fold(0.0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
 
+  double get _queuedTotal => _queuedMembers
+      .fold(0.0, (s, m) => s + ((m['total'] as num?)?.toDouble() ?? 0.0));
+
   List<Map<String, String>> get _filteredTests {
-    if (_testSearch.isEmpty) return widget.catalogueItems;
+    final available = widget.catalogueItems
+        .where((t) => !widget.parentTestIds.contains(t['id']))
+        .toList();
+    if (_testSearch.isEmpty) return available;
     final q = _testSearch.toLowerCase();
-    return widget.catalogueItems.where((t) =>
+    return available.where((t) =>
         (t['name']?.toLowerCase().contains(q) ?? false) ||
         (t['category']?.toLowerCase().contains(q) ?? false)).toList();
   }
@@ -2329,23 +2875,37 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     setState(() => _step = 1);
   }
 
-  Future<void> _confirm() async {
+  // Builds the member payload from the current form and appends to _queuedMembers,
+  // then resets the form so the technician can add another member.
+  void _addToQueue() {
+    if (_selectedTestIds.isEmpty) return;
+
     final String name;
     final String mobile;
     int? patientId;
+    int? age;
+    String? gender;
+    String? relation;
+    String? dobStr;
 
     if (_mode == 'select') {
-      name     = (_selectedFamilyMember?['patient_name'] as String? ?? '').trim();
-      mobile   = (_selectedFamilyMember?['patient_mobile'] as String? ?? '').trim();
-      patientId = (_selectedFamilyMember?['patient_id'] as num?)?.toInt();
+      name      = (_selectedFamilyMember?['patient_name']   as String? ?? '').trim();
+      mobile    = (_selectedFamilyMember?['patient_mobile'] as String? ?? '').trim();
+      patientId = (_selectedFamilyMember?['patient_id']     as num?)?.toInt();
+      age       = (_selectedFamilyMember?['patient_age']    as num?)?.toInt();
+      gender    = _selectedFamilyMember?['patient_gender']  as String?;
+      relation  = _selectedFamilyMember?['patient_relation'] as String?;
     } else {
-      name   = _nameCtrl.text.trim();
-      mobile = _mobileCtrl.text.trim();
+      name      = _nameCtrl.text.trim();
+      mobile    = _mobileCtrl.text.trim();
       patientId = (_foundPatient?['patient_id'] as num?)?.toInt();
+      age       = _age;
+      gender    = _gender;
+      relation  = _relation;
+      if (_dob != null) {
+        dobStr = '${_dob!.year}-${_dob!.month.toString().padLeft(2,'0')}-${_dob!.day.toString().padLeft(2,'0')}';
+      }
     }
-
-    if (name.isEmpty || mobile.length != 10 || _selectedTestIds.isEmpty) return;
-    setState(() => _isSaving = true);
 
     final tests = widget.catalogueItems
         .where((t) => _selectedTestIds.contains(t['id']))
@@ -2356,52 +2916,80 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         .where((t) => (t['productId'] as int) > 0)
         .toList();
 
-    String? dobStr;
-    if (_dob != null) {
-      dobStr =
-          '${_dob!.year}-${_dob!.month.toString().padLeft(2, '0')}-${_dob!.day.toString().padLeft(2, '0')}';
-    }
+    final totalAmount = _selectedTotal;
+
+    setState(() {
+      _queuedMembers.add({
+        'name':       name,
+        'mobile':     mobile,
+        if (patientId != null) 'patientId': patientId,
+        if (dobStr != null)    'dob':       dobStr,
+        if (age != null)       'age':       age,
+        if (gender != null)    'gender':    gender,
+        if (relation != null)  'relation':  relation,
+        if (_healthCtrl.text.trim().isNotEmpty) 'healthNotes': _healthCtrl.text.trim(),
+        'tests': tests,
+        'total': totalAmount,  // UI-only field, stripped before API call
+      });
+      _step = 2;
+    });
+  }
+
+  void _addAnotherMember() {
+    setState(() {
+      _step = 0;
+      _mode = _availableMembers.isEmpty ? 'newPatient' : 'select';
+      _selectedFamilyMember = null;
+      _foundPatient = null;
+      _searchedWithNoResult = false;
+      _mobileCtrl.clear();
+      _nameCtrl.clear();
+      _dobCtrl.clear();
+      _healthCtrl.clear();
+      _dob = null; _age = null; _gender = null; _relation = null;
+      _selectedTestIds.clear();
+      _testSearch = '';
+    });
+  }
+
+  Future<void> _submitAll() async {
+    if (_queuedMembers.isEmpty) return;
+    setState(() => _isSaving = true);
+
+    // Strip the UI-only 'total' field before sending to server
+    final apiMembers = _queuedMembers.map((m) {
+      final copy = Map<String, dynamic>.from(m);
+      copy.remove('total');
+      return copy;
+    }).toList();
 
     try {
-      final result = await ApiService.addVisitMember(
+      final result = await ApiService.addVisitMembers(
         parentBookingId: widget.parentBookingId,
-        patientId: patientId,
-        name: name,
-        mobile: mobile,
-        dob: dobStr,
-        age: _mode == 'select'
-            ? (_selectedFamilyMember?['patient_age'] as num?)?.toInt()
-            : _age,
-        gender: _mode == 'select'
-            ? (_selectedFamilyMember?['patient_gender'] as String?)
-            : _gender,
-        relation: _mode == 'select'
-            ? (_selectedFamilyMember?['patient_relation'] as String?)
-            : _relation,
-        healthNotes: _healthCtrl.text.trim().isEmpty ? null : _healthCtrl.text.trim(),
-        tests: tests,
+        members: apiMembers,
       );
       if (!mounted) return;
       if (result != null) {
+        final firstName = (_queuedMembers.first['name'] as String? ?? '');
         Navigator.pop(context, {
-          'name':       name,
-          'mobile':     mobile,
-          'bookingRef': result['bookingRef'],
+          'count':     _queuedMembers.length,
+          'firstName': firstName,
+          'members':   result['members'],
         });
       } else {
         setState(() => _isSaving = false);
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to add member — please retry'),
+          content: Text('Failed to add members — please retry'),
           backgroundColor: Colors.red,
           behavior: SnackBarBehavior.floating,
         ));
       }
     } catch (e) {
-      debugPrint('[_AddVisitMemberSheet._confirm] ERROR: $e');
+      debugPrint('[_AddVisitMemberSheet._submitAll] ERROR: $e');
       if (mounted) {
         setState(() => _isSaving = false);
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to add member — please retry'),
+          content: Text('Failed to add members — please retry'),
           backgroundColor: Colors.red,
           behavior: SnackBarBehavior.floating,
         ));
@@ -2412,24 +3000,47 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   // ── Build ────────────────────────────────────────────────────────────────
 
   bool get _canProceed {
+    if (_step == 2) return _queuedMembers.isNotEmpty;
     if (_step == 1) return _selectedTestIds.isNotEmpty;
     if (_mode == 'select') return _selectedFamilyMember != null;
     return _nameCtrl.text.trim().isNotEmpty && _mobileCtrl.text.trim().length == 10;
   }
 
   String get _headerTitle {
-    if (_step == 1) return 'Select Tests for ${_nameCtrl.text.trim()}';
-    if (_mode == 'newPatient' && _familyMembers.isNotEmpty) return 'Add New Customer';
+    if (_step == 2) return 'Review Members (${_queuedMembers.length})';
+    if (_step == 1) {
+      final n = _mode == 'select'
+          ? (_selectedFamilyMember?['patient_name'] as String? ?? _nameCtrl.text.trim())
+          : _nameCtrl.text.trim();
+      return 'Select Tests for $n';
+    }
+    if (_mode == 'newPatient' && _availableMembers.isNotEmpty) return 'Add New Customer';
     return 'Add Visit Member';
   }
 
   bool get _showBackArrow =>
-      _step == 1 || (_mode == 'newPatient' && _familyMembers.isNotEmpty);
+      _step == 1 ||
+      _step == 2 ||
+      (_step == 0 && _mode == 'newPatient' && _availableMembers.isNotEmpty);
 
   void _onBack() {
-    if (_step == 1) {
+    if (_step == 2) {
+      // Return to test selection for the last queued member, or to patient form if queue is empty
+      if (_queuedMembers.isNotEmpty) {
+        final last = _queuedMembers.removeLast();
+        final tests = last['tests'] as List? ?? [];
+        setState(() {
+          _step = 1;
+          _selectedTestIds
+            ..clear()
+            ..addAll(tests.map((t) => t['productId']?.toString() ?? '').where((id) => id.isNotEmpty));
+        });
+      } else {
+        setState(() => _step = 0);
+      }
+    } else if (_step == 1) {
       setState(() { _step = 0; _selectedTestIds.clear(); _testSearch = ''; });
-    } else {
+    } else if (_step == 0) {
       setState(() { _mode = 'select'; _mobileCtrl.clear(); _nameCtrl.clear();
                     _foundPatient = null; _searchedWithNoResult = false; });
     }
@@ -2477,14 +3088,22 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
           ),
           const SizedBox(height: 12),
           const Divider(height: 1),
-          Expanded(child: _step == 0 ? _buildStep0(scroll) : _buildTestStep(scroll)),
+          Expanded(child: switch (_step) {
+            0 => _buildStep0(scroll),
+            1 => _buildTestStep(scroll),
+            _ => _buildReviewStep(scroll),
+          }),
           Padding(
             padding: EdgeInsets.fromLTRB(16, 8, 16, bottom + 12),
             child: SizedBox(
               width: double.infinity,
               height: 50,
               child: ElevatedButton(
-                onPressed: _isSaving ? null : (_step == 0 ? _onNextStep : _confirm),
+                onPressed: _isSaving ? null : switch (_step) {
+                  0 => _canProceed ? _onNextStep : null,
+                  1 => _canProceed ? _addToQueue : null,
+                  _ => _canProceed ? _submitAll  : null,
+                },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _canProceed
                       ? AppColors.brandGreen
@@ -2497,11 +3116,14 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                     ? const SizedBox(width: 20, height: 20,
                         child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                     : Text(
-                        _step == 0
-                            ? 'Next: Select Tests'
-                            : (_selectedTestIds.isEmpty
-                                ? 'Select at least one test'
-                                : 'Add to Visit · ₹${_selectedTotal.toInt()}'),
+                        switch (_step) {
+                          0 => 'Next: Select Tests',
+                          1 => _selectedTestIds.isEmpty
+                              ? 'Select at least one test'
+                              : 'Add to Queue · ₹${_selectedTotal.toInt()}',
+                          _ => 'Submit ${_queuedMembers.length} Member${_queuedMembers.length == 1 ? '' : 's'}'
+                              ' · ₹${_queuedTotal.toInt()}',
+                        },
                         style: const TextStyle(
                             color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
                       ),
@@ -2532,7 +3154,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
             style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
         const SizedBox(height: 12),
 
-        ..._familyMembers.map(_buildFamilyCard),
+        ..._availableMembers.map(_buildFamilyCard),
 
         const SizedBox(height: 4),
         const Divider(height: 24),
@@ -2917,5 +3539,141 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         ),
       ),
     ]);
+  }
+
+  // ── Step 2: Queue review ──────────────────────────────────────────────────
+
+  Widget _buildReviewStep(ScrollController scroll) {
+    return SingleChildScrollView(
+      controller: scroll,
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+        // Info banner
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          margin: const EdgeInsets.only(bottom: 16),
+          decoration: BoxDecoration(
+            color: AppColors.brandGreenSurface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: AppColors.brandGreenLight),
+          ),
+          child: const Row(children: [
+            Icon(Icons.info_outline_rounded, size: 16, color: AppColors.brandGreen),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Payment will be collected after submission from the Collect Payment section.',
+                style: TextStyle(fontSize: 12, color: AppColors.brandGreen),
+              ),
+            ),
+          ]),
+        ),
+
+        // Member cards
+        ..._queuedMembers.asMap().entries.map((entry) {
+          final i = entry.key;
+          final m = entry.value;
+          final name   = m['name'] as String? ?? '';
+          final mobile = m['mobile'] as String? ?? '';
+          final total  = (m['total'] as num?)?.toDouble() ?? 0.0;
+          final tests  = m['tests'] as List? ?? [];
+          final color  = _avatarColor(name);
+          final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+
+          return Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.divider),
+            ),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              CircleAvatar(
+                radius: 20,
+                backgroundColor: color.withValues(alpha: 0.15),
+                child: Text(initial,
+                    style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 15)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Expanded(child: Text(name,
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                          color: AppColors.textPrimary))),
+                  Text('₹${total.toInt()}',
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary)),
+                ]),
+                if (mobile.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(mobile,
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ],
+                const SizedBox(height: 6),
+                Text('${tests.length} test${tests.length == 1 ? '' : 's'} selected',
+                    style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+              ])),
+              GestureDetector(
+                onTap: () => setState(() => _queuedMembers.removeAt(i)),
+                child: const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                ),
+              ),
+            ]),
+          );
+        }),
+
+        // "Add Another Member" — visible while under the 4-member cap
+        if (_queuedMembers.length < 4) ...[
+          const SizedBox(height: 4),
+          GestureDetector(
+            onTap: _addAnotherMember,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.brandGreenLight),
+              ),
+              child: const Row(children: [
+                SizedBox(
+                  width: 36, height: 36,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreenSurface,
+                      borderRadius: BorderRadius.all(Radius.circular(18)),
+                    ),
+                    child: Icon(Icons.person_add_rounded, size: 18, color: AppColors.brandGreen),
+                  ),
+                ),
+                SizedBox(width: 12),
+                Expanded(child: Text('Add Another Member',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500,
+                        color: AppColors.brandGreen))),
+                Icon(Icons.chevron_right_rounded, color: AppColors.brandGreen, size: 18),
+              ]),
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+
+        // Total
+        if (_queuedMembers.isNotEmpty) ...[
+          const Divider(height: 24),
+          Row(children: [
+            const Text('Total to collect',
+                style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+            const Spacer(),
+            Text('₹${_queuedTotal.toInt()}',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary)),
+          ]),
+          const SizedBox(height: 8),
+        ],
+      ]),
+    );
   }
 }

@@ -888,6 +888,11 @@ class SocketService {
     _isDriverOnline  = false;
     _driverLat       = null;
     _driverLng       = null;
+    // Reset identity so the next technician's connect() always writes fresh credentials.
+    userId           = 0;
+    userName         = '';
+    userRole         = '';
+    sessionId        = null;
 
     _log('DISCONNECT', 'socket disposed and state reset');
   }

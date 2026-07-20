@@ -1,6 +1,7 @@
 const db       = require('../config/db');
 const settings = require('../config/settings');
 const { syncBookingToClient } = require('../services/clientSync');
+const { triggerScheduledDispatch } = require('../socket/bookingSocket');
 
 let _io = null;
 exports.setIo = (io) => { _io = io; };
@@ -582,7 +583,9 @@ exports.getLinkedPatients = async (req, res) => {
     // UNION: (1) old approach — patients added to ip_patient_bookings of parent
     //        (2) new approach — sibling bookings linked via visit_group_id
     const [rows] = await db.execute(
-      `SELECT p.patient_id, p.patient_name, p.patient_mobile, NULL AS booking_ref
+      `SELECT p.patient_id, p.patient_name, p.patient_mobile,
+              NULL AS booking_ref, NULL AS booking_id,
+              NULL AS total_amount, NULL AS amount_due, NULL AS payment_status
        FROM ip_patient_bookings pb
        JOIN ip_patients p ON p.patient_id = pb.patient_id
        WHERE pb.booking_id = ?
@@ -592,7 +595,9 @@ exports.getLinkedPatients = async (req, res) => {
 
        UNION
 
-       SELECT p.patient_id, p.patient_name, p.patient_mobile, b2.booking_ref
+       SELECT p.patient_id, p.patient_name, p.patient_mobile,
+              b2.booking_ref, b2.booking_id,
+              b2.total_amount, b2.amount_due, b2.payment_status
        FROM ip_bookings b1
        JOIN ip_bookings b2 ON b2.visit_group_id = b1.visit_group_id
                            AND b2.booking_id != b1.booking_id
@@ -658,6 +663,172 @@ exports.updateLabStatus = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+// ── PUT /api/bookings/:bookingId/admin-status ─────────────────────────────────
+// Admin override for the full booking status lifecycle.
+// Updates ip_bookings, ip_technician_collection, AND ip_booking_requests
+// in one atomic operation so all three tables stay in sync.
+exports.updateAdminStatus = async (req, res) => {
+  const { bookingId }                   = req.params;
+  const { status, technicianId = null } = req.body;
+
+  // ── Status maps ────────────────────────────────────────────────────────────
+  // Which ip_bookings.status each admin status resolves to (null = no change)
+  const BOOKING_STATUS_MAP = {
+    pending:              'pending',
+    confirmed:            'confirmed',
+    technician_assigned:  'confirmed',   // tech assigned → booking is confirmed
+    en_route:              null,
+    arrived:               null,
+    sample_collected:      null,
+    submitted_to_lab:      null,
+    processing:            null,
+    partial:               null,
+    results_ready:        'completed',
+    completed:            'completed',
+    cancelled:            'cancelled',
+  };
+
+  // Which ip_technician_collection.collection_status each admin status resolves to
+  const COLLECTION_STATUS_MAP = {
+    technician_assigned: 'assigned',
+    en_route:            'en_route',
+    arrived:             'arrived',
+    sample_collected:    'sample_collected',
+    submitted_to_lab:    'handed_to_lab',
+    processing:          'collected',
+    partial:             'collected',
+    results_ready:       'completed',
+    completed:           'completed',
+    cancelled:           'cancelled',
+  };
+
+  if (!Object.prototype.hasOwnProperty.call(BOOKING_STATUS_MAP, status)) {
+    return res.status(400).json({
+      success: false,
+      message: `Invalid status. Allowed: ${Object.keys(BOOKING_STATUS_MAP).join(', ')}`,
+    });
+  }
+
+  try {
+    // ── 1. Update ip_bookings ──────────────────────────────────────────────
+    const newBookingStatus = BOOKING_STATUS_MAP[status];
+    if (newBookingStatus) {
+      await db.execute(
+        `UPDATE ip_bookings SET status = ?, updated_at = NOW() WHERE booking_id = ?`,
+        [newBookingStatus, bookingId]
+      );
+    }
+
+    // ── 2. Update / create ip_technician_collection ───────────────────────
+    const collectionStatus = COLLECTION_STATUS_MAP[status];
+    if (collectionStatus) {
+      const [[existing]] = await db.execute(
+        `SELECT tc.technician_id FROM ip_technician_collection tc WHERE tc.booking_id = ? LIMIT 1`,
+        [bookingId]
+      );
+
+      if (existing) {
+        // Row already exists — just update the status
+        await db.execute(
+          `UPDATE ip_technician_collection
+           SET collection_status = ?, updated_at = NOW()
+           WHERE booking_id = ?`,
+          [collectionStatus, bookingId]
+        );
+      } else if (technicianId) {
+        // No row yet — admin is manually assigning a technician; create the row
+        const [[booking]] = await db.execute(
+          `SELECT b.booking_date, b.collection_address, b.collection_latitude, b.collection_longitude,
+                  b.slot_id, pb.patient_id
+           FROM ip_bookings b
+           LEFT JOIN ip_patient_bookings pb ON pb.booking_id = b.booking_id
+           WHERE b.booking_id = ? LIMIT 1`,
+          [bookingId]
+        );
+        const [[techRow]] = await db.execute(
+          `SELECT u.user_name FROM ip_technicians t
+           JOIN ip_users u ON u.user_id = t.user_id
+           WHERE t.technician_id = ? LIMIT 1`,
+          [technicianId]
+        );
+        await db.execute(
+          `INSERT INTO ip_technician_collection
+             (booking_id, technician_id, technician_name, collection_status, collection_date,
+              collection_address, collection_latitude, collection_longitude,
+              patient_id, slot_id, assigned_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), NOW())
+           ON DUPLICATE KEY UPDATE
+             collection_status = VALUES(collection_status),
+             technician_name   = VALUES(technician_name),
+             updated_at        = NOW()`,
+          [
+            bookingId, technicianId, techRow?.user_name ?? null, collectionStatus,
+            booking?.booking_date         ?? null,
+            booking?.collection_address   ?? null,
+            booking?.collection_latitude  ?? null,
+            booking?.collection_longitude ?? null,
+            booking?.patient_id           ?? null,
+            booking?.slot_id              ?? null,
+          ]
+        );
+      }
+      // If no row and no technicianId provided, skip — can't create without a tech
+    }
+
+    // ── 3. Update ip_booking_requests ─────────────────────────────────────
+    if (status === 'technician_assigned') {
+      // Resolve the technician to record against the request
+      const [[tc]] = await db.execute(
+        `SELECT technician_id FROM ip_technician_collection WHERE booking_id = ? LIMIT 1`,
+        [bookingId]
+      );
+      const assignedTechId = tc?.technician_id ?? technicianId;
+
+      if (assignedTechId) {
+        // Fetch technician display name to keep ip_booking_requests consistent with socket inserts
+        const [[techRow]] = await db.execute(
+          `SELECT u.user_name FROM ip_technicians t
+           JOIN ip_users u ON u.user_id = t.user_id
+           WHERE t.technician_id = ? LIMIT 1`,
+          [assignedTechId]
+        );
+        const techName = techRow?.user_name || '';
+
+        await db.execute(
+          `INSERT INTO ip_booking_requests
+             (booking_id, technician_id, technician_name, request_status, total_attempts, max_attempts, last_sent_at, responded_at, updated_at)
+           VALUES (?, ?, ?, 'accepted', 1, 1, NOW(), NOW(), NOW())
+           ON DUPLICATE KEY UPDATE
+             request_status = 'accepted',
+             responded_at   = NOW(),
+             updated_at     = NOW()`,
+          [bookingId, assignedTechId, techName]
+        );
+        // Expire any other pending requests for this booking
+        await db.execute(
+          `UPDATE ip_booking_requests
+           SET request_status = 'expired', updated_at = NOW()
+           WHERE booking_id = ? AND technician_id != ? AND request_status = 'pending'`,
+          [bookingId, assignedTechId]
+        );
+      }
+    } else if (status === 'cancelled') {
+      await db.execute(
+        `UPDATE ip_booking_requests
+         SET request_status = 'expired', updated_at = NOW()
+         WHERE booking_id = ? AND request_status = 'pending'`,
+        [bookingId]
+      );
+    }
+
+    console.log(`✅ updateAdminStatus — booking_id=${bookingId} → ${status}`);
+    res.json({ success: true, status });
+  } catch (err) {
+    console.error('❌ updateAdminStatus FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error', detail: err.message });
+  }
+};
+
 exports.updateBookingItems = async (req, res) => {
   const { bookingId } = req.params;
   const { items = [], serviceCharge = 0 } = req.body;
@@ -964,5 +1135,84 @@ exports.createFamilyBooking = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error', detail: err.message });
   } finally {
     conn.release();
+  }
+};
+
+// ── POST /api/bookings/:bookingId/dispatch ────────────────────────────────────
+// Called by the CodeIgniter admin portal after creating a booking.
+// Reads booking + patient data from DB, then fires the existing dispatch engine
+// via triggerScheduledDispatch — same path the cron scheduler uses.
+// Protected by adminAuth middleware (HMAC-SHA256 shared secret).
+exports.dispatchBooking = async (req, res) => {
+  const bid = parseInt(req.params.bookingId, 10);
+  if (!bid) {
+    return res.status(400).json({ success: false, message: 'Invalid bookingId' });
+  }
+
+  try {
+    // Same query as dispatchScheduler — gets all fields _handleBookingRequest needs
+    const [[row]] = await db.execute(
+      `SELECT
+         b.booking_id,
+         b.patient_id,
+         b.branch_id,
+         b.booking_type,
+         b.status,
+         b.collection_address,
+         b.collection_latitude   AS patient_lat,
+         b.collection_longitude  AS patient_lng,
+         p.patient_name,
+         p.patient_mobile,
+         COALESCE(ts.slot_id, ls.slot_id) AS slot_id,
+         ias.slot_time
+       FROM ip_bookings b
+       JOIN ip_patients p   ON p.patient_id          = b.patient_id
+       LEFT JOIN ip_available_slots  ias ON ias.available_slot_id  = b.available_slot_id
+       LEFT JOIN ip_technician_slots ts  ON ts.tech_slot_id        = ias.technician_slot_id
+       LEFT JOIN ip_lab_slots        ls  ON ls.lab_slot_id         = ias.lab_slot_id
+       WHERE b.booking_id  = ?
+         AND b.deleted_at IS NULL
+       LIMIT 1`,
+      [bid]
+    );
+
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    if (row.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: `Booking status is '${row.status}' — dispatch requires status 'pending'`,
+      });
+    }
+
+    // "HH:MM:SS" → "HH:MM"  (null if no slot time stored)
+    const slotTime    = row.slot_time ? String(row.slot_time).substring(0, 5) : null;
+    const dispatchType = row.booking_type === 'home_collection' ? 'lab' : (row.booking_type ?? 'lab');
+
+    console.log(`[dispatchBooking] firing dispatch for booking_id=${bid} type=${dispatchType}`);
+
+    // Fire and forget — dispatch runs in the background, response returns immediately
+    triggerScheduledDispatch({
+      bookingId:       row.booking_id,
+      patientId:       row.patient_id,
+      patientName:     row.patient_name   ?? 'Patient',
+      patientMobile:   row.patient_mobile ?? '',
+      patientAddress:  row.collection_address ?? 'Home Collection',
+      patientLat:      row.patient_lat  ?? null,
+      patientLng:      row.patient_lng  ?? null,
+      hospital:        'MicroLab Home Collection',
+      bookingType:     dispatchType,
+      branchId:        row.branch_id  ?? null,
+      slotId:          row.slot_id    ?? null,
+      slotLabel:       null,
+      appointmentTime: slotTime,
+    }, _io);
+
+    res.json({ success: true, message: 'Dispatch started', bookingId: bid });
+  } catch (err) {
+    console.error('❌ dispatchBooking FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };

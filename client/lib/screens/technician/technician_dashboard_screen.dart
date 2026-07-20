@@ -721,12 +721,11 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   }
 
   Future<void> _handleLogout() async {
-    // 1. Go offline — stops ping timer + socket + foreground service
-    if (_isOnline) {
-      _stopLocationStream();
-      SocketService.instance.goOffline();
-      await ForegroundService.instance.stop();
-    }
+    // 1. Stop location, disconnect socket (emits technician_offline internally),
+    //    and stop foreground service.
+    _stopLocationStream();
+    SocketService.instance.disconnect();
+    await ForegroundService.instance.stop();
 
     // 2. Read IDs before clearing prefs
     final prefs  = await SharedPreferences.getInstance();
