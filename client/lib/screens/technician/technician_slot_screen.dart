@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -32,6 +33,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
   static const _durationOptions = [15, 30, 40];
 
   bool _isSaving = false;
+  Timer? _slotRefreshTimer;
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -65,6 +67,17 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
       _selectedDurations[_key(d)] = <int, int?>{};
     }
     _loadSlots();
+    // Rebuild every minute so past-slot locks apply without a network call.
+    _slotRefreshTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) { if (mounted) setState(() {}); },
+    );
+  }
+
+  @override
+  void dispose() {
+    _slotRefreshTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadSlots() async {
@@ -110,6 +123,20 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
         }
       }
 
+      // Remove expired slots from today's preselect — server may have stored
+      // them from an earlier session, but they must not appear selected now.
+      final todayKey = _key(_days[0]);
+      preSelected[todayKey]?.removeWhere((slotId) {
+        final slot = master.firstWhere(
+          (s) => (s['slot_id'] as int) == slotId,
+          orElse: () => <String, dynamic>{},
+        );
+        return _isPast(todayKey, slot);
+      });
+      preDurations[todayKey]?.removeWhere(
+        (slotId, _) => !(preSelected[todayKey]?.contains(slotId) ?? false),
+      );
+
       setState(() {
         _masterSlots = master;
         _selectedSlots.clear();
@@ -150,6 +177,11 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
   // ── Actions ────────────────────────────────────────────────────────────────
 
   void _toggleSlot(String k, int slotId) {
+    final slot = _masterSlots.firstWhere(
+      (s) => (s['slot_id'] as int) == slotId,
+      orElse: () => <String, dynamic>{},
+    );
+    if (_isPast(k, slot)) return;
     setState(() {
       final s = _selectedSlots[k]!;
       if (s.contains(slotId)) {
@@ -161,11 +193,28 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
     });
   }
 
-  void _selectAll(String k) =>
-      setState(() => _selectedSlots[k] = {for (final s in _masterSlots) s['slot_id'] as int});
+  void _selectAll(String k) => setState(() =>
+      _selectedSlots[k] = {
+        for (final s in _masterSlots)
+          if (!_isPast(k, s)) s['slot_id'] as int,
+      });
 
   void _clearAll(String k) =>
       setState(() { _selectedSlots[k] = {}; _selectedDurations[k] = {}; });
+
+  // Returns true when [slot] is past for today — its slot_end has been reached.
+  // Always false for tomorrow and future dates.
+  bool _isPast(String dateKey, Map<String, dynamic> slot) {
+    if (dateKey != _key(_days[0])) return false;
+    final endStr = slot['slot_end'] as String? ?? '';
+    if (endStr.isEmpty) return false;
+    final parts = endStr.split(':');
+    if (parts.length < 2) return false;
+    final now = DateTime.now();
+    final end = DateTime(now.year, now.month, now.day,
+        int.tryParse(parts[0]) ?? 0, int.tryParse(parts[1]) ?? 0);
+    return !now.isBefore(end); // now >= slot_end → locked
+  }
 
   Future<void> _save() async {
     setState(() => _isSaving = true);
@@ -324,8 +373,10 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
     final d        = _days[_selectedDayIndex];
     final k        = _key(d);
     final selected = _selectedSlots[k] ?? {};
-    final allCount = _masterSlots.length;
-    final allSel   = allCount > 0 && selected.length == allCount;
+    final allCount  = _masterSlots.length;
+    final pastCount = _masterSlots.where((s) => _isPast(k, s)).length;
+    final allSel    = allCount > 0 && pastCount < allCount &&
+                      selected.length == (allCount - pastCount);
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
@@ -376,19 +427,24 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
               final slotId    = slot['slot_id']    as int;
               final slotLabel = slot['slot_label'] as String;
               final isSel     = selected.contains(slotId);
+              final isPast    = _isPast(k, slot);
               return GestureDetector(
-                onTap: () => _toggleSlot(k, slotId),
+                onTap: isPast ? null : () => _toggleSlot(k, slotId),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 160),
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
                   decoration: BoxDecoration(
-                    color: isSel ? AppColors.brandGreen : Colors.white,
+                    color: isPast
+                        ? const Color(0xFFF0F0F0)
+                        : (isSel ? AppColors.brandGreen : Colors.white),
                     borderRadius: BorderRadius.circular(10),
                     border: Border.all(
-                      color: isSel ? AppColors.brandGreen : AppColors.divider,
-                      width: isSel ? 1.5 : 1,
+                      color: isPast
+                          ? AppColors.divider
+                          : (isSel ? AppColors.brandGreen : AppColors.divider),
+                      width: (!isPast && isSel) ? 1.5 : 1,
                     ),
-                    boxShadow: isSel
+                    boxShadow: (!isPast && isSel)
                         ? [BoxShadow(
                             color: AppColors.brandGreen.withValues(alpha: 0.18),
                             blurRadius: 6,
@@ -400,11 +456,15 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
                   ),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
                     Icon(
-                      isSel
-                          ? Icons.check_circle_rounded
-                          : Icons.radio_button_unchecked_rounded,
+                      isPast
+                          ? Icons.lock_outline_rounded
+                          : (isSel
+                              ? Icons.check_circle_rounded
+                              : Icons.radio_button_unchecked_rounded),
                       size: 15,
-                      color: isSel ? Colors.white : AppColors.textHint,
+                      color: isPast
+                          ? AppColors.textHint
+                          : (isSel ? Colors.white : AppColors.textHint),
                     ),
                     const SizedBox(width: 7),
                     Text(
@@ -412,7 +472,9 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
-                        color: isSel ? Colors.white : AppColors.textPrimary,
+                        color: isPast
+                            ? AppColors.textHint
+                            : (isSel ? Colors.white : AppColors.textPrimary),
                       ),
                     ),
                   ]),

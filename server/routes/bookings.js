@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const bookingController = require('../controllers/bookingController');
-const auth = require('../middleware/auth');
+const auth      = require('../middleware/auth');
+const adminAuth = require('../middleware/adminAuth');
 
 // POST /api/bookings — create booking (returns bookingId)
 router.post('/', auth, bookingController.createBooking);
@@ -45,7 +46,21 @@ router.post('/:bookingId/pay', auth, bookingController.payBooking);
 // PUT /api/bookings/:bookingId/items — replace tests/packages on an existing booking
 router.put('/:bookingId/items', auth, bookingController.updateBookingItems);
 
-// PUT /api/bookings/:bookingId/lab-status — update lab pipeline stage
-router.put('/:bookingId/lab-status', bookingController.updateLabStatus);
+// PUT /api/bookings/:bookingId/lab-status — update lab pipeline stage (lab-side only)
+router.put('/:bookingId/lab-status',    bookingController.updateLabStatus);
+
+// PUT /api/bookings/:bookingId/admin-status — full admin status override
+// Updates ip_bookings + ip_technician_collection + ip_booking_requests in sync
+// No auth middleware — called from admin panel which does not send a JWT
+router.put('/:bookingId/admin-status',  bookingController.updateAdminStatus);
+
+// POST /api/bookings/admin — create booking from admin portal + auto-dispatch same-day
+// Secured by HMAC-SHA256 shared secret (adminAuth middleware), not JWT
+// Signing payload: "|timestamp"  (no bookingId in URL — bookingId param is empty string)
+router.post('/admin', adminAuth, bookingController.createAdminBooking);
+
+// POST /api/bookings/:bookingId/dispatch — trigger dispatch from admin portal
+// Secured by HMAC-SHA256 shared secret (adminAuth middleware), not JWT
+router.post('/:bookingId/dispatch', adminAuth, bookingController.dispatchBooking);
 
 module.exports = router;

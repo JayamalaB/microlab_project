@@ -113,7 +113,11 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
     //    but the overlay never appeared. Now that the tech is back in the app
     //    (via app icon, not the notification), show the overlay so they can
     //    still Accept or Decline within the 40-second server window.
-    _showPendingBackgroundBooking();
+    //    First drain any booking the FCM background isolate persisted to
+    //    SharedPreferences — that isolate cannot write to main-isolate memory.
+    BookingNotificationService.instance
+        .checkAndSetFcmPendingBooking()
+        .then((_) => _showPendingBackgroundBooking());
   }
 
   void _showPendingBackgroundBooking() {
@@ -314,10 +318,14 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
       });
     }
 
-    // Case 2 — Body tap (or background booking pending from a previous session)
+    // Case 2 — Body tap (or background booking pending from a previous session).
     // addPostFrameCallback defers until after the first frame so context and
     // Navigator are ready for showBookingRequestOverlay().
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    // Drain FCM-isolate prefs first — background isolate writes there, not to
+    // main-isolate memory, so we must promote it before showing the overlay.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      await BookingNotificationService.instance.checkAndSetFcmPendingBooking();
       if (mounted) _showPendingBackgroundBooking();
     });
   }
@@ -432,6 +440,8 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
             testNames:         const ['Home Collection'],
             mode:              'Home Collection',
             status:            status,
+            docRequired:       map['doc_required'] == 1,
+            docVerified:       map['doc_verified'] == 1,
             serviceChargePaid: 0,
             testsTotal:        double.tryParse(map['amount_paid']?.toString() ?? '') ?? 0,
             amountPaid:        double.tryParse(map['booking_amount_paid']?.toString() ?? '') ?? 0.0,
@@ -721,12 +731,11 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   }
 
   Future<void> _handleLogout() async {
-    // 1. Go offline — stops ping timer + socket + foreground service
-    if (_isOnline) {
-      _stopLocationStream();
-      SocketService.instance.goOffline();
-      await ForegroundService.instance.stop();
-    }
+    // 1. Stop location, disconnect socket (emits technician_offline internally),
+    //    and stop foreground service.
+    _stopLocationStream();
+    SocketService.instance.disconnect();
+    await ForegroundService.instance.stop();
 
     // 2. Read IDs before clearing prefs
     final prefs  = await SharedPreferences.getInstance();

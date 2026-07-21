@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../constants/app_constants.dart';
 import 'socket_service.dart';
@@ -103,6 +104,25 @@ class BookingNotificationService {
     final b = _pendingBackgroundBooking;
     _pendingBackgroundBooking = null;
     return b;
+  }
+
+  // Reads any booking saved by the FCM background isolate via SharedPreferences
+  // and promotes it to _pendingBackgroundBooking so the main isolate can show it.
+  // Call this on app resume / cold start before calling consumePendingBackgroundBooking.
+  Future<void> checkAndSetFcmPendingBooking() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('pending_fcm_booking');
+      if (raw == null || raw.isEmpty) return;
+      await prefs.remove('pending_fcm_booking');
+      final booking = SocketBooking.fromJson(
+        jsonDecode(raw) as Map<String, dynamic>,
+      );
+      _pendingBackgroundBooking ??= booking;
+      _log('FCM prefs booking promoted — #${booking.bookingId}');
+    } catch (e) {
+      _log('checkAndSetFcmPendingBooking error: $e');
+    }
   }
 
   // ── Show notification ──────────────────────────────────────────────────────
@@ -209,13 +229,23 @@ class BookingNotificationService {
         _pendingBackgroundBooking = null;
       }
       _lastShownAt.remove(bookingId);
-      if (SocketService.instance.isConnected) {
+      void doEmit() {
         SocketService.instance.emitBookingAccepted(
-          bookingId:      booking.bookingId,
+          bookingId:      booking!.bookingId,
           technicianId:   SocketService.instance.userId,
           technicianName: SocketService.instance.userName,
           sessionId:      SocketService.instance.sessionId,
         );
+      }
+      if (SocketService.instance.isConnected) {
+        doEmit();
+      } else {
+        // Socket is down (common when app is backgrounded) — queue the emit
+        // for when the socket reconnects so the server receives the accept.
+        SocketService.instance.onConnected
+            .where((connected) => connected)
+            .take(1)
+            .listen((_) => doEmit());
       }
       if (_acceptedCtrl.hasListener) {
         _acceptedCtrl.add(booking);
