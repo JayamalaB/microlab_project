@@ -165,7 +165,7 @@ exports.savePatient = async (req, res) => {
 
 exports.updatePatient = async (req, res) => {
   try {
-    const { user_id, client_id } = req.user;
+    const { user_id, client_id, mobile: jwtMobile } = req.user;
     const { id } = req.params;
     const {
       name, mobile, gender, location, address,
@@ -190,29 +190,29 @@ exports.updatePatient = async (req, res) => {
       );
     }
 
+    const SET_CLAUSE = `
+       SET patient_name=?, patient_mobile=?, patient_gender=?, patient_city=?, patient_address=?,
+           patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
+           health_conditions=?, patient_photo=?, updated_by=?,
+           created_by=COALESCE(NULLIF(created_by,''), ?), updated_at=NOW()`;
+
     const fields = [name, mobile, gender, location, address,
       email || null, date_of_birth || null, age || null,
       relation || null, health_condition || null, photo_url || null, updatedBy, updatedBy];
 
+    // Try matching by patient_id + client_id first, then fall back to patient_mobile
+    // (covers users whose client_id was set by admin or differs from JWT client_id)
     let [result] = await db.query(
-      `UPDATE ip_patients
-       SET patient_name=?, patient_mobile=?, patient_gender=?, patient_city=?, patient_address=?,
-           patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
-           health_conditions=?, patient_photo=?, updated_by=?,
-           created_by=COALESCE(NULLIF(created_by,''), ?), updated_at=NOW()
-       WHERE patient_id=? AND client_id=?`,
-      [...fields, id, client_id]
+      `UPDATE ip_patients ${SET_CLAUSE}
+       WHERE patient_id=? AND (client_id=? OR patient_mobile=?)`,
+      [...fields, id, client_id, jwtMobile]
     );
 
     if (result.affectedRows === 0) {
       [result] = await db.query(
-        `UPDATE ip_patients
-         SET patient_name=?, patient_mobile=?, patient_gender=?, patient_city=?, patient_address=?,
-             patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
-             health_conditions=?, patient_photo=?, updated_by=?,
-             created_by=COALESCE(NULLIF(created_by,''), ?), updated_at=NOW()
-         WHERE patient_id_ref=? AND client_id=?`,
-        [...fields, id, client_id]
+        `UPDATE ip_patients ${SET_CLAUSE}
+         WHERE patient_id_ref=? AND (client_id=? OR patient_mobile=?)`,
+        [...fields, id, client_id, jwtMobile]
       );
     }
 
@@ -222,8 +222,8 @@ exports.updatePatient = async (req, res) => {
 
     const [rows] = await db.query(
       `SELECT ${PATIENT_SELECT} FROM ip_patients
-       WHERE (patient_id=? OR patient_id_ref=?) AND client_id=? LIMIT 1`,
-      [id, id, client_id]
+       WHERE (patient_id=? OR patient_id_ref=?) AND (client_id=? OR patient_mobile=?) LIMIT 1`,
+      [id, id, client_id, jwtMobile]
     );
     res.json({ success: true, data: rows[0] });
   } catch (err) {

@@ -4,6 +4,7 @@ const path   = require('path');
 const fs     = require('fs');
 const db     = require('../config/db');
 const settings = require('../config/settings');
+const { messaging } = require('../config/firebase');
 
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'client_sync.log');
 
@@ -76,11 +77,21 @@ async function syncBookingToClient(bookingId, initiator) {
 
   writeLog(`[clientSync] starting — booking_id=${bookingId} initiator=${initiator.mobile} type=${initiator.type}`);
 
+  // Mark as pending before attempting the HTTP call
+  try {
+    await db.execute(
+      `UPDATE ip_bookings SET client_sync_status = 'pending' WHERE booking_id = ?`,
+      [bookingId]
+    );
+  } catch (dbErr) {
+    writeLog(`[clientSync] ⚠️  could not set pending — ${dbErr.message}`);
+  }
+
   try {
     // 1. Booking + slot time
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date,
-              b.total_amount, b.patient_id, b.status,
+              b.total_amount, b.patient_id, b.client_id, b.status,
               TIME_FORMAT(av.slot_time, '%h:%i %p') AS slot_time
        FROM ip_bookings b
        LEFT JOIN ip_available_slots av ON av.available_slot_id = b.available_slot_id
@@ -191,14 +202,20 @@ async function syncBookingToClient(bookingId, initiator) {
     if (result.status === 'success') {
       if (result.bill_id && booking.status !== 'cancelled') {
         await db.execute(
-          `UPDATE ip_bookings SET bill_id = ? WHERE booking_id = ?`,
+          `UPDATE ip_bookings SET bill_id = ?, client_sync_status = 'synced' WHERE booking_id = ?`,
           [String(result.bill_id), bookingId]
         );
         writeLog(`[clientSync] ✅ bill_id=${result.bill_id} saved — booking_id=${bookingId}`);
+      } else {
+        await db.execute(
+          `UPDATE ip_bookings SET client_sync_status = 'synced' WHERE booking_id = ?`,
+          [bookingId]
+        );
+        writeLog(`[clientSync] ✅ synced (no bill_id) — booking_id=${bookingId}`);
       }
+
       if (isNewPatient && result.patient_id) {
         const ref = String(result.patient_id);
-        // Update all three tables so no join is needed later
         await db.execute(
           `UPDATE ip_patients SET patient_id_ref = ? WHERE patient_id = ?`,
           [ref, booking.patient_id]
@@ -213,11 +230,53 @@ async function syncBookingToClient(bookingId, initiator) {
         );
         writeLog(`[clientSync] ✅ patient_id_ref=${result.patient_id} saved — patient_id=${booking.patient_id} booking_id=${bookingId}`);
       }
+
+      // Send "Booking Confirmed" push notification ONLY after successful sync
+      await _sendBookingConfirmedNotification(booking, initiator.mobile);
+
     } else {
       writeLog(`[clientSync] ⚠️  client server failure — ${result.msg ?? 'no message'}`);
     }
   } catch (err) {
     writeLog(`[clientSync] ❌ ERROR — ${err.message}`);
+  }
+}
+
+async function _sendBookingConfirmedNotification(booking, initiatorMobile) {
+  if (!messaging) {
+    writeLog(`[clientSync] push skipped — Firebase not initialised`);
+    return;
+  }
+  try {
+    const [[userRow]] = await db.execute(
+      `SELECT user_notification_token FROM ip_users
+       WHERE user_mobile_no = ? AND user_microlab_type = 'patient_user' LIMIT 1`,
+      [initiatorMobile]
+    );
+    const fcmToken = userRow?.user_notification_token;
+    if (!fcmToken) {
+      writeLog(`[clientSync] push skipped — no FCM token for ${initiatorMobile}`);
+      return;
+    }
+    await messaging.send({
+      token: fcmToken,
+      notification: {
+        title: 'Booking Confirmed ✅',
+        body:  `Your booking #${booking.booking_ref} has been confirmed. We will contact you shortly.`,
+      },
+      data: {
+        type:        'booking_confirmed',
+        booking_id:  String(booking.booking_id),
+        booking_ref: booking.booking_ref,
+      },
+      android: {
+        priority: 'high',
+        notification: { channelId: 'booking_updates' },
+      },
+    });
+    writeLog(`[clientSync] 🔔 push sent — booking_id=${booking.booking_id} mobile=${initiatorMobile}`);
+  } catch (pushErr) {
+    writeLog(`[clientSync] ⚠️  push failed — ${pushErr.message}`);
   }
 }
 

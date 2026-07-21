@@ -21,6 +21,7 @@
 'use strict';
 const db              = require('../config/db');
 const { messaging }   = require('../config/firebase');
+const { sendToBookingOwner } = require('../services/customerPush');
 const fs              = require('fs');
 const path            = require('path');
 
@@ -1375,6 +1376,13 @@ module.exports = function bookingSocket(io, socket) {
 
     log('👤', 'PATIENT_NOTIFIED', bookingId, 'booking_accepted sent');
 
+    sendToBookingOwner(
+      bookingId,
+      'Technician Assigned 🧑‍⚕️',
+      `${actorName} has been assigned to your booking. They will be on their way soon.`,
+      { type: 'technician_assigned', booking_id: String(bookingId) }
+    );
+
     queuedActors.forEach(qa => {
       if (qa.id === actorId) return;
       const entry = actorMap.get(qa.id);
@@ -1428,6 +1436,12 @@ module.exports = function bookingSocket(io, socket) {
       [technicianId]
     );
     _notifyPatient(io, bookingId, 'technician_en_route', { bookingId });
+    sendToBookingOwner(
+      bookingId,
+      'Technician On the Way 🚴',
+      'Your technician is on the way to your location.',
+      { type: 'technician_en_route', booking_id: String(bookingId) }
+    );
   });
 
   socket.on('technician_arrived', (data = {}) => {
@@ -1447,6 +1461,12 @@ module.exports = function bookingSocket(io, socket) {
       [technicianId]
     );
     _notifyPatient(io, bookingId, 'technician_arrived', { bookingId });
+    sendToBookingOwner(
+      bookingId,
+      'Technician Arrived 📍',
+      'Your technician has arrived at your location.',
+      { type: 'technician_arrived', booking_id: String(bookingId) }
+    );
   });
 
   socket.on('collection_completed', (data = {}) => {
@@ -1599,6 +1619,12 @@ module.exports = function bookingSocket(io, socket) {
     );
     _notifyPatient(io, bookingId, 'sample_received_at_lab', { bookingId });
     log('🧪', 'SAMPLE_RECEIVED', bookingId);
+    sendToBookingOwner(
+      bookingId,
+      'Sample Reached Lab 🧪',
+      'Your sample has been received at the lab and is being processed.',
+      { type: 'sample_received_at_lab', booking_id: String(bookingId) }
+    );
   });
 
   socket.on('test_in_progress', (data = {}) => {

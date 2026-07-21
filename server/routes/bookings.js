@@ -18,6 +18,15 @@ router.get('/patient/:patientId', bookingController.getPatientBookings);
 // GET /api/bookings/:bookingId — single booking detail
 router.get('/:bookingId', bookingController.getBooking);
 
+// GET /api/bookings/:bookingId/results — released test results for patient
+router.get('/:bookingId/results', auth, bookingController.getBookingResults);
+
+// GET /api/bookings/:bookingId/results/:resultId/proxy — stream report PDF via server (avoids CORS)
+router.get('/:bookingId/results/:resultId/proxy', auth, bookingController.proxyReport);
+
+// POST /api/bookings/:bookingId/results/:resultId/released — admin notifies result released (fires FCM push)
+router.post('/:bookingId/results/:resultId/released', bookingController.releaseResult);
+
 // GET  /api/bookings/:bookingId/items   — list booking test items
 router.get('/:bookingId/items',                    auth, bookingController.getItems);
 // GET  /api/bookings/:bookingId/linked-patients — additional patients added by technician

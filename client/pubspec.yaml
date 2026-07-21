@@ -33,6 +33,8 @@ dependencies:
   flutter_foreground_task: ^8.14.0
   connectivity_plus: ^6.0.5
   device_info_plus: ^10.1.0
+  path_provider: ^2.1.4
+  open_filex: ^4.3.4
 
 dev_dependencies:
   flutter_test:

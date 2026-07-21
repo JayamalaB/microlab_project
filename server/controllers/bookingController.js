@@ -1,6 +1,16 @@
 const db       = require('../config/db');
 const settings = require('../config/settings');
 const { syncBookingToClient } = require('../services/clientSync');
+const { sendToBookingOwner } = require('../services/customerPush');
+const fs   = require('fs');
+const path = require('path');
+
+// ── Reports-screen debug log ──────────────────────────────────────────────────
+const REPORTS_LOG = path.join(__dirname, '..', 'logs', 'reports_debug.log');
+function logReports(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+  fs.appendFileSync(REPORTS_LOG, `[${ist}] ${msg}\n`, 'utf8');
+}
 
 let _io = null;
 exports.setIo = (io) => { _io = io; };
@@ -213,13 +223,11 @@ exports.createBooking = async (req, res) => {
     console.log(`🎉 Booking created — booking_id=${bookingId} ref=${bookingRef}`);
     console.log('─────────────────────────────────────────────────\n');
 
-    // Sync to client server for paid bookings (fire-and-forget)
-    if (isPaid) {
-      syncBookingToClient(bookingId, {
-        mobile: req.user.mobile,
-        type:   req.user.user_type ?? 'customer',
-      }).catch(err => console.error('[clientSync] unhandled:', err.message));
-    }
+    // Sync all bookings to client server regardless of payment status (fire-and-forget)
+    syncBookingToClient(bookingId, {
+      mobile: req.user.mobile,
+      type:   req.user.user_type ?? 'customer',
+    }).catch(err => console.error('[clientSync] unhandled:', err.message));
 
     res.status(201).json({
       success:     true,
@@ -257,6 +265,7 @@ exports.getMyBookings = async (req, res) => {
       `SELECT
          b.booking_id              AS booking_id_num,
          b.booking_ref,
+         b.visit_group_id,
          b.status                  AS booking_status,
          b.booking_type,
          b.booking_date            AS collection_date,
@@ -310,7 +319,17 @@ exports.getMyBookings = async (req, res) => {
          u.user_mobile_no   AS tech_mobile,
          tech.tech_photo    AS tech_photo,
          f.overall_rating,
-         f.feedback_comments
+         f.feedback_comments,
+         (SELECT tr.report_url
+          FROM ip_test_results tr
+          WHERE tr.booking_id = b.booking_id
+            AND tr.result_status = 'released'
+            AND tr.report_url IS NOT NULL
+          LIMIT 1) AS report_url,
+         (SELECT COUNT(*)
+          FROM ip_test_results tr
+          WHERE tr.booking_id = b.booking_id
+            AND tr.result_status = 'released') AS released_results_count
        FROM ip_bookings b
        LEFT JOIN ip_patients pat       ON pat.patient_id  = b.patient_id
        LEFT JOIN ip_branches br        ON br.branch_id    = b.branch_id
@@ -340,6 +359,52 @@ exports.getMyBookings = async (req, res) => {
       [clientId, patientId]
     );
     console.log(`✅ Found ${rows.length} booking(s) for client ${clientId}`);
+
+    // ── Reports-screen debug ─────────────────────────────────────────────────
+    const reportableRows = rows.filter(r => r.report_url || parseInt(r.released_results_count || 0) > 0);
+    logReports(`━━━ getMyBookings  client=${clientId} patient=${patientId} ━━━`);
+    logReports(`  Total bookings returned : ${rows.length}`);
+    logReports(`  With results (→ Reports): ${reportableRows.length}`);
+    logReports(`  All statuses            : ${[...new Set(rows.map(r => r.booking_status))].join(', ') || '(none)'}`);
+
+    rows.forEach((r, i) => {
+      const serviceCharge = parseFloat(r.total_amount || 0) - parseFloat(r.items_total || 0);
+      const hasReportUrl  = !!r.report_url;
+      const releasedCount = parseInt(r.released_results_count || 0);
+      const goesToReports = hasReportUrl || releasedCount > 0;
+      const reason = goesToReports
+        ? (hasReportUrl ? 'has report_url' : `${releasedCount} released result(s)`)
+        : 'no report_url, no released results';
+      logReports(
+        `  [${i + 1}] ${r.booking_ref || r.booking_id_num}` +
+        `  status=${r.booking_status}` +
+        `  type=${r.booking_type}` +
+        `  → reports=${goesToReports ? `YES ✅ (${reason})` : `NO  ❌  (${reason})`}`
+      );
+      logReports(
+        `       total=${r.total_amount}  items_total=${r.items_total}` +
+        `  service_charge=${serviceCharge.toFixed(2)}` +
+        `  payment_status=${r.payment_status || '(none)'}`
+      );
+      logReports(
+        `       report_url=${r.report_url ? `PRESENT → ${r.report_url}` : 'NULL'}` +
+        `  released_results=${releasedCount}` +
+        `  collection_status=${r.collection_status || '(none)'}`
+      );
+      const testSummary = (r.test_items || '')
+        .split('|||')
+        .filter(Boolean)
+        .map(t => { const p = t.split(':::'); return p[1] || p[0]; })
+        .join(', ');
+      logReports(`       tests=[${testSummary || '(none)'}]`);
+    });
+
+    if (reportableRows.length === 0) {
+      logReports(`  ⚠️  No bookings with released results — reports screen will show empty state`);
+    }
+    logReports('');
+    // ── end reports debug ────────────────────────────────────────────────────
+
     res.json({ success: true, bookings: rows });
   } catch (err) {
     console.error('❌ getMyBookings FAILED:', err.message);
@@ -365,7 +430,8 @@ exports.cancelBooking = async (req, res) => {
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.status, b.booking_type, b.total_amount, b.available_slot_id, b.booking_date,
               b.visit_group_id,
-              COALESCE(pt.amount_paid, 0) AS amount_paid
+              COALESCE(pt.amount_paid, 0) AS amount_paid,
+              COALESCE((SELECT SUM(bi.final_price) FROM ip_booking_items bi WHERE bi.booking_id = b.booking_id), 0) AS items_total
        FROM ip_bookings b
        LEFT JOIN ip_payment_transactions pt
          ON pt.booking_id = b.booking_id AND (pt.is_refund = 0 OR pt.is_refund IS NULL)
@@ -421,28 +487,16 @@ exports.cancelBooking = async (req, res) => {
       }
     }
 
-    // Calculate refund — service charge only applies to home collection when technician has arrived
-    const amountPaid     = parseFloat(booking.amount_paid) || 0;
-    let   techHasArrived = isHomeCollection && tc && chargeStatuses.includes(tc.collection_status);
-
-    // For family visits: service charge only applies if ALL siblings are also cancelled
-    // (technician's trip is fully wasted only when no one in the group continues)
-    if (techHasArrived && booking.visit_group_id) {
-      const [[{ activeSiblings }]] = await db.execute(
-        `SELECT COUNT(*) AS activeSiblings
-         FROM ip_bookings
-         WHERE visit_group_id = ?
-           AND booking_id != ?
-           AND status != 'cancelled'
-           AND deleted_at IS NULL`,
-        [booking.visit_group_id, bookingId]
-      );
-      if (activeSiblings > 0) techHasArrived = false;
-    }
-
-    const refundAmount  = techHasArrived ? Math.max(0, amountPaid - serviceCharge) : amountPaid;
-    const refundStatus  = amountPaid > 0 ? 'pending' : 'none';
-    const chargeApplied = techHasArrived ? serviceCharge : 0;
+    // Calculate refund
+    const amountPaid          = parseFloat(booking.amount_paid) || 0;
+    const techHasArrived      = isHomeCollection && tc && chargeStatuses.includes(tc.collection_status);
+    // Use the actual service charge on this booking (total - tests).
+    // For family bookings the service charge sits only on one member's booking;
+    // if this booking has no service charge component, nothing is deducted.
+    const bookingServiceCharge = Math.max(0, parseFloat(booking.total_amount) - parseFloat(booking.items_total));
+    const chargeApplied        = techHasArrived && bookingServiceCharge > 0 ? bookingServiceCharge : 0;
+    const refundAmount         = Math.max(0, amountPaid - chargeApplied);
+    const refundStatus         = amountPaid > 0 ? 'pending' : 'none';
 
     await db.execute(
       `UPDATE ip_bookings
@@ -529,6 +583,70 @@ exports.payBooking = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     conn.release();
+  }
+};
+
+// ── GET /api/bookings/:bookingId/results/:resultId/proxy ─────────────────────
+exports.proxyReport = async (req, res) => {
+  const bookingId = parseInt(req.params.bookingId, 10);
+  const resultId  = parseInt(req.params.resultId,  10);
+  const { client_id, id: patientId } = req.user;
+  try {
+    const [[booking]] = await db.execute(
+      `SELECT booking_id FROM ip_bookings
+       WHERE booking_id = ? AND (client_id = ? OR patient_id = ?) AND deleted_at IS NULL LIMIT 1`,
+      [bookingId, client_id, patientId]
+    );
+    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+
+    const [[result]] = await db.execute(
+      `SELECT report_url FROM ip_test_results
+       WHERE result_id = ? AND booking_id = ? AND result_status = 'released' LIMIT 1`,
+      [resultId, bookingId]
+    );
+    if (!result?.report_url) return res.status(404).json({ success: false, message: 'Report not found' });
+
+    const upstream = await fetch(result.report_url);
+    if (!upstream.ok) {
+      return res.status(502).json({ success: false, message: `Upstream error: ${upstream.status}` });
+    }
+    const buffer = Buffer.from(await upstream.arrayBuffer());
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="report_${resultId}.pdf"`);
+    res.send(buffer);
+  } catch (err) {
+    console.error('proxyReport error:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── GET /api/bookings/:bookingId/results ─────────────────────────────────────
+exports.getBookingResults = async (req, res) => {
+  const bookingId = parseInt(req.params.bookingId, 10);
+  const clientId  = req.user.client_id;
+  const patientId = req.user.id;
+  try {
+    // Verify booking belongs to this account
+    const [[booking]] = await db.execute(
+      `SELECT booking_id FROM ip_bookings
+       WHERE booking_id = ? AND (client_id = ? OR patient_id = ?) AND deleted_at IS NULL LIMIT 1`,
+      [bookingId, clientId, patientId]
+    );
+    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+
+    const [rows] = await db.execute(
+      `SELECT result_id, test_name, test_code, result_value, result_unit,
+              reference_range, result_flag, result_remarks, report_url,
+              result_file_path, released_at
+       FROM ip_test_results
+       WHERE booking_id = ? AND result_status = 'released'
+       ORDER BY result_id ASC`,
+      [bookingId]
+    );
+    res.json({ success: true, results: rows });
+  } catch (err) {
+    console.error('❌ getBookingResults FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
@@ -780,6 +898,40 @@ exports.updateLabStatus = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+exports.releaseResult = async (req, res) => {
+  const secret = process.env.ADMIN_WEBHOOK_SECRET;
+  if (!secret || req.headers['x-admin-secret'] !== secret) {
+    return res.status(401).json({ success: false, message: 'Unauthorized' });
+  }
+
+  const { bookingId, resultId } = req.params;
+  try {
+    const [[result]] = await db.execute(
+      `SELECT result_id, test_name FROM ip_test_results
+       WHERE result_id = ? AND booking_id = ? AND result_status = 'released'`,
+      [resultId, bookingId]
+    );
+
+    if (!result) {
+      return res.status(404).json({ success: false, message: 'Released result not found for this booking' });
+    }
+
+    const testName = result.test_name ?? 'Test';
+
+    sendToBookingOwner(
+      Number(bookingId),
+      'Report Ready 📄',
+      `${testName} report is ready. Open the app to view and download it.`,
+      { type: 'results_released', booking_id: String(bookingId), result_id: String(resultId) }
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ releaseResult FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 exports.updateBookingItems = async (req, res) => {
   const { bookingId } = req.params;
   const { items = [], serviceCharge = 0 } = req.body;

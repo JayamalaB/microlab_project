@@ -333,15 +333,14 @@ exports.verifyOtp = async (req, res) => {
     }
 
     let patient;
-    if (patients.length === 0) {
-      try {
-        const [result] = await db.query(
-          'INSERT INTO ip_patients (patient_mobile) VALUES (?)', [mobile]
-        );
-        patient = { patient_id: result.insertId, patient_mobile: mobile };
-      } catch (_) {
-        patient = { patient_id: dbUser.user_id, patient_mobile: mobile };
-      }
+    const isNewUser = patients.length === 0;
+    if (isNewUser) {
+      const [result] = await db.query(
+        `INSERT INTO ip_patients (client_id, patient_name, patient_mobile, patient_relation, created_by)
+         VALUES (?, ?, ?, 'Self', ?)`,
+        [dbUser.client_id, `user_${mobile}`, mobile, `user_${mobile}`]
+      );
+      patient = { patient_id: result.insertId, patient_mobile: mobile, patient_relation: 'Self' };
     } else {
       patient = patients[0];
     }
@@ -378,7 +377,7 @@ exports.verifyOtp = async (req, res) => {
     return res.json({
       success: true,
       message: 'Login successful',
-      data: { token, user: patient, patients: phpPatients },
+      data: { token, user: patient, patients: phpPatients, is_new_user: isNewUser },
     });
 
   } catch (err) {
@@ -386,6 +385,23 @@ exports.verifyOtp = async (req, res) => {
     writeLog(`[verifyOtp] ERROR — ${errDetail}`);
     console.error('verifyOtp error:', err);
     res.status(500).json({ success: false, message: 'Server error', debug: errDetail });
+  }
+};
+
+exports.registerFcmToken = async (req, res) => {
+  try {
+    const { user_id } = req.user;
+    const { token } = req.body;
+    if (!token) return res.status(422).json({ success: false, message: 'token required' });
+
+    await db.query(
+      `UPDATE ip_users SET user_notification_token = ? WHERE user_id = ?`,
+      [token, user_id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('registerFcmToken error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 

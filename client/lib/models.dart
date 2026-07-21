@@ -234,6 +234,7 @@ class BookingModel {
   final DateTime? feedbackDate;
   // Assigned technician info (from ip_technician_collection)
   final String? collectionStatus;   // 'assigned' | 'en_route' | 'arrived' | 'collected' | etc.
+  final String? visitGroupId;       // non-null for family bookings sharing a visit
   final String? technicianName;
   final String? technicianMobile;
   final String? technicianPhoto;
@@ -274,6 +275,7 @@ class BookingModel {
     this.feedbackComment,
     this.feedbackDate,
     this.collectionStatus,
+    this.visitGroupId,
     this.technicianName,
     this.technicianMobile,
     this.technicianPhoto,

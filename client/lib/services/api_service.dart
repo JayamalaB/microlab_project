@@ -31,6 +31,21 @@ class ApiService {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  static Future<void> registerFcmToken(String fcmToken) async {
+    try {
+      final authToken = await getToken();
+      if (authToken == null) return;
+      await http.post(
+        Uri.parse('$baseUrl/api/auth/fcm-token'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $authToken',
+        },
+        body: jsonEncode({'token': fcmToken}),
+      ).timeout(const Duration(seconds: 10));
+    } catch (_) {}
+  }
+
   static Future<void> logout(String token) async {
     await http
         .post(
@@ -591,6 +606,34 @@ class ApiService {
   /// Returns only the live technician fields for a booking — used to poll
   /// collection_status while the detail sheet is open.
   /// Returns null on error or if no technician row exists yet.
+  static Future<Uint8List> getReportProxy(int bookingId, int resultId) async {
+    final token = await getToken();
+    final res = await http.get(
+      Uri.parse('$baseUrl/api/bookings/$bookingId/results/$resultId/proxy'),
+      headers: {'Authorization': 'Bearer $token'},
+    ).timeout(const Duration(seconds: 30));
+    if (res.statusCode != 200) {
+      throw Exception('Failed to fetch report (HTTP ${res.statusCode})');
+    }
+    return res.bodyBytes;
+  }
+
+  static Future<List<Map<String, dynamic>>> getBookingResults(int bookingId) async {
+    try {
+      final token = await getToken();
+      if (token == null) return [];
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/results'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        return List<Map<String, dynamic>>.from(body['results'] as List);
+      }
+    } catch (_) {}
+    return [];
+  }
+
   static Future<Map<String, dynamic>?> fetchBookingStatus(int bookingId) async {
     try {
       final token = await getToken();

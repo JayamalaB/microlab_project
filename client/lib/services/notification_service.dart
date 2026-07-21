@@ -4,6 +4,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import 'api_service.dart';
 import 'booking_notification_service.dart';
 import 'socket_service.dart';
 
@@ -96,20 +97,32 @@ class NotificationService {
 
   final _localNotifs = FlutterLocalNotificationsPlugin();
 
-  static const _channelId   = 'booking_requests';
-  static const _channelName = 'Booking Requests';
+  static const _channelId        = 'booking_requests';
+  static const _channelName      = 'Booking Requests';
+  static const _updatesChannelId   = 'booking_updates';
+  static const _updatesChannelName = 'Booking Updates';
 
   Future<void> initialize() async {
-    // Create HIGH-priority channel for booking request alerts.
-    await _localNotifs
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-        ?.createNotificationChannel(const AndroidNotificationChannel(
+    final androidPlugin = _localNotifs
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+
+    // HIGH-priority channel for technician booking request alerts.
+    await androidPlugin?.createNotificationChannel(const AndroidNotificationChannel(
       _channelId,
       _channelName,
       description: 'Incoming booking request alerts for technicians',
       importance: Importance.max,
       playSound: true,
       enableVibration: true,
+    ));
+
+    // Default-priority channel for customer booking status updates.
+    await androidPlugin?.createNotificationChannel(const AndroidNotificationChannel(
+      _updatesChannelId,
+      _updatesChannelName,
+      description: 'Booking confirmation and status updates',
+      importance: Importance.defaultImportance,
+      playSound: true,
     ));
 
     await _localNotifs.initialize(
@@ -152,6 +165,7 @@ class NotificationService {
     // Keep token fresh if Firebase rotates it.
     FirebaseMessaging.instance.onTokenRefresh.listen((token) {
       SocketService.instance.updateFcmToken(token);
+      ApiService.registerFcmToken(token);
       debugPrint('[FCM] token refreshed');
     });
 
@@ -171,16 +185,57 @@ class NotificationService {
     }
   }
 
-  // Fires when a data-only FCM message arrives while the app is in FOREGROUND.
-  // Socket.IO delivers the same booking simultaneously; BookingNotificationService
-  // dedupes via _lastShownAt (5s window) so only one notification (or overlay) shows.
+  // Call once after customer login so the server can send push notifications.
+  Future<void> loadCustomerToken() async {
+    try {
+      final token = await FirebaseMessaging.instance.getToken();
+      if (token != null) {
+        await ApiService.registerFcmToken(token);
+        debugPrint('[FCM] customer token registered');
+      }
+    } catch (e) {
+      debugPrint('[FCM] loadCustomerToken failed: $e');
+    }
+  }
+
+  // Fires when an FCM message arrives while the app is in FOREGROUND.
+  // Android does not auto-show notification-type FCM messages in foreground —
+  // we must call _localNotifs.show() manually.
   void _onForeground(RemoteMessage message) {
-    if (message.data['type'] != 'booking_request') return;
-    // If socket is connected, _listenToSocket() on the dashboard handles it
-    // (overlay or notification) — skip to avoid duplicate heads-up.
-    if (SocketService.instance.isConnected) return;
-    final data    = Map<String, dynamic>.from(message.data);
-    final booking = SocketBooking.fromJson(data);
-    BookingNotificationService.instance.showBookingNotification(booking);
+    final type = message.data['type'];
+
+    if (type == 'booking_request') {
+      // If socket is connected, _listenToSocket() on the dashboard handles it
+      // (overlay or notification) — skip to avoid duplicate heads-up.
+      if (SocketService.instance.isConnected) return;
+      final data    = Map<String, dynamic>.from(message.data);
+      final booking = SocketBooking.fromJson(data);
+      BookingNotificationService.instance.showBookingNotification(booking);
+      return;
+    }
+
+    if (type == 'booking_confirmed' ||
+        type == 'technician_assigned' ||
+        type == 'technician_en_route' ||
+        type == 'technician_arrived' ||
+        type == 'sample_received_at_lab' ||
+        type == 'results_released') {
+      final title = message.notification?.title ?? 'Booking Update';
+      final body  = message.notification?.body  ?? '';
+      _localNotifs.show(
+        message.data['booking_id'].hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _updatesChannelId,
+            _updatesChannelName,
+            importance: Importance.defaultImportance,
+            priority: Priority.defaultPriority,
+            playSound: true,
+          ),
+        ),
+      );
+    }
   }
 }

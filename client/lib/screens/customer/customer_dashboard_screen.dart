@@ -8,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/notification_service.dart';
 import 'package:microlab/constants/app_constants.dart';
 import '../shared/location_picker_screen.dart';
 import 'customer_home_screen.dart';
@@ -108,6 +109,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   void initState() {
     super.initState();
     _loadTests();
+    NotificationService.instance.loadCustomerToken();
     if (widget.initialCartTests.isNotEmpty) {
       _cart.addAll(widget.initialCartTests);
     }
@@ -1635,7 +1637,6 @@ class _LocationSheetState extends State<_LocationSheet> {
                         Row(
                           children: [
                             Expanded(
-                              flex: 2,
                               child: TextField(
                                 controller: _pincodeCtrl,
                                 keyboardType: TextInputType.number,
@@ -1656,7 +1657,6 @@ class _LocationSheetState extends State<_LocationSheet> {
                             ),
                             const SizedBox(width: 10),
                             Expanded(
-                              flex: 1,
                               child: TextField(
                                 controller: _cityCtrl,
                                 style: const TextStyle(fontSize: 14),

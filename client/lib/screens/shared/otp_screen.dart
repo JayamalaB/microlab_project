@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/auth_service.dart';
+import 'package:microlab/services/notification_service.dart';
 import 'package:microlab/services/socket_service.dart';
 import '../customer/customer_home_screen.dart';
+import '../customer/complete_profile_screen.dart';
 import '../technician/technician_dashboard_screen.dart';
 
 class OtpScreen extends StatefulWidget {
@@ -155,8 +157,14 @@ class _OtpScreenState extends State<OtpScreen> {
     } else {
       final patientId = user['patient_id'] as int? ?? 0;
       final name      = user['patient_name'] as String? ?? widget.mobile;
+      final isNewUser = data['is_new_user'] as bool? ?? false;
       _connectSocket(patientId, null, name);
-      _navigateCustomer();
+      NotificationService.instance.loadCustomerToken();
+      if (isNewUser) {
+        _navigateCompleteProfile(patientId);
+      } else {
+        _navigateCustomer();
+      }
     }
   }
 
@@ -166,6 +174,20 @@ class _OtpScreenState extends State<OtpScreen> {
       role:     widget.userRole == 'technician' ? 'technician' : 'customer',
       name:     name,
       branchId: branchId,
+    );
+  }
+
+  void _navigateCompleteProfile(int patientId) {
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CompleteProfileScreen(
+          mobile:    widget.mobile,
+          patientId: patientId,
+          isVip:     widget.userRole == 'vip_customer',
+        ),
+      ),
+      (route) => false,
     );
   }
 
