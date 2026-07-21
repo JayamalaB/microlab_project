@@ -202,18 +202,18 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
   void _clearAll(String k) =>
       setState(() { _selectedSlots[k] = {}; _selectedDurations[k] = {}; });
 
-  // Returns true when [slot] is past for today — its slot_start has been reached.
+  // Returns true when [slot] is past for today — its slot_end has been reached.
   // Always false for tomorrow and future dates.
   bool _isPast(String dateKey, Map<String, dynamic> slot) {
     if (dateKey != _key(_days[0])) return false;
-    final startStr = slot['slot_start'] as String? ?? '';
-    if (startStr.isEmpty) return false;
-    final parts = startStr.split(':');
+    final endStr = slot['slot_end'] as String? ?? '';
+    if (endStr.isEmpty) return false;
+    final parts = endStr.split(':');
     if (parts.length < 2) return false;
-    final now   = DateTime.now();
-    final start = DateTime(now.year, now.month, now.day,
+    final now = DateTime.now();
+    final end = DateTime(now.year, now.month, now.day,
         int.tryParse(parts[0]) ?? 0, int.tryParse(parts[1]) ?? 0);
-    return !now.isBefore(start); // now >= start → locked
+    return !now.isBefore(end); // now >= slot_end → locked
   }
 
   Future<void> _save() async {

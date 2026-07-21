@@ -440,6 +440,8 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
             testNames:         const ['Home Collection'],
             mode:              'Home Collection',
             status:            status,
+            docRequired:       map['doc_required'] == 1,
+            docVerified:       map['doc_verified'] == 1,
             serviceChargePaid: 0,
             testsTotal:        double.tryParse(map['amount_paid']?.toString() ?? '') ?? 0,
             amountPaid:        double.tryParse(map['booking_amount_paid']?.toString() ?? '') ?? 0.0,

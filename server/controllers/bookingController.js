@@ -494,7 +494,8 @@ exports.getItems = async (req, res) => {
               bi.product_id,
               COALESCE(bi.product_name_snapshot, p.product_name) AS name,
               COALESCE(p.product_category, 'General')            AS category,
-              bi.final_price                                      AS price
+              bi.final_price                                      AS price,
+              CASE WHEN p.document_required IN (1, '1', 'yes') THEN 1 ELSE 0 END AS doc_required
        FROM ip_booking_items bi
        LEFT JOIN ip_products p ON p.product_id = bi.product_id
        WHERE bi.booking_id = ?
@@ -1145,7 +1146,9 @@ exports.createFamilyBooking = async (req, res) => {
 // Protected by adminAuth middleware (HMAC-SHA256 shared secret).
 exports.dispatchBooking = async (req, res) => {
   const bid = parseInt(req.params.bookingId, 10);
+  console.log(`\n📡 [DISPATCH-API] ── incoming ── bookingId=${bid || 'INVALID'}  ip=${req.ip}`);
   if (!bid) {
+    console.warn('[DISPATCH-API] rejected — invalid bookingId');
     return res.status(400).json({ success: false, message: 'Invalid bookingId' });
   }
 
@@ -1177,13 +1180,17 @@ exports.dispatchBooking = async (req, res) => {
     );
 
     if (!row) {
+      console.warn(`[DISPATCH-API] booking_id=${bid} NOT FOUND in ip_bookings`);
       return res.status(404).json({ success: false, message: 'Booking not found' });
     }
 
-    if (row.status !== 'pending') {
+    console.log(`[DISPATCH-API] booking found — id=${bid} status=${row.status} type=${row.booking_type} patient="${row.patient_name}" branch=${row.branch_id}`);
+
+    if (!['pending', 'confirmed'].includes(row.status)) {
+      console.warn(`[DISPATCH-API] REJECTED — status='${row.status}' (must be pending or confirmed)  bookingId=${bid}`);
       return res.status(400).json({
         success: false,
-        message: `Booking status is '${row.status}' — dispatch requires status 'pending'`,
+        message: `Booking status is '${row.status}' — dispatch requires status 'pending' or 'confirmed'`,
       });
     }
 
@@ -1191,7 +1198,7 @@ exports.dispatchBooking = async (req, res) => {
     const slotTime    = row.slot_time ? String(row.slot_time).substring(0, 5) : null;
     const dispatchType = row.booking_type === 'home_collection' ? 'lab' : (row.booking_type ?? 'lab');
 
-    console.log(`[dispatchBooking] firing dispatch for booking_id=${bid} type=${dispatchType}`);
+    console.log(`[DISPATCH-API] firing dispatch — bookingId=${bid} type=${dispatchType} slotTime=${slotTime ?? 'none'} lat=${row.patient_lat} lng=${row.patient_lng}`);
 
     // Fire and forget — dispatch runs in the background, response returns immediately
     triggerScheduledDispatch({
@@ -1440,3 +1447,6 @@ exports.createAdminBooking = async (req, res) => {
     conn.release();
   }
 };
+
+
+

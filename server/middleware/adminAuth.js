@@ -20,6 +20,7 @@ module.exports = function adminAuth(req, res, next) {
   const timestamp = req.headers['x-admin-timestamp'];
 
   if (!signature || !timestamp) {
+    console.warn(`[adminAuth] REJECTED — missing headers  bookingId=${req.params.bookingId ?? '?'}  ip=${req.ip}`);
     return res.status(403).json({ success: false, message: 'Admin credentials missing' });
   }
 
@@ -27,6 +28,7 @@ module.exports = function adminAuth(req, res, next) {
   const now = Math.floor(Date.now() / 1000);
   const ts  = parseInt(timestamp, 10);
   if (isNaN(ts) || Math.abs(now - ts) > 300) {
+    console.warn(`[adminAuth] REJECTED — timestamp expired  bookingId=${req.params.bookingId ?? '?'}  ts=${timestamp}  diff=${now - ts}s  ip=${req.ip}`);
     return res.status(403).json({ success: false, message: 'Request timestamp expired' });
   }
 
@@ -49,8 +51,10 @@ module.exports = function adminAuth(req, res, next) {
   }
 
   if (!match) {
+    console.warn(`[adminAuth] REJECTED — signature mismatch  bookingId=${bookingId}  payload="${bookingId}|${timestamp}"  ip=${req.ip}`);
     return res.status(403).json({ success: false, message: 'Invalid admin signature' });
   }
 
+  console.log(`[adminAuth] OK  bookingId=${bookingId}  ip=${req.ip}`);
   next();
 };

@@ -203,7 +203,18 @@ exports.getActiveBookings = async (req, res) => {
          p.patient_name,
          p.patient_mobile,
          s.slot_label,
-         TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted
+         TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
+         CASE WHEN EXISTS(
+           SELECT 1 FROM ip_booking_items bi
+           JOIN ip_products pr ON pr.product_id = bi.product_id
+           WHERE bi.booking_id = tc.booking_id
+             AND pr.document_required IN (1, '1', 'yes')
+         ) THEN 1 ELSE 0 END AS doc_required,
+         CASE WHEN EXISTS(
+           SELECT 1 FROM ip_booking_documents bd
+           WHERE bd.booking_id = tc.booking_id
+             AND bd.file_description = 'prescription'
+         ) THEN 1 ELSE 0 END AS doc_verified
        FROM ip_technician_collection tc
        JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
        LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
@@ -285,7 +296,8 @@ exports.saveSlots = async (req, res) => {
     if (!tech) return res.status(404).json({ success: false, message: 'Technician not found' });
     const branchId = tech.branch_id;
 
-    // For today (IST), reject slot_ids whose slot_start has already been reached.
+    // For today (IST), reject slot_ids whose slot_end has already been reached.
+    // A slot is still valid while any appointment time within it remains in the future.
     // Protects against raw API calls (Postman, modified clients) sending past slots.
     // Tomorrow and future dates are skipped — all their slots remain editable.
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -296,14 +308,14 @@ exports.saveSlots = async (req, res) => {
       if (day.date !== todayIST || !Array.isArray(day.slot_ids) || day.slot_ids.length === 0) continue;
       const placeholders = day.slot_ids.map(() => '?').join(',');
       const [slotDefs] = await db.query(
-        `SELECT slot_id, slot_start FROM ip_slots WHERE slot_id IN (${placeholders})`,
+        `SELECT slot_id, slot_end FROM ip_slots WHERE slot_id IN (${placeholders})`,
         day.slot_ids
       );
       const validIds = new Set(
         slotDefs
           .filter(r => {
-            const [h = 0, m = 0] = String(r.slot_start).split(':').map(Number);
-            return (h * 60 + m) > nowISTMinutes; // slot_start strictly after now
+            const [h = 0, m = 0] = String(r.slot_end).split(':').map(Number);
+            return (h * 60 + m) > nowISTMinutes; // slot_end strictly after now → still valid
           })
           .map(r => r.slot_id)
       );

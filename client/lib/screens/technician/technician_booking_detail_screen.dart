@@ -132,8 +132,11 @@ class _TechnicianBookingDetailScreenState
   // Document — multi-image upload
   final List<_TechPresDoc> _docUploads = [];
   bool _docIsPicking = false;
-  bool _docVerified = false;
-  bool _docsLoading = true;
+  bool _docVerified  = false;
+  bool _docsLoading  = true;
+  // Whether any selected test/package requires a prescription.
+  // Initialized from widget.booking.docRequired; recalculated once items load.
+  late bool _docRequired;
   static const int _docMaxFiles = 5;
   final ImagePicker _picker = ImagePicker();
 
@@ -206,6 +209,7 @@ class _TechnicianBookingDetailScreenState
     _currentStatus        = widget.booking.status;
     _livePaymentStatus    = widget.booking.paymentStatus;
     _liveAmountPaid       = widget.booking.amountPaid;
+    _docRequired          = widget.booking.docRequired;
     _loadItems();
     _loadDocs();
     _loadLinkedPatients();
@@ -282,8 +286,14 @@ class _TechnicianBookingDetailScreenState
           'price':         double.tryParse(i['price']?.toString() ?? '0')?.toStringAsFixed(0) ?? '0',
         }).toList();
         _originalItemIds = items.map((i) => i['product_id']?.toString() ?? '').toSet();
-        _catalogueItems = catalogue;
-        _itemsLoading = false;
+        _catalogueItems  = catalogue;
+        _itemsLoading    = false;
+        // Recalculate from actual items — covers family member bookings and
+        // cases where tests are added/removed during the visit.
+        _docRequired = items.any((i) {
+          final v = i['doc_required'];
+          return v == 1 || v == true || v == '1' || v == 'yes';
+        });
       });
     } catch (e) {
       debugPrint('[_loadItems] ERROR: $e');
@@ -409,6 +419,24 @@ void _advanceStatus() {
     return;
   }
 
+  // Prescription gate: must upload + verify before Sample Collected
+  if (next == 'Sample Collected' && _docRequired) {
+    if (_docUploads.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Upload prescription before collecting the sample.'),
+        backgroundColor: Colors.red,
+      ));
+      return;
+    }
+    if (!_docVerified) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Verify the prescription before collecting the sample.'),
+        backgroundColor: Colors.orange,
+      ));
+      return;
+    }
+  }
+
   showDialog(
     context: context,
     builder: (_) => AlertDialog(
@@ -468,7 +496,7 @@ void _handleStatusTransition(String next) {
         ),
       ).then((wasCompleted) {
         if (wasCompleted == true && mounted) {
-          setState(() => _currentStatus = 'Handed to Lab');
+          Navigator.of(context).pop(true);
         }
       });
       break;
@@ -513,7 +541,7 @@ void _resumeJourney() {
     ),
   ).then((wasCompleted) {
     if (wasCompleted == true && mounted) {
-      setState(() => _currentStatus = 'Handed to Lab');
+      Navigator.of(context).pop(true);
     }
   });
 }
@@ -1680,10 +1708,12 @@ void _resumeJourney() {
           const SizedBox(height: 14),
 
           // ── Prescription / Document ─────────────────────────
-          _SectionCard(
+          // Shown only when the booking requires a prescription OR when
+          // documents have already been uploaded (to avoid hiding existing uploads).
+          if (_docRequired || _docUploads.isNotEmpty) _SectionCard(
             title: 'Prescription / Document',
             icon: Icons.description_outlined,
-            badge: widget.booking.docRequired ? 'REQUIRED' : null,
+            badge: _docRequired ? 'REQUIRED' : null,
             child: _docsLoading
                 ? const Padding(
                     padding: EdgeInsets.symmetric(vertical: 24),
@@ -1693,35 +1723,35 @@ void _resumeJourney() {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: widget.booking.docRequired
+                  color: _docRequired
                       ? const Color(0xFFFFF3E0)
                       : AppColors.brandGreenSurface,
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                    color: widget.booking.docRequired
+                    color: _docRequired
                         ? const Color(0xFFFFCC02).withOpacity(0.4)
                         : AppColors.brandGreenLight,
                   ),
                 ),
                 child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Icon(
-                    widget.booking.docRequired
+                    _docRequired
                         ? Icons.warning_amber_rounded
                         : Icons.info_outline_rounded,
                     size: 13,
-                    color: widget.booking.docRequired
+                    color: _docRequired
                         ? const Color(0xFFE65100)
                         : AppColors.brandGreen,
                   ),
                   const SizedBox(width: 7),
                   Expanded(child: Text(
-                    widget.booking.docRequired
+                    _docRequired
                         ? 'This booking requires a doctor\'s prescription. Upload and verify before collecting sample.'
                         : 'Upload prescription if provided by the customer.',
                     style: TextStyle(
                       fontSize: 12,
                       height: 1.4,
-                      color: widget.booking.docRequired
+                      color: _docRequired
                           ? const Color(0xFF795548)
                           : AppColors.brandGreen,
                     ),

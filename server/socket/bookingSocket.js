@@ -1407,7 +1407,7 @@ module.exports = function bookingSocket(io, socket) {
 
       dbRun(
         `UPDATE ip_bookings
-         SET status = 'confirmed', technician_id = ?, technician_name = ?, updated_at = NOW()
+         SET status = 'assigned', technician_id = ?, technician_name = ?, updated_at = NOW()
          WHERE booking_id = ?`,
         [actorId, actorName || null, bookingId]
       );
