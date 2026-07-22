@@ -1,12 +1,24 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/notification_service.dart';
+import 'package:microlab/constants/app_constants.dart';
+import '../shared/location_picker_screen.dart';
 import 'customer_home_screen.dart';
 import 'checkout_screen.dart';
 import 'my_bookings_screen.dart';
 import 'package:microlab/models.dart';
 import 'reports_screen.dart';
+import 'patient_ride_tracking_screen.dart';
+import 'tracking_map_screen.dart';
+import 'lab_progress_screen.dart';
 
 
 
@@ -38,13 +50,23 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
   // ── Collection mode ───────────────────────────────────────
   String _mode = 'Home Collection'; // or 'Lab Test'
+  bool _modeChosen = false;         // true once user explicitly taps a mode
   final List<String> _modes = ['Home Collection', 'Lab Test'];
 
   // ── Location fields ───────────────────────────────────────
+  String? _address;
   String? _pincode;
   String? _city;
+  double? _lat;
+  double? _lng;
+  // Silently auto-detected from pincode — patient never sees or selects this.
   BranchModel? _selectedBranch;
-  bool _loadingBranches = false;
+  bool _branchDetecting = false;
+  // Real patientId from auth session — falls back to 1 if socket not yet connected
+  int get _patientId {
+    final id = SocketService.instance.userId;
+    return id > 0 ? id : 1;
+  }
 
   // ── Cart ──────────────────────────────────────────────────
   final List<TestModel> _cart = [];
@@ -56,8 +78,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   String _selectedCategory = 'All';
   bool _showOffersOnly = false;
 
-  // Mock branches — replace with GET /api/branches
-  List<BranchModel> _branches = [];
+  final List<BranchModel> _branches = [];
 
   // Mock tests — replace with GET /api/tests
   List<TestModel> _allTests = [];
@@ -87,8 +108,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   @override
   void initState() {
     super.initState();
-    _loadMockData();
-    // Pre-add tests from offers/other screens
+    _loadTests();
+    NotificationService.instance.loadCustomerToken();
     if (widget.initialCartTests.isNotEmpty) {
       _cart.addAll(widget.initialCartTests);
     }
@@ -97,79 +118,18 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     });
   }
 
-  void _loadMockData() {
+  Future<void> _loadTests() async {
     setState(() => _loadingTests = true);
-
-    // Mock API response — replace with:
-    // GET /api/tests → List<TestModel>
-    // GET /api/branches → List<BranchModel>
-    Future.delayed(const Duration(milliseconds: 600), () {
+    try {
+      final tests = await ApiService.getPackages();
       if (!mounted) return;
       setState(() {
-        _branches = [
-          BranchModel(id: '1', name: 'Anna Nagar Branch', address: '14, 3rd Ave, Anna Nagar, Chennai'),
-          BranchModel(id: '2', name: 'T Nagar Branch', address: '8, Pondy Bazaar, T Nagar, Chennai'),
-          BranchModel(id: '3', name: 'Velachery Branch', address: '22, 100 Feet Rd, Velachery, Chennai'),
-          BranchModel(id: '4', name: 'Tambaram Branch', address: '5, GST Road, Tambaram, Chennai'),
-        ];
-
-        _allTests = [
-          TestModel.fromJson({
-            'id': '1', 'name': 'HbA1c', 'type': 'single', 'category': 'Diabetes',
-            'description': '3-month average blood sugar control indicator',
-            'offer': 'yes', 'original_price': '600', 'offer_pct': '10',
-            'final_price': '540', 'doc_req': 'no',
-            'start_date': '28-04-2026', 'end_date': '30-04-2026', 'report_sts': '48 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '2', 'name': 'Complete Blood Count (CBC)', 'type': 'single', 'category': 'General',
-            'description': 'Full blood panel including RBC, WBC and platelets',
-            'offer': 'no', 'original_price': '350', 'final_price': '350',
-            'doc_req': 'no', 'report_sts': '24 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '3', 'name': 'Thyroid Profile (T3, T4, TSH)', 'type': 'single', 'category': 'Thyroid',
-            'description': 'Complete thyroid function evaluation',
-            'offer': 'yes', 'original_price': '900', 'offer_pct': '15',
-            'final_price': '765', 'doc_req': 'no',
-            'start_date': '01-05-2026', 'end_date': '31-05-2026', 'report_sts': '24 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '4', 'name': 'Lipid Profile', 'type': 'single', 'category': 'Heart',
-            'description': 'Cholesterol, HDL, LDL and triglycerides',
-            'offer': 'no', 'original_price': '500', 'final_price': '500',
-            'doc_req': 'no', 'report_sts': '24 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '5', 'name': 'Diabetes Care Package', 'type': 'package', 'category': 'Diabetes',
-            'description': 'HbA1c + Fasting glucose + Insulin + Lipid Profile',
-            'offer': 'yes', 'original_price': '1800', 'offer_pct': '20',
-            'final_price': '1440', 'doc_req': 'no',
-            'start_date': '01-05-2026', 'end_date': '31-05-2026', 'report_sts': '48 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '6', 'name': 'Full Body Checkup', 'type': 'package', 'category': 'General',
-            'description': '60+ parameters — CBC, liver, kidney, thyroid, vitamins & more',
-            'offer': 'yes', 'original_price': '3500', 'offer_pct': '25',
-            'final_price': '2625', 'doc_req': 'yes',
-            'start_date': '01-05-2026', 'end_date': '31-05-2026', 'report_sts': '72 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '7', 'name': 'Vitamin Panel (B12, D3, Folate)', 'type': 'single', 'category': 'Vitamins',
-            'description': 'Essential vitamins for energy and immunity',
-            'offer': 'no', 'original_price': '1200', 'final_price': '1200',
-            'doc_req': 'no', 'report_sts': '48 hrs',
-          }),
-          TestModel.fromJson({
-            'id': '8', 'name': 'Kidney Function Test (KFT)', 'type': 'single', 'category': 'Kidney',
-            'description': 'Creatinine, urea, uric acid and eGFR',
-            'offer': 'no', 'original_price': '450', 'final_price': '450',
-            'doc_req': 'no', 'report_sts': '24 hrs',
-          }),
-        ];
+        _allTests = tests;
         _loadingTests = false;
       });
-    });
+    } catch (_) {
+      if (mounted) setState(() => _loadingTests = false);
+    }
   }
 
   void _toggleCart(TestModel test) {
@@ -195,6 +155,88 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     );
   }
 
+  // ── Branch auto-detection ─────────────────────────────────
+  // Called silently whenever a 6-digit pincode becomes available.
+  // Patient never sees this — branch is stored and forwarded to CheckoutScreen.
+  Future<void> _autoDetectBranch(String pincode, {String? place}) async {
+    if (!mounted) return;
+    final effectivePlace = place ?? _city;
+    debugPrint('\n🏥 [BRANCH AUTO-DETECT] ─────────────────────────────');
+    debugPrint('   pincode     : $pincode');
+    debugPrint('   place/city  : ${effectivePlace ?? '— (no fallback)'}');
+    debugPrint('   mode        : $_mode');
+    setState(() { _branchDetecting = true; _selectedBranch = null; });
+
+    try {
+      final params = <String, String>{'pincode': pincode};
+      if (effectivePlace != null && effectivePlace.isNotEmpty) {
+        params['place'] = effectivePlace;
+      }
+      if (_lat != null) params['lat'] = _lat!.toString();
+      if (_lng != null) params['lng'] = _lng!.toString();
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/branches/lookup')
+          .replace(queryParameters: params);
+      debugPrint('   → GET $uri');
+
+      final res = await http
+          .get(uri)
+          .timeout(const Duration(seconds: 10));
+
+      debugPrint('   ← status    : ${res.statusCode}');
+      debugPrint('   ← body      : ${res.body}');
+
+      if (!mounted) return;
+
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        if (body['success'] == true) {
+          final branch = BranchModel.fromJson(body['branch'] as Map<String, dynamic>);
+          setState(() { _selectedBranch = branch; _branchDetecting = false; });
+          debugPrint('   ✅ branch    : ${branch.name} (id=${branch.id})');
+          debugPrint('   📍 address   : ${branch.address}');
+        } else {
+          setState(() => _branchDetecting = false);
+          debugPrint('   ⚠️  no branch : ${body['message']}');
+        }
+      } else {
+        setState(() => _branchDetecting = false);
+        debugPrint('   ❌ HTTP ${res.statusCode} — branch detection skipped');
+      }
+    } catch (e) {
+      if (mounted) setState(() => _branchDetecting = false);
+      debugPrint('   ❌ error     : $e');
+    }
+    debugPrint('────────────────────────────────────────────────────\n');
+  }
+
+  // Extracts a 6-digit Indian pincode from a GPS reverse-geocoded address string.
+  // e.g. "12 Gandhi St, T Nagar, Chennai, Tamil Nadu 600017, India" → "600017"
+  void _tryExtractPincodeFromAddress(String address) {
+    debugPrint('\n📍 [GPS ADDRESS → PINCODE]');
+    debugPrint('   raw address : $address');
+    final pinMatch = RegExp(r'\b(\d{6})\b').firstMatch(address);
+    if (pinMatch != null) {
+      final pin = pinMatch.group(1)!;
+      // Try to extract city: split by comma, take 2nd segment, strip digits/dashes
+      String? extractedCity;
+      final parts = address.split(',');
+      if (parts.length >= 2) {
+        final candidate = parts[1].trim().replaceAll(RegExp(r'[\d\-\s]+$'), '').trim();
+        if (candidate.length > 2) extractedCity = candidate;
+      }
+      debugPrint('   extracted   : pin=$pin  city=${extractedCity ?? '— using _city=$_city'}');
+      final cityToUse = extractedCity ?? _city;
+      if (extractedCity != null) {
+        setState(() { _pincode = pin; _city = extractedCity; });
+      } else {
+        setState(() => _pincode = pin);
+      }
+      _autoDetectBranch(pin, place: cityToUse);
+    } else {
+      debugPrint('   ⚠️  no 6-digit pincode found in address — branch not auto-detected');
+    }
+  }
+
   void _showLocationSheet() {
     showModalBottomSheet(
       context: context,
@@ -207,14 +249,69 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         selectedBranch: _selectedBranch,
         pincode: _pincode,
         city: _city,
-        onModeChanged: (m) => setState(() {
-          _mode = m;
-          if (m == 'Home Collection') _selectedBranch = null;
-          if (m == 'Lab Test') { _pincode = null; _city = null; }
-        }),
-        onBranchChanged: (b) => setState(() => _selectedBranch = b),
-        onPincodeChanged: (p) => setState(() => _pincode = p),
+        address: _address,
+        onModeChanged: (m) {
+          final prev = _mode;
+          debugPrint('\n🔄 [MODE CHANGE] $prev → $m');
+          setState(() {
+            _mode = m;
+            _modeChosen = true;
+            // Only clear branch when SWITCHING from Lab Test → Home Collection.
+            // If mode hasn't changed (sheet re-confirmed same mode), keep state.
+            if (m == 'Home Collection' && prev == 'Lab Test') {
+              _selectedBranch = null;
+              debugPrint('   🏥 branch cleared (switched to Home Collection)');
+            }
+            if (m == 'Lab Test' && prev != 'Lab Test') {
+              _pincode = null;
+              _city    = null;
+              debugPrint('   🏥 pincode/city cleared (switched to Lab Test)');
+            }
+            if (m == prev) debugPrint('   ℹ️  mode unchanged — state preserved');
+          });
+        },
+        // Lab Test only — patient manually picks a branch.
+        onBranchChanged: (b) {
+          debugPrint('\n🏥 [BRANCH MANUAL SELECT] ${b?.name ?? 'cleared'} (Lab Test)');
+          setState(() => _selectedBranch = b);
+        },
+        // Home Collection — pincode set → trigger silent branch detection.
+        onPincodeChanged: (p) {
+          debugPrint('\n📮 [PINCODE SET] "$p"  mode=$_mode  (current pincode=$_pincode)');
+          // GPS flow sends null after address is confirmed.
+          // If we already extracted a pincode from the GPS address, keep it.
+          if (p == null && _pincode != null) {
+            debugPrint('   ℹ️  null received but keeping extracted pincode "$_pincode" — skipping override');
+            return;
+          }
+          setState(() {
+            _pincode = p;
+            // Only clear branch for Home Collection — Lab Test branch is set
+            // separately via onBranchChanged and must not be wiped here.
+            if (_mode != 'Lab Test') _selectedBranch = null;
+          });
+          if (p != null && p.length == 6 && _mode == 'Home Collection') {
+            debugPrint('   → 6 digits confirmed — starting branch auto-detect (city=$_city)');
+            _autoDetectBranch(p, place: _city);
+          } else {
+            debugPrint('   → skipped (length=${p?.length}, mode=$_mode)');
+          }
+        },
         onCityChanged: (c) => setState(() => _city = c),
+        // GPS / manual address — try to extract pincode from the address string.
+        onAddressChanged: (a) {
+          debugPrint('\n🏠 [ADDRESS SET] "$a"');
+          setState(() => _address = a);
+          if (a != null && a.isNotEmpty &&
+              _pincode == null && _mode == 'Home Collection') {
+            debugPrint('   → no pincode yet — scanning address for 6-digit code');
+            _tryExtractPincodeFromAddress(a);
+          }
+        },
+        onLatLngChanged: (lat, lng) {
+          debugPrint('\n📡 [GPS COORDS] lat=$lat  lng=$lng');
+          setState(() { _lat = lat; _lng = lng; });
+        },
       ),
     );
   }
@@ -228,22 +325,46 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         cart: _cart,
         onRemove: (t) => setState(() => _cart.removeWhere((x) => x.id == t.id)),
         onCheckout: () {
+          final branchId = _selectedBranch != null
+              ? int.tryParse(_selectedBranch!.id)
+              : null;
+          debugPrint('\n🛒 [CHECKOUT] ────────────────────────────────────');
+          debugPrint('   mode        : $_mode');
+          debugPrint('   pincode     : ${_pincode ?? '—'}');
+          debugPrint('   branch      : ${_selectedBranch?.name ?? '⚠️ none — slots will be static'}');
+          debugPrint('   branchId    : ${branchId ?? '⚠️ null'}');
+          debugPrint('   patientId   : $_patientId');
+          debugPrint('   cart items  : ${_cart.length}');
+          debugPrint('──────────────────────────────────────────────────\n');
           Navigator.pop(context);
           Navigator.push(
             context,
             MaterialPageRoute(
               builder: (_) => CheckoutScreen(
-                member: widget.member,
-                cart: List.from(_cart),
-                mode: _mode,
-                address: _pincode,
-                pincode: _pincode,
-                city: _city,
-                branch: _selectedBranch,
-                isVip: widget.isVip,
+                member:     widget.member,
+                cart:       List.from(_cart),
+                mode:       _mode,
+                address:    _address,
+                pincode:    _pincode,
+                city:       _city,
+                branch:     _selectedBranch,
+                isVip:      widget.isVip,
+                patientId:  int.tryParse(widget.member.id) ?? _patientId,
+                patientLat: _lat,
+                patientLng: _lng,
+                branchId:   branchId,
+                onBookingComplete: () => setState(() {
+                  _cart.clear();
+                  _address        = null;
+                  _pincode        = null;
+                  _city           = null;
+                  _lat            = null;
+                  _lng            = null;
+                  _selectedBranch = null;
+                }),
               ),
             ),
-          ).then((_) => setState(() => _cart.clear()));
+          );
         },
       ),
     );
@@ -547,7 +668,25 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 const SizedBox(height: 20),
 
                 // ── Content ───────────────────────────────
-                if (_loadingTests)
+                if (!_modeChosen)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 40, horizontal: 16),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.touch_app_outlined, size: 36, color: AppColors.brandGreen),
+                          SizedBox(height: 12),
+                          Text(
+                            'Select a booking type to see available tests',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(fontSize: 14, color: AppColors.textSecondary, height: 1.5),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                else if (_loadingTests)
                   const Padding(
                     padding: EdgeInsets.symmetric(vertical: 60),
                     child: Center(
@@ -594,7 +733,81 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         ],
     );
 
+    // Combined banner: lab collection (top) + active ride (below)
+    final banners = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ValueListenableBuilder<ActiveLabBookingInfo?>(
+          valueListenable: SocketService.instance.activeLabBooking,
+          builder: (context, lab, _) {
+            if (lab == null) return const SizedBox.shrink();
+            return _ActiveLabBanner(
+              lab: lab,
+              onTrack: () {
+                if (lab.collected) {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => LabProgressScreen(
+                        bookingId: lab.bookingId,
+                        patientName: SocketService.instance.userName.isEmpty
+                            ? 'Patient'
+                            : SocketService.instance.userName,
+                      ),
+                    ),
+                  );
+                } else {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => TrackingMapScreen(
+                        bookingId:      lab.bookingId,
+                        patientId:      lab.patientId,
+                        trackingId:     lab.trackingId,
+                        technicianId:   lab.technicianId,
+                        technicianName: lab.technicianName,
+                        patientLat:     lab.patientLat,
+                        patientLng:     lab.patientLng,
+                        patientAddress: lab.patientAddress,
+                      ),
+                    ),
+                  );
+                }
+              },
+            );
+          },
+        ),
+        ValueListenableBuilder<ActiveRideInfo?>(
+          valueListenable: SocketService.instance.activeRide,
+          builder: (context, ride, _) {
+            if (ride == null) return const SizedBox.shrink();
+            return _ActiveRideBanner(
+              ride: ride,
+              onTrack: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => PatientRideTrackingScreen(
+                    bookingId:     ride.bookingId.toString(),
+                    patientId:     ride.patientId,
+                    patientName:   ride.patientName,
+                    trackingId:    ride.trackingId,
+                    driverId:      ride.driverId,
+                    driverName:    ride.driverName,
+                    patientLat:    ride.patientLat,
+                    patientLng:    ride.patientLng,
+                    patientAddress: ride.patientAddress,
+                    hospital:      ride.hospital,
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ],
+    );
+
     if (widget.embedded) {
+      final bottomPad = MediaQuery.of(context).padding.bottom;
       return Stack(
         children: [
           body,
@@ -602,9 +815,14 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
             Positioned(
               left: 16,
               right: 16,
-              bottom: MediaQuery.of(context).padding.bottom + 8,
+              bottom: bottomPad + 8,
               child: _buildCartBar(context),
             ),
+          Positioned(
+            left: 0, right: 0,
+            bottom: _cart.isNotEmpty ? bottomPad + 78 : bottomPad + 8,
+            child: banners,
+          ),
         ],
       );
     }
@@ -613,7 +831,16 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       key: _scaffoldKey,
       backgroundColor: AppColors.background,
       drawer: _AppDrawer(member: widget.member, isVip: widget.isVip),
-      body: body,
+      body: Stack(
+        children: [
+          body,
+          Positioned(
+            left: 0, right: 0,
+            bottom: _cart.isNotEmpty ? 76 : 0,
+            child: banners,
+          ),
+        ],
+      ),
       bottomNavigationBar: _cart.isNotEmpty ? _buildCartBar(context) : null,
     );
   }
@@ -757,6 +984,8 @@ class _LocationBar extends StatelessWidget {
 
 // ─── Location Sheet ───────────────────────────────────────────────────────────
 
+// ─── Location Sheet ───────────────────────────────────────────────────────────
+
 class _LocationSheet extends StatefulWidget {
   final String mode;
   final List<String> modes;
@@ -764,10 +993,13 @@ class _LocationSheet extends StatefulWidget {
   final BranchModel? selectedBranch;
   final String? pincode;
   final String? city;
+  final String? address;
   final ValueChanged<String> onModeChanged;
   final ValueChanged<BranchModel?> onBranchChanged;
   final ValueChanged<String?> onPincodeChanged;
   final ValueChanged<String?> onCityChanged;
+  final ValueChanged<String?> onAddressChanged;
+  final void Function(double? lat, double? lng)? onLatLngChanged;
 
   const _LocationSheet({
     required this.mode,
@@ -776,10 +1008,13 @@ class _LocationSheet extends StatefulWidget {
     required this.selectedBranch,
     required this.pincode,
     required this.city,
+    this.address,
     required this.onModeChanged,
     required this.onBranchChanged,
     required this.onPincodeChanged,
     required this.onCityChanged,
+    required this.onAddressChanged,
+    this.onLatLngChanged,
   });
 
   @override
@@ -795,52 +1030,337 @@ class _LocationSheetState extends State<_LocationSheet> {
   bool _locationError = false;
   bool _branchError = false;
 
-  // Branches filtered by pincode/city search
+  // Branches for Lab Test mode
+  List<BranchModel> _allBranches      = [];
   List<BranchModel> _filteredBranches = [];
   bool _searchingBranches = false;
+
+  // Pincode auto-detection
+  String? _detectedArea;
+  bool _detecting = false;
+  
+  // Manual address mode flag
+  bool _isManualMode = false;
+  
+  // Address from GPS
+  String? _gpsAddress;
+  double? _gpsLat;
+  double? _gpsLng;
+  bool _gpsSelected = false;
+  
+  // Address from manual entry (pincode based)
+  String? _manualAddress;
+  double? _manualLat;
+  double? _manualLng;
+  bool _manualSelected = false;
+  
+  // Pincode geocoding in progress
+  bool _isGeocoding = false;
 
   @override
   void initState() {
     super.initState();
-    _mode = widget.mode;
+    _mode   = widget.mode;
     _branch = widget.selectedBranch;
     _pincodeCtrl.text = widget.pincode ?? '';
-    _cityCtrl.text = widget.city ?? '';
-    _addressCtrl.text = '';
-    _filteredBranches = widget.branches;
+    _cityCtrl.text    = widget.city    ?? '';
 
-    // For Lab Test mode, react to pincode/city changes to filter branches
+    // Restore previously entered address so user sees it when going back
+    if (widget.address != null && widget.address!.isNotEmpty) {
+      _addressCtrl.text = widget.address!;
+      _manualAddress    = widget.address;
+      _manualSelected   = true;
+      _isManualMode     = true;
+    }
+
     _pincodeCtrl.addListener(_filterBranches);
     _cityCtrl.addListener(_filterBranches);
+    _pincodeCtrl.addListener(_onPincodeChanged);
+
+    if (_mode == 'Lab Test') {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _loadBranches());
+    }
+  }
+
+  Future<void> _loadBranches() async {
+    if (!mounted) return;
+    setState(() => _searchingBranches = true);
+    try {
+      final branches = await ApiService.getBranches();
+      if (!mounted) return;
+      setState(() {
+        _allBranches      = branches;
+        _filteredBranches = branches;
+        _searchingBranches = false;
+        // Re-sync _branch to the freshly loaded instance so DropdownButtonFormField value matches by reference
+        if (_branch != null) {
+          _branch = branches.cast<BranchModel?>().firstWhere(
+            (b) => b?.id == _branch!.id,
+            orElse: () => _branch,
+          );
+        }
+      });
+    } catch (_) {
+      if (mounted) setState(() => _searchingBranches = false);
+    }
+  }
+
+  Future<void> _getCurrentLocation() async {
+    setState(() {
+      _isGeocoding = true;
+      _gpsSelected = false;
+      _manualSelected = false;
+    });
+    
+    try {
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.deniedForever || perm == LocationPermission.denied) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Location permission denied. Please enable location access.')),
+          );
+        }
+        setState(() => _isGeocoding = false);
+        return;
+      }
+      
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      ).timeout(const Duration(seconds: 10));
+      
+      _gpsLat = pos.latitude;
+      _gpsLng = pos.longitude;
+      
+      // Reverse geocode to get address
+      final address = await _reverseGeocode(pos.latitude, pos.longitude);
+      
+      setState(() {
+        _gpsAddress = address;
+        _gpsSelected = true;
+        _isGeocoding = false;
+      });
+      
+      debugPrint('[LocationSheet] GPS Location: ${pos.latitude}, ${pos.longitude}');
+      debugPrint('[LocationSheet] GPS Address: $address');
+      
+    } catch (e) {
+      debugPrint('[LocationSheet] GPS error: $e');
+      setState(() => _isGeocoding = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to get current location. Please try again.')),
+        );
+      }
+    }
+  }
+  
+  Future<String> _reverseGeocode(double lat, double lng) async {
+    try {
+      final apiKey = AppConstants.googleMapsApiKey;
+      if (apiKey.isEmpty) return '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}';
+      
+      final url = Uri.parse(
+        'https://maps.googleapis.com/maps/api/geocode/json'
+        '?latlng=$lat,$lng'
+        '&key=$apiKey',
+      );
+      
+      final response = await http.get(url).timeout(const Duration(seconds: 8));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
+        if (data['status'] == 'OK') {
+          final results = data['results'] as List;
+          if (results.isNotEmpty) {
+            return results[0]['formatted_address'] as String;
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[LocationSheet] Reverse geocoding error: $e');
+    }
+    return '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}';
+  }
+  
+  Future<void> _detectLocationFromPincode() async {
+    final pincode = _pincodeCtrl.text.trim();
+    if (pincode.length != 6) {
+      setState(() => _locationError = true);
+      return;
+    }
+    
+    setState(() {
+      _isGeocoding = true;
+      _gpsSelected = false;
+      _manualSelected = false;
+      _locationError = false;
+    });
+    
+    try {
+      // First detect area from pincode API
+      final res = await http
+          .get(Uri.parse('https://api.postalpincode.in/pincode/$pincode'))
+          .timeout(const Duration(seconds: 8));
+          
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as List;
+        if (data.isNotEmpty && data[0]['Status'] == 'Success') {
+          final offices = data[0]['PostOffice'] as List;
+          if (offices.isNotEmpty) {
+            final po = offices[0];
+            final area = po['Name'] as String;
+            final district = po['District'] as String;
+            final state = po['State'] as String;
+            final city = _cityCtrl.text.trim().isEmpty ? district : _cityCtrl.text.trim();
+            
+            setState(() {
+              _detectedArea = '$area, $district, $state';
+              if (_cityCtrl.text.trim().isEmpty) _cityCtrl.text = district;
+            });
+            
+            // Geocode to get coordinates
+            final geoUri = Uri.parse(
+              'https://maps.googleapis.com/maps/api/geocode/json'
+              '?address=$pincode,India'
+              '&key=${AppConstants.googleMapsApiKey}',
+            );
+            
+            final geoRes = await http.get(geoUri).timeout(const Duration(seconds: 8));
+            if (geoRes.statusCode == 200) {
+              final geoData = jsonDecode(geoRes.body) as Map<String, dynamic>;
+              if (geoData['status'] == 'OK') {
+                final results = geoData['results'] as List;
+                if (results.isNotEmpty) {
+                  final loc = (results[0]['geometry'] as Map)['location'] as Map;
+                  _manualLat = (loc['lat'] as num).toDouble();
+                  _manualLng = (loc['lng'] as num).toDouble();
+                  
+                  // Build manual address
+                  _manualAddress = '$area, $city, $state - $pincode';
+                  
+                  setState(() {
+                    _manualSelected = true;
+                    _isGeocoding = false;
+                  });
+                  
+                  debugPrint('[LocationSheet] Pincode detected: $_manualAddress');
+                  debugPrint('[LocationSheet] Coordinates: $_manualLat, $_manualLng');
+                  return;
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      // If pincode API fails, try direct geocoding
+      final geoUri = Uri.parse(
+        'https://maps.googleapis.com/maps/api/geocode/json'
+        '?address=$pincode,India'
+        '&key=${AppConstants.googleMapsApiKey}',
+      );
+      
+      final geoRes = await http.get(geoUri).timeout(const Duration(seconds: 8));
+      if (geoRes.statusCode == 200) {
+        final geoData = jsonDecode(geoRes.body) as Map<String, dynamic>;
+        if (geoData['status'] == 'OK') {
+          final results = geoData['results'] as List;
+          if (results.isNotEmpty) {
+            final loc = (results[0]['geometry'] as Map)['location'] as Map;
+            _manualLat = (loc['lat'] as num).toDouble();
+            _manualLng = (loc['lng'] as num).toDouble();
+            _manualAddress = results[0]['formatted_address'] as String;
+            
+            setState(() {
+              _manualSelected = true;
+              _isGeocoding = false;
+            });
+            
+            debugPrint('[LocationSheet] Geocoded pincode: $_manualAddress');
+            return;
+          }
+        }
+      }
+      
+      setState(() {
+        _detectedArea = 'Not found';
+        _isGeocoding = false;
+        _locationError = true;
+      });
+      
+    } catch (e) {
+      debugPrint('[LocationSheet] Pincode detection error: $e');
+      setState(() {
+        _isGeocoding = false;
+        _locationError = true;
+      });
+    }
+  }
+  
+  void _onPincodeChanged() {
+    final pin = _pincodeCtrl.text.trim();
+    if (_mode != 'Home Collection') return;
+    if (pin.length == 6) {
+      // Auto-detect when pincode length is 6
+      _detectLocationFromPincode();
+    } else {
+      if (_detectedArea != null || _detecting) {
+        setState(() { 
+          _detectedArea = null; 
+          _detecting = false;
+          _manualSelected = false;
+        });
+      }
+    }
   }
 
   void _filterBranches() {
     if (_mode != 'Lab Test') return;
-    final query = (_pincodeCtrl.text + _cityCtrl.text).trim().toLowerCase();
+    final query = '${_pincodeCtrl.text} ${_cityCtrl.text}'.trim().toLowerCase();
     setState(() {
-      _branch = null; // reset selection when filter changes
+      _branch = null;
       if (query.isEmpty) {
-        _filteredBranches = widget.branches;
+        _filteredBranches = _allBranches;
       } else {
-        _filteredBranches = widget.branches.where((b) =>
+        _filteredBranches = _allBranches.where((b) =>
           b.name.toLowerCase().contains(query) ||
-          b.address.toLowerCase().contains(query)
+          b.address.toLowerCase().contains(query) ||
+          (b.pincode?.contains(query) ?? false) ||
+          (b.location?.toLowerCase().contains(query) ?? false)
         ).toList();
       }
     });
   }
 
   void _apply() {
-    // Validate
     if (_mode == 'Home Collection') {
-      final address = _addressCtrl.text.trim();
-      final pincode = _pincodeCtrl.text.trim();
-      final city = _cityCtrl.text.trim();
-      if (address.isEmpty || (pincode.isEmpty && city.isEmpty)) {
+      if (_gpsSelected && _gpsLat != null && _gpsLng != null) {
+        // Use GPS location
+        widget.onAddressChanged(_gpsAddress);
+        widget.onLatLngChanged?.call(_gpsLat, _gpsLng);
+        widget.onPincodeChanged(null);
+        widget.onCityChanged(null);
+      } 
+      else if (_manualSelected && _manualLat != null && _manualLng != null) {
+        // Use manual pincode-based location.
+        // city MUST fire before pincode so _city is ready when auto-detect triggers.
+        final address = _addressCtrl.text.trim().isNotEmpty
+            ? _addressCtrl.text.trim()
+            : _manualAddress;
+        final city = _cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim();
+        widget.onCityChanged(city);                        // 1st — set city
+        widget.onAddressChanged(address);                  // 2nd
+        widget.onLatLngChanged?.call(_manualLat, _manualLng);
+        widget.onPincodeChanged(_pincodeCtrl.text.trim()); // last — triggers auto-detect (city already set)
+      }
+      else {
         setState(() => _locationError = true);
         return;
       }
     }
+    
     if (_mode == 'Lab Test' && _branch == null) {
       setState(() => _branchError = true);
       return;
@@ -851,10 +1371,7 @@ class _LocationSheetState extends State<_LocationSheet> {
       widget.onBranchChanged(_branch);
       widget.onPincodeChanged(_pincodeCtrl.text.trim().isEmpty ? null : _pincodeCtrl.text.trim());
       widget.onCityChanged(_cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim());
-    } else {
-      widget.onPincodeChanged(_pincodeCtrl.text.trim().isEmpty ? null : _pincodeCtrl.text.trim());
-      widget.onCityChanged(_cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim());
-      widget.onBranchChanged(null);
+      widget.onAddressChanged(null);
     }
     Navigator.pop(context);
   }
@@ -863,6 +1380,7 @@ class _LocationSheetState extends State<_LocationSheet> {
   void dispose() {
     _pincodeCtrl.removeListener(_filterBranches);
     _cityCtrl.removeListener(_filterBranches);
+    _pincodeCtrl.removeListener(_onPincodeChanged);
     _pincodeCtrl.dispose();
     _cityCtrl.dispose();
     _addressCtrl.dispose();
@@ -911,7 +1429,10 @@ class _LocationSheetState extends State<_LocationSheet> {
                     padding: EdgeInsets.only(
                         right: m == widget.modes.first ? 8 : 0),
                     child: GestureDetector(
-                      onTap: () => setState(() => _mode = m),
+                      onTap: () {
+                        setState(() => _mode = m);
+                        if (m == 'Lab Test' && _allBranches.isEmpty) _loadBranches();
+                      },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
                         padding: const EdgeInsets.symmetric(vertical: 12),
@@ -949,137 +1470,295 @@ class _LocationSheetState extends State<_LocationSheet> {
             const SizedBox(height: 20),
 
             if (_mode == 'Home Collection') ...[
-              RichText(
-                text: const TextSpan(
-                  text: 'Collection Address',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textPrimary),
-                  children: [TextSpan(text: ' *', style: TextStyle(color: Color(0xFFD32F2F)))],
+              const Text('Select Location Method',
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary)),
+              const SizedBox(height: 12),
+              
+              // Option 1: GPS Current Location Button
+              GestureDetector(
+                onTap: _isGeocoding ? null : _getCurrentLocation,
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: _gpsSelected ? AppColors.brandGreenSurface : Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: _gpsSelected ? AppColors.brandGreen : AppColors.divider,
+                      width: _gpsSelected ? 2 : 1,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 50,
+                        height: 50,
+                        decoration: BoxDecoration(
+                          color: AppColors.brandGreenSurface,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: _isGeocoding && !_manualSelected
+                            ? const Center(
+                                child: SizedBox(
+                                  width: 24, height: 24,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: AppColors.brandGreen,
+                                  ),
+                                ),
+                              )
+                            : const Icon(Icons.my_location_rounded,
+                                size: 28, color: AppColors.brandGreen),
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Use Current Location',
+                                style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.textPrimary)),
+                            const SizedBox(height: 4),
+                            Text(
+                              _gpsSelected && _gpsAddress != null
+                                  ? _gpsAddress!
+                                  : 'Get your real-time location using GPS',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: _gpsSelected ? AppColors.brandGreen : AppColors.textSecondary),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (_gpsSelected)
+                        const Icon(Icons.check_circle_rounded,
+                            color: AppColors.brandGreen, size: 24),
+                    ],
+                  ),
                 ),
               ),
-              const SizedBox(height: 8),
-
-              // Use current location button
+              
+              const SizedBox(height: 16),
+              
+              // Option 2: Manual Address with Pincode
               GestureDetector(
                 onTap: () {
-                  // TODO: geolocator → reverse geocode → fill address
-                  // For now fill a mock location
                   setState(() {
-                    _addressCtrl.text = 'Current Location, Chennai';
-                    _pincodeCtrl.text = '600001';
-                    _cityCtrl.text = 'Chennai';
-                    _locationError = false;
+                    _isManualMode = true;
+                    _gpsSelected = false;
                   });
                 },
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: AppColors.brandGreenSurface,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: AppColors.brandGreenLight),
+                    color: _manualSelected ? AppColors.brandGreenSurface : Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: _manualSelected ? AppColors.brandGreen : AppColors.divider,
+                      width: _manualSelected ? 2 : 1,
+                    ),
                   ),
-                  child: const Row(children: [
-                    Icon(Icons.my_location_rounded, size: 18, color: AppColors.brandGreen),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
                         children: [
-                          Text('Use current location',
-                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-                          Text('Auto-detect your location',
-                              style: TextStyle(fontSize: 11, color: AppColors.brandGreen)),
+                          Container(
+                            width: 50,
+                            height: 50,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFEEF4FB),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Icon(Icons.edit_location_rounded,
+                                size: 28, color: Color(0xFF1565C0)),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Enter Address Manually',
+                                    style: TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w700,
+                                        color: AppColors.textPrimary)),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _manualSelected && _manualAddress != null
+                                      ? _manualAddress!
+                                      : 'Enter pincode to auto-detect location',
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      color: _manualSelected ? AppColors.brandGreen : AppColors.textSecondary),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (_manualSelected)
+                            const Icon(Icons.check_circle_rounded,
+                                color: AppColors.brandGreen, size: 24),
                         ],
                       ),
-                    ),
-                    Icon(Icons.arrow_forward_ios_rounded, size: 13, color: AppColors.brandGreen),
-                  ]),
+                      
+                      // Manual entry form (shown when manual mode is active)
+                      if (_manualSelected || _isManualMode) ...[
+                        const SizedBox(height: 16),
+                        const Divider(),
+                        const SizedBox(height: 12),
+                        
+                        // Full address
+                        TextField(
+                          controller: _addressCtrl,
+                          maxLines: 2,
+                          style: const TextStyle(fontSize: 14),
+                          decoration: InputDecoration(
+                            hintText: 'House no, Street, Area (optional)',
+                            hintStyle: const TextStyle(color: AppColors.textHint),
+                            prefixIcon: const Icon(Icons.home_outlined, size: 18, color: AppColors.textHint),
+                            filled: true,
+                            fillColor: AppColors.background,
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        
+                        // Pincode (required for manual detection)
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _pincodeCtrl,
+                                keyboardType: TextInputType.number,
+                                maxLength: 6,
+                                style: const TextStyle(fontSize: 14),
+                                decoration: InputDecoration(
+                                  hintText: 'Pincode *',
+                                  hintStyle: const TextStyle(color: AppColors.textHint),
+                                  counterText: '',
+                                  prefixIcon: const Icon(Icons.pin_outlined, size: 18, color: AppColors.textHint),
+                                  filled: true,
+                                  fillColor: AppColors.background,
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: TextField(
+                                controller: _cityCtrl,
+                                style: const TextStyle(fontSize: 14),
+                                decoration: InputDecoration(
+                                  hintText: 'City',
+                                  hintStyle: const TextStyle(color: AppColors.textHint),
+                                  prefixIcon: const Icon(Icons.location_city_outlined, size: 18, color: AppColors.textHint),
+                                  filled: true,
+                                  fillColor: AppColors.background,
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        
+                        // Geocoding indicator
+                        if (_isGeocoding && _manualSelected == false) ...[
+                          const SizedBox(height: 8),
+                          const Row(children: [
+                            SizedBox(
+                              width: 14, height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 1.5, color: AppColors.brandGreen),
+                            ),
+                            SizedBox(width: 8),
+                            Text('Detecting location from pincode...',
+                                style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                          ]),
+                        ],
+                        
+                        // Detected area result
+                        if (_detectedArea != null && _detectedArea != 'Not found' && _manualSelected) ...[
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: AppColors.brandGreenSurface,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text('Detected: $_detectedArea',
+                                      style: const TextStyle(fontSize: 12, color: AppColors.brandGreen)),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ] else if (_detectedArea == 'Not found') ...[
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF3E0),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.info_outline_rounded, size: 16, color: Color(0xFFE65100)),
+                                SizedBox(width: 8),
+                                Expanded(
+                                  child: Text('Pincode not found — enter city manually',
+                                      style: TextStyle(fontSize: 12, color: Color(0xFFE65100))),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
+                    ],
+                  ),
                 ),
               ),
-
-              const SizedBox(height: 10),
-              const Row(children: [
-                Expanded(child: Divider()),
-                Padding(padding: EdgeInsets.symmetric(horizontal: 10),
-                  child: Text('or enter manually', style: TextStyle(fontSize: 11, color: AppColors.textHint))),
-                Expanded(child: Divider()),
-              ]),
-              const SizedBox(height: 10),
-
-              // Full address
-              TextField(
-                controller: _addressCtrl,
-                maxLines: 2,
-                style: const TextStyle(fontSize: 14),
-                onChanged: (_) => setState(() => _locationError = false),
-                decoration: InputDecoration(
-                  hintText: 'House no, Street, Area',
-                  hintStyle: const TextStyle(color: AppColors.textHint),
-                  prefixIcon: const Padding(
-                    padding: EdgeInsets.only(bottom: 20),
-                    child: Icon(Icons.home_outlined, size: 18, color: AppColors.textHint),
-                  ),
-                  filled: true,
-                  fillColor: AppColors.background,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
-                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                  contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
-                ),
-              ),
-              const SizedBox(height: 10),
-
-              // Pincode + City side by side
-              Row(children: [
-                Expanded(
-                  child: TextField(
-                    controller: _pincodeCtrl,
-                    keyboardType: TextInputType.number,
-                    maxLength: 6,
-                    style: const TextStyle(fontSize: 14),
-                    onChanged: (_) => setState(() => _locationError = false),
-                    decoration: InputDecoration(
-                      hintText: 'Pincode',
-                      hintStyle: const TextStyle(color: AppColors.textHint),
-                      counterText: '',
-                      prefixIcon: const Icon(Icons.pin_outlined, size: 18, color: AppColors.textHint),
-                      filled: true, fillColor: AppColors.background,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
-                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
-                    controller: _cityCtrl,
-                    style: const TextStyle(fontSize: 14),
-                    onChanged: (_) => setState(() => _locationError = false),
-                    decoration: InputDecoration(
-                      hintText: 'City',
-                      hintStyle: const TextStyle(color: AppColors.textHint),
-                      prefixIcon: const Icon(Icons.location_city_outlined, size: 18, color: AppColors.textHint),
-                      filled: true, fillColor: AppColors.background,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
-                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                    ),
-                  ),
-                ),
-              ]),
-
+              
               if (_locationError) ...[
-                const SizedBox(height: 6),
-                const Row(children: [
-                  Icon(Icons.error_outline, size: 13, color: Color(0xFFD32F2F)),
-                  SizedBox(width: 4),
-                  Expanded(child: Text('Address with pincode/city is required', style: TextStyle(fontSize: 12, color: Color(0xFFD32F2F)))),
-                ]),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF5F5),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFFFCDD2)),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.error_outline, size: 16, color: Color(0xFFD32F2F)),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text('Please select a location method or enter valid pincode',
+                            style: TextStyle(fontSize: 12, color: Color(0xFFD32F2F))),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ],
 
             if (_mode == 'Lab Test') ...[
-              // Pincode/City to filter branches
               RichText(
                 text: const TextSpan(
                   text: 'Pincode or City',
@@ -1133,7 +1812,21 @@ class _LocationSheetState extends State<_LocationSheet> {
                 ),
               ),
               const SizedBox(height: 8),
-              if (_filteredBranches.isEmpty)
+              if (_searchingBranches)
+                Container(
+                  padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: AppColors.divider),
+                  ),
+                  child: const Row(children: [
+                    SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                    SizedBox(width: 10),
+                    Text('Loading branches…', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                  ]),
+                )
+              else if (_filteredBranches.isEmpty)
                 Container(
                   padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
                   decoration: BoxDecoration(
@@ -1182,7 +1875,7 @@ class _LocationSheetState extends State<_LocationSheet> {
               ],
             ],
 
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
 
             SizedBox(
               width: double.infinity,
@@ -1196,8 +1889,8 @@ class _LocationSheetState extends State<_LocationSheet> {
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(14)),
                 ),
-                child: const Text('Apply',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+                child: const Text('Apply Location',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
               ),
             ),
           ],
@@ -1206,7 +1899,6 @@ class _LocationSheetState extends State<_LocationSheet> {
     );
   }
 }
-
 // ─── Test Card ────────────────────────────────────────────────────────────────
 
 class _TestCard extends StatelessWidget {
@@ -2027,22 +2719,24 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
   static const int _maxFiles = 5;
   final List<_PresDoc> _uploads = [];
   bool _isPicking = false;
+  bool _isSubmitting = false;
+  List<Map<String, dynamic>> _previous = [];
+  bool _loadingHistory = true;
 
-  // Mock previous prescriptions
-  final List<Map<String, dynamic>> _previous = [
-    {
-      'date': '08 May 2026',
-      'file': 'prescription_ravi_08may.jpg',
-      'status': 'Tests assigned by technician',
-      'action': 'Technician assigned CBC + Lipid Profile based on prescription',
-    },
-    {
-      'date': '15 Apr 2026',
-      'file': 'prescription_ravi_15apr.jpg',
-      'status': 'Reviewed',
-      'action': 'Technician called and confirmed HbA1c test',
-    },
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _loadHistory();
+  }
+
+  Future<void> _loadHistory() async {
+    final requests = await ApiService.getMyPrescriptionRequests(patientId: widget.member.id);
+    if (!mounted) return;
+    setState(() {
+      _previous = requests;
+      _loadingHistory = false;
+    });
+  }
 
   // ── Image picking ─────────────────────────────────────────
   void _showSourcePicker() {
@@ -2153,31 +2847,68 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
     ));
   }
 
-  void _submit() {
-    if (_uploads.isEmpty) return;
-    Navigator.pop(context);
-    // TODO: POST /api/prescriptions with _uploads.map((d) => d.bytes)
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Row(children: [
-        const Icon(Icons.check_circle_outline, color: Colors.white, size: 16),
-        const SizedBox(width: 8),
-        Expanded(
-            child: Text(
-                '${_uploads.length} prescription image${_uploads.length > 1 ? 's' : ''} submitted. Our technician will review and contact you.')),
-      ]),
-      backgroundColor: AppColors.brandGreen,
-      behavior: SnackBarBehavior.floating,
-      duration: const Duration(seconds: 4),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ));
+  Future<void> _submit() async {
+    if (_uploads.isEmpty || _isSubmitting) return;
+    setState(() => _isSubmitting = true);
+    try {
+      // Upload each image and collect URLs
+      final filePaths = <String>[];
+      for (final doc in _uploads) {
+        final url = await ApiService.uploadPhoto(doc.bytes, doc.fileName);
+        if (url != null) filePaths.add(url);
+      }
+      if (filePaths.isEmpty) throw Exception('Upload failed');
+
+      await ApiService.submitPrescriptionRequest(filePaths, patientId: widget.member.id);
+      if (!mounted) return;
+
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Row(children: [
+          const Icon(Icons.check_circle_outline, color: Colors.white, size: 16),
+          const SizedBox(width: 8),
+          Expanded(child: Text(
+              '${filePaths.length} prescription image${filePaths.length > 1 ? 's' : ''} submitted. Our team will review and contact you.')),
+        ]),
+        backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isSubmitting = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('Could not submit. Please try again.'),
+        backgroundColor: const Color(0xFFD32F2F),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+    }
   }
 
   Color _statusColor(String s) {
-    if (s.contains('assigned') || s.contains('Reviewed')) {
-      return AppColors.brandGreen;
+    switch (s) {
+      case 'reviewed':  return AppColors.brandGreen;
+      case 'converted': return const Color(0xFF1565C0);
+      default:          return const Color(0xFFE65100); // pending
     }
-    if (s.contains('Pending')) return const Color(0xFFE65100);
-    return const Color(0xFF1565C0);
+  }
+
+  String _statusLabel(String s) {
+    switch (s) {
+      case 'reviewed':  return 'Reviewed';
+      case 'converted': return 'Booking Created';
+      default:          return 'Pending Review';
+    }
+  }
+
+  String _formatDate(String iso) {
+    try {
+      final d = DateTime.parse(iso);
+      const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return '${d.day} ${months[d.month]} ${d.year}';
+    } catch (_) { return iso; }
   }
 
   @override
@@ -2409,7 +3140,13 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                   ],
 
                   // ── Previous prescriptions ───────────────
-                  if (_previous.isNotEmpty) ...[
+                  if (_loadingHistory)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 16),
+                      child: Center(child: CircularProgressIndicator(
+                          strokeWidth: 2, color: AppColors.brandGreen)),
+                    )
+                  else if (_previous.isNotEmpty) ...[
                     const SizedBox(height: 24),
                     const Text('Previous Uploads',
                         style: TextStyle(
@@ -2417,77 +3154,106 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                             fontWeight: FontWeight.w600,
                             color: AppColors.textPrimary)),
                     const SizedBox(height: 10),
-                    ..._previous.map((p) => Container(
-                          margin: const EdgeInsets.only(bottom: 10),
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: AppColors.background,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: AppColors.divider),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(children: [
-                                const Icon(
-                                    Icons.insert_drive_file_outlined,
-                                    size: 16,
-                                    color: AppColors.textHint),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(p['file'],
-                                      style: const TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w500,
-                                          color: AppColors.textPrimary),
-                                      overflow: TextOverflow.ellipsis),
+                    ..._previous.map((p) {
+                      final paths  = (p['file_paths'] as List?)?.cast<String>() ?? [];
+                      final status = (p['status'] as String?) ?? 'pending';
+                      final date   = _formatDate((p['created_at'] as String?) ?? '');
+                      final note   = (p['admin_notes'] as String?);
+                      final sc     = _statusColor(status);
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: AppColors.background,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.divider),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Patient name + date
+                            Row(children: [
+                              const Icon(Icons.person_outline,
+                                  size: 14, color: AppColors.textHint),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  (p['patient_name'] as String?) ?? 'Patient',
+                                  style: const TextStyle(fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.textPrimary),
                                 ),
-                              ]),
-                              const SizedBox(height: 6),
-                              Row(children: [
-                                const Icon(Icons.calendar_today_outlined,
-                                    size: 11, color: AppColors.textHint),
-                                const SizedBox(width: 4),
-                                Text(p['date'],
-                                    style: const TextStyle(
-                                        fontSize: 11,
-                                        color: AppColors.textSecondary)),
-                              ]),
-                              const SizedBox(height: 6),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: _statusColor(p['status'])
-                                      .withValues(alpha: 0.1),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Text(p['status'],
-                                    style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w600,
-                                        color: _statusColor(p['status']))),
                               ),
+                              const Icon(Icons.calendar_today_outlined,
+                                  size: 11, color: AppColors.textHint),
+                              const SizedBox(width: 4),
+                              Text(date,
+                                  style: const TextStyle(fontSize: 11,
+                                      color: AppColors.textSecondary)),
+                            ]),
+                            // Image thumbnails
+                            if (paths.isNotEmpty) ...[
+                              const SizedBox(height: 10),
+                              SizedBox(
+                                height: 72,
+                                child: ListView.separated(
+                                  scrollDirection: Axis.horizontal,
+                                  itemCount: paths.length,
+                                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                                  itemBuilder: (_, i) => ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Image.network(
+                                      paths[i],
+                                      width: 72, height: 72,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => Container(
+                                        width: 72, height: 72,
+                                        decoration: BoxDecoration(
+                                          color: AppColors.background,
+                                          borderRadius: BorderRadius.circular(8),
+                                          border: Border.all(color: AppColors.divider),
+                                        ),
+                                        child: const Icon(Icons.broken_image_outlined,
+                                            size: 28, color: AppColors.textHint),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 6),
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: sc.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(_statusLabel(status),
+                                  style: TextStyle(fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: sc)),
+                            ),
+                            if (note != null && note.isNotEmpty) ...[
                               const SizedBox(height: 6),
                               Row(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const Icon(Icons.check_circle_outline,
-                                      size: 13,
-                                      color: AppColors.brandGreen),
+                                      size: 13, color: AppColors.brandGreen),
                                   const SizedBox(width: 6),
-                                  Expanded(
-                                    child: Text(p['action'],
-                                        style: const TextStyle(
-                                            fontSize: 11,
-                                            color: AppColors.textSecondary,
-                                            height: 1.4)),
-                                  ),
+                                  Expanded(child: Text(note,
+                                      style: const TextStyle(fontSize: 11,
+                                          color: AppColors.textSecondary,
+                                          height: 1.4))),
                                 ],
                               ),
                             ],
-                          ),
-                        )),
+                          ],
+                        ),
+                      );
+                    }),
                   ],
 
                   const SizedBox(height: 16),
@@ -2823,6 +3589,216 @@ class _ImageViewerPageState extends State<_ImageViewerPage> {
               ),
             )
           : null,
+    );
+  }
+}
+
+// ─── Active Ride Banner ───────────────────────────────────────────────────────
+
+class _ActiveRideBanner extends StatelessWidget {
+  final ActiveRideInfo ride;
+  final VoidCallback onTrack;
+  const _ActiveRideBanner({required this.ride, required this.onTrack});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTrack,
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0A3D2D),
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: const [
+                BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, 4)),
+              ],
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 40, height: 40,
+                  decoration: BoxDecoration(
+                    color: AppColors.brandGreen,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.local_taxi_rounded, color: Colors.white, size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Active Ride',
+                        style: TextStyle(
+                          color: AppColors.brandGreen,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        ride.driverName.isNotEmpty
+                            ? 'Driver: ${ride.driverName}'
+                            : 'Driver en route',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        ride.hospital,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.65),
+                          fontSize: 11,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: AppColors.brandGreen,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Text(
+                    'Track',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Active Lab Booking Banner ────────────────────────────────────────────────
+
+class _ActiveLabBanner extends StatelessWidget {
+  final ActiveLabBookingInfo lab;
+  final VoidCallback onTrack;
+  const _ActiveLabBanner({required this.lab, required this.onTrack});
+
+  @override
+  Widget build(BuildContext context) {
+    final statusText = lab.collected
+        ? 'Sample collected — processing at lab'
+        : lab.arrived
+            ? 'Technician has arrived!'
+            : lab.enRoute
+                ? 'Technician en route to you'
+                : 'Finding technician…';
+    final statusColor = lab.collected
+        ? const Color(0xFF6A1B9A)
+        : lab.arrived
+            ? AppColors.brandGreen
+            : lab.enRoute
+                ? const Color(0xFF1565C0)
+                : AppColors.brandGreen;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTrack,
+          borderRadius: BorderRadius.circular(16),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0A3D2D),
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: const [
+                BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, 4)),
+              ],
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 40, height: 40,
+                  decoration: BoxDecoration(
+                    color: statusColor,
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.science_rounded, color: Colors.white, size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        statusText,
+                        style: TextStyle(
+                          color: statusColor == AppColors.brandGreen
+                              ? AppColors.brandGreen
+                              : Colors.lightBlueAccent,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        lab.technicianName.isNotEmpty
+                            ? 'Technician: ${lab.technicianName}'
+                            : 'Lab Collection',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      Text(
+                        lab.patientAddress,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.65),
+                          fontSize: 11,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: AppColors.brandGreen,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Text(
+                    'Track',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

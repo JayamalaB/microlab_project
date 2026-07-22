@@ -3,33 +3,36 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/razorpay_service.dart';
-import 'technician_dashboard_screen.dart';
+import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/services/api_service.dart';
+import 'package:microlab/models/technician_booking.dart';
+import 'technician_active_job_screen.dart';
 
 // ─── Prescription doc model ──────────────────────────────────────────────────
 
 class _TechPresDoc {
-  final Uint8List bytes;
+  final int? docId;         // null while uploading; set once saved to server
+  final Uint8List? bytes;   // local bytes present only while uploading
+  final String? url;        // remote URL set after upload completes
   final String fileName;
   final DateTime uploadedAt;
-  _TechPresDoc({required this.bytes, required this.fileName, required this.uploadedAt});
+  bool isUploading;
+  String docStatus;
+
+  _TechPresDoc({
+    this.docId,
+    this.bytes,
+    this.url,
+    required this.fileName,
+    required this.uploadedAt,
+    this.isUploading = false,
+    this.docStatus = 'pending_review',
+  });
+
+  bool get isVerified => docStatus == 'verified';
 }
 
-// ─── Test catalogue ───────────────────────────────────────────────────────────
-
-const List<Map<String, String>> _testCatalogue = [
-  {'id': 't1',  'name': 'HbA1c',                    'category': 'Diabetes', 'price': '540'},
-  {'id': 't2',  'name': 'Complete Blood Count (CBC)','category': 'General',  'price': '350'},
-  {'id': 't3',  'name': 'Thyroid Profile',           'category': 'Thyroid',  'price': '765'},
-  {'id': 't4',  'name': 'Lipid Profile',             'category': 'Heart',    'price': '500'},
-  {'id': 't5',  'name': 'Fasting Glucose',           'category': 'Diabetes', 'price': '120'},
-  {'id': 't6',  'name': 'Kidney Function Test',      'category': 'Kidney',   'price': '450'},
-  {'id': 't7',  'name': 'Liver Function Test',       'category': 'Liver',    'price': '600'},
-  {'id': 't8',  'name': 'Vitamin D3',                'category': 'Vitamins', 'price': '900'},
-  {'id': 't9',  'name': 'Vitamin B12',               'category': 'Vitamins', 'price': '700'},
-  {'id': 't10', 'name': 'Urine Routine',             'category': 'General',  'price': '150'},
-  {'id': 't11', 'name': 'Diabetes Care Package',     'category': 'Package',  'price': '1440'},
-  {'id': 't12', 'name': 'Full Body Checkup',         'category': 'Package',  'price': '2625'},
-];
+// (Test catalogue is now loaded from the server — see _loadItems)
 
 // ─── Journey steps ────────────────────────────────────────────────────────────
 
@@ -75,10 +78,24 @@ const List<_JourneyStep> _journeySteps = [
     color: Color(0xFFE65100),
   ),
   _JourneyStep(
-    status: 'Completed',
-    label: 'Completed',
-    description: 'Collection done — OTP verified',
-    icon: Icons.task_alt_rounded,
+    status: 'Sample Collected',
+    label: 'Sample Collected',
+    description: 'Sample successfully collected',
+    icon: Icons.biotech_rounded,
+    color: Color(0xFF6A1B9A),
+  ),
+  _JourneyStep(
+    status: 'OTP Verified',
+    label: 'OTP Verified',
+    description: 'Identity verified by patient',
+    icon: Icons.verified_user_outlined,
+    color: Color(0xFF1565C0),
+  ),
+  _JourneyStep(
+    status: 'Handed to Lab',
+    label: 'Handed to Lab',
+    description: 'Sample handed over to laboratory',
+    icon: Icons.local_hospital_rounded,
     color: AppColors.brandGreen,
   ),
 ];
@@ -103,62 +120,82 @@ class _TechnicianBookingDetailScreenState
     extends State<TechnicianBookingDetailScreen> {
 
   late String _currentStatus;
-  late List<Map<String, String>> _selectedTests;
+  List<Map<String, String>> _selectedTests = [];
+  // IDs of tests that existed in the booking at screen open — used to block
+  // deletion of paid original tests without affecting newly added ones.
+  Set<String> _originalItemIds = {};
+  bool _itemsLoading = true;
+  List<Map<String, String>> _catalogueItems = [];
   bool _showAddTest = false;
   String _searchQuery = '';
 
   // Document — multi-image upload
   final List<_TechPresDoc> _docUploads = [];
   bool _docIsPicking = false;
-  bool _docVerified = false;
+  bool _docVerified  = false;
+  bool _docsLoading  = true;
+  // Whether any selected test/package requires a prescription.
+  // Initialized from widget.booking.docRequired; recalculated once items load.
+  late bool _docRequired;
   static const int _docMaxFiles = 5;
   final ImagePicker _picker = ImagePicker();
 
-  // Payment
+  // Payment — live values fetched from server in initState, overriding immutable widget.booking fields
   bool _isProcessingPayment = false;
-  bool _paymentDone = false; // tracks if tests payment collected
+  double _sessionPaymentCollected = 0.0;
+  late String _livePaymentStatus;  // refreshed from server; starts from widget value
+  late double _liveAmountPaid;     // refreshed from server; starts from widget value
 
-  // New customer form
-  bool _showNewCustomerForm = false;
-  final _ncNameCtrl    = TextEditingController();
-  final _ncMobileCtrl  = TextEditingController();
-  final _ncEmailCtrl   = TextEditingController();
-  final _ncDobCtrl     = TextEditingController();
-  final _ncRelCtrl     = TextEditingController();
-  final _ncHealthCtrl  = TextEditingController();
-  DateTime? _ncDob;
-  int? _ncCalculatedAge;
-  String? _ncGender;
-  final List<String> _ncGenders = ['Male', 'Female', 'Other'];
-  final List<String> _ncRelations = ['Self','Spouse','Father','Mother','Son','Daughter','Brother','Sister','Other'];
-  late List<Map<String, String>> _additionalCustomerTests;
-  bool _showAddCustTest = false;
-  String _custTestSearch = '';
+  // Visit members linked to this booking (refreshed after each add)
+  List<Map<String, dynamic>> _linkedPatients = [];
 
   // OTP
   final List<TextEditingController> _otpControllers =
       List.generate(4, (_) => TextEditingController());
   final List<FocusNode> _otpFocusNodes =
       List.generate(4, (_) => FocusNode());
-  bool _isVerifyingOtp = false;
-  bool _otpError = false;
+  bool _isVerifyingOtp  = false;
+  bool _isResendingOtp  = false;
+  bool _otpError        = false;
+  String _otpErrorText  = 'Invalid OTP. Please try again.';
 
   // ── Computed ──────────────────────────────────────────────
 
   double get _testsTotal =>
       _selectedTests.fold(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
 
-  // Service charge already paid by customer at booking — NOT collected here
   double get _serviceChargePaid => widget.booking.serviceChargePaid;
 
-  // Only tests amount is due at collection
-  double get _amountDue => _testsTotal;
+  double get _amountDue {
+    final due = _testsTotal - (_liveAmountPaid + _sessionPaymentCollected);
+    return due < 0.0 ? 0.0 : due;
+  }
+
+  bool get _paymentDone => _amountDue <= 0.0;
+
+  // True when any sibling booking added this session still has an unpaid balance.
+  bool get _hasUnpaidSiblings => _linkedPatients.any((c) {
+    final due = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+    return due > 0 && c['payment_status'] != 'paid';
+  });
+
+  // A test is locked when it was already paid for:
+  // - original tests on a booking whose payment_status is 'paid', OR
+  // - tests that existed in the booking when the technician collected payment
+  //   this session (captured in _paidTestIds at the moment of collection).
+  Set<String> _paidTestIds = {};
+
+  bool _isTestLocked(String testId) =>
+      (_livePaymentStatus == 'paid' && _originalItemIds.contains(testId)) ||
+      _paidTestIds.contains(testId);
 
   int get _currentStepIndex =>
       _journeySteps.indexWhere((s) => s.status == _currentStatus);
 
-  bool get _isCompleted => _currentStatus == 'Completed';
-  bool get _canAdvance => !_isCompleted;
+  bool get _isCompleted => _currentStatus == 'Handed to Lab';
+  // Visit is finalized after OTP Verified — no more edits allowed from this point.
+  bool get _isFinalized => _currentStatus == 'OTP Verified' || _currentStatus == 'Handed to Lab';
+  bool get _canAdvance  => !_isCompleted;
 
   String? get _nextStatus {
     final idx = _currentStepIndex;
@@ -169,149 +206,206 @@ class _TechnicianBookingDetailScreenState
   @override
   void initState() {
     super.initState();
-    _currentStatus = widget.booking.status;
-    _additionalCustomerTests = [];
-    _selectedTests = widget.booking.testNames.map((name) {
-      final match = _testCatalogue.firstWhere(
-        (t) => t['name'] == name,
-        orElse: () => {'id': name, 'name': name, 'category': 'General', 'price': '0'},
-      );
-      return Map<String, String>.from(match);
-    }).toList();
+    _currentStatus        = widget.booking.status;
+    _livePaymentStatus    = widget.booking.paymentStatus;
+    _liveAmountPaid       = widget.booking.amountPaid;
+    _docRequired          = widget.booking.docRequired;
+    _loadItems();
+    _loadDocs();
+    _loadLinkedPatients();
+    _refreshPaymentInfo();
   }
 
-  void _saveNewCustomer() {
-    final name    = _ncNameCtrl.text.trim();
-    final mobile  = _ncMobileCtrl.text.trim();
-    final tests   = List<Map<String, String>>.from(_additionalCustomerTests);
+  // Fetches fresh payment_status + amount_paid from the server so the screen
+  // never shows stale data from the time the dashboard last loaded bookings.
+  Future<void> _refreshPaymentInfo() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) return;
+    try {
+      final data = await ApiService.getBookingPaymentInfo(bookingId);
+      if (!mounted || data == null) return;
+      setState(() {
+        _livePaymentStatus = data['payment_status'] as String? ?? _livePaymentStatus;
+        _liveAmountPaid    = double.tryParse(data['amount_paid']?.toString() ?? '') ?? _liveAmountPaid;
+      });
+    } catch (e) {
+      debugPrint('[_refreshPaymentInfo] $e');
+    }
+  }
 
-    final newBooking = TechnicianBooking(
-      id: 'BK${DateTime.now().millisecondsSinceEpoch.toString().substring(7)}',
-      customerName: name,
-      customerPhone: mobile,
-      address: widget.booking.address,   // same location as current booking
-      city: widget.booking.city,
-      pincode: widget.booking.pincode,
-      date: widget.booking.date,
-      timeSlot: widget.booking.timeSlot,
-      testNames: tests.map((t) => t['name'] ?? '').toList(),
-      mode: widget.booking.mode,
-      status: 'Confirmed',
-      serviceChargePaid: 99.0,
-      testsTotal: tests.fold(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0)),
-      assignedAt: DateTime.now(),
+  Future<void> _loadDocs() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) {
+      if (mounted) setState(() => _docsLoading = false);
+      return;
+    }
+    try {
+      final docs = await ApiService.getPrescriptions(bookingId);
+      if (!mounted) return;
+      setState(() {
+        for (final d in docs) {
+          _docUploads.add(_TechPresDoc(
+            docId:      (d['doc_id'] as num?)?.toInt(),
+            url:        d['file_path'] as String?,
+            fileName:   d['file_name'] as String? ?? 'document',
+            uploadedAt: DateTime.tryParse(d['created_at']?.toString() ?? '') ?? DateTime.now(),
+            docStatus:  d['doc_status'] as String? ?? 'pending_review',
+          ));
+        }
+        _docVerified = _docUploads.isNotEmpty && _docUploads.every((d) => d.isVerified);
+        _docsLoading = false;
+      });
+    } catch (e) {
+      debugPrint('[_loadDocs] ERROR: $e');
+      if (mounted) setState(() => _docsLoading = false);
+    }
+  }
+
+  Future<void> _loadItems() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) {
+      if (mounted) setState(() => _itemsLoading = false);
+      return;
+    }
+    try {
+      // Both calls run in parallel
+      final results = await Future.wait([
+        ApiService.getBookingItems(bookingId),
+        ApiService.getTechTestCatalogue(),
+      ]);
+      if (!mounted) return;
+      final items     = results[0] as List<Map<String, dynamic>>;
+      final catalogue = results[1] as List<Map<String, String>>;
+      setState(() {
+        _selectedTests = items.map((i) => {
+          'bookingItemId': i['booking_item_id']?.toString() ?? '',
+          'id':            i['product_id']?.toString() ?? '',
+          'name':          i['name']?.toString()     ?? '',
+          'category':      i['category']?.toString() ?? 'General',
+          // MySQL DECIMAL comes back as a String from mysql2 — parse it safely
+          'price':         double.tryParse(i['price']?.toString() ?? '0')?.toStringAsFixed(0) ?? '0',
+        }).toList();
+        _originalItemIds = items.map((i) => i['product_id']?.toString() ?? '').toSet();
+        _catalogueItems  = catalogue;
+        _itemsLoading    = false;
+        // Recalculate from actual items — covers family member bookings and
+        // cases where tests are added/removed during the visit.
+        _docRequired = items.any((i) {
+          final v = i['doc_required'];
+          return v == 1 || v == true || v == '1' || v == 'yes';
+        });
+      });
+    } catch (e) {
+      debugPrint('[_loadItems] ERROR: $e');
+      if (mounted) setState(() => _itemsLoading = false);
+    }
+  }
+
+  Future<void> _loadLinkedPatients() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) return;
+    try {
+      final patients = await ApiService.getLinkedPatients(bookingId);
+      if (mounted) setState(() => _linkedPatients = patients);
+    } catch (e) {
+      debugPrint('[_loadLinkedPatients] ERROR: $e');
+    }
+  }
+
+  Future<void> _openAddVisitMemberSheet() async {
+    // Block adding family members once OTP has been verified — visit is finalized.
+    if (_isFinalized) return;
+    final parentBookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (parentBookingId == 0) return;
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _AddVisitMemberSheet(
+        parentBookingId: parentBookingId,
+        catalogueItems: _catalogueItems,
+        parentTestIds: _originalItemIds,
+        linkedPatientIds: _linkedPatients
+            .map((p) => (p['patient_id'] as num?)?.toInt() ?? 0)
+            .where((id) => id > 0)
+            .toSet(),
+      ),
     );
-
-    // Notify dashboard to add this booking
-    widget.onNewBooking?.call(newBooking);
-
-    setState(() {
-      _showNewCustomerForm = false;
-      _ncNameCtrl.clear();
-      _ncMobileCtrl.clear();
-      _ncEmailCtrl.clear();
-      _ncDobCtrl.clear();
-      _ncRelCtrl.clear();
-      _ncHealthCtrl.clear();
-      _ncDob = null;
-      _ncCalculatedAge = null;
-      _ncGender = null;
-      _additionalCustomerTests.clear();
-      _showAddCustTest = false;
-      _custTestSearch = '';
-    });
-
-    // TODO: POST /api/bookings/additional
-    // { name, mobile, email, dob, gender, relation, healthCondition, tests, booking_id, address }
-
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('$name added with ${tests.length} test(s) — visible in dashboard'),
-      backgroundColor: AppColors.brandGreen,
-      behavior: SnackBarBehavior.floating,
-      duration: const Duration(seconds: 3),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ));
+    if (result != null && mounted) {
+      final count     = result['count'] as int? ?? 1;
+      final firstName = result['firstName'] as String? ?? '';
+      // Reload items, payment info, and linked patients so all sections are fresh
+      _loadItems();
+      _refreshPaymentInfo();
+      _loadLinkedPatients();
+      if (mounted) {
+        final msg = count > 1
+            ? '$count members added — collect payment below'
+            : '$firstName added — collect payment below';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(msg),
+          backgroundColor: AppColors.brandGreen,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      }
+    }
   }
 
   @override
   void dispose() {
     clearRazorpay();
-    _ncNameCtrl.dispose();
-    _ncMobileCtrl.dispose();
-    _ncEmailCtrl.dispose();
-    _ncDobCtrl.dispose();
-    _ncRelCtrl.dispose();
-    _ncHealthCtrl.dispose();
     for (final c in _otpControllers) c.dispose();
     for (final f in _otpFocusNodes) f.dispose();
     super.dispose();
   }
 
-  // ── New customer DOB picker ───────────────────────────────
-
-  Future<void> _pickNcDate() async {
-    final now = DateTime.now();
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: _ncDob ?? DateTime(now.year - 30),
-      firstDate: DateTime(now.year - 120),
-      lastDate: now,
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.light(primary: AppColors.brandGreen),
-        ),
-        child: child!,
-      ),
-    );
-    if (picked != null) {
-      int age = now.year - picked.year;
-      if (now.month < picked.month ||
-          (now.month == picked.month && now.day < picked.day)) age--;
-      setState(() {
-        _ncDob = picked;
-        _ncCalculatedAge = age;
-        _ncDobCtrl.text =
-            '${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}';
-      });
-    }
-  }
-
   // ── Journey advance ───────────────────────────────────────
 
-  void _advanceStatus() {
-    final next = _nextStatus;
-    if (next == null) return;
+void _advanceStatus() {
+  if (_currentStatus == 'Handed to Lab') return;
 
-    // If next step is Completed, check payment first
-    if (next == 'Completed') {
-      if (!_paymentDone && _amountDue > 0) {
-        _showCompleteSheet(); // shows "Make Payment" first
-      } else {
-        _showOtpDialog(); // payment done → go to OTP
-      }
+  final next = _nextStatus;
+  if (next == null) return;
+
+  // OTP step: all payments (parent + siblings) must be settled first
+  if (next == 'OTP Verified') {
+    if ((_amountDue > 0) || _hasUnpaidSiblings) {
+      _showCompleteSheet();
+    } else {
+      _showOtpDialog();
+    }
+    return;
+  }
+
+  // Final step: payment check, then confirm, then emit handed_to_lab
+  if (next == 'Handed to Lab') {
+    if (_amountDue > 0 || _hasUnpaidSiblings) {
+      _showCompleteSheet();
       return;
     }
-
-    // All other transitions: confirm + advance
-    String actionLabel = next;
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Text('$actionLabel?',
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-        content: Text(
-          _journeySteps.firstWhere((s) => s.status == next).description,
-          style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
+        title: const Text('Hand Over to Lab?',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        content: const Text(
+          'This will complete the visit and cannot be undone.',
+          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary))),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
+          ),
           ElevatedButton(
             onPressed: () {
-              setState(() => _currentStatus = next);
               Navigator.pop(context);
-              // TODO: PUT /api/bookings/${widget.booking.id}/status { status: next }
+              final bookingId = int.tryParse(widget.booking.id) ?? 0;
+              SocketService.instance.emitHandedToLab(bookingId: bookingId);
+              setState(() => _currentStatus = 'Handed to Lab');
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: AppColors.brandGreen, elevation: 0,
@@ -322,14 +416,162 @@ class _TechnicianBookingDetailScreenState
         ],
       ),
     );
+    return;
   }
 
-  // ── OTP dialog ────────────────────────────────────────────
+  // Prescription gate: must upload + verify before Sample Collected
+  if (next == 'Sample Collected' && _docRequired) {
+    if (_docUploads.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Upload prescription before collecting the sample.'),
+        backgroundColor: Colors.red,
+      ));
+      return;
+    }
+    if (!_docVerified) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Verify the prescription before collecting the sample.'),
+        backgroundColor: Colors.orange,
+      ));
+      return;
+    }
+  }
 
-  void _showOtpDialog() {
-    for (final c in _otpControllers) c.clear();
-    setState(() => _otpError = false);
+  showDialog(
+    context: context,
+    builder: (_) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Text('$next?',
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+      content: Text(
+        _journeySteps.firstWhere((s) => s.status == next).description,
+        style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary))),
+        ElevatedButton(
+          onPressed: () {
+            Navigator.pop(context);
+            _handleStatusTransition(next);
+          },
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.brandGreen, elevation: 0,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ),
+          child: const Text('Confirm', style: TextStyle(color: Colors.white)),
+        ),
+      ],
+    ),
+  );
+}
 
+  // Applies the correct socket event and navigation for each status transition,
+// mirroring the behaviour of the dashboard "Start Journey" card flow.
+void _handleStatusTransition(String next) {
+  final bookingId = int.tryParse(widget.booking.id) ?? 0;
+
+  switch (next) {
+    case 'Journey Started':
+      // Only update status and emit if not already in progress
+      if (_currentStatus != 'Journey Started') {
+        setState(() => _currentStatus = 'Journey Started');
+        // Notify customer immediately
+        if (bookingId > 0) SocketService.instance.emitEnRoute(bookingId: bookingId);
+      }
+      
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => TechnicianActiveJobScreen(
+            bookingId: bookingId,
+            patientName: widget.booking.customerName,
+            patientMobile: widget.booking.customerPhone,
+            patientAddress: widget.booking.address,
+            patientLat: widget.booking.patientLat,
+            patientLng: widget.booking.patientLng,
+            hospital: widget.booking.hospital,
+            startInEnRoute: true,
+          ),
+        ),
+      ).then((wasCompleted) {
+        if (wasCompleted == true && mounted) {
+          Navigator.of(context).pop(true);
+        }
+      });
+      break;
+
+    case 'Destination Reached':
+      setState(() => _currentStatus = 'Destination Reached');
+      if (bookingId > 0) SocketService.instance.emitArrived(bookingId: bookingId);
+      break;
+
+    case 'Collection Started':
+      setState(() => _currentStatus = 'Collection Started');
+      if (bookingId > 0) SocketService.instance.emitCollectionStarted(bookingId: bookingId);
+      break;
+
+    case 'Sample Collected':
+      setState(() => _currentStatus = 'Sample Collected');
+      if (bookingId > 0) SocketService.instance.emitSampleCollected(bookingId: bookingId);
+      break;
+
+    default:
+      setState(() => _currentStatus = next);
+  }
+}
+// ── Resume Journey ───────────────────────────────────────
+
+void _resumeJourney() {
+  final bookingId = int.tryParse(widget.booking.id) ?? 0;
+  
+  Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) => TechnicianActiveJobScreen(
+        bookingId: bookingId,
+        patientName: widget.booking.customerName,
+        patientMobile: widget.booking.customerPhone,
+        patientAddress: widget.booking.address,
+        patientLat: widget.booking.patientLat,
+        patientLng: widget.booking.patientLng,
+        hospital: widget.booking.hospital,
+        startInEnRoute: true,
+      ),
+    ),
+  ).then((wasCompleted) {
+    if (wasCompleted == true && mounted) {
+      Navigator.of(context).pop(true);
+    }
+  });
+}
+ // ── OTP dialog ────────────────────────────────────────────
+
+  Future<void> _showOtpDialog() async {
+    for (final c in _otpControllers) { c.clear(); }
+    setState(() { _otpError = false; _otpErrorText = 'Invalid OTP. Please try again.'; });
+
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+
+    // Generate OTP on server and send SMS before opening the dialog
+    final genResult = await ApiService.generateBookingOtp(bookingId);
+    if (!mounted) return;
+
+    if (genResult == null || genResult['success'] != true) {
+      final msg = genResult?['message'] as String? ?? 'Failed to send OTP. Please try again.';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+      return;
+    }
+
+    final maskedMobile = genResult['maskedMobile'] as String? ??
+        widget.booking.customerPhone.replaceRange(3, 7, '****');
+
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -353,7 +595,7 @@ class _TechnicianBookingDetailScreenState
                     style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 6),
                 Text(
-                  'An OTP has been sent to ${widget.booking.customerPhone.replaceRange(3, 7, '****')}. Ask the customer to share it.',
+                  'OTP sent to $maskedMobile. Ask the customer to share it.',
                   textAlign: TextAlign.center,
                   style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
                 ),
@@ -413,20 +655,37 @@ class _TechnicianBookingDetailScreenState
 
                 if (_otpError) ...[
                   const SizedBox(height: 8),
-                  const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    Icon(Icons.error_outline, size: 13, color: Color(0xFFD32F2F)),
-                    SizedBox(width: 4),
-                    Text('Invalid OTP. Please try again.',
-                        style: TextStyle(fontSize: 12, color: Color(0xFFD32F2F))),
+                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    const Icon(Icons.error_outline, size: 13, color: Color(0xFFD32F2F)),
+                    const SizedBox(width: 4),
+                    Flexible(child: Text(_otpErrorText,
+                        style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)))),
                   ]),
                 ],
 
-                const SizedBox(height: 20),
+                const SizedBox(height: 8),
+
+                // Resend OTP
+                Center(
+                  child: _isResendingOtp
+                      ? const SizedBox(width: 14, height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 1.5, color: AppColors.textSecondary))
+                      : TextButton(
+                          onPressed: () => _resendOtp(setDialogState),
+                          style: TextButton.styleFrom(
+                            foregroundColor: AppColors.textSecondary,
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          ),
+                          child: const Text('Resend OTP', style: TextStyle(fontSize: 12)),
+                        ),
+                ),
+
+                const SizedBox(height: 12),
 
                 Row(children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(ctx),
+                      onPressed: _isVerifyingOtp ? null : () => Navigator.pop(ctx),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: AppColors.textSecondary,
                         side: const BorderSide(color: AppColors.divider),
@@ -464,35 +723,73 @@ class _TechnicianBookingDetailScreenState
       ),
     );
 
-    // Auto-focus first OTP box — call directly on the node so it
-    // finds its own scope, avoiding the cross-scope assertion.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _otpFocusNodes[0].requestFocus();
+      if (mounted) _otpFocusNodes[0].requestFocus();
     });
   }
 
   Future<void> _verifyOtp(BuildContext ctx, StateSetter setDialogState) async {
     final otp = _otpControllers.map((c) => c.text).join();
-    if (otp.length < 4) return;
+    if (otp.length < 4) {
+      setDialogState(() => _otpError = true);
+      return;
+    }
 
-    setState(() => _isVerifyingOtp = true);
+    setState(() { _isVerifyingOtp = true; _otpError = false; });
+    setDialogState(() {});
 
-    // TODO: POST /api/bookings/${widget.booking.id}/verify-otp { otp }
-    await Future.delayed(const Duration(milliseconds: 1000));
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    final result = await ApiService.verifyBookingOtp(bookingId: bookingId, otp: otp);
 
-    // Mock: any non-'0000' OTP succeeds
-    if (otp == '0000') {
-      setState(() { _isVerifyingOtp = false; _otpError = true; });
-      setDialogState(() {});
+    if (!mounted) return;
+
+    if (result?['success'] == true) {
+      setState(() { _isVerifyingOtp = false; _currentStatus = 'OTP Verified'; });
+      if (ctx.mounted) Navigator.pop(ctx);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('OTP verified — tap "Hand Over to Lab" to complete'),
+        backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        duration: const Duration(seconds: 3),
+      ));
     } else {
+      final msg = result?['message'] as String? ?? 'Invalid OTP. Please try again.';
       setState(() {
         _isVerifyingOtp = false;
-        _currentStatus = 'Completed';
+        _otpError       = true;
+        _otpErrorText   = msg;
       });
-      Navigator.pop(ctx);
+      setDialogState(() {});
+    }
+  }
+
+  Future<void> _resendOtp(StateSetter setDialogState) async {
+    setState(() => _isResendingOtp = true);
+    setDialogState(() {});
+
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    final result    = await ApiService.resendBookingOtp(bookingId);
+
+    if (!mounted) return;
+    setState(() => _isResendingOtp = false);
+    setDialogState(() {});
+
+    if (result?['success'] == true) {
+      for (final c in _otpControllers) { c.clear(); }
+      setState(() { _otpError = false; _otpErrorText = 'Invalid OTP. Please try again.'; });
+      setDialogState(() {});
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('OTP verified — booking marked as Completed!'),
+        content: const Text('OTP resent successfully'),
         backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+    } else {
+      final msg = result?['message'] as String? ?? 'Failed to resend OTP. Please try again.';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg),
+        backgroundColor: Colors.redAccent,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ));
@@ -501,35 +798,79 @@ class _TechnicianBookingDetailScreenState
 
   // ── Tests ─────────────────────────────────────────────────
 
-  void _removeTest(String id) =>
-      setState(() => _selectedTests.removeWhere((t) => t['id'] == id));
+  Future<void> _removeTest(String id) async {
+    // Block all removals once OTP has been verified — visit is finalized at that point.
+    if (_isFinalized) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Tests cannot be changed after OTP verification.'),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    if (_isTestLocked(id)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Tests cannot be removed after payment has been collected.'),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    final test          = _selectedTests.firstWhere((t) => t['id'] == id, orElse: () => {});
+    final bookingItemId = int.tryParse(test['bookingItemId'] ?? '');
+    // Remove from UI immediately (optimistic)
+    setState(() => _selectedTests.removeWhere((t) => t['id'] == id));
+    if (bookingItemId != null && bookingItemId > 0) {
+      final bookingId = int.tryParse(widget.booking.id) ?? 0;
+      await ApiService.removeBookingItem(bookingId: bookingId, bookingItemId: bookingItemId);
+    }
+  }
 
-  void _addTest(Map<String, String> t) {
+  Future<void> _addTest(Map<String, String> t) async {
+    // Block new tests once OTP has been verified — visit is finalized at that point.
+    if (_isFinalized) return;
     if (_selectedTests.any((x) => x['id'] == t['id'])) return;
+    // Add optimistically with empty bookingItemId while the API call is in flight
     setState(() {
-      _selectedTests.add(Map<String, String>.from(t));
+      _selectedTests.add({...Map<String, String>.from(t), 'bookingItemId': ''});
       _showAddTest = false;
       _searchQuery = '';
     });
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    final productId = int.tryParse(t['id'] ?? '') ?? 0;
+    if (bookingId == 0 || productId == 0) return;
+    final result = await ApiService.addBookingItem(bookingId: bookingId, productId: productId);
+    if (!mounted) return;
+    if (result != null) {
+      // Stamp the real bookingItemId on the optimistic entry
+      setState(() {
+        final idx = _selectedTests.indexWhere(
+            (x) => x['id'] == t['id'] && x['bookingItemId'] == '');
+        if (idx != -1) {
+          _selectedTests[idx]['bookingItemId'] =
+              (result['bookingItemId'] as num?)?.toInt().toString() ?? '';
+        }
+      });
+    } else {
+      setState(() => _selectedTests.removeWhere(
+          (x) => x['id'] == t['id'] && x['bookingItemId'] == ''));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to add test — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
   }
 
   List<Map<String, String>> get _filteredCatalogue {
     final already = _selectedTests.map((t) => t['id']).toSet();
-    return _testCatalogue.where((t) {
+    return _catalogueItems.where((t) {
       if (already.contains(t['id'])) return false;
       if (_searchQuery.isEmpty) return true;
       return (t['name']?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false) ||
           (t['category']?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false);
-    }).toList();
-  }
-
-  List<Map<String, String>> get _filteredCustCatalogue {
-    final already = _additionalCustomerTests.map((t) => t['id']).toSet();
-    return _testCatalogue.where((t) {
-      if (already.contains(t['id'])) return false;
-      if (_custTestSearch.isEmpty) return true;
-      return (t['name']?.toLowerCase().contains(_custTestSearch.toLowerCase()) ?? false) ||
-          (t['category']?.toLowerCase().contains(_custTestSearch.toLowerCase()) ?? false);
     }).toList();
   }
 
@@ -570,22 +911,70 @@ class _TechnicianBookingDetailScreenState
         final images = await _picker.pickMultiImage(imageQuality: 80);
         if (images.isNotEmpty) {
           final toAdd = images.take(_docMaxFiles - _docUploads.length);
-          final docs = await Future.wait(toAdd.map((f) async => _TechPresDoc(
-              bytes: await f.readAsBytes(),
-              fileName: f.name,
-              uploadedAt: DateTime.now())));
-          setState(() => _docUploads.addAll(docs));
+          for (final f in toAdd) {
+            final bytes = await f.readAsBytes();
+            final placeholder = _TechPresDoc(
+              bytes: bytes, fileName: f.name,
+              uploadedAt: DateTime.now(), isUploading: true,
+            );
+            setState(() => _docUploads.add(placeholder));
+            _uploadDoc(placeholder, bytes, f.name);
+          }
         }
       } else {
         final image = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
         if (image != null) {
           final bytes = await image.readAsBytes();
-          setState(() => _docUploads.add(_TechPresDoc(
-              bytes: bytes, fileName: image.name, uploadedAt: DateTime.now())));
+          final placeholder = _TechPresDoc(
+            bytes: bytes, fileName: image.name,
+            uploadedAt: DateTime.now(), isUploading: true,
+          );
+          setState(() => _docUploads.add(placeholder));
+          _uploadDoc(placeholder, bytes, image.name);
         }
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('Error picking image: $e');
+    }
     setState(() => _docIsPicking = false);
+  }
+
+  Future<void> _uploadDoc(_TechPresDoc placeholder, Uint8List bytes, String fileName) async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    final patientId = widget.booking.patientId ?? 0;
+    try {
+      // Step 1: upload file binary → get URL
+      final url = await ApiService.uploadFile(bytes.toList(), fileName);
+      if (url == null || !mounted) {
+        setState(() => _docUploads.remove(placeholder));
+        return;
+      }
+      // Step 2: save URL linked to booking → get docId
+      final docId = await ApiService.savePrescriptionDoc(
+        bookingId: bookingId, patientId: patientId, imageUrl: url,
+      );
+      if (!mounted) return;
+      setState(() {
+        final idx = _docUploads.indexOf(placeholder);
+        if (idx == -1) return;
+        if (docId != null) {
+          _docUploads[idx] = _TechPresDoc(
+            docId: docId, url: url, fileName: fileName,
+            uploadedAt: DateTime.now(), docStatus: 'pending_review',
+          );
+        } else {
+          _docUploads.removeAt(idx);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Upload failed — please retry'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ));
+        }
+      });
+    } catch (e) {
+      debugPrint('[_uploadDoc] ERROR: $e');
+      if (mounted) setState(() => _docUploads.remove(placeholder));
+    }
   }
 
   void _viewDocImage(int index) {
@@ -593,16 +982,30 @@ class _TechnicianBookingDetailScreenState
         builder: (_) => _DocImageViewerPage(images: _docUploads, initialIndex: index)));
   }
 
-  void _deleteDocImage(int index) {
+  Future<void> _deleteDocImage(int index) async {
+    final doc = _docUploads[index];
+    if (doc.isUploading) return; // wait for upload to finish first
+    if (doc.docId != null) {
+      final ok = await ApiService.deletePrescription(doc.docId!);
+      if (!ok || !mounted) return;
+    }
     setState(() {
       _docUploads.removeAt(index);
       if (_docUploads.isEmpty) _docVerified = false;
     });
   }
 
-  // ── Payment ───────────────────────────────────────────────
+  Future<void> _markDocsVerified() async {
+    for (final doc in _docUploads) {
+      if (doc.docId != null && !doc.isVerified) {
+        final ok = await ApiService.verifyPrescription(doc.docId!);
+        if (ok && mounted) setState(() => doc.docStatus = 'verified');
+      }
+    }
+    if (mounted) setState(() => _docVerified = true);
+  }
 
-  // ── Complete sheet — payment then OTP ────────────────────
+  // ── Payment ───────────────────────────────────────────────
 
   void _showCompleteSheet() {
     showModalBottomSheet(
@@ -641,7 +1044,11 @@ class _TechnicianBookingDetailScreenState
               _CompleteStep(
                 number: '1',
                 title: 'Collect Payment',
-                subtitle: 'Collect ₹${_amountDue.toInt()} from customer (tests amount)',
+                subtitle: _paymentDone
+                    ? 'All payments collected'
+                    : _livePaymentStatus == 'paid'
+                        ? 'Original ₹${_liveAmountPaid.toInt()} paid. Collect additional: ₹${_amountDue.toInt()}'
+                        : 'Collect ₹${_amountDue.toInt()} from customer (tests amount)',
                 done: _paymentDone,
                 locked: false,
                 buttonLabel: _paymentDone ? 'Paid ✓' : 'Make Payment  ₹${_amountDue.toInt()}',
@@ -651,8 +1058,6 @@ class _TechnicianBookingDetailScreenState
                     : () {
                         Navigator.pop(ctx);
                         _collectPayment(onDone: () {
-                          setState(() => _paymentDone = true);
-                          // Re-open sheet after payment success
                           Future.delayed(
                               const Duration(milliseconds: 300), _showCompleteSheet);
                         });
@@ -666,11 +1071,11 @@ class _TechnicianBookingDetailScreenState
                 number: '2',
                 title: 'Verify OTP',
                 subtitle: 'Ask customer for the OTP sent to their phone',
-                done: _isCompleted,
-                locked: !_paymentDone,
-                buttonLabel: _isCompleted ? 'Verified ✓' : 'Verify OTP',
+                done: _currentStatus == 'OTP Verified' || _isCompleted,
+                locked: !_paymentDone || _hasUnpaidSiblings,
+                buttonLabel: (_currentStatus == 'OTP Verified' || _isCompleted) ? 'Verified ✓' : 'Verify OTP',
                 buttonColor: AppColors.brandGreen,
-                onTap: (!_paymentDone || _isCompleted)
+                onTap: (!_paymentDone || _hasUnpaidSiblings || _currentStatus == 'OTP Verified' || _isCompleted)
                     ? null
                     : () {
                         Navigator.pop(ctx);
@@ -704,14 +1109,6 @@ class _TechnicianBookingDetailScreenState
     );
   }
 
-  void _collectPaymentThenOtp() {
-    if (!_paymentDone && _amountDue > 0) {
-      _showCompleteSheet();
-    } else {
-      _showOtpDialog();
-    }
-  }
-
   void _collectPayment({VoidCallback? onDone}) {
     setState(() => _isProcessingPayment = true);
 
@@ -734,17 +1131,40 @@ class _TechnicianBookingDetailScreenState
     openRazorpay(
       options: options,
       onSuccess: (paymentId) {
+        // Capture amount + test IDs before state changes
+        final paidAmount      = _amountDue;
+        final bookingId       = int.tryParse(widget.booking.id) ?? 0;
+        final nowPaidTestIds  = _selectedTests.map((t) => t['id'] ?? '').toSet();
         setState(() {
-          _isProcessingPayment = false;
-          _paymentDone = true;
+          _isProcessingPayment     = false;
+          _sessionPaymentCollected += paidAmount;
+          _livePaymentStatus       = 'paid';
+          _paidTestIds             = {..._paidTestIds, ...nowPaidTestIds};
         });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Payment of ₹${_amountDue.toInt()} received · $paymentId'),
+          content: Text('Payment of ₹${paidAmount.toInt()} received · $paymentId'),
           backgroundColor: AppColors.brandGreen,
           behavior: SnackBarBehavior.floating,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ));
         onDone?.call();
+        // Persist to DB and refresh live payment state from server
+        () async {
+          final ok = await ApiService.collectPayment(
+            bookingId: bookingId,
+            razorpayPaymentId: paymentId,
+            amount: paidAmount,
+          );
+          if (mounted) _refreshPaymentInfo();
+          if (!ok && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Payment saved locally but server sync failed — contact support'),
+              backgroundColor: Colors.orange,
+              behavior: SnackBarBehavior.floating,
+              duration: Duration(seconds: 6),
+            ));
+          }
+        }();
       },
       onError: (msg) {
         setState(() => _isProcessingPayment = false);
@@ -758,6 +1178,175 @@ class _TechnicianBookingDetailScreenState
     );
   }
 
+  // Collect payment for a visit-member's sibling booking (separate from the parent's payment)
+  void _collectVisitMemberPayment({
+    required int siblingBookingId,
+    required double amountDue,
+    required String patientName,
+  }) {
+    if (amountDue <= 0) return;
+    final options = {
+      'key': 'rzp_test_SonqjjPurqlLci',
+      'amount': (amountDue * 100).toInt(),
+      'name': 'MicroLab',
+      'description': 'Tests for $patientName',
+      'prefill': {
+        'contact': widget.booking.customerPhone,
+        'name': patientName,
+      },
+      'notes': {
+        'booking_id': siblingBookingId.toString(),
+        'note': 'Visit member payment',
+      },
+      'theme': {'color': '#0A5C4A'},
+    };
+
+    openRazorpay(
+      options: options,
+      onSuccess: (paymentId) async {
+        // Optimistic UI update: mark this sibling as paid in the local list
+        if (mounted) {
+          setState(() {
+            _linkedPatients = _linkedPatients.map((p) {
+              if ((p['booking_id'] as num?)?.toInt() == siblingBookingId) {
+                return {...p, 'payment_status': 'paid', 'amount_due': 0.0};
+              }
+              return p;
+            }).toList();
+          });
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('₹${amountDue.toInt()} received for $patientName · $paymentId'),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
+        final ok = await ApiService.collectPayment(
+          bookingId: siblingBookingId,
+          razorpayPaymentId: paymentId,
+          amount: amountDue,
+        );
+        if (!ok && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Payment saved locally but server sync failed — contact support'),
+            backgroundColor: Colors.orange,
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 6),
+          ));
+        }
+        // Refresh the list to get accurate server state
+        if (mounted) _loadLinkedPatients();
+      },
+      onError: (msg) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Failed: $msg'),
+            backgroundColor: Colors.red[700],
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
+      },
+    );
+  }
+
+  // Collects a single combined Razorpay payment for all unpaid bookings (parent + siblings).
+  // Each booking's ip_payment_transactions row is updated individually using the same
+  // Razorpay payment ID — existing per-booking data structure is not changed.
+  void _collectAllPayment() {
+    final unpaidItems = <Map<String, dynamic>>[];
+
+    if (!_paymentDone && _amountDue > 0) {
+      unpaidItems.add({
+        'bookingId': int.tryParse(widget.booking.id) ?? 0,
+        'amount':    _amountDue,
+        'name':      widget.booking.customerName,
+        'isParent':  true,
+      });
+    }
+    for (final p in _linkedPatients) {
+      final sibId = (p['booking_id'] as num?)?.toInt();
+      final due   = double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0;
+      if (sibId != null && due > 0 && p['payment_status'] != 'paid') {
+        unpaidItems.add({
+          'bookingId': sibId,
+          'amount':    due,
+          'name':      p['patient_name'] as String? ?? 'Visit Member',
+          'isParent':  false,
+        });
+      }
+    }
+    if (unpaidItems.length < 2) return;
+
+    final totalAmount = unpaidItems.fold<double>(0, (s, i) => s + (i['amount'] as double));
+
+    setState(() => _isProcessingPayment = true);
+
+    openRazorpay(
+      options: {
+        'key':         'rzp_test_SonqjjPurqlLci',
+        'amount':      (totalAmount * 100).toInt(),
+        'name':        'MicroLab',
+        'description': 'Combined payment · ${unpaidItems.length} members',
+        'prefill': {
+          'contact': widget.booking.customerPhone,
+          'name':    widget.booking.customerName,
+        },
+        'notes': {
+          'booking_ids': unpaidItems.map((i) => i['bookingId'].toString()).join(','),
+          'note':        'Combined visit payment',
+        },
+        'theme': {'color': '#0A5C4A'},
+      },
+      onSuccess: (paymentId) async {
+        if (!mounted) return;
+        setState(() {
+          _isProcessingPayment = false;
+          final parentItem = unpaidItems.where((i) => i['isParent'] == true).toList();
+          if (parentItem.isNotEmpty) {
+            _sessionPaymentCollected += parentItem.first['amount'] as double;
+            _livePaymentStatus        = 'paid';
+            _paidTestIds              = {..._paidTestIds, ..._selectedTests.map((t) => t['id'] ?? '').toSet()};
+          }
+          _linkedPatients = _linkedPatients.map((p) {
+            final sibId = (p['booking_id'] as num?)?.toInt();
+            final inList = unpaidItems.any((i) => i['bookingId'] == sibId && i['isParent'] == false);
+            return inList ? {...p, 'payment_status': 'paid', 'amount_due': 0.0} : p;
+          }).toList();
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content:         Text('Combined ₹${totalAmount.toInt()} received · $paymentId'),
+          backgroundColor: AppColors.brandGreen,
+          behavior:        SnackBarBehavior.floating,
+          shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+        // Persist each booking's record individually with the same Razorpay ID
+        for (final item in unpaidItems) {
+          await ApiService.collectPayment(
+            bookingId:         item['bookingId'] as int,
+            razorpayPaymentId: paymentId,
+            amount:            item['amount']    as double,
+          );
+        }
+        if (mounted) {
+          _refreshPaymentInfo();
+          _loadLinkedPatients();
+        }
+      },
+      onError: (msg) {
+        if (mounted) {
+          setState(() => _isProcessingPayment = false);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content:         Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Failed: $msg'),
+            backgroundColor: Colors.red[700],
+            behavior:        SnackBarBehavior.floating,
+            shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final currentStep = _journeySteps.firstWhere(
@@ -765,14 +1354,19 @@ class _TechnicianBookingDetailScreenState
       orElse: () => _journeySteps.first,
     );
 
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) Navigator.of(context).pop(_isCompleted ? true : null);
+      },
+      child: Scaffold(
       backgroundColor: const Color(0xFFF4F6F8),
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
-          onPressed: () => Navigator.pop(context),
+          onPressed: () => Navigator.pop(context, _isCompleted ? true : null),  // pops with true only when Handed to Lab
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -808,7 +1402,6 @@ class _TechnicianBookingDetailScreenState
             icon: Icons.alt_route_rounded,
             child: Column(
               children: [
-                // Stepper
                 ...List.generate(_journeySteps.length, (i) {
                   final step = _journeySteps[i];
                   final isDone = i < _currentStepIndex;
@@ -819,7 +1412,6 @@ class _TechnicianBookingDetailScreenState
                     child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Icon + line — stretches to match text height
                       Column(children: [
                         AnimatedContainer(
                           duration: const Duration(milliseconds: 300),
@@ -879,31 +1471,54 @@ class _TechnicianBookingDetailScreenState
                           ),
                         ),
                       ),
-                      if (isCurrent && _canAdvance) ...[
-                        const SizedBox(width: 8),
-                        GestureDetector(
-                          onTap: _advanceStatus,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: step.color,
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              _nextStatus == 'Completed'
-                                  ? 'Complete ▸'
-                                  : '${_journeySteps[i + 1].label} ▸',
-                              style: const TextStyle(
-                                  fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white),
-                            ),
-                          ),
-                        ),
-                      ],
+          if (isCurrent && _canAdvance) ...[
+  const SizedBox(width: 8),
+  if (_currentStatus == 'Journey Started') 
+    // Show Resume button only if not completed
+    GestureDetector(
+      onTap: _resumeJourney,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1565C0),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: const Text(
+          'Resume ▸',
+          style: TextStyle(
+            fontSize: 11, 
+            fontWeight: FontWeight.w700, 
+            color: Colors.white
+          ),
+        ),
+      ),
+    )
+  else if (_currentStatus != 'Handed to Lab' && _nextStatus != null)
+    GestureDetector(
+      onTap: _advanceStatus,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: step.color,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          '${_journeySteps[i + 1].label} ▸',
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: Colors.white
+          ),
+        ),
+      ),
+    ),
+],          
                     ],
                   ));
                 }),
               ],
             ),
+            
           ),
 
           const SizedBox(height: 14),
@@ -921,7 +1536,9 @@ class _TechnicianBookingDetailScreenState
                 'Mode', widget.booking.mode,
               ),
               _InfoRow(Icons.location_on_outlined, 'Address',
-                  '${widget.booking.address}, ${widget.booking.city} – ${widget.booking.pincode}'),
+                  [widget.booking.address, widget.booking.city, widget.booking.pincode]
+                      .where((s) => s.isNotEmpty)
+                      .join(', ')),
               _InfoRow(Icons.event_outlined, 'Date', _formatDate(widget.booking.date)),
               _InfoRow(Icons.schedule_outlined, 'Slot', widget.booking.timeSlot),
               if (widget.booking.isVip)
@@ -946,11 +1563,16 @@ class _TechnicianBookingDetailScreenState
 
           const SizedBox(height: 14),
 
-          // ── Tests (editable unless completed) ─────────────
+          // ── Tests ──────────────────────────────────────────
           _SectionCard(
             title: 'Tests & Packages',
             icon: Icons.science_outlined,
-            child: Column(
+            child: _itemsLoading
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24),
+                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                  )
+                : Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 ..._selectedTests.map((t) => Container(
@@ -981,32 +1603,47 @@ class _TechnicianBookingDetailScreenState
                     ),
                     Text('₹${t['price'] ?? '0'}',
                         style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                    if (!_isCompleted) ...[
+                    // Hide the remove control entirely once the visit is finalized (OTP Verified or Handed to Lab).
+                    if (!_isFinalized) ...[
                       const SizedBox(width: 8),
                       GestureDetector(
-                        onTap: () => _removeTest(t['id'] ?? ''),
-                        child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                        onTap: () { _removeTest(t['id'] ?? ''); },
+                        child: _isTestLocked(t['id'] ?? '')
+                            ? const Icon(Icons.lock_outline_rounded, size: 16, color: AppColors.textHint)
+                            : const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
                       ),
                     ],
                   ]),
                 )),
 
-                // Add test (only if not completed)
+                // Always visible; shows a lock icon and disabled style once the visit is finalized.
                 if (!_isCompleted && !_showAddTest)
                   GestureDetector(
-                    onTap: () => setState(() => _showAddTest = true),
+                    onTap: _isFinalized ? null : () => setState(() => _showAddTest = true),
                     child: Container(
                       padding: const EdgeInsets.symmetric(vertical: 10),
                       decoration: BoxDecoration(
-                        color: AppColors.brandGreenSurface,
+                        color: _isFinalized ? AppColors.background : AppColors.brandGreenSurface,
                         borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: AppColors.brandGreenLight),
+                        border: Border.all(
+                          color: _isFinalized ? AppColors.divider : AppColors.brandGreenLight,
+                        ),
                       ),
-                      child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                        Icon(Icons.add_circle_outline, size: 15, color: AppColors.brandGreen),
-                        SizedBox(width: 6),
-                        Text('Add Test / Package',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen)),
+                      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                        Icon(
+                          _isFinalized ? Icons.lock_outline_rounded : Icons.add_circle_outline,
+                          size: 15,
+                          color: _isFinalized ? AppColors.textHint : AppColors.brandGreen,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          _isFinalized ? 'Tests Locked' : 'Add Test / Package',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: _isFinalized ? AppColors.textHint : AppColors.brandGreen,
+                          ),
+                        ),
                       ]),
                     ),
                   ),
@@ -1034,7 +1671,7 @@ class _TechnicianBookingDetailScreenState
                   ),
                   const SizedBox(height: 8),
                   ..._filteredCatalogue.take(5).map((t) => GestureDetector(
-                    onTap: () => _addTest(t),
+                    onTap: () { _addTest(t); },
                     child: Container(
                       margin: const EdgeInsets.only(bottom: 6),
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1056,7 +1693,6 @@ class _TechnicianBookingDetailScreenState
                   )),
                 ],
 
-                // Billing summary
                 if (_selectedTests.isNotEmpty) ...[
                   const Divider(height: 20),
                   _BillRow('Tests Total', '₹${_testsTotal.toInt()}', bold: true, green: true),
@@ -1071,45 +1707,51 @@ class _TechnicianBookingDetailScreenState
 
           const SizedBox(height: 14),
 
-          // ── Prescription / Document (multi-image) ─────────
-          _SectionCard(
+          // ── Prescription / Document ─────────────────────────
+          // Shown only when the booking requires a prescription OR when
+          // documents have already been uploaded (to avoid hiding existing uploads).
+          if (_docRequired || _docUploads.isNotEmpty) _SectionCard(
             title: 'Prescription / Document',
             icon: Icons.description_outlined,
-            badge: widget.booking.docRequired ? 'REQUIRED' : null,
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              // Info note
+            badge: _docRequired ? 'REQUIRED' : null,
+            child: _docsLoading
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24),
+                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                  )
+                : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: widget.booking.docRequired
+                  color: _docRequired
                       ? const Color(0xFFFFF3E0)
                       : AppColors.brandGreenSurface,
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                    color: widget.booking.docRequired
+                    color: _docRequired
                         ? const Color(0xFFFFCC02).withOpacity(0.4)
                         : AppColors.brandGreenLight,
                   ),
                 ),
                 child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Icon(
-                    widget.booking.docRequired
+                    _docRequired
                         ? Icons.warning_amber_rounded
                         : Icons.info_outline_rounded,
                     size: 13,
-                    color: widget.booking.docRequired
+                    color: _docRequired
                         ? const Color(0xFFE65100)
                         : AppColors.brandGreen,
                   ),
                   const SizedBox(width: 7),
                   Expanded(child: Text(
-                    widget.booking.docRequired
+                    _docRequired
                         ? 'This booking requires a doctor\'s prescription. Upload and verify before collecting sample.'
                         : 'Upload prescription if provided by the customer.',
                     style: TextStyle(
                       fontSize: 12,
                       height: 1.4,
-                      color: widget.booking.docRequired
+                      color: _docRequired
                           ? const Color(0xFF795548)
                           : AppColors.brandGreen,
                     ),
@@ -1118,7 +1760,6 @@ class _TechnicianBookingDetailScreenState
               ),
               const SizedBox(height: 12),
 
-              // Thumbnail grid — shown when images are present
               if (_docUploads.isNotEmpty) ...[
                 SizedBox(
                   height: 104,
@@ -1136,7 +1777,7 @@ class _TechnicianBookingDetailScreenState
                       return _DocThumbnailCard(
                         doc: _docUploads[i],
                         onView: () => _viewDocImage(i),
-                        onDelete: () => _deleteDocImage(i),
+                        onDelete: () { _deleteDocImage(i); },
                       );
                     },
                   ),
@@ -1149,7 +1790,6 @@ class _TechnicianBookingDetailScreenState
                 const SizedBox(height: 12),
               ],
 
-              // Empty upload tile
               if (_docUploads.isEmpty)
                 GestureDetector(
                   onTap: _docIsPicking ? null : _showDocSourcePicker,
@@ -1187,13 +1827,12 @@ class _TechnicianBookingDetailScreenState
                   ),
                 ),
 
-              // Verify / verified row
               if (_docUploads.isNotEmpty && !_docVerified) ...[
                 const SizedBox(height: 10),
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: () => setState(() => _docVerified = true),
+                    onPressed: _markDocsVerified,
                     icon: const Icon(Icons.verified_outlined, size: 16),
                     label: const Text('Mark as Verified',
                         style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
@@ -1219,12 +1858,15 @@ class _TechnicianBookingDetailScreenState
             ]),
           ),
 
-          // ── Collect Payment (tests amount only) ───────────
+          // ── Collect Payment ──────────────────────────────
           if (!_isCompleted)
             _SectionCard(
               title: 'Collect Payment',
               icon: Icons.payment_outlined,
-              child: Column(children: [
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                // Info banner
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -1236,25 +1878,219 @@ class _TechnicianBookingDetailScreenState
                     const Icon(Icons.info_outline_rounded, size: 14, color: AppColors.brandGreen),
                     const SizedBox(width: 8),
                     Expanded(child: Text(
-                      'Service charge ₹${_serviceChargePaid.toInt()} paid at booking. Collect tests amount: ₹${_amountDue.toInt()}',
+                      _paymentDone
+                          ? 'Service charge ₹${_serviceChargePaid.toInt()} paid at booking. All tests also paid.'
+                          : _livePaymentStatus == 'paid'
+                              ? 'Original booking (₹${_liveAmountPaid.toInt()}) paid. Collect additional tests: ₹${_amountDue.toInt()}'
+                              : 'Service charge ₹${_serviceChargePaid.toInt()} paid at booking. Collect tests amount: ₹${_amountDue.toInt()}',
                       style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
                     )),
                   ]),
                 ),
                 const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: _isProcessingPayment ? null : () => _collectPayment(onDone: null),
-                    icon: _isProcessingPayment
-                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                        : const Icon(Icons.payment_outlined, size: 18),
-                    label: Text(_isProcessingPayment ? 'Processing…' : 'Collect ₹${_amountDue.toInt()} via Razorpay',
-                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1565C0), foregroundColor: Colors.white,
-                      elevation: 0, padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+
+                // Billing Summary — per-person breakdown before collect buttons
+                ...() {
+                  final rows = <Map<String, dynamic>>[];
+                  if (!_paymentDone && _amountDue > 0) {
+                    rows.add({
+                      'name':   '${widget.booking.customerName} (Tests)',
+                      'amount': _amountDue,
+                    });
+                  }
+                  for (final p in _linkedPatients) {
+                    final due = double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0;
+                    if (p['payment_status'] != 'paid' && due > 0) {
+                      rows.add({
+                        'name':   p['patient_name'] as String? ?? 'Visit Member',
+                        'amount': due,
+                      });
+                    }
+                  }
+                  if (rows.isEmpty) return <Widget>[];
+                  final totalDue = rows.fold<double>(0, (s, r) => s + (r['amount'] as double));
+                  return [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5F7FA),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFE0E4EA)),
+                      ),
+                      child: Column(
+                        children: [
+                          ...rows.map<Widget>((r) => Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(r['name'] as String,
+                                    style: const TextStyle(fontSize: 13, color: Color(0xFF555555))),
+                                Text('₹${(r['amount'] as double).toInt()}',
+                                    style: const TextStyle(fontSize: 13, color: Color(0xFF333333))),
+                              ],
+                            ),
+                          )),
+                          const Divider(height: 16, thickness: 1),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('Total Due',
+                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+                              Text('₹${totalDue.toInt()}',
+                                  style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF1565C0))),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ];
+                }(),
+
+                // Collect All — single Razorpay transaction when 2+ bookings are unpaid
+                ...() {
+                  final parentUnpaid    = !_paymentDone && _amountDue > 0;
+                  final unpaidSiblings  = _linkedPatients.where((c) {
+                    final due = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+                    return (c['booking_id'] as num?) != null && due > 0 && c['payment_status'] != 'paid';
+                  }).toList();
+                  final totalUnpaid     = (parentUnpaid ? 1 : 0) + unpaidSiblings.length;
+                  if (totalUnpaid < 2) return <Widget>[];
+                  final totalAmount     = (parentUnpaid ? _amountDue : 0.0) +
+                      unpaidSiblings.fold<double>(0, (s, c) =>
+                          s + (double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0));
+                  return [
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _isProcessingPayment ? null : _collectAllPayment,
+                        icon: _isProcessingPayment
+                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                            : const Icon(Icons.payments_outlined, size: 18),
+                        label: Text(
+                          _isProcessingPayment
+                              ? 'Processing…'
+                              : 'Collect All ₹${totalAmount.toInt()} · $totalUnpaid members',
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.brandGreen,
+                          foregroundColor: Colors.white,
+                          elevation:       0,
+                          padding:         const EdgeInsets.symmetric(vertical: 14),
+                          shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ),
+                  ];
+                }(),
+
+                // Single-booking button — shown only when exactly one booking is unpaid
+                // (Collect All handles the 2+ case above)
+                ...() {
+                  final parentUnpaid   = !_paymentDone && _amountDue > 0;
+                  final unpaidSiblings = _linkedPatients.where((c) {
+                    final sibId = (c['booking_id'] as num?)?.toInt();
+                    final due   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+                    return sibId != null && due > 0 && c['payment_status'] != 'paid';
+                  }).toList();
+                  if ((parentUnpaid ? 1 : 0) + unpaidSiblings.length >= 2) return <Widget>[];
+
+                  final widgets = <Widget>[];
+
+                  if (parentUnpaid) {
+                    widgets.add(SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _isProcessingPayment ? null : () => _collectPayment(onDone: null),
+                        icon: _isProcessingPayment
+                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                            : const Icon(Icons.payment_outlined, size: 18),
+                        label: Text(
+                          _isProcessingPayment
+                              ? 'Processing…'
+                              : 'Collect ₹${_amountDue.toInt()} · ${widget.booking.customerName}',
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF1565C0),
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ));
+                  }
+
+                  for (final c in unpaidSiblings) {
+                    final sibId = (c['booking_id'] as num?)!.toInt();
+                    final due   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+                    final mName = c['patient_name'] as String? ?? 'Visit Member';
+                    widgets.add(Padding(
+                      padding: EdgeInsets.only(top: widgets.isEmpty ? 0 : 8),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: () => _collectVisitMemberPayment(
+                            siblingBookingId: sibId,
+                            amountDue: due,
+                            patientName: mName,
+                          ),
+                          icon: const Icon(Icons.payment_outlined, size: 18),
+                          label: Text('Collect ₹${due.toInt()} · $mName',
+                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF1565C0),
+                            foregroundColor: Colors.white,
+                            elevation: 0,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                        ),
+                      ),
+                    ));
+                  }
+
+                  if (widgets.isEmpty && _paymentDone) {
+                    widgets.add(SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: null,
+                        icon: const Icon(Icons.check_circle_outline, size: 18),
+                        label: const Text('Booking Paid ✓',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.brandGreen,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                      ),
+                    ));
+                  }
+
+                  return widgets;
+                }(),
+
+                // Refresh row
+                const SizedBox(height: 4),
+                Center(
+                  child: TextButton.icon(
+                    onPressed: () {
+                      _refreshPaymentInfo();
+                      _loadLinkedPatients();
+                    },
+                    icon: const Icon(Icons.refresh_rounded, size: 15),
+                    label: const Text('Refresh payment status', style: TextStyle(fontSize: 12)),
+                    style: TextButton.styleFrom(
+                      foregroundColor: AppColors.textSecondary,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     ),
                   ),
                 ),
@@ -1263,340 +2099,101 @@ class _TechnicianBookingDetailScreenState
 
           const SizedBox(height: 14),
 
-          // ── Add New Customer ──────────────────────────────
+          // ── Visit Members (Same Location) ─────────────────
           _SectionCard(
-            title: 'Add New Customer',
-            icon: Icons.person_add_outlined,
+            title: 'Visit Members',
+            icon: Icons.group_outlined,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'If another person at this location also needs a blood test, add their details here.',
+                  'Add family members at this address who also need a blood test during this visit.',
                   style: TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
                 ),
                 const SizedBox(height: 12),
 
-                if (!_showNewCustomerForm)
-                  GestureDetector(
-                    onTap: () => setState(() => _showNewCustomerForm = true),
-                    child: Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(vertical: 13),
+                if (_linkedPatients.isNotEmpty) ...[
+                  ..._linkedPatients.map((c) {
+                    final amountDue   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+                    final totalAmount = double.tryParse(c['total_amount']?.toString() ?? '0') ?? 0.0;
+                    final isPaid      = c['payment_status'] == 'paid' || amountDue <= 0;
+                    final hasPayment  = (c['booking_id'] as num?) != null && totalAmount > 0;
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       decoration: BoxDecoration(
                         color: AppColors.brandGreenSurface,
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(color: AppColors.brandGreenLight),
                       ),
-                      child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                        Icon(Icons.add_rounded, size: 18, color: AppColors.brandGreen),
-                        SizedBox(width: 6),
-                        Text('Add New Customer',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-                      ]),
-                    ),
-                  ),
-
-                if (_showNewCustomerForm) ...[
-                  // Name
-                  _FormField(
-                    label: 'Full Name *',
-                    controller: _ncNameCtrl,
-                    hint: 'Enter customer name',
-                    icon: Icons.person_outline,
-                    keyboardType: TextInputType.name,
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Mobile
-                  _FormField(
-                    label: 'Mobile Number *',
-                    controller: _ncMobileCtrl,
-                    hint: '10-digit mobile number',
-                    icon: Icons.phone_outlined,
-                    keyboardType: TextInputType.phone,
-                    maxLength: 10,
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Email
-                  _FormField(
-                    label: 'Email Address',
-                    controller: _ncEmailCtrl,
-                    hint: 'example@email.com',
-                    icon: Icons.email_outlined,
-                    keyboardType: TextInputType.emailAddress,
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Date of Birth
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Date of Birth',
-                          style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                      const SizedBox(height: 6),
-                      GestureDetector(
-                        onTap: _pickNcDate,
-                        child: Container(
-                          height: 50,
-                          padding: const EdgeInsets.symmetric(horizontal: 14),
-                          decoration: BoxDecoration(
-                            color: AppColors.background,
-                            border: Border.all(color: AppColors.divider),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Row(children: [
-                            const Icon(Icons.cake_outlined, size: 18, color: AppColors.textHint),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                _ncDobCtrl.text.isEmpty ? 'DD/MM/YYYY' : _ncDobCtrl.text,
-                                style: TextStyle(
-                                    fontSize: 14,
-                                    color: _ncDobCtrl.text.isEmpty
-                                        ? AppColors.textHint
-                                        : AppColors.textPrimary),
-                              ),
+                      child: Row(children: [
+                        const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
+                        const SizedBox(width: 8),
+                        Expanded(child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
+                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                             ),
-                            if (_ncCalculatedAge != null)
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            if ((c['booking_ref'] as String?) != null)
+                              Text(c['booking_ref'] as String,
+                                  style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                          ],
+                        )),
+                        if (hasPayment)
+                          isPaid
+                            ? Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                 decoration: BoxDecoration(
-                                  color: AppColors.brandGreenSurface,
-                                  borderRadius: BorderRadius.circular(20),
+                                  color: AppColors.brandGreen.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(6),
                                 ),
-                                child: Text('$_ncCalculatedAge yrs',
-                                    style: const TextStyle(
-                                        fontSize: 12,
-                                        color: AppColors.brandGreen,
-                                        fontWeight: FontWeight.w600)),
+                                child: const Text('Paid ✓',
+                                    style: TextStyle(fontSize: 11, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
+                              )
+                            : Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFE3F2FD),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text('₹${amountDue.toInt()} due',
+                                    style: const TextStyle(fontSize: 11, color: Color(0xFF1565C0), fontWeight: FontWeight.w600)),
                               ),
-                            const SizedBox(width: 6),
-                            const Icon(Icons.calendar_month_outlined,
-                                size: 18, color: AppColors.textSecondary),
-                          ]),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Gender
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('Gender',
-                          style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                      const SizedBox(height: 6),
-                      Wrap(
-                        spacing: 8, runSpacing: 6,
-                        children: ['Male', 'Female', 'Other'].map((g) => GestureDetector(
-                          onTap: () => setState(() => _ncGender = g),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 150),
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: _ncGender == g ? AppColors.brandGreen : Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: _ncGender == g ? AppColors.brandGreen : AppColors.divider),
-                            ),
-                            child: Text(g,
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                    color: _ncGender == g ? Colors.white : AppColors.textSecondary)),
-                          ),
-                        )).toList(),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-
-                  // Relation
-                  DropdownButtonFormField<String>(
-                    value: _ncRelCtrl.text.isEmpty ? null : _ncRelCtrl.text,
-                    isExpanded: true,
-                    hint: const Text('Relation to patient',
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 13, color: AppColors.textHint)),
-                    decoration: InputDecoration(
-                      prefixIcon: const Icon(Icons.group_outlined, size: 18, color: AppColors.textHint),
-                      filled: true, fillColor: AppColors.background,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    ),
-                    items: _ncRelations.map((r) => DropdownMenuItem(value: r, child: Text(r, style: const TextStyle(fontSize: 13)))).toList(),
-                    onChanged: (v) => setState(() => _ncRelCtrl.text = v ?? ''),
-                  ),
-                  const SizedBox(height: 12),
-
-                  // Health Condition / Notes
-                  _FormField(
-                    label: 'Health Condition / Notes',
-                    controller: _ncHealthCtrl,
-                    hint: 'e.g. Diabetes, Hypertension, Thyroid…',
-                    icon: Icons.medical_information_outlined,
-                    maxLines: 2,
-                  ),
-                  const SizedBox(height: 12),
-
-                  // Tests for new customer
-                  const Text('Tests for this customer',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                      ]),
+                    );
+                  }),
                   const SizedBox(height: 8),
-
-                  if (_additionalCustomerTests.isEmpty)
-                    const Text('No tests added yet.',
-                        style: TextStyle(fontSize: 12, color: AppColors.textHint)),
-
-                  ..._additionalCustomerTests.map((t) => Container(
-                    margin: const EdgeInsets.only(bottom: 6),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: AppColors.divider),
-                    ),
-                    child: Row(children: [
-                      Expanded(child: Text(t['name'] ?? '',
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500))),
-                      Text('₹${t['price'] ?? '0'}',
-                          style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-                      const SizedBox(width: 8),
-                      GestureDetector(
-                        onTap: () => setState(() => _additionalCustomerTests.removeWhere((x) => x['id'] == t['id'])),
-                        child: const Icon(Icons.close_rounded, size: 16, color: AppColors.textHint),
-                      ),
-                    ]),
-                  )),
-
-                  const SizedBox(height: 6),
-                  // Add test — search and select
-                  if (!_showAddCustTest)
-                    GestureDetector(
-                      onTap: () => setState(() => _showAddCustTest = true),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: AppColors.brandGreenLight),
-                        ),
-                        child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                          Icon(Icons.add_circle_outline, size: 15, color: AppColors.brandGreen),
-                          SizedBox(width: 6),
-                          Text('Add Test', style: TextStyle(fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w500)),
-                        ]),
-                      ),
-                    ),
-
-                  if (_showAddCustTest) ...[
-                    const SizedBox(height: 8),
-                    TextField(
-                      autofocus: true,
-                      onChanged: (v) => setState(() => _custTestSearch = v),
-                      style: const TextStyle(fontSize: 14),
-                      decoration: InputDecoration(
-                        hintText: 'Search test…',
-                        hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
-                        prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
-                        suffixIcon: GestureDetector(
-                          onTap: () => setState(() { _showAddCustTest = false; _custTestSearch = ''; }),
-                          child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
-                        ),
-                        filled: true, fillColor: AppColors.background,
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                        contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    ..._filteredCustCatalogue.take(5).map((t) => GestureDetector(
-                      onTap: () => setState(() {
-                        _additionalCustomerTests.add(Map<String, String>.from(t));
-                        _showAddCustTest = false;
-                        _custTestSearch = '';
-                      }),
-                      child: Container(
-                        margin: const EdgeInsets.only(bottom: 6),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: AppColors.divider),
-                        ),
-                        child: Row(children: [
-                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Text(t['name'] ?? '', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                            Text(t['category'] ?? '', style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                          ])),
-                          Text('₹${t['price']}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen)),
-                          const SizedBox(width: 8),
-                          const Icon(Icons.add_circle_outline, size: 18, color: AppColors.brandGreen),
-                        ]),
-                      ),
-                    )),
-                  ],
-
-                  const SizedBox(height: 14),
-
-                  // Submit / Cancel
-                  Row(children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () => setState(() {
-                          _showNewCustomerForm = false;
-                          _ncNameCtrl.clear(); _ncMobileCtrl.clear();
-                          _ncEmailCtrl.clear(); _ncDobCtrl.clear();
-                          _ncRelCtrl.clear(); _ncHealthCtrl.clear();
-                          _ncDob = null; _ncCalculatedAge = null;
-                          _ncGender = null; _additionalCustomerTests.clear();
-                          _showAddCustTest = false; _custTestSearch = '';
-                        }),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.textSecondary,
-                          side: const BorderSide(color: AppColors.divider),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                        child: const Text('Cancel'),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: (_ncNameCtrl.text.trim().isNotEmpty &&
-                                _ncMobileCtrl.text.trim().length == 10)
-                            ? () => _saveNewCustomer()
-                              
-                            : null,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.brandGreen,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                        child: const Text('Save Customer',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                      ),
-                    ),
-                  ]),
                 ],
+
+                // Disabled with lock icon once visit is finalized — no new family members after OTP.
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _isFinalized ? null : _openAddVisitMemberSheet,
+                    icon: Icon(
+                      _isFinalized ? Icons.lock_outline_rounded : Icons.person_add_outlined,
+                      size: 16,
+                    ),
+                    label: Text(_isFinalized ? 'Visit Member Locked' : 'Add Visit Member'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _isFinalized ? AppColors.textHint : AppColors.brandGreen,
+                      side: BorderSide(
+                        color: _isFinalized ? AppColors.divider : AppColors.brandGreen,
+                      ),
+                      padding: const EdgeInsets.symmetric(vertical: 11),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
         ],
       ),
 
-      // Bottom save bar (hidden after completed)
-      bottomNavigationBar: _isCompleted
-          ? null
-          : Container(
+      bottomNavigationBar: Container(
               padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
               decoration: const BoxDecoration(
                 color: Colors.white,
@@ -1606,25 +2203,31 @@ class _TechnicianBookingDetailScreenState
                 height: 50,
                 child: ElevatedButton(
                   onPressed: () {
-                    // TODO: PUT /api/bookings/${widget.booking.id} { tests: _selectedTests }
-                    Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text('Changes saved'),
-                      backgroundColor: AppColors.brandGreen,
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    ));
+                    if (!_isCompleted) {
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: const Text('Changes saved'),
+                        backgroundColor: AppColors.brandGreen,
+                        behavior: SnackBarBehavior.floating,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ));
+                    }
+                    Navigator.pop(context, _isCompleted ? true : null);
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen, foregroundColor: Colors.white,
+                    backgroundColor: AppColors.brandGreen,
+                    foregroundColor: Colors.white,
                     elevation: 0,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
-                  child: const Text('Save Changes', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500)),
+                  child: Text(
+                    _isCompleted ? 'Done' : 'Save Changes',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+                  ),
                 ),
               ),
             ),
-    );
+      ),   // Scaffold
+    );     // PopScope
   }
 
   String _formatDate(DateTime d) {
@@ -1754,7 +2357,6 @@ class _CompleteStep extends StatelessWidget {
       ),
       child: Row(
         children: [
-          // Step circle
           Container(
             width: 32, height: 32,
             decoration: BoxDecoration(
@@ -1779,7 +2381,6 @@ class _CompleteStep extends StatelessWidget {
           ),
           const SizedBox(width: 12),
 
-          // Text
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1796,7 +2397,6 @@ class _CompleteStep extends StatelessWidget {
           ),
           const SizedBox(width: 10),
 
-          // Button
           GestureDetector(
             onTap: onTap,
             child: Container(
@@ -1832,7 +2432,6 @@ class _FormField extends StatelessWidget {
   final String hint;
   final IconData icon;
   final TextInputType keyboardType;
-  final int? maxLength;
   final int maxLines;
 
   const _FormField({
@@ -1841,7 +2440,6 @@ class _FormField extends StatelessWidget {
     required this.hint,
     required this.icon,
     this.keyboardType = TextInputType.text,
-    this.maxLength,
     this.maxLines = 1,
   });
 
@@ -1855,7 +2453,7 @@ class _FormField extends StatelessWidget {
           TextField(
             controller: controller,
             keyboardType: keyboardType,
-            maxLength: maxLength,
+
             maxLines: maxLines,
             style: const TextStyle(fontSize: 14),
             decoration: InputDecoration(
@@ -1907,7 +2505,17 @@ class _DocThumbnailCard extends StatelessWidget {
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(10),
-              child: Image.memory(doc.bytes, fit: BoxFit.cover),
+              child: doc.isUploading
+                  ? const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
+                  : doc.bytes != null
+                      ? Image.memory(doc.bytes!, fit: BoxFit.cover)
+                      : Image.network(
+                          doc.url!,
+                          fit: BoxFit.cover,
+                          loadingBuilder: (_, child, progress) =>
+                              progress == null ? child : const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                          errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: AppColors.textHint),
+                        ),
             ),
           ),
           Positioned(
@@ -2056,12 +2664,25 @@ class _DocImageViewerPageState extends State<_DocImageViewerPage> {
               controller: _pageCtrl,
               itemCount: widget.images.length,
               onPageChanged: (i) => setState(() => _current = i),
-              itemBuilder: (_, i) => InteractiveViewer(
-                maxScale: 5.0,
-                child: Center(
-                  child: Image.memory(widget.images[i].bytes, fit: BoxFit.contain),
-                ),
-              ),
+              itemBuilder: (_, i) {
+                final doc = widget.images[i];
+                return InteractiveViewer(
+                  maxScale: 5.0,
+                  child: Center(
+                    child: doc.bytes != null
+                        ? Image.memory(doc.bytes!, fit: BoxFit.contain)
+                        : Image.network(
+                            doc.url!,
+                            fit: BoxFit.contain,
+                            loadingBuilder: (_, child, progress) => progress == null
+                                ? child
+                                : const CircularProgressIndicator(color: Colors.white),
+                            errorBuilder: (_, __, ___) => const Icon(
+                                Icons.broken_image, color: Colors.white54, size: 48),
+                          ),
+                  ),
+                );
+              },
             ),
           ),
           if (widget.images.length > 1)
@@ -2083,4 +2704,1006 @@ class _DocImageViewerPageState extends State<_DocImageViewerPage> {
             ),
         ]),
       );
+}
+
+// ─── Add Visit Member bottom sheet ───────────────────────────────────────────
+
+class _AddVisitMemberSheet extends StatefulWidget {
+  final int parentBookingId;
+  final List<Map<String, String>> catalogueItems;
+  final Set<String> parentTestIds;
+  // Patient IDs already linked to this visit — excluded from the picker
+  // so the technician cannot add the same person twice.
+  final Set<int> linkedPatientIds;
+
+  const _AddVisitMemberSheet({
+    required this.parentBookingId,
+    required this.catalogueItems,
+    required this.parentTestIds,
+    required this.linkedPatientIds,
+  });
+
+  @override
+  State<_AddVisitMemberSheet> createState() => _AddVisitMemberSheetState();
+}
+
+class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
+  // 0 = patient info, 1 = test selection, 2 = queue review
+  int _step = 0;
+  // 'select' shows family cards; 'newPatient' shows the mobile+form
+  String _mode = 'select';
+
+  // ── Queued members awaiting Submit All ──────────────────────────────────
+  final List<Map<String, dynamic>> _queuedMembers = [];
+
+  // ── Family members (loaded on init) ─────────────────────────────────────
+  bool _loadingFamily = true;
+  List<Map<String, dynamic>> _familyMembers = [];
+  Map<String, dynamic>? _selectedFamilyMember;
+
+  // ── New patient form ─────────────────────────────────────────────────────
+  final _mobileCtrl = TextEditingController();
+  bool _isSearching = false;
+  Map<String, dynamic>? _foundPatient;
+  bool _searchedWithNoResult = false;
+  final _nameCtrl   = TextEditingController();
+  final _dobCtrl    = TextEditingController();
+  final _healthCtrl = TextEditingController();
+  DateTime? _dob;
+  int? _age;
+  String? _gender;
+  String? _relation;
+
+  // ── Test selection ───────────────────────────────────────────────────────
+  final Set<String> _selectedTestIds = {};
+  String _testSearch = '';
+  bool _isSaving = false;
+
+  static const _relations = [
+    'Self','Spouse','Father','Mother','Son','Daughter','Brother','Sister','Other',
+  ];
+
+  static const _avatarColors = [
+    Color(0xFF1565C0), Color(0xFF2E7D32), Color(0xFFE65100),
+    Color(0xFF6A1B9A), Color(0xFFC62828), Color(0xFF00695C),
+    Color(0xFF4527A0), Color(0xFF558B2F), Color(0xFF00838F),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _nameCtrl.addListener(_onFormChanged);
+    _mobileCtrl.addListener(_onFormChanged);
+    _loadFamilyMembers();
+  }
+
+  void _onFormChanged() { if (mounted) setState(() {}); }
+
+  // Family members minus anyone already on this visit or already queued this session.
+  List<Map<String, dynamic>> get _availableMembers {
+    final queuedIds = _queuedMembers
+        .map((m) => (m['patientId'] as num?)?.toInt() ?? 0)
+        .where((id) => id > 0)
+        .toSet();
+    return _familyMembers.where((m) {
+      final id = (m['patient_id'] as num?)?.toInt() ?? 0;
+      return !widget.linkedPatientIds.contains(id) && !queuedIds.contains(id);
+    }).toList();
+  }
+
+  Future<void> _loadFamilyMembers() async {
+    try {
+      final members = await ApiService.getBookingFamily(widget.parentBookingId);
+      if (!mounted) return;
+      setState(() {
+        _familyMembers = members;
+        _loadingFamily = false;
+        // Switch to form if no selectable members remain after filtering
+        if (_availableMembers.isEmpty) _mode = 'newPatient';
+      });
+    } catch (_) {
+      if (mounted) setState(() { _loadingFamily = false; _mode = 'newPatient'; });
+    }
+  }
+
+  @override
+  void dispose() {
+    _mobileCtrl.dispose();
+    _nameCtrl.dispose();
+    _dobCtrl.dispose();
+    _healthCtrl.dispose();
+    super.dispose();
+  }
+
+  Color _avatarColor(String name) {
+    if (name.isEmpty) return _avatarColors[0];
+    return _avatarColors[name.codeUnitAt(0) % _avatarColors.length];
+  }
+
+  double get _selectedTotal => widget.catalogueItems
+      .where((t) => _selectedTestIds.contains(t['id']))
+      .fold(0.0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
+
+  double get _queuedTotal => _queuedMembers
+      .fold(0.0, (s, m) => s + ((m['total'] as num?)?.toDouble() ?? 0.0));
+
+  List<Map<String, String>> get _filteredTests {
+    final available = widget.catalogueItems
+        .where((t) => !widget.parentTestIds.contains(t['id']))
+        .toList();
+    if (_testSearch.isEmpty) return available;
+    final q = _testSearch.toLowerCase();
+    return available.where((t) =>
+        (t['name']?.toLowerCase().contains(q) ?? false) ||
+        (t['category']?.toLowerCase().contains(q) ?? false)).toList();
+  }
+
+  void _selectFamilyMember(Map<String, dynamic> m) {
+    setState(() {
+      _selectedFamilyMember = m;
+      _foundPatient = m;
+      _nameCtrl.text   = (m['patient_name']   as String?) ?? '';
+      _mobileCtrl.text = (m['patient_mobile'] as String?) ?? '';
+    });
+  }
+
+  Future<void> _searchPatient() async {
+    final mobile = _mobileCtrl.text.trim();
+    if (mobile.length != 10) return;
+    setState(() { _isSearching = true; _foundPatient = null; _searchedWithNoResult = false; });
+    try {
+      final result = await ApiService.lookupPatientByMobile(
+        mobile: mobile,
+        bookingId: widget.parentBookingId,
+      );
+      if (!mounted) return;
+      setState(() {
+        _foundPatient = result;
+        _isSearching = false;
+        _searchedWithNoResult = result == null;
+        if (result != null && _nameCtrl.text.trim().isEmpty) {
+          _nameCtrl.text = result['patient_name'] as String? ?? '';
+        }
+      });
+    } catch (_) {
+      if (mounted) setState(() { _isSearching = false; _searchedWithNoResult = true; });
+    }
+  }
+
+  Future<void> _pickDob() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _dob ?? DateTime(now.year - 30),
+      firstDate: DateTime(now.year - 120),
+      lastDate: now,
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+            colorScheme: const ColorScheme.light(primary: AppColors.brandGreen)),
+        child: child!,
+      ),
+    );
+    if (picked != null && mounted) {
+      int age = now.year - picked.year;
+      if (now.month < picked.month ||
+          (now.month == picked.month && now.day < picked.day)) { age--; }
+      setState(() {
+        _dob = picked;
+        _age = age;
+        _dobCtrl.text =
+            '${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}';
+      });
+    }
+  }
+
+  void _onNextStep() {
+    if (_mode == 'select') {
+      if (_selectedFamilyMember == null) return;
+    } else {
+      if (_nameCtrl.text.trim().isEmpty || _mobileCtrl.text.trim().length != 10) return;
+    }
+    setState(() => _step = 1);
+  }
+
+  // Builds the member payload from the current form and appends to _queuedMembers,
+  // then resets the form so the technician can add another member.
+  void _addToQueue() {
+    if (_selectedTestIds.isEmpty) return;
+
+    final String name;
+    final String mobile;
+    int? patientId;
+    int? age;
+    String? gender;
+    String? relation;
+    String? dobStr;
+
+    if (_mode == 'select') {
+      name      = (_selectedFamilyMember?['patient_name']   as String? ?? '').trim();
+      mobile    = (_selectedFamilyMember?['patient_mobile'] as String? ?? '').trim();
+      patientId = (_selectedFamilyMember?['patient_id']     as num?)?.toInt();
+      age       = (_selectedFamilyMember?['patient_age']    as num?)?.toInt();
+      gender    = _selectedFamilyMember?['patient_gender']  as String?;
+      relation  = _selectedFamilyMember?['patient_relation'] as String?;
+    } else {
+      name      = _nameCtrl.text.trim();
+      mobile    = _mobileCtrl.text.trim();
+      patientId = (_foundPatient?['patient_id'] as num?)?.toInt();
+      age       = _age;
+      gender    = _gender;
+      relation  = _relation;
+      if (_dob != null) {
+        dobStr = '${_dob!.year}-${_dob!.month.toString().padLeft(2,'0')}-${_dob!.day.toString().padLeft(2,'0')}';
+      }
+    }
+
+    final tests = widget.catalogueItems
+        .where((t) => _selectedTestIds.contains(t['id']))
+        .map((t) => <String, dynamic>{
+              'productId': int.tryParse(t['id'] ?? '0') ?? 0,
+              'price': double.tryParse(t['price'] ?? '0') ?? 0.0,
+            })
+        .where((t) => (t['productId'] as int) > 0)
+        .toList();
+
+    final totalAmount = _selectedTotal;
+
+    setState(() {
+      _queuedMembers.add({
+        'name':       name,
+        'mobile':     mobile,
+        if (patientId != null) 'patientId': patientId,
+        if (dobStr != null)    'dob':       dobStr,
+        if (age != null)       'age':       age,
+        if (gender != null)    'gender':    gender,
+        if (relation != null)  'relation':  relation,
+        if (_healthCtrl.text.trim().isNotEmpty) 'healthNotes': _healthCtrl.text.trim(),
+        'tests': tests,
+        'total': totalAmount,  // UI-only field, stripped before API call
+      });
+      _step = 2;
+    });
+  }
+
+  void _addAnotherMember() {
+    setState(() {
+      _step = 0;
+      _mode = _availableMembers.isEmpty ? 'newPatient' : 'select';
+      _selectedFamilyMember = null;
+      _foundPatient = null;
+      _searchedWithNoResult = false;
+      _mobileCtrl.clear();
+      _nameCtrl.clear();
+      _dobCtrl.clear();
+      _healthCtrl.clear();
+      _dob = null; _age = null; _gender = null; _relation = null;
+      _selectedTestIds.clear();
+      _testSearch = '';
+    });
+  }
+
+  Future<void> _submitAll() async {
+    if (_queuedMembers.isEmpty) return;
+    setState(() => _isSaving = true);
+
+    // Strip the UI-only 'total' field before sending to server
+    final apiMembers = _queuedMembers.map((m) {
+      final copy = Map<String, dynamic>.from(m);
+      copy.remove('total');
+      return copy;
+    }).toList();
+
+    try {
+      final result = await ApiService.addVisitMembers(
+        parentBookingId: widget.parentBookingId,
+        members: apiMembers,
+      );
+      if (!mounted) return;
+      if (result != null) {
+        final firstName = (_queuedMembers.first['name'] as String? ?? '');
+        Navigator.pop(context, {
+          'count':     _queuedMembers.length,
+          'firstName': firstName,
+          'members':   result['members'],
+        });
+      } else {
+        setState(() => _isSaving = false);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to add members — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (e) {
+      debugPrint('[_AddVisitMemberSheet._submitAll] ERROR: $e');
+      if (mounted) {
+        setState(() => _isSaving = false);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to add members — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
+  }
+
+  // ── Build ────────────────────────────────────────────────────────────────
+
+  bool get _canProceed {
+    if (_step == 2) return _queuedMembers.isNotEmpty;
+    if (_step == 1) return _selectedTestIds.isNotEmpty;
+    if (_mode == 'select') return _selectedFamilyMember != null;
+    return _nameCtrl.text.trim().isNotEmpty && _mobileCtrl.text.trim().length == 10;
+  }
+
+  String get _headerTitle {
+    if (_step == 2) return 'Review Members (${_queuedMembers.length})';
+    if (_step == 1) {
+      final n = _mode == 'select'
+          ? (_selectedFamilyMember?['patient_name'] as String? ?? _nameCtrl.text.trim())
+          : _nameCtrl.text.trim();
+      return 'Select Tests for $n';
+    }
+    if (_mode == 'newPatient' && _availableMembers.isNotEmpty) return 'Add New Customer';
+    return 'Add Visit Member';
+  }
+
+  bool get _showBackArrow =>
+      _step == 1 ||
+      _step == 2 ||
+      (_step == 0 && _mode == 'newPatient' && _availableMembers.isNotEmpty);
+
+  void _onBack() {
+    if (_step == 2) {
+      // Return to test selection for the last queued member, or to patient form if queue is empty
+      if (_queuedMembers.isNotEmpty) {
+        final last = _queuedMembers.removeLast();
+        final tests = last['tests'] as List? ?? [];
+        setState(() {
+          _step = 1;
+          _selectedTestIds
+            ..clear()
+            ..addAll(tests.map((t) => t['productId']?.toString() ?? '').where((id) => id.isNotEmpty));
+        });
+      } else {
+        setState(() => _step = 0);
+      }
+    } else if (_step == 1) {
+      setState(() { _step = 0; _selectedTestIds.clear(); _testSearch = ''; });
+    } else if (_step == 0) {
+      setState(() { _mode = 'select'; _mobileCtrl.clear(); _nameCtrl.clear();
+                    _foundPatient = null; _searchedWithNoResult = false; });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottom = MediaQuery.of(context).padding.bottom;
+    return DraggableScrollableSheet(
+      initialChildSize: 0.85,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (_, scroll) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: Column(children: [
+          Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.only(top: 12, bottom: 4),
+            decoration: BoxDecoration(
+                color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Row(children: [
+              if (_showBackArrow) ...[
+                GestureDetector(
+                  onTap: _onBack,
+                  child: const Icon(Icons.arrow_back_rounded, size: 20,
+                      color: AppColors.textPrimary),
+                ),
+                const SizedBox(width: 10),
+              ],
+              Expanded(
+                child: Text(
+                  _headerTitle,
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 12),
+          const Divider(height: 1),
+          Expanded(child: switch (_step) {
+            0 => _buildStep0(scroll),
+            1 => _buildTestStep(scroll),
+            _ => _buildReviewStep(scroll),
+          }),
+          Padding(
+            padding: EdgeInsets.fromLTRB(16, 8, 16, bottom + 12),
+            child: SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: _isSaving ? null : switch (_step) {
+                  0 => _canProceed ? _onNextStep : null,
+                  1 => _canProceed ? _addToQueue : null,
+                  _ => _canProceed ? _submitAll  : null,
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _canProceed
+                      ? AppColors.brandGreen
+                      : AppColors.brandGreen.withValues(alpha: 0.35),
+                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: _isSaving
+                    ? const SizedBox(width: 20, height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : Text(
+                        switch (_step) {
+                          0 => 'Next: Select Tests',
+                          1 => _selectedTestIds.isEmpty
+                              ? 'Select at least one test'
+                              : 'Add to Queue · ₹${_selectedTotal.toInt()}',
+                          _ => 'Submit ${_queuedMembers.length} Member${_queuedMembers.length == 1 ? '' : 's'}'
+                              ' · ₹${_queuedTotal.toInt()}',
+                        },
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                      ),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildStep0(ScrollController scroll) =>
+      _mode == 'select' ? _buildSelectMode(scroll) : _buildNewPatientForm(scroll);
+
+  // ── Step 0-A: Family member cards ────────────────────────────────────────
+
+  Widget _buildSelectMode(ScrollController scroll) {
+    if (_loadingFamily) {
+      return const Center(
+        child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+      );
+    }
+    return SingleChildScrollView(
+      controller: scroll,
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Select a family member',
+            style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+        const SizedBox(height: 12),
+
+        ..._availableMembers.map(_buildFamilyCard),
+
+        const SizedBox(height: 4),
+        const Divider(height: 24),
+
+        // Add new customer option
+        GestureDetector(
+          onTap: () => setState(() => _mode = 'newPatient'),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.divider),
+            ),
+            child: Row(children: [
+              Container(
+                width: 44, height: 44,
+                decoration: BoxDecoration(
+                  color: AppColors.brandGreenSurface,
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: const Icon(Icons.person_add_rounded,
+                    size: 20, color: AppColors.brandGreen),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Add New Customer',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                          color: AppColors.textPrimary)),
+                  SizedBox(height: 2),
+                  Text('Search or create a new patient',
+                      style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ]),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: AppColors.textHint),
+            ]),
+          ),
+        ),
+        const SizedBox(height: 8),
+      ]),
+    );
+  }
+
+  Widget _buildFamilyCard(Map<String, dynamic> m) {
+    final name     = (m['patient_name']   as String?) ?? '';
+    final relation = (m['patient_relation'] as String?) ?? '';
+    final mobile   = (m['patient_mobile'] as String?) ?? '';
+    final isSelected = _selectedFamilyMember == m;
+    final initial  = name.isNotEmpty ? name[0].toUpperCase() : '?';
+    final color    = _avatarColor(name);
+
+    return GestureDetector(
+      onTap: () => _selectFamilyMember(m),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: isSelected ? AppColors.brandGreenSurface : Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: isSelected ? AppColors.brandGreen : AppColors.divider,
+            width: isSelected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(children: [
+          CircleAvatar(
+            radius: 22,
+            backgroundColor: color.withValues(alpha: 0.15),
+            child: Text(initial,
+                style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 17)),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(name, style: const TextStyle(
+                fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            const SizedBox(height: 3),
+            Row(children: [
+              if (relation.isNotEmpty) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(relation, style: TextStyle(
+                      fontSize: 11, color: color, fontWeight: FontWeight.w500)),
+                ),
+                const SizedBox(width: 6),
+              ],
+              if (mobile.isNotEmpty)
+                Text(mobile, style: const TextStyle(
+                    fontSize: 12, color: AppColors.textSecondary)),
+            ]),
+          ])),
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            width: 20, height: 20,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: isSelected ? AppColors.brandGreen : AppColors.divider,
+                width: isSelected ? 2 : 1.5,
+              ),
+              color: Colors.white,
+            ),
+            child: isSelected
+                ? Center(child: Container(
+                    width: 10, height: 10,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppColors.brandGreen,
+                    ),
+                  ))
+                : null,
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // ── Step 0-B: New patient form ────────────────────────────────────────────
+
+  Widget _buildNewPatientForm(ScrollController scroll) {
+    return SingleChildScrollView(
+      controller: scroll,
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Mobile Number *',
+            style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+        const SizedBox(height: 6),
+        Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _mobileCtrl,
+              keyboardType: TextInputType.phone,
+              maxLength: 10,
+              autofocus: true,
+              style: const TextStyle(fontSize: 15),
+              decoration: InputDecoration(
+                hintText: '10-digit mobile number',
+                hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 14),
+                prefixIcon: const Icon(Icons.phone_outlined, size: 18, color: AppColors.textHint),
+                counterText: '',
+                filled: true, fillColor: AppColors.background,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: AppColors.divider)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: AppColors.divider)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                contentPadding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            height: 50,
+            child: ElevatedButton(
+              onPressed: _isSearching ? null : _searchPatient,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.brandGreen,
+                disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.5),
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              child: _isSearching
+                  ? const SizedBox(width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.search_rounded, size: 20, color: Colors.white),
+            ),
+          ),
+        ]),
+
+        if (_foundPatient != null) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.brandGreenSurface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.brandGreenLight),
+            ),
+            child: Row(children: [
+              const Icon(Icons.person_pin_rounded, size: 16, color: AppColors.brandGreen),
+              const SizedBox(width: 8),
+              Expanded(child: Text(
+                _foundPatient!['patient_name'] as String? ?? '',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                    color: AppColors.brandGreen),
+              )),
+              const Text('Existing patient',
+                  style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+            ]),
+          ),
+        ] else if (_searchedWithNoResult) ...[
+          const SizedBox(height: 8),
+          const Row(children: [
+            Icon(Icons.person_add_outlined, size: 14, color: AppColors.textSecondary),
+            SizedBox(width: 6),
+            Text('New patient — fill details below',
+                style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+          ]),
+        ],
+
+        const SizedBox(height: 14),
+
+        _FormField(
+          label: 'Full Name *',
+          controller: _nameCtrl,
+          hint: 'Enter full name',
+          icon: Icons.person_outline,
+          keyboardType: TextInputType.name,
+        ),
+        const SizedBox(height: 10),
+
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Date of Birth',
+              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+          const SizedBox(height: 6),
+          GestureDetector(
+            onTap: _pickDob,
+            child: Container(
+              height: 50,
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: AppColors.background,
+                border: Border.all(color: AppColors.divider),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(children: [
+                const Icon(Icons.cake_outlined, size: 18, color: AppColors.textHint),
+                const SizedBox(width: 10),
+                Expanded(child: Text(
+                  _dobCtrl.text.isEmpty ? 'DD / MM / YYYY' : _dobCtrl.text,
+                  style: TextStyle(fontSize: 14,
+                      color: _dobCtrl.text.isEmpty
+                          ? AppColors.textHint : AppColors.textPrimary),
+                )),
+                if (_age != null)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreenSurface,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text('$_age yrs', style: const TextStyle(
+                        fontSize: 12, color: AppColors.brandGreen,
+                        fontWeight: FontWeight.w600)),
+                  ),
+                const SizedBox(width: 6),
+                const Icon(Icons.calendar_month_outlined, size: 18,
+                    color: AppColors.textSecondary),
+              ]),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 10),
+
+        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Gender',
+              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8, runSpacing: 6,
+            children: ['Male', 'Female', 'Other'].map((g) => GestureDetector(
+              onTap: () => setState(() => _gender = g),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: _gender == g ? AppColors.brandGreen : Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                      color: _gender == g ? AppColors.brandGreen : AppColors.divider),
+                ),
+                child: Text(g, style: TextStyle(
+                    fontSize: 12, fontWeight: FontWeight.w500,
+                    color: _gender == g ? Colors.white : AppColors.textSecondary)),
+              ),
+            )).toList(),
+          ),
+        ]),
+        const SizedBox(height: 10),
+
+        Container(
+          height: 50,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: AppColors.background,
+            border: Border.all(color: AppColors.divider),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(children: [
+            const Icon(Icons.group_outlined, size: 18, color: AppColors.textHint),
+            const SizedBox(width: 8),
+            Expanded(
+              child: DropdownButton<String>(
+                value: _relation,
+                isExpanded: true,
+                underline: const SizedBox(),
+                hint: const Text('Relation to primary patient',
+                    style: TextStyle(fontSize: 13, color: AppColors.textHint)),
+                style: const TextStyle(fontSize: 13, color: AppColors.textPrimary),
+                items: _relations.map((r) =>
+                    DropdownMenuItem(value: r, child: Text(r))).toList(),
+                onChanged: (v) => setState(() => _relation = v),
+              ),
+            ),
+          ]),
+        ),
+        const SizedBox(height: 10),
+
+        _FormField(
+          label: 'Health Condition / Notes',
+          controller: _healthCtrl,
+          hint: 'e.g. Diabetes, Hypertension, Thyroid…',
+          icon: Icons.medical_information_outlined,
+          maxLines: 2,
+        ),
+        const SizedBox(height: 20),
+      ]),
+    );
+  }
+
+  // ── Step 1: Test selection ────────────────────────────────────────────────
+
+  Widget _buildTestStep(ScrollController scroll) {
+    final filtered = _filteredTests;
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+        child: TextField(
+          onChanged: (v) => setState(() => _testSearch = v),
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(
+            hintText: 'Search test or package…',
+            hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
+            prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
+            filled: true, fillColor: AppColors.background,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.divider)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.divider)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+            contentPadding: const EdgeInsets.symmetric(vertical: 10),
+          ),
+        ),
+      ),
+      Expanded(
+        child: ListView.separated(
+          controller: scroll,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          itemCount: filtered.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (_, i) {
+            final t = filtered[i];
+            final checked = _selectedTestIds.contains(t['id']);
+            return CheckboxListTile(
+              value: checked,
+              onChanged: (v) => setState(() {
+                if (v!) { _selectedTestIds.add(t['id']!); }
+                else     { _selectedTestIds.remove(t['id']); }
+              }),
+              activeColor: AppColors.brandGreen,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              title: Text(t['name'] ?? '',
+                  style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+              subtitle: (t['category'] ?? '').isNotEmpty
+                  ? Text(t['category']!,
+                      style: const TextStyle(fontSize: 11, color: AppColors.brandGreen))
+                  : null,
+              secondary: Text('₹${t['price'] ?? '0'}',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary)),
+              controlAffinity: ListTileControlAffinity.leading,
+            );
+          },
+        ),
+      ),
+    ]);
+  }
+
+  // ── Step 2: Queue review ──────────────────────────────────────────────────
+
+  Widget _buildReviewStep(ScrollController scroll) {
+    return SingleChildScrollView(
+      controller: scroll,
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+        // Info banner
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          margin: const EdgeInsets.only(bottom: 16),
+          decoration: BoxDecoration(
+            color: AppColors.brandGreenSurface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: AppColors.brandGreenLight),
+          ),
+          child: const Row(children: [
+            Icon(Icons.info_outline_rounded, size: 16, color: AppColors.brandGreen),
+            SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Payment will be collected after submission from the Collect Payment section.',
+                style: TextStyle(fontSize: 12, color: AppColors.brandGreen),
+              ),
+            ),
+          ]),
+        ),
+
+        // Member cards
+        ..._queuedMembers.asMap().entries.map((entry) {
+          final i = entry.key;
+          final m = entry.value;
+          final name   = m['name'] as String? ?? '';
+          final mobile = m['mobile'] as String? ?? '';
+          final total  = (m['total'] as num?)?.toDouble() ?? 0.0;
+          final tests  = m['tests'] as List? ?? [];
+          final color  = _avatarColor(name);
+          final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
+
+          return Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.divider),
+            ),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              CircleAvatar(
+                radius: 20,
+                backgroundColor: color.withValues(alpha: 0.15),
+                child: Text(initial,
+                    style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 15)),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Expanded(child: Text(name,
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                          color: AppColors.textPrimary))),
+                  Text('₹${total.toInt()}',
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary)),
+                ]),
+                if (mobile.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(mobile,
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ],
+                const SizedBox(height: 6),
+                Text('${tests.length} test${tests.length == 1 ? '' : 's'} selected',
+                    style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+              ])),
+              GestureDetector(
+                onTap: () => setState(() => _queuedMembers.removeAt(i)),
+                child: const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                ),
+              ),
+            ]),
+          );
+        }),
+
+        // "Add Another Member" — visible while under the 4-member cap
+        if (_queuedMembers.length < 4) ...[
+          const SizedBox(height: 4),
+          GestureDetector(
+            onTap: _addAnotherMember,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.brandGreenLight),
+              ),
+              child: const Row(children: [
+                SizedBox(
+                  width: 36, height: 36,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreenSurface,
+                      borderRadius: BorderRadius.all(Radius.circular(18)),
+                    ),
+                    child: Icon(Icons.person_add_rounded, size: 18, color: AppColors.brandGreen),
+                  ),
+                ),
+                SizedBox(width: 12),
+                Expanded(child: Text('Add Another Member',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500,
+                        color: AppColors.brandGreen))),
+                Icon(Icons.chevron_right_rounded, color: AppColors.brandGreen, size: 18),
+              ]),
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+
+        // Total
+        if (_queuedMembers.isNotEmpty) ...[
+          const Divider(height: 24),
+          Row(children: [
+            const Text('Total to collect',
+                style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+            const Spacer(),
+            Text('₹${_queuedTotal.toInt()}',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary)),
+          ]),
+          const SizedBox(height: 8),
+        ],
+      ]),
+    );
+  }
 }

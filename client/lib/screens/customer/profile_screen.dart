@@ -2,6 +2,80 @@ import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models.dart';
 
+Future<void> _confirmLogout(BuildContext context, VoidCallback onLogout) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    barrierDismissible: true,
+    builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      contentPadding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: const BoxDecoration(
+              color: Color(0xFFFFEBEE),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.logout_rounded,
+                size: 26, color: Color(0xFFD32F2F)),
+          ),
+          const SizedBox(height: 16),
+          const Text('Logout?',
+              style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary)),
+          const SizedBox(height: 8),
+          const Text(
+            'Are you sure you want to logout from MicroLab?',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: 24),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textSecondary,
+                    side: const BorderSide(color: AppColors.divider),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Cancel',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFD32F2F),
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Logout',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+  if (confirmed == true) onLogout();
+}
+
 class ProfileScreen extends StatelessWidget {
   final String mobile;
   final bool isVip;
@@ -72,7 +146,7 @@ class ProfileScreen extends StatelessWidget {
           ],
           const Spacer(),
           TextButton.icon(
-            onPressed: onLogout,
+            onPressed: () => _confirmLogout(context, onLogout),
             icon: const Icon(Icons.logout_rounded, size: 15, color: Colors.white70),
             label: const Text('Logout',
                 style: TextStyle(color: Colors.white70, fontSize: 13)),
@@ -97,7 +171,7 @@ class ProfileScreen extends StatelessWidget {
                     fontWeight: FontWeight.w700,
                     color: AppColors.textPrimary)),
             const Spacer(),
-            if (self != null)
+            if (self != null && !self.isReadOnly)
               _EditButton(onTap: () => onEditMember(self)),
           ],
         ),
@@ -241,11 +315,11 @@ class ProfileScreen extends StatelessWidget {
                 Icon(Icons.people_outline_rounded,
                     size: 32, color: AppColors.textHint),
                 SizedBox(height: 8),
-                Text('No patients added yet',
+                Text('No customers added yet',
                     style: TextStyle(
                         fontSize: 14, color: AppColors.textSecondary)),
                 SizedBox(height: 2),
-                Text('Tap "Add Patient" to add family members',
+                Text('Tap "Add" to add family members',
                     style: TextStyle(
                         fontSize: 12, color: AppColors.textHint)),
               ],
@@ -254,7 +328,7 @@ class ProfileScreen extends StatelessWidget {
 
         ...patients.map((m) => _PatientCard(
               member: m,
-              onEdit: () => onEditMember(m),
+              onEdit: m.isReadOnly ? null : () => onEditMember(m),
             )),
       ],
     );
@@ -281,7 +355,7 @@ class ProfileScreen extends StatelessWidget {
                 color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
         actions: [
           TextButton.icon(
-            onPressed: onLogout,
+            onPressed: () => _confirmLogout(context, onLogout),
             icon: const Icon(Icons.logout_rounded, size: 16, color: Colors.white70),
             label: const Text('Logout',
                 style: TextStyle(color: Colors.white70, fontSize: 13)),
@@ -314,6 +388,12 @@ class _Avatar extends StatelessWidget {
       return CircleAvatar(
         radius: 30,
         backgroundImage: MemoryImage(member!.photoBytes!),
+      );
+    }
+    if (member?.photoUrl != null && member!.photoUrl!.isNotEmpty) {
+      return CircleAvatar(
+        radius: 30,
+        backgroundImage: NetworkImage(member!.photoUrl!),
       );
     }
     final initials = member?.name.isNotEmpty == true
@@ -403,8 +483,8 @@ class _HDivider extends StatelessWidget {
 
 class _PatientCard extends StatelessWidget {
   final MemberModel member;
-  final VoidCallback onEdit;
-  const _PatientCard({required this.member, required this.onEdit});
+  final VoidCallback? onEdit;
+  const _PatientCard({required this.member, this.onEdit});
 
   @override
   Widget build(BuildContext context) {
@@ -432,14 +512,23 @@ class _PatientCard extends StatelessWidget {
             margin: const EdgeInsets.only(right: 12, top: 2),
             decoration: const BoxDecoration(
                 color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-            child: Center(
-              child: Text(
-                member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
-                style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.brandGreen),
-              ),
+            child: ClipOval(
+              child: member.photoBytes != null
+                  ? Image.memory(member.photoBytes!, fit: BoxFit.cover)
+                  : member.photoUrl != null && member.photoUrl!.isNotEmpty
+                      ? Image.network(member.photoUrl!, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Center(
+                            child: Text(
+                              member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
+                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
+                            ),
+                          ))
+                      : Center(
+                          child: Text(
+                            member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
+                          ),
+                        ),
             ),
           ),
           Expanded(
@@ -492,20 +581,20 @@ class _PatientCard extends StatelessWidget {
               ],
             ),
           ),
-          // Edit icon
-          GestureDetector(
-            onTap: onEdit,
-            child: Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: AppColors.brandGreenSurface,
-                borderRadius: BorderRadius.circular(8),
+          if (onEdit != null)
+            GestureDetector(
+              onTap: onEdit,
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: AppColors.brandGreenSurface,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.edit_outlined,
+                    size: 16, color: AppColors.brandGreen),
               ),
-              child: const Icon(Icons.edit_outlined,
-                  size: 16, color: AppColors.brandGreen),
             ),
-          ),
         ],
       ),
     );

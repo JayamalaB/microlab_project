@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/services/api_service.dart';
 import 'otp_screen.dart';
 
 /// This widget is embedded directly inside [OnboardingScreen] as the bottom
@@ -40,22 +41,52 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = true);
     FocusScope.of(context).unfocus();
 
-    // TODO: Call API — POST /api/auth/send-otp
-    // { mobile: _mobileController.text, role: _selectedRole }
-    await Future.delayed(const Duration(milliseconds: 800));
-
-    if (mounted) {
-      setState(() => _isLoading = false);
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => OtpScreen(
-            mobile: _mobileController.text.trim(),
-            userRole: _selectedRole,
-          ),
-        ),
+    try {
+      final result = await ApiService.sendOtp(
+        _mobileController.text.trim(),
+        _selectedRole,
       );
+      if (!mounted) return;
+      if (result['success'] == true) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => OtpScreen(
+              mobile:                    _mobileController.text.trim(),
+              userRole:                  _selectedRole,
+              technicianName:            result['name']           as String?,
+              technicianPhoto:           result['photo']          as String?,
+              technicianSpecialization:  result['specialization'] as String?,
+            ),
+          ),
+        );
+      } else {
+        _showError(result['message'] ?? 'Failed to send OTP');
+      }
+    } catch (_) {
+      if (!mounted) return;
+      _showError('Network error. Check your connection.');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.error_outline, color: Colors.white, size: 18),
+            const SizedBox(width: 8),
+            Expanded(child: Text(message, style: const TextStyle(color: Colors.white))),
+          ],
+        ),
+        backgroundColor: const Color(0xFFD32F2F),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(seconds: 3),
+      ),
+    );
   }
 
   @override
@@ -114,9 +145,9 @@ class _LoginScreenState extends State<LoginScreen> {
                         label: 'Customer',
                         description: 'Book lab tests',
                         icon: Icons.person_outline_rounded,
-                        selected: _selectedRole == 'vip_customer',
+                        selected: _selectedRole == 'customer',
                         onTap: () =>
-                            setState(() => _selectedRole = 'vip_customer'),
+                            setState(() => _selectedRole = 'customer'),
                       ),
                     ),
                     const SizedBox(width: 10),

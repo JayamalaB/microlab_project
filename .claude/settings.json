@@ -1,7 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(grep -v \"//.*http\")"
+      "Bash(grep -v \"//.*http\")",
+      "Bash(mkdir -p \"F:/microlab/php\")",
+      "PowerShell(Stop-Process -Id \\(Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue\\).OwningProcess -Force -ErrorAction SilentlyContinue; Write-Host \"Done\")",
+      "Bash(node -e \"require\\('multer'\\); console.log\\('multer ok'\\)\")",
+      "PowerShell(node -e \"require\\('multer'\\); console.log\\('multer ok'\\)\" 2>&1)",
+      "Bash(mysql -u root -proot -e \"DESCRIBE available_time_slots; DESCRIBE slot;\" microlab)"
+    ],
+    "additionalDirectories": [
+      "F:\\microlab"
     ]
   }
 }

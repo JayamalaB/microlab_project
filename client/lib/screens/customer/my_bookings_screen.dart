@@ -1,106 +1,206 @@
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:microlab/theme/app_theme.dart';
-import 'checkout_screen.dart';
+import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/razorpay_service.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
+import 'tracking_map_screen.dart';
 
 class MyBookingsScreen extends StatefulWidget {
   final BookingModel? initialBooking;
   final bool embedded;
-  const MyBookingsScreen({super.key, this.initialBooking, this.embedded = false});
+  final ValueNotifier<int>? refreshTrigger;
+  const MyBookingsScreen({super.key, this.initialBooking, this.embedded = false, this.refreshTrigger});
 
   @override
   State<MyBookingsScreen> createState() => _MyBookingsScreenState();
 }
 
-class _MyBookingsScreenState extends State<MyBookingsScreen>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-
-  // Mock bookings list — replace with GET /api/bookings
-  late List<BookingModel> _bookings;
-
-  final List<String> _tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
+class _MyBookingsScreenState extends State<MyBookingsScreen> {
+  List<BookingModel> _bookings = [];
+  bool _isLoading = true;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: _tabs.length, vsync: this);
-    _buildMockBookings();
+    _loadBookings();
+    widget.refreshTrigger?.addListener(_loadBookings);
   }
 
-  void _buildMockBookings() {
-    // TODO: replace with GET /api/bookings
-    final sampleMember = MemberModel(
-      id: 's1', name: 'Ravi Kumar', mobile: '9876543210',
-      gender: 'Male', location: 'Chennai',
-      address: '12, Gandhi Street, T Nagar, Chennai - 600017',
-      relation: 'Self', dob: DateTime(1985, 6, 15),
+  Future<void> _loadBookings() async {
+    setState(() { _isLoading = true; _error = null; });
+    try {
+      final raw = await ApiService.getMyBookings();
+      debugPrint('[MyBookings] raw rows: ${raw.length}');
+      final mapped = <BookingModel>[];
+      for (final row in raw) {
+        try {
+          mapped.add(_fromApi(row));
+        } catch (e) {
+          debugPrint('[MyBookings] _fromApi failed for row: $row\nError: $e');
+        }
+      }
+      if (widget.initialBooking != null &&
+          !mapped.any((b) => b.id == widget.initialBooking!.id)) {
+        mapped.insert(0, widget.initialBooking!);
+      }
+      debugPrint('[MyBookings] mapped ${mapped.length} booking(s)');
+      setState(() { _bookings = mapped; _isLoading = false; });
+    } catch (e, st) {
+      debugPrint('[MyBookings] _loadBookings error: $e\n$st');
+      setState(() { _error = 'Could not load bookings'; _isLoading = false; });
+    }
+  }
+
+  static String _mapStatus(String raw) {
+    switch (raw) {
+      case 'scheduled':  return 'Scheduled';
+      case 'confirmed':  return 'Confirmed';
+      case 'collected':  return 'Sample Collected';
+      case 'completed':  return 'Completed';
+      case 'cancelled':  return 'Cancelled';
+      default:           return 'Pending';
+    }
+  }
+
+  static List<String> _parsePresImages(dynamic raw) {
+    if (raw == null) return [];
+    try {
+      final list = jsonDecode(raw as String) as List;
+      return list.map((e) => e.toString()).toList();
+    } catch (_) { return []; }
+  }
+
+  static BookingModel _fromApi(Map<String, dynamic> b) {
+    // test_items format: "productId:::Name:::price:::type|||..."
+    final rawItems = (b['test_items'] as String? ?? '')
+        .split('|||')
+        .where((s) => s.isNotEmpty)
+        .toList();
+    final tests = rawItems.map((raw) {
+      final parts = raw.split(':::');
+      final productId = parts.isNotEmpty ? parts[0] : '0';
+      final name      = parts.length > 1 ? parts[1] : 'Unknown';
+      final price     = parts.length > 2 ? (double.tryParse(parts[2]) ?? 0.0) : 0.0;
+      final type      = parts.length > 3 ? parts[3] : 'test';
+      return TestModel(
+        id: productId,
+        name: name,
+        type: type == 'package' ? 'package' : 'single',
+        category: '',
+        description: '',
+        hasOffer: false,
+        originalPrice: price,
+        finalPrice: price,
+        docRequired: false,
+        reportStatus: '',
+      );
+    }).toList();
+
+    final total      = double.tryParse(b['total_amount']?.toString() ?? '') ?? 0.0;
+    final itemsTotal = double.tryParse(b['items_total']?.toString() ?? '') ?? total;
+    final amountPaid = double.tryParse(b['amount_paid']?.toString() ?? '') ?? 0.0;
+    final amountDue  = double.tryParse(b['amount_due']?.toString() ?? '') ?? (total - amountPaid).clamp(0, double.infinity);
+
+    final presImages = _parsePresImages(b['presc_image_url']);
+    final presStatus = b['prescription_status'] as String?;
+
+    final bookingType = b['booking_type'] as String? ?? 'lab_visit';
+    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Visit';
+
+    DateTime date;
+    final collDate = b['collection_date'] as String?;
+    if (collDate != null && collDate.isNotEmpty) {
+      date = DateTime.tryParse(collDate) ?? DateTime.now();
+    } else {
+      date = DateTime.tryParse(b['created_at'] as String? ?? '') ?? DateTime.now();
+    }
+
+    BranchModel? branch;
+    if (b['branch_id'] != null && b['branch_name'] != null) {
+      branch = BranchModel(
+        id: b['branch_id'].toString(),
+        name: b['branch_name'] as String,
+        address: b['branch_address'] as String? ?? '',
+        location: b['branch_location'] as String?,
+        pincode: b['branch_pincode']?.toString(),
+      );
+    }
+
+    final member = MemberModel(
+      id: b['patient_id']?.toString() ?? '0',
+      name: b['patient_name'] as String? ?? 'Patient',
+      mobile: b['patient_mobile'] as String? ?? '',
+      gender: '',
+      location: '',
+      address: '',
     );
-    final List<TestModel> sampleTests = [
-      TestModel.fromJson({'id': '1', 'name': 'HbA1c', 'type': 'single', 'category': 'Diabetes', 'description': '3-month average blood sugar', 'offer': 'no', 'original_price': '600', 'final_price': '540', 'doc_req': 'no', 'report_sts': '48 hrs'}),
-      TestModel.fromJson({'id': '2', 'name': 'CBC', 'type': 'single', 'category': 'General', 'description': 'Complete blood count', 'offer': 'no', 'original_price': '350', 'final_price': '350', 'doc_req': 'no', 'report_sts': '24 hrs'}),
-    ];
 
-    _bookings = [
-      // Upcoming
-      BookingModel(
-        id: 'BK00123456', member: sampleMember, tests: sampleTests,
-        mode: 'Home Collection', city: 'Chennai', pincode: '600017',
-        address: '12, Gandhi Street, T Nagar',
-        date: DateTime.now().add(const Duration(days: 2)),
-        timeSlot: '10:00 AM', paymentType: 'service_charge',
-        serviceCharge: 99, testsTotal: 890, grandTotal: 989, paidAmount: 99,
-        status: 'Technician Allocated', createdAt: DateTime.now().subtract(const Duration(hours: 3)),
-        docRequired: false, docVerified: false,
-      ),
-      BookingModel(
-        id: 'BK00123789', member: sampleMember,
-        tests: [TestModel.fromJson({'id': '5', 'name': 'Diabetes Care Package', 'type': 'package', 'category': 'Diabetes', 'description': 'HbA1c + Fasting + Insulin', 'offer': 'yes', 'original_price': '1800', 'offer_pct': '20', 'final_price': '1440', 'doc_req': 'no', 'report_sts': '48 hrs'})],
-        mode: 'Lab Test', branch: null,
-        date: DateTime.now().add(const Duration(days: 5)),
-        timeSlot: '1:00 PM', paymentType: 'full',
-        serviceCharge: 99, testsTotal: 1440, grandTotal: 1539, paidAmount: 1539,
-        status: 'In Progress', createdAt: DateTime.now().subtract(const Duration(days: 1)),
-        docRequired: false, docVerified: false,
-      ),
-      // Completed
-      BookingModel(
-        id: 'BK00122001', member: sampleMember,
-        tests: [TestModel.fromJson({'id': '4', 'name': 'Lipid Profile', 'type': 'single', 'category': 'Heart', 'description': 'Cholesterol, HDL, LDL', 'offer': 'no', 'original_price': '500', 'final_price': '500', 'doc_req': 'no', 'report_sts': '24 hrs'})],
-        mode: 'Home Collection', city: 'Chennai', pincode: '600017',
-        address: '12, Gandhi Street, T Nagar',
-        date: DateTime.now().subtract(const Duration(days: 7)),
-        timeSlot: '4:00 PM', paymentType: 'full',
-        serviceCharge: 99, testsTotal: 500, grandTotal: 599, paidAmount: 599,
-        status: 'Completed', createdAt: DateTime.now().subtract(const Duration(days: 8)),
-        docRequired: false, docVerified: false,
-        reportUrl: 'https://example.com/reports/BK00122001.pdf',
-        reportReadyDate: DateTime.now().subtract(const Duration(days: 6)),
-      ),
-    ];
+    final slotLabel = (b['slot_label'] as String?) ??
+                      (b['slot_time_formatted'] as String?);
 
-    // Add the real booking from checkout if provided (add at front)
-    if (widget.initialBooking != null) {
-      _bookings.insert(0, widget.initialBooking!);
-    }
+    return BookingModel(
+      id:                  b['booking_ref'] as String? ?? b['booking_id_num'].toString(),
+      bookingIdNum:        b['booking_id_num'] != null ? (b['booking_id_num'] as num).toInt() : null,
+      member:              member,
+      tests:               tests,
+      mode:                mode,
+      address:             b['collection_address'] as String?,
+      pincode:             b['collection_pincode']?.toString(),
+      city:                b['collection_city']    as String?,
+      branch:              branch,
+      date:                date,
+      timeSlot:            slotLabel ?? 'Not specified',
+      paymentType:         amountPaid >= total && total > 0 ? 'full' : 'pay_later',
+      serviceCharge:       (total - itemsTotal).clamp(0, double.infinity),
+      testsTotal:          itemsTotal,
+      grandTotal:          total,
+      paidAmount:          amountPaid,
+      amountDue:           amountDue,
+      paymentStatus:       b['payment_status'] as String?,
+      status:              _mapStatus(b['booking_status'] as String? ?? 'pending'),
+      createdAt:           DateTime.tryParse(b['created_at'] as String? ?? '') ?? DateTime.now(),
+      docRequired:         presImages.isNotEmpty,
+      docVerified:         presStatus == 'verified',
+      prescriptionStatus:  presStatus,
+      prescriptionImages:  presImages,
+      collectionStatus:    b['collection_status'] as String?,
+      visitGroupId:        b['visit_group_id']    as String?,
+      technicianName:      b['tech_name']         as String?,
+      technicianMobile:    b['tech_mobile']        as String?,
+      technicianPhoto:     b['tech_photo']         as String?,
+      technicianId:        b['technician_id'] != null ? (b['technician_id'] as num).toInt() : null,
+      patientLat:          b['collection_latitude']  != null ? double.tryParse(b['collection_latitude'].toString())  : null,
+      patientLng:          b['collection_longitude'] != null ? double.tryParse(b['collection_longitude'].toString()) : null,
+      rating:              b['overall_rating'] != null ? (b['overall_rating'] as num).toInt() : null,
+      feedbackComment:     b['feedback_comments'] as String?,
+      reportUrl:           b['report_url'] as String?,
+    );
   }
 
-  List<BookingModel> _filtered(String tab) {
-    if (tab == 'All') return _bookings;
-    if (tab == 'Upcoming') {
-      return _bookings.where((b) =>
-        b.status == 'Technician Allocated' || b.status == 'In Progress'
-      ).toList();
+  List<({MemberModel member, List<BookingModel> bookings})> get _patientGroups {
+    final map = <String, List<BookingModel>>{};
+    final members = <String, MemberModel>{};
+    for (final b in _bookings) {
+      final id = b.member.id;
+      map.putIfAbsent(id, () => []).add(b);
+      members.putIfAbsent(id, () => b.member);
     }
-    if (tab == 'Completed') return _bookings.where((b) => b.status == 'Completed').toList();
-    if (tab == 'Cancelled') return _bookings.where((b) => b.status == 'Cancelled').toList();
-    return _bookings;
+    final groups = map.entries
+        .map((e) => (member: members[e.key]!, bookings: e.value))
+        .toList()
+      ..sort((a, b) => b.bookings.first.createdAt.compareTo(a.bookings.first.createdAt));
+    return groups;
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
+    widget.refreshTrigger?.removeListener(_loadBookings);
     super.dispose();
   }
 
@@ -108,56 +208,24 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
   Widget build(BuildContext context) {
     if (widget.embedded) {
       return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
+            width: double.infinity,
             color: AppColors.brandGreen,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: EdgeInsets.fromLTRB(16, MediaQuery.of(context).padding.top + 14, 16, 8),
-                  child: const Text('My Bookings',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600)),
-                ),
-                TabBar(
-                  controller: _tabController,
-                  indicatorColor: Colors.white,
-                  indicatorWeight: 3,
-                  labelColor: Colors.white,
-                  unselectedLabelColor: Colors.white60,
-                  labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                  unselectedLabelStyle:
-                      const TextStyle(fontSize: 13, fontWeight: FontWeight.w400),
-                  isScrollable: true,
-                  tabAlignment: TabAlignment.start,
-                  tabs: _tabs.map((t) => Tab(text: t)).toList(),
-                ),
-              ],
+            padding: EdgeInsets.fromLTRB(
+                0, MediaQuery.of(context).padding.top + 16, 0, 18),
+            child: const Text(
+              'My Bookings',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.2),
             ),
           ),
-          Expanded(
-            child: ColoredBox(
-              color: const Color(0xFFF4F6F8),
-              child: TabBarView(
-                controller: _tabController,
-                children: _tabs.map((tab) {
-                  final list = _filtered(tab);
-                  if (list.isEmpty) return _emptyState(tab);
-                  return ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-                    itemCount: list.length,
-                    itemBuilder: (_, i) => _BookingCard(
-                      booking: list[i],
-                      onTap: () => _showBookingDetail(list[i]),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
-          ),
+          Expanded(child: _buildBody()),
         ],
       );
     }
@@ -173,33 +241,260 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
         ),
         title: const Text('My Bookings',
             style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
-        bottom: TabBar(
-          controller: _tabController,
-          indicatorColor: Colors.white,
-          indicatorWeight: 3,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white60,
-          labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          unselectedLabelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w400),
-          isScrollable: true,
-          tabAlignment: TabAlignment.start,
-          tabs: _tabs.map((t) => Tab(text: t)).toList(),
-        ),
       ),
-      body: TabBarView(
-        controller: _tabController,
-        children: _tabs.map((tab) {
-          final list = _filtered(tab);
-          if (list.isEmpty) return _emptyState(tab);
-          return ListView.builder(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-            itemCount: list.length,
-            itemBuilder: (_, i) => _BookingCard(
-              booking: list[i],
-              onTap: () => _showBookingDetail(list[i]),
-            ),
+      body: _buildBody(),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_isLoading) {
+      return const ColoredBox(
+        color: Color(0xFFF4F6F8),
+        child: Center(child: CircularProgressIndicator(color: AppColors.brandGreen)),
+      );
+    }
+    if (_error != null) {
+      return ColoredBox(
+        color: const Color(0xFFF4F6F8),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.wifi_off_rounded, size: 40, color: AppColors.textHint),
+              const SizedBox(height: 12),
+              Text(_error!, style: const TextStyle(color: AppColors.textSecondary)),
+              const SizedBox(height: 16),
+              TextButton(
+                onPressed: _loadBookings,
+                child: const Text('Retry', style: TextStyle(color: AppColors.brandGreen)),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final groups = _patientGroups;
+    if (groups.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 72, height: 72,
+                decoration: const BoxDecoration(
+                    color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+                child: const Icon(Icons.calendar_today_outlined,
+                    size: 32, color: AppColors.brandGreen),
+              ),
+              const SizedBox(height: 16),
+              const Text('No bookings yet',
+                  style: TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+              const SizedBox(height: 8),
+              const Text(
+                'Your booked tests will appear here.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return ColoredBox(
+      color: const Color(0xFFF4F6F8),
+      child: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        itemCount: groups.length,
+        itemBuilder: (_, i) {
+          final g = groups[i];
+          return _PatientCard(
+            member: g.member,
+            bookings: g.bookings,
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => _PatientBookingsPage(
+                    member: g.member,
+                    initialBookings: g.bookings,
+                  ),
+                ),
+              ).then((_) => _loadBookings());
+            },
           );
-        }).toList(),
+        },
+      ),
+    );
+  }
+}
+
+// ─── Patient Card ────────────────────────────────────────────────────────────
+
+class _PatientCard extends StatelessWidget {
+  final MemberModel member;
+  final List<BookingModel> bookings;
+  final VoidCallback onTap;
+
+  const _PatientCard({required this.member, required this.bookings, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final upcoming = bookings.where((b) =>
+        b.status == 'Pending' ||
+        b.status == 'Confirmed' ||
+        b.status == 'Technician Allocated' ||
+        b.status == 'In Progress').length;
+    final initial = member.name.isNotEmpty ? member.name[0].toUpperCase() : '?';
+
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.06),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: const BoxDecoration(
+              color: AppColors.brandGreenSurface,
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: Text(
+                initial,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.brandGreen,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  member.name,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '${bookings.length} booking${bookings.length == 1 ? '' : 's'}'
+                  '${upcoming > 0 ? ' · $upcoming upcoming' : ''}',
+                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          const Icon(Icons.chevron_right_rounded, color: AppColors.textHint, size: 22),
+        ]),
+      ),
+    );
+  }
+}
+
+// ─── Patient Bookings Page ───────────────────────────────────────────────────
+
+class _PatientBookingsPage extends StatefulWidget {
+  final MemberModel member;
+  final List<BookingModel> initialBookings;
+
+  const _PatientBookingsPage({required this.member, required this.initialBookings});
+
+  @override
+  State<_PatientBookingsPage> createState() => _PatientBookingsPageState();
+}
+
+class _PatientBookingsPageState extends State<_PatientBookingsPage>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabCtrl;
+  late List<BookingModel> _bookings;
+  bool _reloading = false;
+
+  static const _tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
+
+  @override
+  void initState() {
+    super.initState();
+    _bookings = List.from(widget.initialBookings);
+    _tabCtrl = TabController(length: _tabs.length, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _reload() async {
+    setState(() => _reloading = true);
+    try {
+      final raw = await ApiService.getMyBookings();
+      final all = raw.map((r) => _MyBookingsScreenState._fromApi(r)).toList();
+      if (mounted) {
+        setState(() {
+          _bookings = all.where((b) => b.member.id == widget.member.id).toList();
+          _reloading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _reloading = false);
+    }
+  }
+
+  List<BookingModel> _filtered(String tab) {
+    if (tab == 'All') return _bookings;
+    if (tab == 'Upcoming') {
+      return _bookings
+          .where((b) =>
+              b.status == 'Scheduled' ||
+              b.status == 'Pending' ||
+              b.status == 'Confirmed' ||
+              b.status == 'Technician Allocated' ||
+              b.status == 'In Progress')
+          .toList();
+    }
+    if (tab == 'Completed') {
+      return _bookings
+          .where((b) => b.status == 'Completed' || b.status == 'Sample Collected')
+          .toList();
+    }
+    if (tab == 'Cancelled') {
+      return _bookings.where((b) => b.status == 'Cancelled').toList();
+    }
+    return _bookings;
+  }
+
+  void _showDetail(BookingModel booking) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _BookingDetailSheet(
+        booking: booking,
+        onPaymentSuccess: _reload,
       ),
     );
   }
@@ -212,7 +507,8 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 72, height: 72,
+              width: 72,
+              height: 72,
               decoration: const BoxDecoration(
                   color: AppColors.brandGreenSurface, shape: BoxShape.circle),
               child: const Icon(Icons.calendar_today_outlined,
@@ -226,7 +522,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
             ),
             const SizedBox(height: 8),
             const Text(
-              'Your booked tests will appear here.',
+              'Tests booked for this patient will appear here.',
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
             ),
@@ -236,37 +532,138 @@ class _MyBookingsScreenState extends State<MyBookingsScreen>
     );
   }
 
-  void _showBookingDetail(BookingModel booking) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _BookingDetailSheet(booking: booking),
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4F6F8),
+      appBar: AppBar(
+        backgroundColor: AppColors.brandGreen,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Text(
+          widget.member.name,
+          style: const TextStyle(
+              color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+        ),
+        bottom: TabBar(
+          controller: _tabCtrl,
+          indicatorColor: Colors.white,
+          indicatorWeight: 3,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white60,
+          labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w400),
+          isScrollable: true,
+          tabAlignment: TabAlignment.start,
+          tabs: _tabs.map((t) => Tab(text: t)).toList(),
+        ),
+      ),
+      body: _reloading
+          ? const Center(child: CircularProgressIndicator(color: AppColors.brandGreen))
+          : TabBarView(
+              controller: _tabCtrl,
+              children: _tabs.map((tab) {
+                final list = _filtered(tab);
+                if (list.isEmpty) return _emptyState(tab);
+                return ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+                  itemCount: list.length,
+                  itemBuilder: (_, i) {
+                    final b = list[i];
+                    // Service charge applies only when this booking carries a service
+                    // charge component (home collection fee) and technician has arrived.
+                    // Family members whose booking has no service charge never get deducted.
+                    final chargeApplies = b.collectionStatus == 'arrived' &&
+                        b.mode == 'Home Collection' &&
+                        b.serviceCharge > 0;
+                    return _BookingCard(
+                      booking: b,
+                      chargeApplies: chargeApplies,
+                      onTap: () => _showDetail(b),
+                      onFeedbackSubmitted: _reload,
+                      onCancelled: _reload,
+                    );
+                  },
+                );
+              }).toList(),
+            ),
     );
   }
 }
 
-void _showFeedback(BuildContext context, BookingModel booking) {
+void _showFeedback(BuildContext context, BookingModel booking, {VoidCallback? onRefresh}) {
   showModalBottomSheet(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
     builder: (_) => _FeedbackSheet(
       booking: booking,
-      onSubmit: (rating, comment) {
-        // TODO: POST /api/bookings/${booking.id}/feedback { rating, comment }
-        // For now show a snackbar; in real app update state with new rating
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Row(children: [
-            ...List.generate(rating, (_) => const Icon(Icons.star_rounded, color: Colors.white, size: 14)),
-            const SizedBox(width: 8),
-            const Expanded(child: Text('Thank you for your feedback!')),
-          ]),
-          backgroundColor: AppColors.brandGreen,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+      onSubmit: (rating, comment) async {
+        final result = await ApiService.submitFeedback(
+          booking.bookingIdNum!, rating, comment);
+        if (!context.mounted) return;
+        if (result['success'] == true) {
+          Navigator.pop(context);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Row(children: [
+              ...List.generate(rating, (_) => const Icon(Icons.star_rounded, color: Colors.white, size: 14)),
+              const SizedBox(width: 8),
+              const Expanded(child: Text('Thank you for your feedback!')),
+            ]),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+          onRefresh?.call();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(result['message'] ?? 'Could not submit feedback'),
+            backgroundColor: const Color(0xFFD32F2F),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
+      },
+    ),
+  );
+}
+
+void _showCancelSheet(BuildContext context, BookingModel booking, bool chargeApplies, VoidCallback? onCancelled) {
+  showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => _CancelSheet(
+      booking: booking,
+      chargeApplies: chargeApplies,
+      onConfirm: (reason) async {
+        final result = await ApiService.cancelBooking(booking.bookingIdNum!, reason: reason);
+        if (!context.mounted) return;
+        if (result['success'] == true) {
+          Navigator.pop(context);
+          final refund = (result['refund_amount'] as num?)?.toDouble() ?? 0;
+          final charge = (result['service_charge_applied'] as num?)?.toDouble() ?? 0;
+          String msg = 'Booking cancelled.';
+          if (refund > 0) msg += ' Refund of ₹${refund.toInt()} will be processed.';
+          if (charge > 0) msg += ' ₹${charge.toInt()} service charge deducted.';
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(msg),
+            backgroundColor: const Color(0xFFD32F2F),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+          onCancelled?.call();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(result['message'] ?? 'Could not cancel booking'),
+            backgroundColor: const Color(0xFFD32F2F),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
       },
     ),
   );
@@ -290,8 +687,11 @@ void _downloadReport(BuildContext context, BookingModel booking) {
 
 class _BookingCard extends StatelessWidget {
   final BookingModel booking;
+  final bool chargeApplies;
   final VoidCallback onTap;
-  const _BookingCard({required this.booking, required this.onTap});
+  final VoidCallback? onFeedbackSubmitted;
+  final VoidCallback? onCancelled;
+  const _BookingCard({required this.booking, required this.chargeApplies, required this.onTap, this.onFeedbackSubmitted, this.onCancelled});
 
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -301,19 +701,25 @@ class _BookingCard extends StatelessWidget {
 
   Color _statusColor(String s) {
     switch (s) {
-      case 'Completed': return AppColors.brandGreen;
-      case 'Cancelled': return const Color(0xFFD32F2F);
-      case 'In Progress': return const Color(0xFF1565C0);
-      default: return const Color(0xFFE65100);
+      case 'Completed':        return AppColors.brandGreen;
+      case 'Sample Collected': return const Color(0xFF2E7D32);
+      case 'Confirmed':        return const Color(0xFF1565C0);
+      case 'In Progress':      return const Color(0xFF1565C0);
+      case 'Cancelled':        return const Color(0xFFD32F2F);
+      case 'Scheduled':        return const Color(0xFF6A1B9A);
+      default:                 return const Color(0xFFE65100); // Pending
     }
   }
 
   IconData _statusIcon(String s) {
     switch (s) {
-      case 'Completed': return Icons.check_circle_outline;
-      case 'Cancelled': return Icons.cancel_outlined;
-      case 'In Progress': return Icons.directions_run_rounded;
-      default: return Icons.person_pin_outlined;
+      case 'Completed':        return Icons.check_circle_outline;
+      case 'Sample Collected': return Icons.science_outlined;
+      case 'Confirmed':        return Icons.event_available_outlined;
+      case 'In Progress':      return Icons.directions_run_rounded;
+      case 'Cancelled':        return Icons.cancel_outlined;
+      case 'Scheduled':        return Icons.event_outlined;
+      default:                 return Icons.hourglass_empty_rounded; // Pending
     }
   }
 
@@ -463,7 +869,7 @@ class _BookingCard extends StatelessWidget {
                     if (booking.status == 'Completed' && booking.rating == null) ...[
                       const SizedBox(height: 10),
                       GestureDetector(
-                        onTap: () => _showFeedback(context, booking),
+                        onTap: () => _showFeedback(context, booking, onRefresh: onFeedbackSubmitted),
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 9),
                           decoration: BoxDecoration(
@@ -510,6 +916,37 @@ class _BookingCard extends StatelessWidget {
                       ),
                     ],
 
+                    // Cancel button — only for pending/scheduled/confirmed, future dates,
+                    // and before technician starts collection
+                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
+                        !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
+                        !const {'collection_started', 'otp_verified', 'sample_collected',
+                                 'handed_to_lab', 'collected', 'completed',
+                                 'all_collected', 'cancelled'}
+                            .contains(booking.collectionStatus)) ...[
+                      const SizedBox(height: 10),
+                      GestureDetector(
+                        onTap: () => _showCancelSheet(context, booking, chargeApplies, onCancelled),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 9),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFF8F8),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFFEF9A9A)),
+                          ),
+                          child: const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.cancel_outlined, size: 15, color: Color(0xFFD32F2F)),
+                              SizedBox(width: 6),
+                              Text('Cancel Booking',
+                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFFD32F2F))),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+
                     // Download report for completed bookings
                     if (booking.status == 'Completed' && booking.reportUrl != null) ...[
                       const SizedBox(height: 10),
@@ -547,14 +984,183 @@ class _BookingCard extends StatelessWidget {
 
 // ─── Booking Detail Sheet ─────────────────────────────────────────────────────
 
-class _BookingDetailSheet extends StatelessWidget {
+class _BookingDetailSheet extends StatefulWidget {
   final BookingModel booking;
-  const _BookingDetailSheet({required this.booking});
+  final VoidCallback? onPaymentSuccess;
+  const _BookingDetailSheet({required this.booking, this.onPaymentSuccess});
+
+  @override
+  State<_BookingDetailSheet> createState() => _BookingDetailSheetState();
+}
+
+class _BookingDetailSheetState extends State<_BookingDetailSheet> {
+  bool _isProcessing = false;
+
+  // Test results (released only)
+  List<Map<String, dynamic>> _testResults = [];
+  bool _resultsLoading = false;
+
+  // Live technician state — refreshed on demand
+  String? _collectionStatus;
+  String? _technicianName;
+  String? _technicianMobile;
+  String? _technicianPhoto;
+  int?    _technicianId;
+  double? _patientLat;
+  double? _patientLng;
+  bool    _isTechRefreshing = false;
+
+  Future<void> _loadResults() async {
+    if (widget.booking.bookingIdNum == null) return;
+    setState(() => _resultsLoading = true);
+    final results = await ApiService.getBookingResults(widget.booking.bookingIdNum!);
+    if (mounted) setState(() { _testResults = results; _resultsLoading = false; });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.booking.status == 'Completed') _loadResults();
+    // Seed from the snapshot passed in
+    _collectionStatus  = widget.booking.collectionStatus;
+    _technicianName    = widget.booking.technicianName;
+    _technicianMobile  = widget.booking.technicianMobile;
+    _technicianPhoto   = widget.booking.technicianPhoto;
+    _technicianId      = widget.booking.technicianId;
+    _patientLat        = widget.booking.patientLat;
+    _patientLng        = widget.booking.patientLng;
+
+  }
+
+  Future<void> _refreshTechStatus() async {
+    if (_isTechRefreshing || widget.booking.bookingIdNum == null) return;
+    setState(() => _isTechRefreshing = true);
+    try {
+      final data = await ApiService.fetchBookingStatus(widget.booking.bookingIdNum!);
+      if (!mounted || data == null) return;
+      setState(() {
+        _collectionStatus = data['collection_status'] as String? ?? _collectionStatus;
+        _technicianName   = data['tech_name']         as String? ?? _technicianName;
+        _technicianMobile = data['tech_mobile']        as String? ?? _technicianMobile;
+        _technicianPhoto  = data['tech_photo']         as String? ?? _technicianPhoto;
+        if (data['technician_id'] != null) {
+          _technicianId = (data['technician_id'] as num).toInt();
+        }
+        if (data['collection_latitude'] != null) {
+          _patientLat = double.tryParse(data['collection_latitude'].toString());
+        }
+        if (data['collection_longitude'] != null) {
+          _patientLng = double.tryParse(data['collection_longitude'].toString());
+        }
+      });
+    } finally {
+      if (mounted) setState(() => _isTechRefreshing = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    clearRazorpay();
+    super.dispose();
+  }
+
+  void _showEditTests() {
+    if (b.bookingIdNum == null) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _EditTestsSheet(
+        booking: b,
+        onSaved: () {
+          if (!mounted) return;
+          Navigator.pop(context);
+          widget.onPaymentSuccess?.call();
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('Booking updated successfully'),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        },
+      ),
+    );
+  }
+
+  BookingModel get b => widget.booking;
+
+  bool get _canEditTests {
+    if (b.paymentStatus == 'paid') return false;
+    const blocked = {
+      'en_route', 'arrived', 'collection_started', 'sample_collected', 'handed_to_lab'
+    };
+    if (b.collectionStatus != null && blocked.contains(b.collectionStatus)) return false;
+    return b.status == 'Pending' || b.status == 'Confirmed' || b.status == 'Scheduled';
+  }
 
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
     return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
+  }
+
+  bool get _paymentPending => b.status != 'Cancelled' && b.paymentStatus != 'paid' && b.grandTotal > 0;
+  bool get _prescriptionBlocking =>
+      b.prescriptionImages.isNotEmpty && b.prescriptionStatus != 'verified';
+
+  void _triggerPayment() {
+    if (b.bookingIdNum == null) return;
+    final amount = b.amountDue > 0 ? b.amountDue : b.grandTotal;
+    setState(() => _isProcessing = true);
+
+    openRazorpay(
+      options: {
+        'key':         'rzp_test_SonqjjPurqlLci',
+        'amount':      (amount * 100).toInt(),
+        'name':        'MicroLab',
+        'description': b.tests.map((t) => t.name).join(', '),
+        'prefill': {
+          'contact': b.member.mobile,
+          'name':    b.member.name,
+        },
+        'theme': {'color': '#0A5C4A'},
+      },
+      onSuccess: (paymentId) async {
+        final ok = await ApiService.payBooking(
+          bookingId:          b.bookingIdNum!,
+          razorpayPaymentId:  paymentId,
+          amount:             amount,
+        );
+        if (!mounted) return;
+        setState(() => _isProcessing = false);
+        if (ok) {
+          Navigator.pop(context);
+          widget.onPaymentSuccess?.call();
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('Payment successful! Booking confirmed.'),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: const Text('Payment recorded but confirmation failed. Contact support.'),
+            backgroundColor: Colors.orange[700],
+            behavior: SnackBarBehavior.floating,
+          ));
+        }
+      },
+      onError: (message) {
+        if (!mounted) return;
+        setState(() => _isProcessing = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(message == 'Payment cancelled' ? 'Payment cancelled' : 'Payment failed: $message'),
+          backgroundColor: message == 'Payment cancelled' ? AppColors.textSecondary : Colors.red[700],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      },
+    );
   }
 
   @override
@@ -587,12 +1193,12 @@ class _BookingDetailSheet extends StatelessWidget {
                     children: [
                       const Text('Booking Details',
                           style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                      Text(booking.id,
+                      Text(b.id,
                           style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
                     ],
                   ),
                 ),
-                BookingStatusBadge(status: booking.status),
+                BookingStatusBadge(status: b.status),
               ],
             ),
           ),
@@ -610,39 +1216,94 @@ class _BookingDetailSheet extends StatelessWidget {
                   _DetailSection(
                     title: 'Appointment',
                     rows: [
-                      _DetailRow(Icons.person_outline, 'Customer', booking.member.name),
-                      _DetailRow(Icons.event_outlined, 'Date', _formatDate(booking.date)),
-                      _DetailRow(Icons.schedule_outlined, 'Time', booking.timeSlot),
+                      _DetailRow(Icons.person_outline, 'Customer', b.member.name),
+                      _DetailRow(Icons.event_outlined, 'Date', _formatDate(b.date)),
+                      _DetailRow(Icons.schedule_outlined, 'Time', b.timeSlot),
                       _DetailRow(
-                        booking.mode == 'Home Collection' ? Icons.home_outlined : Icons.local_hospital_outlined,
-                        'Mode', booking.mode,
+                        b.mode == 'Home Collection' ? Icons.home_outlined : Icons.local_hospital_outlined,
+                        'Mode', b.mode,
                       ),
-                      if (booking.isVip && booking.selectedTechnician != null)
-                        _DetailRow(Icons.medical_services_outlined,
-                            'Technician', booking.selectedTechnician!.name),
-                      if (booking.isVip)
-                        _DetailRow(Icons.star_rounded, 'Type',
-                            'VIP Customer', valueColor: const Color(0xFFFFB300)),
-                      if (booking.city != null)
-                        _DetailRow(Icons.location_on_outlined, 'Location',
-                            '${booking.city}${booking.pincode != null ? ', ${booking.pincode}' : ''}'),
-                      if (booking.branch != null)
-                        if (booking.branch != null) _DetailRow(Icons.local_hospital_outlined, 'Branch', booking.branch!.name),
+                      if (b.isVip && b.selectedTechnician != null)
+                        _DetailRow(Icons.medical_services_outlined, 'Technician', b.selectedTechnician!.name),
+                      if (b.isVip)
+                        const _DetailRow(Icons.star_rounded, 'Type', 'VIP Customer', valueColor: Color(0xFFFFB300)),
+                      if (b.mode == 'Home Collection') ...[
+                        if (b.address != null && b.address!.isNotEmpty)
+                          _DetailRow(Icons.home_outlined, 'Collection Address', b.address!),
+                        if (b.city != null || b.pincode != null)
+                          _DetailRow(Icons.location_on_outlined, 'Area',
+                            [b.city, b.pincode].where((s) => s != null && s.isNotEmpty).join(', ')),
+                      ] else ...[
+                        if (b.branch != null)
+                          _DetailRow(Icons.local_hospital_outlined, 'Branch', b.branch!.name),
+                        if (b.branch?.address != null && b.branch!.address.isNotEmpty)
+                          _DetailRow(Icons.location_on_outlined, 'Branch Address', b.branch!.address),
+                      ],
                     ],
                   ),
+
+                  // Technician card — always shown for home collection
+                  if (b.mode == 'Home Collection') ...[
+                    const SizedBox(height: 16),
+                    _TechnicianCard(
+                      name:             _technicianName,
+                      mobile:           _technicianMobile,
+                      photoUrl:         _technicianPhoto,
+                      collectionStatus: _collectionStatus,
+                      isRefreshing:     _isTechRefreshing,
+                      onRefresh:        b.bookingIdNum != null ? _refreshTechStatus : null,
+                      onTrack: (_collectionStatus == 'en_route' && _technicianId != null && b.bookingIdNum != null)
+                          ? () => Navigator.push(context, MaterialPageRoute(
+                              builder: (_) => TrackingMapScreen(
+                                bookingId:      b.bookingIdNum!,
+                                patientId:      int.tryParse(b.member.id) ?? 0,
+                                trackingId:     b.bookingIdNum!.toString(),
+                                technicianId:   _technicianId!,
+                                technicianName: _technicianName ?? '',
+                                patientLat:     _patientLat,
+                                patientLng:     _patientLng,
+                                patientAddress: b.address ?? '',
+                                isPatientView:  true,
+                              ),
+                            ))
+                          : null,
+                    ),
+                  ],
 
                   const SizedBox(height: 16),
 
                   // Tests
                   _DetailSection(
-                    title: 'Tests & Packages (${booking.tests.length})',
-                    rows: booking.tests.map((t) => _DetailRow(
+                    title: 'Tests & Packages (${b.tests.length})',
+                    rows: b.tests.map((t) => _DetailRow(
                       t.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
-                      t.name,
-                      '₹${t.finalPrice.toInt()}',
-                      valueBold: true,
+                      t.name, '₹${t.finalPrice.toInt()}', valueBold: true,
                     )).toList(),
                   ),
+
+                  if (_canEditTests) ...[
+                    const SizedBox(height: 10),
+                    GestureDetector(
+                      onTap: _showEditTests,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: AppColors.brandGreen),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.edit_outlined, size: 16, color: AppColors.brandGreen),
+                            SizedBox(width: 8),
+                            Text('Edit Tests / Packages',
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                    color: AppColors.brandGreen)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
 
                   const SizedBox(height: 16),
 
@@ -650,72 +1311,235 @@ class _BookingDetailSheet extends StatelessWidget {
                   _DetailSection(
                     title: 'Payment',
                     rows: [
-                      _DetailRow(Icons.receipt_outlined, 'Tests Total', '₹${booking.testsTotal.toInt()}'),
-                      _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${booking.serviceCharge.toInt()}'),
-                      _DetailRow(Icons.calculate_outlined, 'Grand Total', '₹${booking.grandTotal.toInt()}', valueBold: true),
+                      _DetailRow(Icons.receipt_outlined, 'Tests Total', '₹${b.testsTotal.toInt()}'),
+                      if (b.serviceCharge > 0)
+                        _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${b.serviceCharge.toInt()}'),
+                      _DetailRow(Icons.calculate_outlined, 'Grand Total', '₹${b.grandTotal.toInt()}', valueBold: true),
                       _DetailRow(Icons.check_circle_outline, 'Paid',
-                          '₹${booking.paidAmount.toInt()}', valueColor: AppColors.brandGreen),
-                      if (booking.paymentType == 'service_charge')
-                        _DetailRow(Icons.pending_outlined, 'Due at Collection',
-                            '₹${(booking.grandTotal - booking.paidAmount).toInt()}',
-                            valueColor: const Color(0xFFE65100)),
+                          '₹${b.paidAmount.toInt()}', valueColor: AppColors.brandGreen),
+                      if (b.amountDue > 0)
+                        _DetailRow(Icons.pending_outlined,
+                            b.mode == 'Home Collection' ? 'Due at Collection' : 'Due at Lab',
+                            '₹${b.amountDue.toInt()}', valueColor: const Color(0xFFE65100)),
                     ],
                   ),
 
-                  if (booking.docRequired) ...[
+                  // Prescription section
+                  if (b.prescriptionImages.isNotEmpty) ...[
                     const SizedBox(height: 16),
-                    _DetailSection(
-                      title: 'Document',
-                      rows: [
-                        _DetailRow(
-                          booking.docVerified ? Icons.verified_outlined : Icons.pending_outlined,
-                          'Prescription',
-                          booking.docVerified ? 'Verified' : 'Awaiting verification',
-                          valueColor: booking.docVerified ? AppColors.brandGreen : const Color(0xFFE65100),
+                    const Text('Prescription',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                            color: AppColors.textSecondary, letterSpacing: 0.3)),
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppColors.background,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.divider),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Status badge
+                          Row(children: [
+                            Icon(
+                              b.prescriptionStatus == 'verified'
+                                  ? Icons.verified_outlined
+                                  : Icons.hourglass_top_rounded,
+                              size: 14,
+                              color: b.prescriptionStatus == 'verified'
+                                  ? AppColors.brandGreen
+                                  : const Color(0xFFE65100),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              b.prescriptionStatus == 'verified'
+                                  ? 'Prescription Verified'
+                                  : 'Awaiting Verification',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: b.prescriptionStatus == 'verified'
+                                    ? AppColors.brandGreen
+                                    : const Color(0xFFE65100),
+                              ),
+                            ),
+                          ]),
+                          const SizedBox(height: 12),
+                          // Thumbnails
+                          SizedBox(
+                            height: 80,
+                            child: ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              itemCount: b.prescriptionImages.length,
+                              separatorBuilder: (_, __) => const SizedBox(width: 8),
+                              itemBuilder: (_, i) => ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.network(
+                                  b.prescriptionImages[i],
+                                  width: 80, height: 80,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => Container(
+                                    width: 80, height: 80,
+                                    color: AppColors.brandGreenSurface,
+                                    child: const Icon(Icons.image_not_supported_outlined,
+                                        color: AppColors.brandGreen, size: 28),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text('${b.prescriptionImages.length} image${b.prescriptionImages.length == 1 ? '' : 's'} uploaded',
+                              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                        ],
+                      ),
+                    ),
+                  ],
+
+                  // Pay Now button — only shown after prescription is verified (or no doc required)
+                  if (_paymentPending && !_prescriptionBlocking) ...[
+                    const SizedBox(height: 20),
+                    GestureDetector(
+                      onTap: _isProcessing ? null : _triggerPayment,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        decoration: BoxDecoration(
+                          color: _isProcessing
+                              ? AppColors.brandGreen.withValues(alpha: 0.5)
+                              : const Color(0xFF1565C0),
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                      ],
+                        child: _isProcessing
+                            ? const Center(child: SizedBox(width: 20, height: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white))))
+                            : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                const Icon(Icons.payment_outlined, size: 18, color: Colors.white),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Pay ₹${(b.amountDue > 0 ? b.amountDue : b.grandTotal).toInt()} via Razorpay',
+                                  style: const TextStyle(fontSize: 14,
+                                      fontWeight: FontWeight.w600, color: Colors.white),
+                                ),
+                              ]),
+                      ),
                     ),
                   ],
 
                   // Report section for completed bookings
-                  if (booking.status == 'Completed') ...[
+                  if (b.status == 'Completed') ...[
                     const SizedBox(height: 16),
-                    _DetailSection(
-                      title: 'Report',
-                      rows: [
-                        _DetailRow(
-                          Icons.science_outlined,
-                          'Status',
-                          booking.reportUrl != null ? 'Ready to download' : 'Being processed',
-                          valueColor: booking.reportUrl != null ? AppColors.brandGreen : const Color(0xFFE65100),
+                    Row(children: [
+                      const Icon(Icons.science_outlined, size: 15, color: AppColors.textHint),
+                      const SizedBox(width: 6),
+                      const Text('Test Results',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                      const Spacer(),
+                      if (_resultsLoading)
+                        const SizedBox(width: 14, height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                    ]),
+                    const SizedBox(height: 10),
+                    if (_resultsLoading)
+                      const SizedBox.shrink()
+                    else if (_testResults.isEmpty)
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: AppColors.background,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: AppColors.divider),
                         ),
-                        if (booking.reportReadyDate != null)
-                          _DetailRow(
-                            Icons.event_available_outlined,
-                            'Available since',
-                            _formatDate(booking.reportReadyDate!),
-                          ),
-                      ],
-                    ),
-                    if (booking.reportUrl != null) ...[
+                        child: const Row(children: [
+                          Icon(Icons.hourglass_empty_rounded, size: 16, color: AppColors.textHint),
+                          SizedBox(width: 8),
+                          Text('Results not available yet',
+                              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                        ]),
+                      )
+                    else
+                      Column(
+                        children: _testResults.map((r) {
+                          final flag = r['result_flag'] as String? ?? '';
+                          final flagColor = flag == 'critical' ? const Color(0xFFD32F2F)
+                              : (flag == 'high' || flag == 'low') ? const Color(0xFFE65100)
+                              : AppColors.brandGreen;
+                          final flagLabel = flag == 'critical' ? 'Critical'
+                              : flag == 'high' ? 'High'
+                              : flag == 'low'  ? 'Low'
+                              : 'Normal';
+                          final releasedAt = r['released_at'] as String?;
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: flagColor.withValues(alpha: 0.04),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: flagColor.withValues(alpha: 0.2)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(children: [
+                                  Expanded(child: Text(r['test_name'] as String? ?? '',
+                                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                          color: AppColors.textPrimary))),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: flagColor.withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(20),
+                                    ),
+                                    child: Text(flagLabel,
+                                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                                            color: flagColor)),
+                                  ),
+                                ]),
+                                const SizedBox(height: 6),
+                                Row(children: [
+                                  Text(
+                                    '${r['result_value'] ?? '—'} ${r['result_unit'] ?? ''}'.trim(),
+                                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: flagColor),
+                                  ),
+                                  if (r['reference_range'] != null) ...[
+                                    const SizedBox(width: 10),
+                                    Text('Ref: ${r['reference_range']}',
+                                        style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                                  ],
+                                ]),
+                                if (r['result_remarks'] != null && (r['result_remarks'] as String).isNotEmpty) ...[
+                                  const SizedBox(height: 4),
+                                  Text(r['result_remarks'] as String,
+                                      style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                                ],
+                                if (releasedAt != null) ...[
+                                  const SizedBox(height: 4),
+                                  Text('Released: ${_formatDate(DateTime.tryParse(releasedAt) ?? DateTime.now())}',
+                                      style: const TextStyle(fontSize: 10, color: AppColors.textHint)),
+                                ],
+                              ],
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    if (b.reportUrl != null) ...[
                       const SizedBox(height: 12),
                       GestureDetector(
-                        onTap: () => _downloadReport(context, booking),
+                        onTap: () => _downloadReport(context, b),
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 13),
                           decoration: BoxDecoration(
                             color: AppColors.brandGreen,
                             borderRadius: BorderRadius.circular(12),
                           ),
-                          child: const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.download_outlined, size: 18, color: Colors.white),
-                              SizedBox(width: 8),
-                              Text('Download Report',
-                                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
-                            ],
-                          ),
+                          child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                            Icon(Icons.download_outlined, size: 18, color: Colors.white),
+                            SizedBox(width: 8),
+                            Text('Download Report',
+                                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
+                          ]),
                         ),
                       ),
                     ],
@@ -726,6 +1550,200 @@ class _BookingDetailSheet extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ─── Technician Card (always shown for Home Collection bookings) ───────────────
+
+class _TechnicianCard extends StatelessWidget {
+  final String? name;            // null = no technician assigned yet
+  final String? mobile;
+  final String? photoUrl;
+  final String? collectionStatus;
+  final VoidCallback? onTrack;   // non-null only when en_route + technicianId known
+  final VoidCallback? onRefresh;
+  final bool isRefreshing;
+
+  const _TechnicianCard({
+    this.name,
+    this.mobile,
+    this.photoUrl,
+    this.collectionStatus,
+    this.onTrack,
+    this.onRefresh,
+    this.isRefreshing = false,
+  });
+
+  bool get _assigned => name != null && name!.isNotEmpty;
+
+  String get _statusLabel {
+    switch (collectionStatus) {
+      case 'assigned':           return 'Assigned';
+      case 'en_route':           return 'On the way';
+      case 'arrived':            return 'Arrived';
+      case 'collection_started': return 'Collection Started';
+      case 'sample_collected':   return 'Sample Collected';
+      case 'handed_to_lab':      return 'Handed to Lab';
+      default:                   return 'Assigned';
+    }
+  }
+
+  Color get _statusColor {
+    switch (collectionStatus) {
+      case 'en_route':           return const Color(0xFF1565C0);
+      case 'arrived':            return const Color(0xFF2E7D32);
+      case 'collection_started': return const Color(0xFF6A1B9A);
+      case 'sample_collected':   return const Color(0xFF2E7D32);
+      case 'handed_to_lab':      return AppColors.brandGreen;
+      default:                   return AppColors.brandGreen;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text('Technician Status',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                    color: AppColors.textSecondary, letterSpacing: 0.3)),
+            const Spacer(),
+            if (isRefreshing)
+              const SizedBox(
+                width: 16, height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+              )
+            else
+              GestureDetector(
+                onTap: onRefresh,
+                child: const Icon(Icons.refresh_rounded, size: 20, color: AppColors.brandGreen),
+              ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppColors.background,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.divider),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _assigned ? _assignedRow(context) : _pendingRow(),
+              if (onTrack != null) ...[
+                const SizedBox(height: 12),
+                GestureDetector(
+                  onTap: onTrack,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreen,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.my_location_rounded, size: 16, color: Colors.white),
+                        SizedBox(width: 8),
+                        Text('Track Live',
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _pendingRow() {
+    return Row(
+      children: [
+        Container(
+          width: 52, height: 52,
+          decoration: BoxDecoration(
+            color: AppColors.brandGreenSurface,
+            borderRadius: BorderRadius.circular(26),
+          ),
+          child: const Icon(Icons.person_search_outlined, size: 26, color: AppColors.brandGreen),
+        ),
+        const SizedBox(width: 14),
+        const Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Finding Technician',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary)),
+              SizedBox(height: 4),
+              Text('A technician will be assigned shortly',
+                  style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _assignedRow(BuildContext context) {
+    return Row(
+      children: [
+        CircleAvatar(
+          radius: 26,
+          backgroundColor: AppColors.brandGreenSurface,
+          backgroundImage: photoUrl != null && photoUrl!.isNotEmpty
+              ? NetworkImage(photoUrl!)
+              : null,
+          child: photoUrl == null || photoUrl!.isEmpty
+              ? const Icon(Icons.person_outline, size: 26, color: AppColors.brandGreen)
+              : null,
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(name!,
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary)),
+              const SizedBox(height: 4),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: _statusColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(_statusLabel,
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                        color: _statusColor)),
+              ),
+            ],
+          ),
+        ),
+        if (mobile != null && mobile!.isNotEmpty &&
+            collectionStatus != 'sample_collected' &&
+            collectionStatus != 'handed_to_lab')
+          GestureDetector(
+            onTap: () => launchUrl(Uri(scheme: 'tel', path: mobile)),
+            child: Container(
+              width: 40, height: 40,
+              decoration: BoxDecoration(
+                color: AppColors.brandGreenSurface,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.phone_outlined, size: 20, color: AppColors.brandGreen),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -795,9 +1813,155 @@ class _DetailRow {
 
 // ─── Feedback Sheet ───────────────────────────────────────────────────────────
 
+// ─── Cancel Sheet ─────────────────────────────────────────────────────────────
+
+class _CancelSheet extends StatefulWidget {
+  final BookingModel booking;
+  final bool chargeApplies;
+  final Future<void> Function(String? reason) onConfirm;
+  const _CancelSheet({required this.booking, required this.chargeApplies, required this.onConfirm});
+
+  @override
+  State<_CancelSheet> createState() => _CancelSheetState();
+}
+
+class _CancelSheetState extends State<_CancelSheet> {
+  static const _reasons = ['Changed plans', 'Emergency', 'Wrong booking', 'Other'];
+  String? _reason;
+  bool _submitting = false;
+
+  Future<void> _submit() async {
+    setState(() => _submitting = true);
+    try {
+      await widget.onConfirm(_reason);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final arrivedWarning = widget.chargeApplies;
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      padding: EdgeInsets.fromLTRB(20, 16, 20, MediaQuery.of(context).viewInsets.bottom + 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 36, height: 4,
+              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(children: [
+            const Icon(Icons.cancel_outlined, color: Color(0xFFD32F2F), size: 20),
+            const SizedBox(width: 8),
+            const Text('Cancel Booking',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          ]),
+          const SizedBox(height: 4),
+          Text('${widget.booking.member.name} · ${widget.booking.id}',
+              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+          const SizedBox(height: 14),
+          if (arrivedWarning) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFF3E0),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFFCC02)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.info_outline, size: 16, color: Color(0xFFE65100)),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'The technician has arrived. A service charge will be deducted from your refund.',
+                      style: TextStyle(fontSize: 12, color: Color(0xFFE65100)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+          ],
+          const Text('Reason (optional)',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _reasons.map((r) {
+              final selected = _reason == r;
+              return GestureDetector(
+                onTap: () => setState(() => _reason = selected ? null : r),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  decoration: BoxDecoration(
+                    color: selected ? const Color(0xFFFFEBEE) : AppColors.background,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                        color: selected ? const Color(0xFFD32F2F) : AppColors.divider),
+                  ),
+                  child: Text(r,
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: selected ? const Color(0xFFD32F2F) : AppColors.textSecondary,
+                          fontWeight: selected ? FontWeight.w600 : FontWeight.w400)),
+                ),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 20),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _submitting ? null : () => Navigator.pop(context),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: AppColors.divider),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                ),
+                child: const Text('Go Back',
+                    style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600)),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: _submitting ? null : _submit,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFD32F2F),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                ),
+                child: _submitting
+                    ? const SizedBox(width: 18, height: 18,
+                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                    : const Text('Confirm Cancel',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+              ),
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Feedback Sheet ───────────────────────────────────────────────────────────
+
 class _FeedbackSheet extends StatefulWidget {
   final BookingModel booking;
-  final void Function(int rating, String comment) onSubmit;
+  final Future<void> Function(int rating, String comment) onSubmit;
   const _FeedbackSheet({required this.booking, required this.onSubmit});
 
   @override
@@ -842,12 +2006,15 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
   Future<void> _submit() async {
     if (_rating == 0) return;
     setState(() => _submitting = true);
-    await Future.delayed(const Duration(milliseconds: 600));
     final comment = [
       ..._selectedTags,
       if (_commentCtrl.text.trim().isNotEmpty) _commentCtrl.text.trim(),
     ].join(', ');
-    widget.onSubmit(_rating, comment);
+    try {
+      await widget.onSubmit(_rating, comment);
+    } catch (_) {
+      if (mounted) setState(() => _submitting = false);
+    }
   }
 
   @override
@@ -994,7 +2161,7 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
                 onPressed: _rating > 0 && !_submitting ? _submit : null,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.brandGreen,
-                  disabledBackgroundColor: AppColors.brandGreen.withOpacity(0.35),
+                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
                   elevation: 0,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                 ),
@@ -1015,5 +2182,661 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
   String _formatDate(DateTime d) {
     const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     return '${d.day} ${months[d.month]} ${d.year}';
+  }
+}
+
+// ─── Edit Tests Sheet ─────────────────────────────────────────────────────────
+
+class _EditTestsSheet extends StatefulWidget {
+  final BookingModel booking;
+  final VoidCallback onSaved;
+  const _EditTestsSheet({required this.booking, required this.onSaved});
+
+  @override
+  State<_EditTestsSheet> createState() => _EditTestsSheetState();
+}
+
+class _EditTestsSheetState extends State<_EditTestsSheet> {
+  List<TestModel> _allTests = [];
+  final Set<String> _selectedIds = {};
+  Set<String> _initialIds = {};
+  bool _loading = true;
+  bool _saving = false;
+  final TextEditingController _searchCtrl = TextEditingController();
+  String _searchQuery = '';
+
+  // Prescription upload (only shown when a selected test needs it)
+  final List<Uint8List> _prescriptions = [];
+  bool _isPicking = false;
+  final ImagePicker _picker = ImagePicker();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTests();
+    _searchCtrl.addListener(() => setState(() => _searchQuery = _searchCtrl.text));
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadTests() async {
+    setState(() => _loading = true);
+    try {
+      final tests = await ApiService.getPackages();
+
+      // Real product_id matches (id != '0')
+      final realIds = widget.booking.tests
+          .where((t) => t.id != '0')
+          .map((t) => t.id)
+          .toSet();
+
+      // Fallback: old bookings with product_id=0 — match by name, first occurrence only
+      final fallbackNames = widget.booking.tests
+          .where((t) => t.id == '0')
+          .map((t) => t.name.toLowerCase())
+          .toSet();
+
+      final preselected = <String>{};
+      preselected.addAll(tests.where((t) => realIds.contains(t.id)).map((t) => t.id));
+      for (final name in fallbackNames) {
+        final match = tests.cast<TestModel?>().firstWhere(
+          (t) => t!.name.toLowerCase() == name,
+          orElse: () => null,
+        );
+        if (match != null) preselected.add(match.id);
+      }
+
+      setState(() {
+        _allTests = tests;
+        _selectedIds.addAll(preselected);
+        _initialIds = Set.from(preselected);
+        _loading = false;
+      });
+    } catch (_) {
+      setState(() => _loading = false);
+    }
+  }
+
+  List<TestModel> get _filtered {
+    if (_searchQuery.isEmpty) return _allTests;
+    final q = _searchQuery.toLowerCase();
+    return _allTests
+        .where((t) =>
+            t.name.toLowerCase().contains(q) ||
+            t.category.toLowerCase().contains(q))
+        .toList();
+  }
+
+  // Prescription is required only when the user added a NEW doc-required test
+  // that was not part of the original booking.
+  bool get _needsPrescription =>
+      _allTests
+          .where((t) => _selectedIds.contains(t.id) && !_initialIds.contains(t.id))
+          .any((t) => t.docRequired);
+
+  double get _itemsTotal => _allTests
+      .where((t) => _selectedIds.contains(t.id))
+      .fold(0.0, (s, t) => s + t.finalPrice);
+
+  double get _serviceCharge =>
+      widget.booking.mode == 'Home Collection' ? widget.booking.serviceCharge : 0.0;
+
+  double get _total => _itemsTotal + _serviceCharge;
+
+  void _showPresSourcePicker() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.only(bottom: 16),
+            decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+          ),
+          _EditPresSourceTile(
+            icon: Icons.camera_alt_outlined,
+            title: 'Camera',
+            subtitle: 'Take a photo now',
+            onTap: () { Navigator.pop(ctx); _pickPres(ImageSource.camera); },
+          ),
+          const SizedBox(height: 8),
+          _EditPresSourceTile(
+            icon: Icons.photo_library_outlined,
+            title: 'Gallery',
+            subtitle: 'Choose from your photos',
+            onTap: () { Navigator.pop(ctx); _pickPres(ImageSource.gallery); },
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _pickPres(ImageSource source) async {
+    if (_isPicking || _prescriptions.length >= 5) return;
+    setState(() => _isPicking = true);
+    try {
+      if (source == ImageSource.gallery) {
+        final images = await _picker.pickMultiImage(imageQuality: 80);
+        if (images.isNotEmpty) {
+          final toAdd = images.take(5 - _prescriptions.length);
+          final bytes = await Future.wait(toAdd.map((f) => f.readAsBytes()));
+          setState(() => _prescriptions.addAll(bytes));
+        }
+      } else {
+        final img = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
+        if (img != null) {
+          final bytes = await img.readAsBytes();
+          setState(() => _prescriptions.add(bytes));
+        }
+      }
+    } catch (_) {}
+    if (mounted) setState(() => _isPicking = false);
+  }
+
+  void _viewImage(int index) {
+    Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+      builder: (_) => _EditPresViewerPage(images: List.from(_prescriptions), initialIndex: index),
+    ));
+  }
+
+  Future<void> _save() async {
+    if (_selectedIds.isEmpty || _saving || widget.booking.bookingIdNum == null) return;
+    setState(() => _saving = true);
+    try {
+      final selectedTests = _allTests.where((t) => _selectedIds.contains(t.id)).toList();
+      final items = selectedTests.map((t) => {
+        'packageId':     t.id,
+        'originalPrice': t.originalPrice,
+        'finalPrice':    t.finalPrice,
+      }).toList();
+      final result = await ApiService.updateBookingItems(
+        bookingId:     widget.booking.bookingIdNum!,
+        items:         items,
+        serviceCharge: _serviceCharge,
+      );
+      if (!mounted) return;
+      if (result != null && result['success'] == true) {
+        // Upload any collected prescriptions (non-fatal if it fails)
+        if (_prescriptions.isNotEmpty) {
+          try {
+            final rawIds = result['docRequiredItemIds'];
+            final bookingItemId = (rawIds is List && rawIds.isNotEmpty)
+                ? rawIds[0] as int?
+                : null;
+            final urls = <String>[];
+            for (final bytes in _prescriptions) {
+              final url = await ApiService.uploadFile(
+                  bytes, 'pres_${DateTime.now().millisecondsSinceEpoch}.jpg');
+              if (url != null) urls.add(url);
+            }
+            if (urls.isNotEmpty) {
+              await ApiService.savePrescription(
+                bookingId:     widget.booking.bookingIdNum!,
+                patientId:     int.tryParse(widget.booking.member.id) ?? 0,
+                bookingItemId: bookingItemId,
+                imageUrls:     urls,
+              );
+            }
+          } catch (_) {}
+        }
+        if (!mounted) return;
+        Navigator.pop(context);
+        widget.onSaved();
+      } else {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(result?['message'] as String? ?? 'Failed to update booking'),
+          backgroundColor: Colors.red[700],
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (_) {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Widget _buildPrescriptionSection() {
+    return Container(
+      decoration: const BoxDecoration(
+        border: Border(top: BorderSide(color: Color(0xFFFFCC02))),
+        color: Color(0xFFFFF3E0),
+      ),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.description_outlined, size: 15, color: Color(0xFFE65100)),
+          const SizedBox(width: 6),
+          const Text('Prescription',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
+          const Text(' *',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFD32F2F))),
+          const Spacer(),
+          if (_prescriptions.isNotEmpty)
+            Text('${_prescriptions.length}/5',
+                style: const TextStyle(fontSize: 11, color: Color(0xFF795548))),
+        ]),
+        const SizedBox(height: 2),
+        const Text('Upload a valid prescription for the selected test(s)',
+            style: TextStyle(fontSize: 11, color: Color(0xFF795548), height: 1.3)),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 104,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.only(top: 8),
+            children: [
+              ..._prescriptions.asMap().entries.map((e) => Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Stack(clipBehavior: Clip.none, children: [
+                  GestureDetector(
+                    onTap: () => _viewImage(e.key),
+                    child: Container(
+                      width: 88, height: 88,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: AppColors.divider),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.memory(e.value, fit: BoxFit.cover),
+                      ),
+                    ),
+                  ),
+                  Positioned(bottom: 4, right: 4,
+                    child: IgnorePointer(
+                      child: Container(
+                        width: 24, height: 24,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.45),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Icon(Icons.fullscreen_rounded, size: 15, color: Colors.white),
+                      ),
+                    ),
+                  ),
+                  Positioned(top: -6, right: -6, child: GestureDetector(
+                    onTap: () => setState(() => _prescriptions.removeAt(e.key)),
+                    child: Container(
+                      width: 22, height: 22,
+                      decoration: const BoxDecoration(color: Color(0xFFD32F2F), shape: BoxShape.circle),
+                      child: const Icon(Icons.close_rounded, size: 13, color: Colors.white),
+                    ),
+                  )),
+                ]),
+              )),
+              if (_prescriptions.length < 5)
+                GestureDetector(
+                  onTap: _isPicking ? null : _showPresSourcePicker,
+                  child: Container(
+                    width: 88, height: 88,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: _prescriptions.isEmpty ? const Color(0xFFE65100) : const Color(0xFFFFCC02),
+                        width: 1.5,
+                      ),
+                    ),
+                    child: _isPicking
+                        ? const Center(child: SizedBox(width: 20, height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
+                        : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                            Icon(
+                              _prescriptions.isEmpty ? Icons.upload_file_outlined : Icons.add_photo_alternate_outlined,
+                              size: 26,
+                              color: _prescriptions.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _prescriptions.isEmpty ? 'Upload' : 'Add more',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w500,
+                                color: _prescriptions.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                              ),
+                            ),
+                          ]),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+      child: Column(
+        children: [
+          Center(
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              width: 40, height: 4,
+              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+            child: Row(
+              children: [
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Edit Tests / Packages',
+                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
+                              color: AppColors.textPrimary)),
+                      Text('Tap to select or deselect',
+                          style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                    ],
+                  ),
+                ),
+                if (_selectedIds.isNotEmpty)
+                  Text('₹${_total.toInt()}',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                          color: AppColors.brandGreen)),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+            child: TextField(
+              controller: _searchCtrl,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Search tests...',
+                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+                prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
+                contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                filled: true,
+                fillColor: AppColors.background,
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+              ),
+            ),
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator(color: AppColors.brandGreen))
+                : _filtered.isEmpty
+                    ? const Center(
+                        child: Text('No tests found',
+                            style: TextStyle(color: AppColors.textSecondary)))
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                        itemCount: _filtered.length,
+                        itemBuilder: (_, i) {
+                          final t = _filtered[i];
+                          final selected = _selectedIds.contains(t.id);
+                          return GestureDetector(
+                            onTap: () => setState(() {
+                              selected ? _selectedIds.remove(t.id) : _selectedIds.add(t.id);
+                              if (!_needsPrescription) _prescriptions.clear();
+                            }),
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: selected
+                                    ? AppColors.brandGreenSurface
+                                    : AppColors.background,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: selected ? AppColors.brandGreen : AppColors.divider,
+                                  width: selected ? 1.5 : 1,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                    t.type == 'package'
+                                        ? Icons.inventory_2_outlined
+                                        : Icons.science_outlined,
+                                    size: 18,
+                                    color: selected ? AppColors.brandGreen : AppColors.textHint,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(t.name,
+                                            style: TextStyle(
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w600,
+                                                color: selected
+                                                    ? AppColors.brandGreen
+                                                    : AppColors.textPrimary)),
+                                        if (t.category.isNotEmpty)
+                                          Text(t.category,
+                                              style: const TextStyle(
+                                                  fontSize: 11, color: AppColors.textSecondary)),
+                                      ],
+                                    ),
+                                  ),
+                                  Text('₹${t.finalPrice.toInt()}',
+                                      style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                          color: selected
+                                              ? AppColors.brandGreen
+                                              : AppColors.textPrimary)),
+                                  const SizedBox(width: 8),
+                                  Icon(
+                                    selected
+                                        ? Icons.check_circle_rounded
+                                        : Icons.circle_outlined,
+                                    size: 20,
+                                    color: selected ? AppColors.brandGreen : AppColors.divider,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+          ),
+          if (!_loading && _needsPrescription) _buildPrescriptionSection(),
+
+          Container(
+            padding: EdgeInsets.fromLTRB(
+                16, 12, 16, MediaQuery.of(context).padding.bottom + 16),
+            decoration: const BoxDecoration(
+              color: AppColors.white,
+              border: Border(top: BorderSide(color: AppColors.divider)),
+            ),
+            child: SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: ElevatedButton(
+                onPressed: _selectedIds.isEmpty || _saving ||
+                    (_needsPrescription && _prescriptions.isEmpty)
+                    ? null : _save,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.brandGreen,
+                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+                child: _saving
+                    ? const SizedBox(
+                        width: 20, height: 20,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
+                    : Text(
+                        _selectedIds.isEmpty
+                            ? 'Select at least one test'
+                            : (_needsPrescription && _prescriptions.isEmpty)
+                                ? 'Upload prescription to continue'
+                                : 'Update Booking · ₹${_total.toInt()}',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500),
+                      ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Prescription source picker tile ─────────────────────────────────────────
+
+class _EditPresSourceTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  const _EditPresSourceTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppColors.background,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: AppColors.divider),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 44, height: 44,
+              decoration: BoxDecoration(
+                color: AppColors.brandGreenSurface,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: AppColors.brandGreen, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title,
+                      style: const TextStyle(
+                          fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                  Text(subtitle,
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right_rounded, color: AppColors.textHint, size: 20),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Full-screen prescription image viewer ────────────────────────────────────
+
+class _EditPresViewerPage extends StatefulWidget {
+  final List<Uint8List> images;
+  final int initialIndex;
+
+  const _EditPresViewerPage({required this.images, required this.initialIndex});
+
+  @override
+  State<_EditPresViewerPage> createState() => _EditPresViewerPageState();
+}
+
+class _EditPresViewerPageState extends State<_EditPresViewerPage> {
+  late final PageController _pageCtrl;
+  late int _current;
+
+  @override
+  void initState() {
+    super.initState();
+    _current = widget.initialIndex;
+    _pageCtrl = PageController(initialPage: widget.initialIndex);
+  }
+
+  @override
+  void dispose() {
+    _pageCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: Text('${_current + 1} / ${widget.images.length}',
+            style: const TextStyle(fontSize: 14, color: Colors.white70)),
+        centerTitle: true,
+        elevation: 0,
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: PageView.builder(
+              controller: _pageCtrl,
+              itemCount: widget.images.length,
+              onPageChanged: (i) => setState(() => _current = i),
+              itemBuilder: (_, i) => InteractiveViewer(
+                minScale: 0.8,
+                maxScale: 4.0,
+                child: Center(
+                  child: Image.memory(widget.images[i], fit: BoxFit.contain),
+                ),
+              ),
+            ),
+          ),
+          if (widget.images.length > 1)
+            Padding(
+              padding: EdgeInsets.only(
+                  bottom: MediaQuery.of(context).padding.bottom + 16, top: 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(widget.images.length, (i) => AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  width: i == _current ? 18 : 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: i == _current ? AppColors.brandGreen : Colors.white38,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                )),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }

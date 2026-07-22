@@ -1,10 +1,15 @@
 # Dependencies
 node_modules/
 client/node_modules/
+server/node_modules/
 
 # Environment (contains API keys — never commit)
 server/.env
 .env
+
+# Firebase credentials — contain API keys / admin access
+server/firebase-service-account.json
+client/android/app/google-services.json
 
 # Flutter build outputs
 client/build/

@@ -1,10 +1,9 @@
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
-import 'customer_home_screen.dart';
 import 'package:microlab/models.dart';
+import 'package:microlab/services/api_service.dart';
 
 class AddMemberScreen extends StatefulWidget {
   final MemberModel? existingMember;
@@ -29,18 +28,19 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
   // ── Optional ──────────────────────────────────────────────
   final _emailController = TextEditingController();
   final _dobController = TextEditingController();
-  final _relationController = TextEditingController();
+  String? _relation;
   final _healthController = TextEditingController();
   DateTime? _selectedDob;
   int? _calculatedAge;
 
   // ── Photo ─────────────────────────────────────────────────
   Uint8List? _imageBytes;       // newly picked image bytes (web-safe)
-  Uint8List? _existingBytes;    // bytes from existing member (edit mode)
+  Uint8List? _existingBytes;
+  String? _existingPhotoUrl;
   final ImagePicker _picker = ImagePicker();
 
   bool get _isEditing => widget.existingMember != null;
-  bool get _hasPhoto => _imageBytes != null || _existingBytes != null;
+  bool get _hasPhoto => _imageBytes != null || _existingBytes != null || _existingPhotoUrl != null;
 
   final List<String> _genders = ['Male', 'Female', 'Other'];
   final List<String> _relations = [
@@ -60,11 +60,21 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
     _mobileController.text = m.mobile;
     _locationController.text = m.location;
     _addressController.text = m.address;
-    _gender = m.gender;
+    _gender = _genders.firstWhere(
+      (g) => g.toLowerCase() == m.gender.toLowerCase(),
+      orElse: () => m.gender,
+    );
     _emailController.text = m.email ?? '';
-    _relationController.text = m.relation ?? '';
+    final rel = m.relation ?? '';
+    final matchedRelation = _relations.where(
+      (r) => r.toLowerCase() == rel.toLowerCase(),
+    ).toList();
+    _relation = matchedRelation.isNotEmpty ? matchedRelation.first : null;
     _healthController.text = m.healthCondition ?? '';
     _existingBytes = m.photoBytes;
+    _existingPhotoUrl = (m.photoBytes == null && m.photoUrl != null && m.photoUrl!.isNotEmpty)
+        ? m.photoUrl
+        : null;
     if (m.dob != null) {
       _selectedDob = m.dob;
       _dobController.text = _formatDate(m.dob!);
@@ -89,7 +99,8 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
         final bytes = await picked.readAsBytes();
         setState(() {
           _imageBytes = bytes;
-          _existingBytes = null; // override existing
+          _existingBytes = null;
+          _existingPhotoUrl = null;
         });
       }
     } on PlatformException catch (e) {
@@ -110,6 +121,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
     setState(() {
       _imageBytes = null;
       _existingBytes = null;
+      _existingPhotoUrl = null;
     });
   }
 
@@ -252,38 +264,103 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
 
     setState(() => _isLoading = true);
 
-    // TODO: Upload image first, get URL back
-    // POST /api/upload/photo  multipart { bytes: _imageBytes }
-    // Then POST /api/customer/members with photoUrl
-    await Future.delayed(const Duration(milliseconds: 800));
+    // Upload newly picked image to server first, get back a URL
+    String? uploadedPhotoUrl = _existingPhotoUrl;
+    if (_imageBytes != null) {
+      uploadedPhotoUrl = await ApiService.uploadPhoto(
+        _imageBytes!,
+        'photo_${DateTime.now().millisecondsSinceEpoch}.jpg',
+      );
+      if (uploadedPhotoUrl == null && mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text('Photo upload failed. Please try again.'),
+          backgroundColor: Colors.red[700],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+        return;
+      }
+    }
 
-    final finalBytes = _imageBytes ?? _existingBytes;
+    // Format dob as 'yyyy-MM-dd' for the API (MySQL format)
+    String? dobForApi;
+    if (_selectedDob != null) {
+      final d = _selectedDob!;
+      dobForApi =
+          '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    }
 
-    final member = MemberModel(
-      id: _isEditing
-          ? widget.existingMember!.id
-          : DateTime.now().millisecondsSinceEpoch.toString(),
-      name: _nameController.text.trim(),
-      mobile: _mobileController.text.trim(),
-      gender: _gender!,
-      location: _locationController.text.trim(),
-      address: _addressController.text.trim(),
-      email: _emailController.text.trim().isEmpty
-          ? null
-          : _emailController.text.trim(),
-      dob: _selectedDob,
-      relation: _relationController.text.trim().isEmpty
-          ? null
-          : _relationController.text.trim(),
-      healthCondition: _healthController.text.trim().isEmpty
-          ? null
-          : _healthController.text.trim(),
-      photoBytes: finalBytes,
-    );
+    final body = <String, dynamic>{
+      'name': _nameController.text.trim(),
+      'mobile': _mobileController.text.trim(),
+      'gender': _gender!,
+      'location': _locationController.text.trim(),
+      'address': _addressController.text.trim(),
+      if (_emailController.text.trim().isNotEmpty)
+        'email': _emailController.text.trim(),
+      if (dobForApi != null) 'date_of_birth': dobForApi,
+      if (_calculatedAge != null) 'age': _calculatedAge.toString(),
+      if (_relation != null && _relation!.isNotEmpty) 'relation': _relation,
+      if (_healthController.text.trim().isNotEmpty)
+        'health_condition': _healthController.text.trim(),
+      if (uploadedPhotoUrl != null) 'photo_url': uploadedPhotoUrl,
+    };
 
-    if (mounted) {
+    try {
+      final result = _isEditing
+          ? await ApiService.updatePatient(widget.existingMember!.id, body)
+          : await ApiService.savePatient(body);
+
+      if (!mounted) return;
+
+      if (result['success'] != true) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(result['message']?.toString() ?? 'Failed to save'),
+          backgroundColor: Colors.red[700],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+        return;
+      }
+
+      final savedId = result['data']?['patient_id']?.toString() ??
+          (_isEditing
+              ? widget.existingMember!.id
+              : DateTime.now().millisecondsSinceEpoch.toString());
+
+      final member = MemberModel(
+        id: savedId,
+        name: _nameController.text.trim(),
+        mobile: _mobileController.text.trim(),
+        gender: _gender!,
+        location: _locationController.text.trim(),
+        address: _addressController.text.trim(),
+        email: _emailController.text.trim().isEmpty
+            ? null
+            : _emailController.text.trim(),
+        dob: _selectedDob,
+        relation: (_relation == null || _relation!.isEmpty) ? null : _relation,
+        healthCondition: _healthController.text.trim().isEmpty
+            ? null
+            : _healthController.text.trim(),
+        photoBytes: _imageBytes ?? _existingBytes,
+        photoUrl: uploadedPhotoUrl,
+      );
+
       setState(() => _isLoading = false);
       Navigator.pop(context, member);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Network error: $e'),
+          backgroundColor: Colors.red[700],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      }
     }
   }
 
@@ -295,7 +372,6 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
     _addressController.dispose();
     _emailController.dispose();
     _dobController.dispose();
-    _relationController.dispose();
     _healthController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -332,6 +408,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
             _PhotoPickerWidget(
               imageBytes: _imageBytes,
               existingBytes: _existingBytes,
+              existingPhotoUrl: _existingPhotoUrl,
               hasPhoto: _hasPhoto,
               onTap: _showImageSourceSheet,
             ),
@@ -486,11 +563,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
               const SizedBox(height: 16),
               _FieldLabel(label: 'Relation'),
               DropdownButtonFormField<String>(
-                value: _relationController.text.isEmpty
-                    ? null
-                    : (_relations.contains(_relationController.text)
-                        ? _relationController.text
-                        : null),
+                value: _relation,
                 hint: const Text('Select relation',
                     style: TextStyle(
                         fontSize: 14, color: AppColors.textHint)),
@@ -521,8 +594,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                 items: _relations
                     .map((r) => DropdownMenuItem(value: r, child: Text(r)))
                     .toList(),
-                onChanged: (v) =>
-                    setState(() => _relationController.text = v ?? ''),
+                onChanged: (v) => setState(() => _relation = v),
               ),
 
               const SizedBox(height: 16),
@@ -587,6 +659,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
 class _PhotoPickerWidget extends StatelessWidget {
   final Uint8List? imageBytes;
   final Uint8List? existingBytes;
+  final String? existingPhotoUrl;
   final bool hasPhoto;
   final VoidCallback onTap;
 
@@ -595,6 +668,7 @@ class _PhotoPickerWidget extends StatelessWidget {
     required this.existingBytes,
     required this.hasPhoto,
     required this.onTap,
+    this.existingPhotoUrl,
   });
 
   @override
@@ -697,13 +771,12 @@ class _PhotoPickerWidget extends StatelessWidget {
   Widget _buildImage() {
     final bytes = imageBytes ?? existingBytes;
     if (bytes != null && bytes.isNotEmpty) {
-      return Image.memory(
-        bytes,
-        fit: BoxFit.cover,
-        width: 100,
-        height: 100,
-        errorBuilder: (_, __, ___) => _placeholder(),
-      );
+      return Image.memory(bytes, fit: BoxFit.cover, width: 100, height: 100,
+          errorBuilder: (_, __, ___) => _placeholder());
+    }
+    if (existingPhotoUrl != null && existingPhotoUrl!.isNotEmpty) {
+      return Image.network(existingPhotoUrl!, fit: BoxFit.cover, width: 100, height: 100,
+          errorBuilder: (_, __, ___) => _placeholder());
     }
     return _placeholder();
   }
