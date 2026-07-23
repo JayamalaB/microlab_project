@@ -30,7 +30,7 @@ class TechnicianProfileScreen extends StatefulWidget {
       _TechnicianProfileScreenState();
 }
 
-class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
+class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with WidgetsBindingObserver {
   bool _isEditing    = false;
   bool _statsLoading = true;
 
@@ -68,6 +68,21 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
     _expCtrl      = TextEditingController();
     _editingSpecs = [];
     _loadProfile();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      final prefs = SharedPreferences.getInstance();
+      prefs.then((p) {
+        final techId = p.getInt('user_id') ?? 0;
+        if (techId > 0) {
+          setState(() => _statsLoading = true);
+          _loadStats(techId);
+        }
+      });
+    }
   }
 
   Future<void> _loadProfile() async {
@@ -134,6 +149,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _nameCtrl.dispose();
     _emailCtrl.dispose();
     _expCtrl.dispose();
@@ -353,7 +369,17 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
       ),
     );
 
-    final body = ListView(
+    final body = RefreshIndicator(
+      onRefresh: () async {
+        final prefs = await SharedPreferences.getInstance();
+        final techId = prefs.getInt('user_id') ?? 0;
+        if (techId > 0) {
+          setState(() => _statsLoading = true);
+          await _loadStats(techId);
+        }
+      },
+      color: AppColors.brandGreen,
+      child: ListView(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 80),
       children: [
         // ── Profile card ─────────────────────────────────────
@@ -650,6 +676,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
           ),
         ],
       ],
+      ),
     );
 
     if (widget.embedded) {
