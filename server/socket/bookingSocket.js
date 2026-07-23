@@ -1735,6 +1735,12 @@ module.exports = function bookingSocket(io, socket) {
     }
 
     _notifyPatient(io, bookingId, 'handed_to_lab', { bookingId });
+    sendToBookingOwner(
+      bookingId,
+      'Sample Reached Lab 🧪',
+      'Your sample has been received at the lab and is being processed.',
+      { type: 'sample_received_at_lab', booking_id: String(bookingId) }
+    );
     bookingRooms.delete(bookingId);
     lastTechLocation.delete(String(bookingId));
   });

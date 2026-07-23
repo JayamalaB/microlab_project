@@ -23,7 +23,7 @@ function mapProduct(r) {
     end_date:       r.offer_end_date   ?? null,
     doc_req:        (r.document_required === 'yes' || r.document_required == 1) ? 'yes' : 'no',
     pre_instrs:     r.pre_instructions ?? null,
-    report_sts:     r.report_tat_hours  ?? '24 hrs',
+    report_sts:     r.report_tat_hours != null ? Number(r.report_tat_hours) : null,
     available_for_home: r.available_for_home ?? 1,
     available_for_lab:  r.available_for_lab  ?? 1,
   };

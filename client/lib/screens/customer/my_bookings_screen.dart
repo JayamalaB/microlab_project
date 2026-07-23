@@ -180,6 +180,8 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
       rating:              b['overall_rating'] != null ? (b['overall_rating'] as num).toInt() : null,
       feedbackComment:     b['feedback_comments'] as String?,
       reportUrl:           b['report_url'] as String?,
+      refundAmount:        b['refund_amount'] != null ? double.tryParse(b['refund_amount'].toString()) : null,
+      refundStatus:        b['refund_status'] as String?,
     );
   }
 
@@ -850,6 +852,18 @@ class _BookingCard extends StatelessWidget {
                             if (booking.paymentType == 'service_charge')
                               Text('Due at collection: ₹${(booking.grandTotal - booking.paidAmount).toInt()}',
                                   style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                            if (booking.status == 'Cancelled' && (booking.refundAmount ?? 0) > 0)
+                              Text(
+                                booking.refundStatus == 'processed'
+                                    ? 'Refund of ₹${booking.refundAmount!.toInt()} initiated · 5–7 days'
+                                    : 'Refund of ₹${booking.refundAmount!.toInt()} pending',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: booking.refundStatus == 'processed'
+                                      ? AppColors.brandGreen
+                                      : const Color(0xFFE65100),
+                                ),
+                              ),
                           ],
                         ),
                         Row(
@@ -1583,6 +1597,7 @@ class _TechnicianCard extends StatelessWidget {
       case 'en_route':           return 'On the way';
       case 'arrived':            return 'Arrived';
       case 'collection_started': return 'Collection Started';
+      case 'otp_verified':        return 'Sample Collected';
       case 'sample_collected':   return 'Sample Collected';
       case 'handed_to_lab':      return 'Handed to Lab';
       default:                   return 'Assigned';
@@ -1594,6 +1609,7 @@ class _TechnicianCard extends StatelessWidget {
       case 'en_route':           return const Color(0xFF1565C0);
       case 'arrived':            return const Color(0xFF2E7D32);
       case 'collection_started': return const Color(0xFF6A1B9A);
+      case 'otp_verified':        return const Color(0xFF2E7D32);
       case 'sample_collected':   return const Color(0xFF2E7D32);
       case 'handed_to_lab':      return AppColors.brandGreen;
       default:                   return AppColors.brandGreen;

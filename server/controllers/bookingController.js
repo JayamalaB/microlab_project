@@ -11,6 +11,15 @@ function logReports(msg) {
   const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
   fs.appendFileSync(REPORTS_LOG, `[${ist}] ${msg}\n`, 'utf8');
 }
+
+// ── Refund log ────────────────────────────────────────────────────────────────
+const REFUND_LOG = path.join(__dirname, '..', 'logs', 'refund.log');
+function logRefund(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+  const line = `[${ist}] ${msg}\n`;
+  process.stdout.write(line);
+  fs.appendFileSync(REFUND_LOG, line, 'utf8');
+}
 const { triggerScheduledDispatch } = require('../socket/bookingSocket');
 
 let _io = null;
@@ -272,6 +281,8 @@ exports.getMyBookings = async (req, res) => {
          b.booking_date            AS collection_date,
          b.total_amount,
          b.discount_amount,
+         b.refund_amount,
+         b.refund_status,
          b.created_at,
          b.branch_id,
          b.patient_id,
@@ -511,13 +522,65 @@ exports.cancelBooking = async (req, res) => {
       [reason ?? null, refundAmount, refundStatus, bookingId]
     );
 
+    // ── Razorpay refund (fire if paid online) ──────────────────────────────────
+    let finalRefundStatus = refundStatus;
+    if (refundAmount > 0) {
+      const [[txn]] = await db.execute(
+        `SELECT gateway_transaction_id FROM ip_payment_transactions
+         WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)
+           AND gateway_transaction_id IS NOT NULL
+         ORDER BY created_at DESC LIMIT 1`,
+        [bookingId]
+      );
+      if (txn?.gateway_transaction_id) {
+        try {
+          const rzpKeyId     = process.env.RAZORPAY_KEY_ID;
+          const rzpKeySecret = process.env.RAZORPAY_KEY_SECRET;
+          const authHeader   = 'Basic ' + Buffer.from(`${rzpKeyId}:${rzpKeySecret}`).toString('base64');
+          const rzpRes = await fetch(
+            `https://api.razorpay.com/v1/payments/${txn.gateway_transaction_id}/refund`,
+            {
+              method:  'POST',
+              headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+              body:    JSON.stringify({ amount: Math.round(refundAmount * 100) }),
+            }
+          );
+          const rzpBody = await rzpRes.json();
+          if (rzpRes.ok && rzpBody.id) {
+            const refundTxnRef = `RFN${Date.now()}`;
+            await db.execute(
+              `INSERT INTO ip_payment_transactions
+                 (transaction_ref, booking_id, patient_id, payment_type,
+                  gross_amount, net_amount, amount_paid, amount_due,
+                  currency, payment_status, transaction_status, is_refund,
+                  gateway_transaction_id, gateway_status, paid_at)
+               VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'refunded', NOW())`,
+              [refundTxnRef, bookingId, booking.patient_id ?? null,
+               refundAmount, refundAmount, refundAmount,
+               rzpBody.id]
+            );
+            await db.execute(
+              `UPDATE ip_bookings SET refund_status = 'processed' WHERE booking_id = ?`,
+              [bookingId]
+            );
+            finalRefundStatus = 'processed';
+            logRefund(`✅ SUCCESS — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} refund_id=${rzpBody.id} amount=₹${refundAmount}`);
+          } else {
+            logRefund(`❌ FAILED — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} amount=₹${refundAmount} response=${JSON.stringify(rzpBody)}`);
+          }
+        } catch (rzpErr) {
+          logRefund(`❌ ERROR — booking_id=${bookingId} error=${rzpErr.message}`);
+        }
+      }
+    }
+
     syncBookingToClient(bookingId, {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
     }).catch(err => console.error('[clientSync] cancel sync failed:', err.message));
 
-    console.log(`✅ Booking ${bookingId} cancelled. Refund: ₹${refundAmount}, Charge: ₹${chargeApplied}`);
-    res.json({ success: true, refund_amount: refundAmount, refund_status: refundStatus, service_charge_applied: chargeApplied });
+    logRefund(`[cancel] booking_id=${bookingId} refund=₹${refundAmount} status=${finalRefundStatus} charge=₹${chargeApplied}`);
+    res.json({ success: true, refund_amount: refundAmount, refund_status: finalRefundStatus, service_charge_applied: chargeApplied });
   } catch (err) {
     console.error('❌ cancelBooking FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
