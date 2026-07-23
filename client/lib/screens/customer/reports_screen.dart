@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -9,26 +10,58 @@ import 'package:open_filex/open_filex.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/customer_refresh_notifier.dart';
+import 'package:microlab/services/socket_service.dart';
 
 // ─── Reports screen ───────────────────────────────────────────────────────────
 
 class ReportsScreen extends StatefulWidget {
   final bool embedded;
-  const ReportsScreen({super.key, this.embedded = false});
+  final ValueNotifier<int>? refreshTrigger;
+  const ReportsScreen({super.key, this.embedded = false, this.refreshTrigger});
 
   @override
   State<ReportsScreen> createState() => _ReportsScreenState();
 }
 
-class _ReportsScreenState extends State<ReportsScreen> {
+class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserver {
   List<BookingModel> _bookings = [];
   bool _isLoading = true;
   String? _error;
+
+  StreamSubscription<ReportReadyEvent>? _reportSub;
+  StreamSubscription<bool>? _connectedSub;
 
   @override
   void initState() {
     super.initState();
     _loadReports();
+    widget.refreshTrigger?.addListener(_loadReports);
+    WidgetsBinding.instance.addObserver(this);
+    CustomerRefreshNotifier.instance.addListener(_onFcmRefresh);
+    _reportSub    = SocketService.instance.onReportReady.listen((_) => _loadReports());
+    _connectedSub = SocketService.instance.onConnected.listen((_) => _loadReports());
+  }
+
+  @override
+  void dispose() {
+    widget.refreshTrigger?.removeListener(_loadReports);
+    WidgetsBinding.instance.removeObserver(this);
+    CustomerRefreshNotifier.instance.removeListener(_onFcmRefresh);
+    _reportSub?.cancel();
+    _connectedSub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _loadReports();
+  }
+
+  void _onFcmRefresh() {
+    if (CustomerRefreshNotifier.instance.lastEvent == CustomerRefreshEvent.reportReady) {
+      _loadReports();
+    }
   }
 
   Future<void> _loadReports() async {
@@ -149,23 +182,36 @@ class _ReportsScreenState extends State<ReportsScreen> {
       );
     }
     if (reports.isEmpty) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.receipt_long_outlined, size: 48, color: AppColors.brandGreenLight),
-            SizedBox(height: 16),
-            Text('No reports yet',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-            SizedBox(height: 8),
-            Text('Reports for completed tests appear here.',
-                style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-          ],
+      return RefreshIndicator(
+        onRefresh: () async => _loadReports(),
+        color: AppColors.brandGreen,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: SizedBox(
+            height: MediaQuery.of(context).size.height * 0.7,
+            child: const Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.receipt_long_outlined, size: 48, color: AppColors.brandGreenLight),
+                  SizedBox(height: 16),
+                  Text('No reports yet',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                  SizedBox(height: 8),
+                  Text('Reports for completed tests appear here.',
+                      style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                ],
+              ),
+            ),
+          ),
         ),
       );
     }
 
-    return ListView.builder(
+    return RefreshIndicator(
+      onRefresh: () async => _loadReports(),
+      color: AppColors.brandGreen,
+      child: ListView.builder(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
       itemCount: reports.length,
       itemBuilder: (_, i) {
@@ -264,6 +310,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
           ),
         );
       },
+      ),
     );
   }
 

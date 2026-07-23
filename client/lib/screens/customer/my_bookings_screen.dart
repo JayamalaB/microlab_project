@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -5,7 +6,9 @@ import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/customer_refresh_notifier.dart';
 import 'package:microlab/services/razorpay_service.dart';
+import 'package:microlab/services/socket_service.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
 import 'tracking_map_screen.dart';
@@ -20,16 +23,29 @@ class MyBookingsScreen extends StatefulWidget {
   State<MyBookingsScreen> createState() => _MyBookingsScreenState();
 }
 
-class _MyBookingsScreenState extends State<MyBookingsScreen> {
+class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBindingObserver {
   List<BookingModel> _bookings = [];
   bool _isLoading = true;
   String? _error;
+
+  StreamSubscription<BookingAcceptedEvent>? _acceptedSub;
+  StreamSubscription<int>? _enRouteSub;
+  StreamSubscription<int>? _arrivedSub;
+  StreamSubscription<int>? _collectedSub;
+  StreamSubscription<bool>? _connectedSub;
 
   @override
   void initState() {
     super.initState();
     _loadBookings();
     widget.refreshTrigger?.addListener(_loadBookings);
+    WidgetsBinding.instance.addObserver(this);
+    CustomerRefreshNotifier.instance.addListener(_onFcmRefresh);
+    _acceptedSub  = SocketService.instance.onBookingAccepted.listen((_) => _loadBookings());
+    _enRouteSub   = SocketService.instance.onTechnicianEnRoute.listen((_) => _loadBookings());
+    _arrivedSub   = SocketService.instance.onTechnicianArrived.listen((_) => _loadBookings());
+    _collectedSub = SocketService.instance.onCollectionCompleted.listen((_) => _loadBookings());
+    _connectedSub = SocketService.instance.onConnected.listen((_) => _loadBookings());
   }
 
   Future<void> _loadBookings() async {
@@ -201,7 +217,26 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
   @override
   void dispose() {
     widget.refreshTrigger?.removeListener(_loadBookings);
+    WidgetsBinding.instance.removeObserver(this);
+    CustomerRefreshNotifier.instance.removeListener(_onFcmRefresh);
+    _acceptedSub?.cancel();
+    _enRouteSub?.cancel();
+    _arrivedSub?.cancel();
+    _collectedSub?.cancel();
+    _connectedSub?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _loadBookings();
+  }
+
+  void _onFcmRefresh() {
+    if (CustomerRefreshNotifier.instance.lastEvent ==
+        CustomerRefreshEvent.bookingStatusChanged) {
+      _loadBookings();
+    }
   }
 
   @override
@@ -276,36 +311,49 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
 
     final groups = _patientGroups;
     if (groups.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(40),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 72, height: 72,
-                decoration: const BoxDecoration(
-                    color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-                child: const Icon(Icons.calendar_today_outlined,
-                    size: 32, color: AppColors.brandGreen),
+      return RefreshIndicator(
+        onRefresh: () async => _loadBookings(),
+        color: AppColors.brandGreen,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: SizedBox(
+            height: MediaQuery.of(context).size.height * 0.7,
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 72, height: 72,
+                      decoration: const BoxDecoration(
+                          color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+                      child: const Icon(Icons.calendar_today_outlined,
+                          size: 32, color: AppColors.brandGreen),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text('No bookings yet',
+                        style: TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Your booked tests will appear here.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(height: 16),
-              const Text('No bookings yet',
-                  style: TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-              const SizedBox(height: 8),
-              const Text(
-                'Your booked tests will appear here.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
-              ),
-            ],
+            ),
           ),
         ),
       );
     }
 
-    return ColoredBox(
+    return RefreshIndicator(
+      onRefresh: () async => _loadBookings(),
+      color: AppColors.brandGreen,
+      child: ColoredBox(
       color: const Color(0xFFF4F6F8),
       child: ListView.builder(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
@@ -328,6 +376,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
             },
           );
         },
+      ),
       ),
     );
   }
