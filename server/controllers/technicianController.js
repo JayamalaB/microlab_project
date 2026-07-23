@@ -17,6 +17,18 @@ function tlog(msg) {
   fs.appendFileSync(TECH_LOG, line, 'utf8');
 }
 
+const OTP_LOG = path.join(__dirname, '..', 'logs', 'otpinfo.log');
+function otpLog(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
+  const line = `[${ist}] ${msg}\n`;
+  process.stdout.write(line);
+  try {
+    const logsDir = path.join(__dirname, '..', 'logs');
+    if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+    fs.appendFileSync(OTP_LOG, line, 'utf8');
+  } catch (_) {}
+}
+
 // Converts "HH:MM:SS" TIME strings to appointment slot array "HH:MM:00"
 function _generateIntervals(startTime, endTime, durationMinutes) {
   const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
@@ -1044,45 +1056,73 @@ exports.generateBookingOtp = async (req, res) => {
 
   const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES ?? '10');
 
+  otpLog(`[GENERATE] ── START ── booking_id=${bookingId} tech_id=${technicianId}`);
+
   try {
-    // Verify assignment and fetch patient mobile in one query
+    // Verify assignment and fetch OTP recipient mobile.
+    // If the booking was created by a logged-in account owner (family head), send to their
+    // registered login number (ip_users.user_mobile_no) so the person physically present
+    // with the technician receives the OTP — not the patient the test is booked for.
+    // Falls back to ip_patients.patient_mobile for self-bookings and cases where
+    // created_by is null or does not match any ip_users row.
     const [[row]] = await db.execute(
-      `SELECT p.patient_mobile, p.patient_name
+      `SELECT COALESCE(u.user_mobile_no, p.patient_mobile) AS patient_mobile,
+              p.patient_name,
+              p.patient_mobile   AS raw_patient_mobile,
+              b.created_by,
+              u.user_id          AS creator_user_id,
+              u.user_mobile_no   AS creator_mobile
        FROM ip_technician_collection tc
        JOIN ip_bookings b ON b.booking_id = tc.booking_id
        JOIN ip_patients p ON p.patient_id = b.patient_id
+       LEFT JOIN ip_users u ON u.user_id = b.created_by
        WHERE tc.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL LIMIT 1`,
       [bookingId, technicianId]
     );
 
     if (!row) {
+      otpLog(`[GENERATE] ❌ LOOKUP FAILED — no row found for booking_id=${bookingId} tech_id=${technicianId} (booking missing, not assigned, or deleted)`);
       return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
+    }
+
+    otpLog(`[GENERATE] DB lookup OK — patient_name="${row.patient_name}" raw_patient_mobile=${row.raw_patient_mobile ?? 'NULL'} created_by=${row.created_by ?? 'NULL'} creator_user_id=${row.creator_user_id ?? 'NULL'} creator_mobile=${row.creator_mobile ?? 'NULL'} resolved_mobile=${row.patient_mobile ?? 'NULL'}`);
+
+    if (!row.patient_mobile) {
+      otpLog(`[GENERATE] ⚠️  resolved mobile is NULL — SMS will not be sent (patient_mobile and creator_mobile are both NULL)`);
     }
 
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
 
-    await db.execute(
+    const [updateRes] = await db.execute(
       `UPDATE ip_technician_collection
        SET collection_otp = ?, collection_otp_expiry = DATE_ADD(NOW(), INTERVAL ? MINUTE), otp_attempts = 0
        WHERE booking_id = ? AND technician_id = ?`,
       [otp, expiryMinutes, bookingId, technicianId]
     );
+    otpLog(`[GENERATE] OTP stored in DB — affected_rows=${updateRes.affectedRows} expiry=${expiryMinutes}min`);
 
-    // Send SMS — non-fatal: OTP is stored even if SMS fails
-    try {
-      const smsRes = await sms.sendBookingOtp(row.patient_mobile, otp);
-      console.log(`✅ generateBookingOtp — booking_id=${bookingId} | SMS: ${smsRes}`);
-    } catch (smsErr) {
-      console.warn(`⚠️  generateBookingOtp — SMS failed (non-fatal): ${smsErr.message}`);
+    if (updateRes.affectedRows === 0) {
+      otpLog(`[GENERATE] ⚠️  OTP UPDATE hit 0 rows — ip_technician_collection row may be missing for booking_id=${bookingId} tech_id=${technicianId}`);
     }
 
-    const mobile = row.patient_mobile ?? '';
-    const maskedMobile = mobile.length >= 10
-      ? `${mobile.slice(0, 3)}****${mobile.slice(7)}`
+    // Send SMS — non-fatal: OTP is stored even if SMS fails
+    const targetMobile = row.patient_mobile ?? '';
+    otpLog(`[GENERATE] SMS target — mobile="${targetMobile}" api_key_set=${!!process.env.PING4SMS_API_KEY} sender_set=${!!process.env.PING4SMS_SENDER_ID} template_id=${process.env.PING4SMS_BOOKING_OTP_TEMPLATE_ID ?? 'NOT SET'}`);
+    try {
+      const smsRes = await sms.sendBookingOtp(targetMobile, otp);
+      otpLog(`[GENERATE] ✅ SMS sent — mobile=${targetMobile} response="${smsRes}"`);
+    } catch (smsErr) {
+      otpLog(`[GENERATE] ❌ SMS FAILED — mobile=${targetMobile} error="${smsErr.message}"`);
+    }
+
+    const maskedMobile = targetMobile.length >= 10
+      ? `${targetMobile.slice(0, 3)}****${targetMobile.slice(7)}`
       : '****';
 
+    otpLog(`[GENERATE] ── DONE ── success=true maskedMobile=${maskedMobile}`);
     res.json({ success: true, maskedMobile });
   } catch (err) {
+    otpLog(`[GENERATE] ❌ SERVER ERROR — ${err.message}`);
     console.error('❌ generateBookingOtp FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -1194,6 +1234,8 @@ exports.resendBookingOtp = async (req, res) => {
 
   const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES ?? '10');
 
+  otpLog(`[RESEND] ── START ── booking_id=${bookingId} tech_id=${technicianId}`);
+
   try {
     // Check cooldown: if OTP remaining time > (expiryMinutes - 1) minutes, resend too soon
     const [[cooldownRow]] = await db.execute(
@@ -1205,41 +1247,56 @@ exports.resendBookingOtp = async (req, res) => {
     );
 
     if (cooldownRow) {
+      otpLog(`[RESEND] ⏱  cooldown active — too soon to resend for booking_id=${bookingId}`);
       return res.status(429).json({ success: false, message: 'Please wait 60 seconds before resending OTP.' });
     }
 
-    // Fetch patient mobile
+    // Fetch OTP recipient mobile — same logic as generateBookingOtp:
+    // prefer the booking creator's login number over the patient's number.
     const [[row]] = await db.execute(
-      `SELECT p.patient_mobile
+      `SELECT COALESCE(u.user_mobile_no, p.patient_mobile) AS patient_mobile,
+              p.patient_mobile   AS raw_patient_mobile,
+              b.created_by,
+              u.user_id          AS creator_user_id,
+              u.user_mobile_no   AS creator_mobile
        FROM ip_technician_collection tc
        JOIN ip_bookings b ON b.booking_id = tc.booking_id
        JOIN ip_patients p ON p.patient_id = b.patient_id
+       LEFT JOIN ip_users u ON u.user_id = b.created_by
        WHERE tc.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL LIMIT 1`,
       [bookingId, technicianId]
     );
 
     if (!row) {
+      otpLog(`[RESEND] ❌ LOOKUP FAILED — no row found for booking_id=${bookingId} tech_id=${technicianId}`);
       return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
     }
 
+    otpLog(`[RESEND] DB lookup OK — raw_patient_mobile=${row.raw_patient_mobile ?? 'NULL'} created_by=${row.created_by ?? 'NULL'} creator_user_id=${row.creator_user_id ?? 'NULL'} creator_mobile=${row.creator_mobile ?? 'NULL'} resolved_mobile=${row.patient_mobile ?? 'NULL'}`);
+
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
 
-    await db.execute(
+    const [updateRes] = await db.execute(
       `UPDATE ip_technician_collection
        SET collection_otp = ?, collection_otp_expiry = DATE_ADD(NOW(), INTERVAL ? MINUTE), otp_attempts = 0
        WHERE booking_id = ? AND technician_id = ?`,
       [otp, expiryMinutes, bookingId, technicianId]
     );
+    otpLog(`[RESEND] OTP stored in DB — affected_rows=${updateRes.affectedRows}`);
 
+    const targetMobile = row.patient_mobile ?? '';
+    otpLog(`[RESEND] SMS target — mobile="${targetMobile}" template_id=${process.env.PING4SMS_BOOKING_OTP_TEMPLATE_ID ?? 'NOT SET'}`);
     try {
-      const smsRes = await sms.sendBookingOtp(row.patient_mobile, otp);
-      console.log(`✅ resendBookingOtp — booking_id=${bookingId} | SMS: ${smsRes}`);
+      const smsRes = await sms.sendBookingOtp(targetMobile, otp);
+      otpLog(`[RESEND] ✅ SMS sent — mobile=${targetMobile} response="${smsRes}"`);
     } catch (smsErr) {
-      console.warn(`⚠️  resendBookingOtp — SMS failed (non-fatal): ${smsErr.message}`);
+      otpLog(`[RESEND] ❌ SMS FAILED — mobile=${targetMobile} error="${smsErr.message}"`);
     }
 
+    otpLog(`[RESEND] ── DONE ── success=true`);
     res.json({ success: true });
   } catch (err) {
+    otpLog(`[RESEND] ❌ SERVER ERROR — ${err.message}`);
     console.error('❌ resendBookingOtp FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }

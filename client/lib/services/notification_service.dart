@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_service.dart';
 import 'booking_notification_service.dart';
+import 'customer_refresh_notifier.dart';
 import 'socket_service.dart';
 
 // ─── FCM background handler ───────────────────────────────────────────────────
@@ -244,6 +245,11 @@ class NotificationService {
           ),
         ),
       );
+      // Fire in-process bus so foregrounded screens reload immediately.
+      final event = type == 'results_released'
+          ? CustomerRefreshEvent.reportReady
+          : CustomerRefreshEvent.bookingStatusChanged;
+      CustomerRefreshNotifier.instance.fire(event);
     }
   }
 }

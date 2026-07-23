@@ -16,7 +16,7 @@ class TechnicianSlotScreen extends StatefulWidget {
   State<TechnicianSlotScreen> createState() => _TechnicianSlotScreenState();
 }
 
-class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
+class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _masterSlots = [];
   bool _slotsLoading = true;
 
@@ -67,6 +67,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
       _selectedDurations[_key(d)] = <int, int?>{};
     }
     _loadSlots();
+    WidgetsBinding.instance.addObserver(this);
     // Rebuild every minute so past-slot locks apply without a network call.
     _slotRefreshTimer = Timer.periodic(
       const Duration(minutes: 1),
@@ -75,7 +76,13 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _loadSlots();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _slotRefreshTimer?.cancel();
     super.dispose();
   }
@@ -720,8 +727,15 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
         _buildDayTabs(),
         const Divider(height: 1, color: AppColors.divider),
         Expanded(
-            child: ColoredBox(
-                color: AppColors.background, child: _buildSlotPanel())),
+          child: ColoredBox(
+            color: AppColors.background,
+            child: RefreshIndicator(
+              onRefresh: () async => _loadSlots(),
+              color: AppColors.brandGreen,
+              child: _buildSlotPanel(),
+            ),
+          ),
+        ),
       ]);
     }
 

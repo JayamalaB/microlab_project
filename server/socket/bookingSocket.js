@@ -305,6 +305,31 @@ function _registerFcmTechs(fcmQueue) {
 //  CORE DISPATCH
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Returns a compact queue snapshot — used inside every logBlock so each log
+// entry is self-contained and readable without cross-referencing earlier lines.
+function _queueStatus(dispatch, actorMap) {
+  const q   = dispatch.queue;
+  const idx = dispatch.techIdx;
+  const remaining = Math.max(0, q.length - idx);
+  const lines = [
+    `Queue Status : ${q.length} total  |  tried: ${dispatch.triedIds.size}  |  remaining: ${remaining}`,
+  ];
+  q.forEach((a, i) => {
+    const marker = i < idx ? '✓' : i === idx ? '▶' : '○';
+    const dist   = a.dist === Infinity ? 'no GPS' : `${a.dist.toFixed(1)} km`;
+    const live   = actorMap.get(a.id);
+    const state  = !live
+      ? 'offline'
+      : !live.isOnline
+        ? 'went offline'
+        : !live.isAvailable
+          ? 'busy'
+          : 'available';
+    lines.push(`  ${marker} ${i + 1}. ${a.name} (ID: ${a.id})  ${dist}  [${state}]`);
+  });
+  return lines;
+}
+
 async function dispatchAttempt(io, bookingId) {
   while (true) {
     if (!bookingRooms.has(bookingId)) return; // patient cancelled
@@ -366,6 +391,46 @@ async function dispatchAttempt(io, bookingId) {
           }
         }
 
+        // Lane 2.5: slot-matched techs fully exhausted — lift the slot constraint
+        // and try any available technician so the booking doesn't silently time out
+        // when a non-slot tech could still reach the patient.
+        if (dispatch.slotTechIds && dispatch.slotTechIds.size > 0) {
+          let fallbackFresh = buildFullQueue(
+            bookingData.patientLat ?? null,
+            bookingData.patientLng ?? null,
+            actorMap,
+            bookingData.branchId   ?? null
+          ).filter(a => !triedIds.has(a.id)); // no slotTechIds filter
+
+          if (fallbackFresh.length === 0 && bookingType !== 'transport') {
+            // Also check FCM-only techs without slot constraint
+            const fallbackFcm = buildFcmQueue(
+              bookingData.patientLat ?? null,
+              bookingData.patientLng ?? null,
+              bookingData.branchId   ?? null
+            ).filter(a => !triedIds.has(a.id));
+            if (fallbackFcm.length > 0) {
+              _registerFcmTechs(fallbackFcm);
+              fallbackFresh = fallbackFcm;
+            }
+          }
+
+          if (fallbackFresh.length > 0) {
+            dispatch.slotTechIds = null; // lift constraint for remaining dispatch
+            dispatch.queue.push(...fallbackFresh);
+            dlog(`[DISPATCH] SLOT_FALLBACK — bookingId=${bookingId} slot techs exhausted, lifting constraint — ${fallbackFresh.length} any-available tech(s) added`);
+            logBlock('🔓', `Slot Fallback  booking=${bookingId}`, [
+              'All slot-matched techs exhausted — lifting slot constraint.',
+              ...fallbackFresh.map((a, i) =>
+                `+${i + 1}. ${a.name} (ID: ${a.id}) — ${
+                  a.dist === Infinity ? 'no GPS' : `${a.dist.toFixed(1)} km`
+                }`
+              ),
+            ]);
+            continue; // restart loop: dispatch next available tech
+          }
+        }
+
         // All slot-matched techs exhausted → tell patient to choose another slot.
         // Generic exhaustion → booking_timeout.
         dlog(`[DISPATCH] ALL TECHS EXHAUSTED — bookingId=${bookingId} triedIds=[${[...dispatch.triedIds].join(',')}] slotId=${dispatch.slotId ?? 'none'}`);
@@ -404,10 +469,13 @@ async function dispatchAttempt(io, bookingId) {
 
     if (!online || !online.isOnline || !online.isAvailable) {
       const why = !online ? 'disconnected' : !online.isOnline ? 'went offline' : 'busy';
-      log('⚠️', 'ACTOR_SKIPPED', bookingId,
-        `tech=${actor.name} id=${actor.id} reason=${why} → advancing`);
       dispatch.techIdx++;
       dispatch.attemptNum = 1;
+      const nextAfterSkip = dispatch.queue[dispatch.techIdx];
+      log('⚠️', 'ACTOR_SKIPPED', bookingId,
+        `${actor.name} (ID: ${actor.id}) [${why}] skipped → next: ${
+          nextAfterSkip ? `${nextAfterSkip.name} (ID: ${nextAfterSkip.id})` : 'none — expanding queue'
+        }`);
       continue;
     }
 
@@ -427,15 +495,20 @@ async function dispatchAttempt(io, bookingId) {
     sendFcmPush(online.fcmToken, bookingData);
     dlog(`[DISPATCH] FCM push sent — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} fcmToken=${online.fcmToken ? online.fcmToken.slice(0, 20) + '...' : 'NULL'}`);
 
-    const distLabel = actor.dist === Infinity
-      ? 'no GPS'
-      : `${actor.dist.toFixed(1)} km`;
+    const distLabel   = actor.dist === Infinity ? 'no GPS' : `${actor.dist.toFixed(1)} km`;
+    const nextInQueue = dispatch.queue[dispatch.techIdx + 1] ?? null;
+    const nextLabel   = nextInQueue
+      ? `${nextInQueue.name} (ID: ${nextInQueue.id})  ${nextInQueue.dist === Infinity ? 'no GPS' : nextInQueue.dist.toFixed(1) + ' km'}`
+      : 'none — queue will expand on exhaustion';
 
     logBlock('📤', `Dispatch Attempt  booking=${bookingId}`, [
-      `Technician : ${actor.name} (ID: ${actor.id})`,
-      `Distance   : ${distLabel}`,
-      `Attempt    : ${dispatch.attemptNum} / ${MAX_ATTEMPTS}`,
-      `Status     : Waiting response  (${TIMEOUT_MS / 1000}s timeout)`,
+      `▶ Current  : ${actor.name} (ID: ${actor.id})  ${distLabel}`,
+      `  Attempt  : ${dispatch.attemptNum} / ${MAX_ATTEMPTS}  (${TIMEOUT_MS / 1000}s timeout each)`,
+      `  Channel  : ${online.socketId ? 'Socket.IO + FCM' : 'FCM only (no active socket)'}`,
+      '',
+      `⬇ Next     : ${nextLabel}`,
+      '',
+      ..._queueStatus(dispatch, actorMap),
     ]);
 
     if (bookingType !== 'transport') {
@@ -445,10 +518,13 @@ async function dispatchAttempt(io, bookingId) {
             total_attempts, max_attempts, last_sent_at)
          VALUES (?, ?, ?, 'pending', 1, ?, NOW())
          ON DUPLICATE KEY UPDATE
-           request_status = 'pending',
-           total_attempts = total_attempts + 1,
-           last_sent_at   = NOW(),
-           updated_at     = NOW()`,
+           technician_id   = VALUES(technician_id),
+           technician_name = VALUES(technician_name),
+           request_status  = 'pending',
+           total_attempts  = IF(technician_id = VALUES(technician_id), total_attempts + 1, 1),
+           max_attempts    = VALUES(max_attempts),
+           last_sent_at    = NOW(),
+           updated_at      = NOW()`,
         [bookingId, actor.id, actor.name || '', MAX_ATTEMPTS]
       );
     }
@@ -480,8 +556,12 @@ async function dispatchAttempt(io, bookingId) {
 
         dispatch.techIdx++;
         dispatch.attemptNum = 1;
+        const nextAfterTimeout = dispatch.queue[dispatch.techIdx];
+        dlog(`[DISPATCH] TIMEOUT_MOVE — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} all ${MAX_ATTEMPTS} attempts exhausted → next: ${nextAfterTimeout ? `${nextAfterTimeout.name}(id=${nextAfterTimeout.id})` : 'queue exhausted — expanding'}`);
         log('⏭️', 'TECH_TIMEOUT_SKIP', bookingId,
-          `tech=${actor.name} exhausted ${MAX_ATTEMPTS} attempts → next actor`);
+          `${actor.name} exhausted ${MAX_ATTEMPTS}×${TIMEOUT_MS / 1000}s → next: ${
+            nextAfterTimeout ? `${nextAfterTimeout.name} (ID: ${nextAfterTimeout.id})` : 'expanding queue'
+          }`);
         dispatchAttempt(io, bookingId);
       }
     }, TIMEOUT_MS);
@@ -1496,8 +1576,6 @@ module.exports = function bookingSocket(io, socket) {
     dlog(`[DISPATCH] booking_rejected received — bookingId=${bookingId} techId=${technicianId} → moving to next tech`);
     if (!bookingId || !technicianId) return;
 
-    log('❌', 'TECH_REJECTED', bookingId, `tech_id=${technicianId} → next actor`);
-
     dbRun(
       `UPDATE ip_booking_requests
        SET request_status = 'rejected',
@@ -1510,8 +1588,15 @@ module.exports = function bookingSocket(io, socket) {
     const dispatch = dispatchQueues.get(bookingId);
     if (dispatch) {
       if (dispatch.handle) { clearTimeout(dispatch.handle); dispatch.handle = null; }
+      const rejectedName = dispatch.queue[dispatch.techIdx]?.name ?? `ID: ${technicianId}`;
       dispatch.techIdx++;
       dispatch.attemptNum = 1;
+      const nextAfterReject = dispatch.queue[dispatch.techIdx];
+      dlog(`[DISPATCH] REJECTED_MOVE — bookingId=${bookingId} techId=${technicianId} techName=${rejectedName} actively declined → next: ${nextAfterReject ? `${nextAfterReject.name}(id=${nextAfterReject.id})` : 'queue exhausted — expanding'}`);
+      log('❌', 'TECH_REJECTED', bookingId,
+        `${rejectedName} (ID: ${technicianId}) declined → next: ${
+          nextAfterReject ? `${nextAfterReject.name} (ID: ${nextAfterReject.id})` : 'expanding queue'
+        }`);
       dispatchAttempt(io, bookingId);
     }
   });

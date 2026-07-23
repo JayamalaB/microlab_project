@@ -29,18 +29,25 @@ class CustomerHomeScreen extends StatefulWidget {
   State<CustomerHomeScreen> createState() => _CustomerHomeScreenState();
 }
 
-class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
+class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBindingObserver {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   int _selectedIndex = 0;
   MemberModel? _activeMember;
   List<MemberModel> _members = [];
   bool _loadingPatients = true;
   final _bookingsRefresh = ValueNotifier<int>(0);
+  final _reportsRefresh  = ValueNotifier<int>(0);
 
   @override
   void initState() {
     super.initState();
     _loadPatients();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _loadPatients();
   }
 
   Future<void> _loadPatients() async {
@@ -170,7 +177,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _bookingsRefresh.dispose();
+    _reportsRefresh.dispose();
     super.dispose();
   }
 
@@ -180,6 +189,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
       if (index != 0) _activeMember = null;
     });
     if (index == 1) _bookingsRefresh.value++;
+    if (index == 2) _reportsRefresh.value++;
   }
 
   bool get _inDashboard => _selectedIndex == 0 && _activeMember != null;
@@ -268,7 +278,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
               else
                 const SizedBox.shrink(),
               SafeArea(top: false, bottom: false, child: MyBookingsScreen(embedded: true, refreshTrigger: _bookingsRefresh)),
-              const SafeArea(top: false, bottom: false, child: ReportsScreen(embedded: true)),
+              SafeArea(top: false, bottom: false, child: ReportsScreen(embedded: true, refreshTrigger: _reportsRefresh)),
               // Slot 4: profile
               SafeArea(
                 top: false,
