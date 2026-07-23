@@ -110,6 +110,7 @@ class TestModel {
   final String? startDate;
   final String? endDate;
   final String reportStatus;
+  final String? preInstructions;
 
   TestModel({
     required this.id,
@@ -125,6 +126,7 @@ class TestModel {
     this.startDate,
     this.endDate,
     required this.reportStatus,
+    this.preInstructions,
   });
 
   factory TestModel.fromJson(Map<String, dynamic> j) {
@@ -152,7 +154,8 @@ class TestModel {
       docRequired: j['doc_req'] == 1 || j['doc_req'] == true || j['doc_req'] == 'yes',
       startDate: j['start_date']?.toString(),
       endDate: j['end_date']?.toString(),
-      reportStatus: j['report_sts'] ?? '',
+      reportStatus: j['report_sts']?.toString() ?? '',
+      preInstructions: j['pre_instrs']?.toString().isNotEmpty == true ? j['pre_instrs'].toString() : null,
     );
   }
 }
@@ -241,6 +244,8 @@ class BookingModel {
   final int?    technicianId;       // ip_technicians.technician_id — needed for TrackingMapScreen
   final double? patientLat;         // collection_latitude  — patient's home coordinates
   final double? patientLng;         // collection_longitude
+  final double? refundAmount;
+  final String? refundStatus;       // 'pending' | 'processed' | 'none' | null
 
   BookingModel({
     required this.id,
@@ -282,6 +287,8 @@ class BookingModel {
     this.technicianId,
     this.patientLat,
     this.patientLng,
+    this.refundAmount,
+    this.refundStatus,
   });
 }
 

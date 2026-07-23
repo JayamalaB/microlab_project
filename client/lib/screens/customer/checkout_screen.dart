@@ -1483,10 +1483,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               child: ElevatedButton(
                 onPressed: _canProceed && !_isProcessing ? _proceedToPayment : null,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: _paymentType == 'pay_later'
+                  backgroundColor: (_paymentType == 'pay_later' || _paymentType == 'cash')
                       ? AppColors.brandGreen
                       : const Color(0xFF1565C0),
-                  disabledBackgroundColor: (_paymentType == 'pay_later'
+                  disabledBackgroundColor: ((_paymentType == 'pay_later' || _paymentType == 'cash')
                       ? AppColors.brandGreen
                       : const Color(0xFF1565C0)).withValues(alpha: 0.35),
                   elevation: 0,
@@ -1499,7 +1499,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     : Text(
                         _paymentType == 'pay_later'
                             ? 'Confirm Booking · Pay Later'
-                            : 'Pay ₹${_payableNow.toInt()} via Razorpay',
+                            : _paymentType == 'cash'
+                                ? 'Confirm Booking · Pay Cash'
+                                : 'Pay ₹${_payableNow.toInt()} via Razorpay',
                         style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500)),
               ),
             ),
