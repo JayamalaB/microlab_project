@@ -37,10 +37,10 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
   // ── Profile fields (loaded from SharedPreferences + API) ─────────────────────
   String _name           = '';
   String _email          = '';
-  String _experience     = '';
   String _technicianCode = '';
   String _branchName     = '';
   String _photoUrl       = '';
+  String _techCity       = '';
   List<String> _specializations = [];
 
   // ── Today's stats (loaded from API) ──────────────────────────────────────────
@@ -51,7 +51,6 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
 
   late TextEditingController _nameCtrl;
   late TextEditingController _emailCtrl;
-  late TextEditingController _expCtrl;
 
   late List<String> _editingSpecs;
 
@@ -65,7 +64,6 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
     super.initState();
     _nameCtrl     = TextEditingController();
     _emailCtrl    = TextEditingController();
-    _expCtrl      = TextEditingController();
     _editingSpecs = [];
     _loadProfile();
     WidgetsBinding.instance.addObserver(this);
@@ -108,6 +106,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
         _technicianCode = code;
         _branchName     = city;
         _photoUrl       = photo;
+        _techCity       = city;
         _specializations = specs;
         _nameCtrl.text  = name;
         _emailCtrl.text = email;
@@ -152,7 +151,6 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
     WidgetsBinding.instance.removeObserver(this);
     _nameCtrl.dispose();
     _emailCtrl.dispose();
-    _expCtrl.dispose();
     super.dispose();
   }
 
@@ -180,7 +178,6 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
   void _cancelEdit() {
     _nameCtrl.text = _name;
     _emailCtrl.text = _email;
-    _expCtrl.text = _experience;
     setState(() => _isEditing = false);
   }
 
@@ -261,11 +258,9 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
   void _save() {
     final name = _nameCtrl.text.trim();
     final email = _emailCtrl.text.trim();
-    final exp = _expCtrl.text.trim();
     setState(() {
       if (name.isNotEmpty) _name = name;
       _email = email;
-      if (exp.isNotEmpty) _experience = exp;
       _specializations = List.from(_editingSpecs);
       _isEditing = false;
     });
@@ -510,18 +505,11 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                     value: _email.isNotEmpty ? _email : '—'),
               const _HDivider(),
 
-              // ── Experience (editable) ─────────────────────
-              if (_isEditing)
-                _EditField(
-                  controller: _expCtrl,
-                  hint: 'e.g. 6 years',
-                  icon: Icons.work_outline_rounded,
-                )
-              else
-                _InfoRow(
-                    icon: Icons.work_outline_rounded,
-                    label: 'Experience',
-                    value: _experience),
+              // ── City (locked) ──────────────────────────────
+              _LockedRow(
+                  icon: Icons.location_city_outlined,
+                  label: 'City',
+                  value: _techCity.isNotEmpty ? _techCity : '—'),
 
               // ── Save / Cancel ─────────────────────────────
               if (_isEditing) ...[

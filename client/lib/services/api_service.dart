@@ -393,11 +393,15 @@ class ApiService {
     return false;
   }
 
-  // Records on-site payment collected by technician and marks booking paid in DB
+  // Records on-site payment collected by technician and marks booking paid in DB.
+  // paymentMethod: 'RAZORPAY' (default, requires razorpayPaymentId) or 'CASH'
+  // (razorpayPaymentId not required). amount may be less than the full amount
+  // due — the server tracks the remaining balance as a partial payment.
   static Future<bool> collectPayment({
     required int bookingId,
-    required String razorpayPaymentId,
+    String? razorpayPaymentId,
     required double amount,
+    String paymentMethod = 'RAZORPAY',
   }) async {
     final token = await getToken();
     if (token == null) return false;
@@ -412,6 +416,7 @@ class ApiService {
           'bookingId': bookingId,
           'razorpayPaymentId': razorpayPaymentId,
           'amount': amount,
+          'paymentMethod': paymentMethod,
         }),
       ).timeout(const Duration(seconds: 15));
       final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -424,8 +429,12 @@ class ApiService {
   }
 
   // Returns [{patientId, patientName, patientMobile}] for additional patients linked to a booking
-  // Returns {payment_status, amount_paid, amount_due} for a booking — used by
-  // the technician detail screen to get fresh payment info on every open.
+  // Returns {payment_status, amount_paid, amount_due, total_amount, items_total}
+  // for a booking — used by the technician detail screen to get fresh payment
+  // info on every open. total_amount is fixed at booking creation (tests +
+  // service charge at that time); items_total reflects the CURRENT item list
+  // (including tests added at the door), so total_amount - items_total is only
+  // meaningful against the ORIGINAL item set, not the live one.
   static Future<Map<String, dynamic>?> getBookingPaymentInfo(int bookingId) async {
     final token = await getToken();
     if (token == null) return null;
@@ -441,6 +450,8 @@ class ApiService {
           'payment_status': b['payment_status'],
           'amount_paid':    b['amount_paid'],
           'amount_due':     b['amount_due'],
+          'total_amount':   b['total_amount'],
+          'items_total':    b['items_total'],
         };
       }
     } catch (e) {
@@ -478,10 +489,11 @@ class ApiService {
         return (body['data'] as List).map((p) {
           final m = p as Map<String, dynamic>;
           return {
-            'id':       m['id']?.toString() ?? '',
-            'name':     m['name']?.toString() ?? '',
-            'category': m['category']?.toString() ?? 'General',
-            'price':    (m['final_price'] as num?)?.toStringAsFixed(0) ?? '0',
+            'id':           m['id']?.toString() ?? '',
+            'name':         m['name']?.toString() ?? '',
+            'category':     m['category']?.toString() ?? 'General',
+            'price':        (m['final_price'] as num?)?.toStringAsFixed(0) ?? '0',
+            'docRequired':  m['doc_req']?.toString() ?? 'no',
           };
         }).toList();
       }

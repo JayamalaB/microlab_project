@@ -601,7 +601,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         branchName:      widget.branch?.name,
         slotId:          _selectedSlot?.parentSlotId ?? int.tryParse(_selectedSlot?.id ?? ''),
         slotLabel:       _selectedSlot?.label,
-        appointmentTime: _selectedAppointmentTime?.time,
+        appointmentTime: _selectedAppointmentTime?.time ?? _selectedSlot?.time,
       );
     }
 
@@ -867,7 +867,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           branchName:      widget.branch?.name,
           slotId:          _selectedSlot?.parentSlotId ?? int.tryParse(_selectedSlot?.id ?? ''),
           slotLabel:       _selectedSlot?.label,
-          appointmentTime: _selectedAppointmentTime?.time,
+          appointmentTime: _selectedAppointmentTime?.time ?? _selectedSlot?.time,
         );
       }
       // Future-date bookings: cron will dispatch on the appointment day.

@@ -55,12 +55,11 @@ exports.getSlots = async (req, res) => {
       writeLog(`[getSlots] ip_technician_slots rows for branch_id=${branch_id} date=${date}: ${JSON.stringify(tsDebug)}`);
       [rows] = await db.execute(
         `SELECT
-           av.available_slot_id                    AS time_slot_id,
-           av.technician_slot_id,
-           ts.slot_id,
+           MIN(av.available_slot_id)               AS time_slot_id,
+           MIN(ts.slot_id)                         AS slot_id,
            TIME_FORMAT(av.slot_time, '%H:%i')      AS time,
            TIME_FORMAT(av.slot_time, '%h:%i %p')   AS label,
-           (ts.max_bookings - ts.booked_count)     AS remaining
+           SUM(ts.max_bookings - ts.booked_count)  AS remaining
          FROM ip_available_slots av
          JOIN ip_technician_slots ts
            ON ts.tech_slot_id = av.technician_slot_id
@@ -70,6 +69,7 @@ exports.getSlots = async (req, res) => {
            AND av.is_available = 1
            AND ts.booked_count < ts.max_bookings
            AND (? != ? OR av.slot_time > ?)
+         GROUP BY av.slot_time
          ORDER BY av.slot_time`,
         [date, branch_id, date, todayIST, cutoffTime]
       );

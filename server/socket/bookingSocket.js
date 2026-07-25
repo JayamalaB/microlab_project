@@ -34,9 +34,14 @@ function clog(msg) {
 }
 
 const DISPATCH_LOG = path.join(__dirname, '..', 'logs', 'dispatch.log');
-function dlog(msg) {
-  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
-  const line = `[${ist}] ${msg}\n`;
+// Column-aligned dispatch trace: "HH:MM:SS | #bookingId | TAG | details".
+// Fixed-width columns keep this scannable even when multiple bookings'
+// dispatch attempts interleave in a live system.
+function dlog(bookingId, tag, details = '') {
+  const ts     = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
+  const idCol  = String(bookingId != null ? `#${bookingId}` : '-').padEnd(6);
+  const tagCol = String(tag).padEnd(15);
+  const line   = `${ts} | ${idCol} | ${tagCol} | ${details}\n`;
   process.stdout.write(line);
   fs.appendFileSync(DISPATCH_LOG, line, 'utf8');
 }
@@ -87,10 +92,14 @@ async function sendFcmPush(fcmToken, bookingData) {
 }
 
 // ── Dispatch config ────────────────────────────────────────────────────────────
-const MAX_DRIVERS   = 3;       // initial queue cap (nearest N actors)
-const MAX_ATTEMPTS  = 3;       // silent-timeout retries before skipping an actor
-const TIMEOUT_MS    = 40_000;  // 40 s per attempt
-const RETRY_GAP_MS  = 3_000;   // 3 s gap before retrying the same actor
+const MAX_DRIVERS              = 3;       // initial queue cap (nearest N actors)
+const MAX_ATTEMPTS             = 3;       // silent-timeout retries before skipping an actor
+const TIMEOUT_MS               = 40_000;  // 40 s per attempt
+const RETRY_GAP_MS             = 3_000;   // 3 s gap before retrying the same actor
+// Extra minutes added to a slot's end time when checking overlaps in Phase 1+.
+// Absorbs collection variance and minimal travel time between appointments.
+// Override via APPOINTMENT_BUFFER_MINUTES env var without redeploying.
+const APPOINTMENT_BUFFER_MINUTES = parseInt(process.env.APPOINTMENT_BUFFER_MINUTES, 10) || 10;
 
 // ── In-memory actor maps ───────────────────────────────────────────────────────
 // Entry shape: { socketId, lat, lng, name, sessionId?, isOnline, isAvailable }
@@ -127,6 +136,14 @@ const fcmOnlineTechnicians = new Map(); // technicianId → { fcmToken, lat, lng
 // ── Active-booking tracking (for disconnect cleanup) ───────────────────────────
 const technicianActiveBookings = new Map(); // technicianId → bookingId
 const driverActiveBookings     = new Map(); // driverId     → bookingId
+
+// ── Appointment-based slot tracking (Phase 0 — declared; Phase 1 will populate) ─
+// technicianId → Map<bookingId, { slotDate, startMinutes, endMinutes, slotId }>
+// Each inner entry represents one committed appointment window.  When Phase 1
+// populates this on booking_accepted, dispatch can check overlaps instead of
+// relying on the global isAvailable flag for appointment-time bookings.
+// Rebuilt from DB on server start by initDispatchState().
+const technicianActiveSlots = new Map();
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  LOGGING
@@ -192,6 +209,12 @@ function _freeTechnician(technicianId, bookingId) {
   if (t) onlineTechnicians.set(technicianId, { ...t, isAvailable: true });
   acceptedBookings.delete(bookingId);
   technicianActiveBookings.delete(technicianId);
+  // Phase 1: release the appointment-slot window for this booking
+  const slots = technicianActiveSlots.get(technicianId);
+  if (slots) {
+    slots.delete(bookingId);
+    if (slots.size === 0) technicianActiveSlots.delete(technicianId);
+  }
   dbRun(
     `UPDATE ip_technician_live_location
      SET booking_id   = NULL,
@@ -229,13 +252,29 @@ async function _cascadeTcStatus(bookingId, status, timestampCol) {
 //  QUEUE BUILDERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function _sortedAvailableActors(patientLat, patientLng, actorMap, branchId = null) {
+// apptCtx = { bookingDate: 'YYYY-MM-DD', requestedStart: minutesSinceMidnight } | null
+// Built for ANY slot-based booking (exact appointmentTime, or a broad slotId with
+// an acceptance-time fallback — see apptCtx construction in _handleBookingRequest).
+// When present, this is the ONLY basis for excluding a tech: a genuine overlapping
+// committed window. One accepted slot never blocks a tech's other, non-overlapping
+// slots for the rest of the day — isAvailable is not consulted at all in this
+// branch, since that flag is a blunt all-day switch and would defeat the entire
+// point of per-slot dispatch. apptCtx is null only for bookings with no slot
+// context whatsoever (rare/legacy path) — there we fall back to the plain global
+// isAvailable flag, since there is no time window to check against.
+function _sortedAvailableActors(patientLat, patientLng, actorMap, branchId = null, apptCtx = null) {
   const withGps = [];
   const noGps   = [];
 
   actorMap.forEach((actor, id) => {
-    if (!actor.isOnline || !actor.isAvailable) return;
+    if (!actor.isOnline) return;
     if (branchId != null && actor.branchId != null && actor.branchId !== branchId) return;
+
+    if (apptCtx) {
+      if (_hasSlotConflict(id, apptCtx.bookingDate, apptCtx.requestedStart)) return; // window conflict
+    } else if (!actor.isAvailable) {
+      return; // no slot context at all — fall back to the global flag
+    }
 
     if (
       actor.lat  != null && actor.lng  != null &&
@@ -254,13 +293,13 @@ function _sortedAvailableActors(patientLat, patientLng, actorMap, branchId = nul
   return [...withGps, ...noGps];
 }
 
-function buildQueue(patientLat, patientLng, actorMap, branchId = null) {
-  return _sortedAvailableActors(patientLat, patientLng, actorMap, branchId)
+function buildQueue(patientLat, patientLng, actorMap, branchId = null, apptCtx = null) {
+  return _sortedAvailableActors(patientLat, patientLng, actorMap, branchId, apptCtx)
     .slice(0, MAX_DRIVERS);
 }
 
-function buildFullQueue(patientLat, patientLng, actorMap, branchId = null) {
-  return _sortedAvailableActors(patientLat, patientLng, actorMap, branchId);
+function buildFullQueue(patientLat, patientLng, actorMap, branchId = null, apptCtx = null) {
+  return _sortedAvailableActors(patientLat, patientLng, actorMap, branchId, apptCtx);
 }
 
 // Build a dispatch queue from Lane 2 (FCM-only techs that went online but whose
@@ -279,6 +318,22 @@ function buildFcmQueue(patientLat, patientLng, branchId = null) {
   });
   entries.sort((a, b) => a.dist - b.dist);
   return entries;
+}
+
+// ── Phase 2 — Appointment slot overlap check ───────────────────────────────────
+// Returns true if the given technician already has a committed appointment window
+// on bookingDate that covers requestedStart (minutes since midnight).
+// Techs with no entry in technicianActiveSlots (old model) always return false —
+// their availability is governed by the global isAvailable flag instead.
+function _hasSlotConflict(techId, bookingDate, requestedStart) {
+  const activeSlots = technicianActiveSlots.get(techId);
+  if (!activeSlots || activeSlots.size === 0) return false;
+  for (const [, win] of activeSlots) {
+    if (win.slotDate !== bookingDate) continue;
+    // Conflict: new appointment starts inside an existing committed window
+    if (requestedStart >= win.startMinutes && requestedStart < win.endMinutes) return true;
+  }
+  return false;
 }
 
 // Temporarily register Lane 2 techs into onlineTechnicians so dispatchAttempt can
@@ -339,6 +394,26 @@ async function dispatchAttempt(io, bookingId) {
     const { queue, bookingData, bookingType = 'lab' } = dispatch;
     const actorMap = bookingType === 'transport' ? onlineDrivers : onlineTechnicians;
 
+    // Appointment context — built whenever this dispatch has a slotId, not only
+    // when an exact appointmentTime was chosen (mirrors the construction in
+    // _handleBookingRequest). Used uniformly below: to filter the expansion pool,
+    // and further down as the actual call-time eligibility check (Checkpoint B) —
+    // so a tech legitimately queued for a non-overlapping slot is not silently
+    // skipped right before the call goes out.
+    const apptCtxD = (dispatch.slotId != null)
+      ? (() => {
+          let requestedStart;
+          if (dispatch.appointmentTime) {
+            const [h, m] = dispatch.appointmentTime.split(':').map(Number);
+            requestedStart = h * 60 + m;
+          } else {
+            const istNow = new Date(Date.now() + (5 * 60 + 30) * 60 * 1000);
+            requestedStart = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
+          }
+          return { bookingDate: dispatch.bookingDate, requestedStart };
+        })()
+      : null;
+
     if (dispatch.techIdx >= queue.length) {
       // Use the persistent triedIds set — tracks techs that were actually dispatched to,
       // not just queued. This prevents re-dispatching skipped techs and is immune to
@@ -350,11 +425,19 @@ async function dispatchAttempt(io, bookingId) {
         bookingData.patientLat ?? null,
         bookingData.patientLng ?? null,
         actorMap,
-        bookingData.branchId   ?? null
+        bookingData.branchId   ?? null,
+        apptCtxD
       ).filter(a => !triedIds.has(a.id));
 
       if (dispatch.slotTechIds && dispatch.slotTechIds.size > 0) {
         fresh = fresh.filter(a => dispatch.slotTechIds.has(a.id));
+      }
+      // Remove any expanded tech with a genuinely conflicting window. No exemption
+      // for slotTechIds membership — DB slot registration answers "can this tech
+      // ever work this slot type", not "are they free right now"; only a real
+      // overlap check answers that, and it must never be overridden.
+      if (apptCtxD) {
+        fresh = fresh.filter(a => !_hasSlotConflict(a.id, apptCtxD.bookingDate, apptCtxD.requestedStart));
       }
 
       if (fresh.length > 0) {
@@ -399,8 +482,15 @@ async function dispatchAttempt(io, bookingId) {
             bookingData.patientLat ?? null,
             bookingData.patientLng ?? null,
             actorMap,
-            bookingData.branchId   ?? null
+            bookingData.branchId   ?? null,
+            apptCtxD // Phase 3: allow non-overlapping appointment-busy techs
           ).filter(a => !triedIds.has(a.id)); // no slotTechIds filter
+          // Phase 2/3: apply overlap filter for any residual conflicts
+          if (apptCtxD) {
+            fallbackFresh = fallbackFresh.filter(
+              a => !_hasSlotConflict(a.id, apptCtxD.bookingDate, apptCtxD.requestedStart)
+            );
+          }
 
           if (fallbackFresh.length === 0 && bookingType !== 'transport') {
             // Also check FCM-only techs without slot constraint
@@ -418,7 +508,7 @@ async function dispatchAttempt(io, bookingId) {
           if (fallbackFresh.length > 0) {
             dispatch.slotTechIds = null; // lift constraint for remaining dispatch
             dispatch.queue.push(...fallbackFresh);
-            dlog(`[DISPATCH] SLOT_FALLBACK — bookingId=${bookingId} slot techs exhausted, lifting constraint — ${fallbackFresh.length} any-available tech(s) added`);
+            dlog(bookingId, 'SLOT_FALLBACK', `slot=${dispatch.slotId} techs exhausted, lifting constraint -> ${fallbackFresh.length} any-available tech(s) added`);
             logBlock('🔓', `Slot Fallback  booking=${bookingId}`, [
               'All slot-matched techs exhausted — lifting slot constraint.',
               ...fallbackFresh.map((a, i) =>
@@ -433,10 +523,10 @@ async function dispatchAttempt(io, bookingId) {
 
         // All slot-matched techs exhausted → tell patient to choose another slot.
         // Generic exhaustion → booking_timeout.
-        dlog(`[DISPATCH] ALL TECHS EXHAUSTED — bookingId=${bookingId} triedIds=[${[...dispatch.triedIds].join(',')}] slotId=${dispatch.slotId ?? 'none'}`);
+        dlog(bookingId, 'ALL_EXHAUSTED', `tried=[${[...dispatch.triedIds].join(',')}] slot=${dispatch.slotId ?? 'none'}`);
         dispatchQueues.delete(bookingId);
         if (dispatch.slotId != null) {
-          dlog(`[DISPATCH] SLOT_EXHAUSTED — bookingId=${bookingId} slot=${dispatch.slotId} — emitting slot_no_availability to patient`);
+          dlog(bookingId, 'SLOT_EXHAUSTED', `slot=${dispatch.slotId} -> emitting slot_no_availability`);
           await _notifySlotNoAvailability(
             io, bookingId, dispatch.slotId, bookingData.branchId, dispatch.bookingDate, dispatch.appointmentTime
           );
@@ -444,7 +534,7 @@ async function dispatchAttempt(io, bookingId) {
           log('🕐', 'SLOT_EXHAUSTED', bookingId,
             `slot=${dispatch.slotId} — all matched techs rejected/timed out → slot_no_availability sent`);
         } else {
-          dlog(`[DISPATCH] BOOKING_TIMEOUT — bookingId=${bookingId} no techs responded — emitting booking_timeout to patient`);
+          dlog(bookingId, 'BOOKING_TIMEOUT', 'no techs responded -> emitting booking_timeout');
           _notifyPatient(io, bookingId, 'booking_timeout', { bookingId });
           bookingRooms.delete(bookingId);
           logBlock('⏰', `Booking Timeout  booking=${bookingId}`, [
@@ -467,7 +557,16 @@ async function dispatchAttempt(io, bookingId) {
     const actor  = dispatch.queue[dispatch.techIdx];
     const online = actorMap.get(actor.id);
 
-    if (!online || !online.isOnline || !online.isAvailable) {
+    // Checkpoint B — the actual call-time gate. Must use the same per-slot logic
+    // as queue-build (Checkpoint A above) or a tech correctly queued for a non-
+    // overlapping slot gets silently skipped here, one line before the call
+    // would have gone out. isAvailable is only consulted when there's no slot
+    // context at all — one accepted slot must never block the rest of the day.
+    const stillFree = !online ? false
+      : apptCtxD ? !_hasSlotConflict(actor.id, apptCtxD.bookingDate, apptCtxD.requestedStart)
+      : online.isAvailable;
+
+    if (!online || !online.isOnline || !stillFree) {
       const why = !online ? 'disconnected' : !online.isOnline ? 'went offline' : 'busy';
       dispatch.techIdx++;
       dispatch.attemptNum = 1;
@@ -486,14 +585,13 @@ async function dispatchAttempt(io, bookingId) {
     // Skipped for offline/FCM-only dispatch entries (socketId is null).
     if (online.socketId) {
       io.to(online.socketId).emit('booking_request', bookingData);
-      dlog(`[DISPATCH] socket sent — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} socketId=${online.socketId} attempt=${dispatch.attemptNum}/${MAX_ATTEMPTS}`);
-    } else {
-      dlog(`[DISPATCH] socket skipped (no socketId) — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} → FCM only attempt=${dispatch.attemptNum}/${MAX_ATTEMPTS}`);
     }
 
     // FCM push — delivers even when the tech is offline / app is killed.
     sendFcmPush(online.fcmToken, bookingData);
-    dlog(`[DISPATCH] FCM push sent — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} fcmToken=${online.fcmToken ? online.fcmToken.slice(0, 20) + '...' : 'NULL'}`);
+
+    const channel = online.socketId ? 'socket+FCM' : 'FCM only';
+    dlog(bookingId, `ATTEMPT ${dispatch.attemptNum}/${MAX_ATTEMPTS}`, `-> ${actor.name}(${actor.id}) via ${channel}`);
 
     const distLabel   = actor.dist === Infinity ? 'no GPS' : `${actor.dist.toFixed(1)} km`;
     const nextInQueue = dispatch.queue[dispatch.techIdx + 1] ?? null;
@@ -534,14 +632,14 @@ async function dispatchAttempt(io, bookingId) {
 
       if (dispatch.attemptNum < MAX_ATTEMPTS) {
         dispatch.attemptNum++;
-        dlog(`[DISPATCH] TIMEOUT_RETRY — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} retry=${dispatch.attemptNum}/${MAX_ATTEMPTS} gap=${RETRY_GAP_MS}ms`);
+        dlog(bookingId, 'TIMEOUT', `${actor.name}(${actor.id}) retry ${dispatch.attemptNum}/${MAX_ATTEMPTS} in ${RETRY_GAP_MS / 1000}s`);
         log('🔁', 'TECH_TIMEOUT_RETRY', bookingId,
           `tech=${actor.name} retry=${dispatch.attemptNum}/${MAX_ATTEMPTS} ` +
           `gap=${RETRY_GAP_MS}ms`
         );
         dispatch.handle = setTimeout(() => dispatchAttempt(io, bookingId), RETRY_GAP_MS);
       } else {
-        dlog(`[DISPATCH] TIMEOUT_EXHAUSTED — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} all ${MAX_ATTEMPTS} attempts failed → moving to next tech`);
+        dlog(bookingId, 'TIMEOUT_EXHAUSTED', `${actor.name}(${actor.id}) all ${MAX_ATTEMPTS} attempts failed -> moving to next tech`);
         const actorEntry = actorMap.get(actor.id);
         if (actorEntry?.socketId) {
           io.to(actorEntry.socketId).emit('booking_cancelled', { bookingId });
@@ -557,7 +655,7 @@ async function dispatchAttempt(io, bookingId) {
         dispatch.techIdx++;
         dispatch.attemptNum = 1;
         const nextAfterTimeout = dispatch.queue[dispatch.techIdx];
-        dlog(`[DISPATCH] TIMEOUT_MOVE — bookingId=${bookingId} techId=${actor.id} techName=${actor.name} all ${MAX_ATTEMPTS} attempts exhausted → next: ${nextAfterTimeout ? `${nextAfterTimeout.name}(id=${nextAfterTimeout.id})` : 'queue exhausted — expanding'}`);
+        dlog(bookingId, 'TIMEOUT_MOVE', `${actor.name}(${actor.id}) exhausted -> next: ${nextAfterTimeout ? `${nextAfterTimeout.name}(${nextAfterTimeout.id})` : 'queue exhausted -- expanding'}`);
         log('⏭️', 'TECH_TIMEOUT_SKIP', bookingId,
           `${actor.name} exhausted ${MAX_ATTEMPTS}×${TIMEOUT_MS / 1000}s → next: ${
             nextAfterTimeout ? `${nextAfterTimeout.name} (ID: ${nextAfterTimeout.id})` : 'expanding queue'
@@ -824,10 +922,10 @@ async function _handleBookingRequest(io, socket, data = {}) {
     appointmentTime = null, // "HH:MM" — exact time within slot
   } = data;
 
-  dlog(`[DISPATCH] ── booking_request received ── bookingId=${bookingId} patientId=${patientId} patientName=${patientName} branchId=${branchId} slotId=${slotId ?? 'none'} appointmentTime=${appointmentTime ?? 'none'} bookingType=${bookingType}`);
+  dlog(bookingId, 'REQUEST', `patient=${patientName} branch=${branchId} slot=${slotId ?? 'none'}${appointmentTime ? '@' + appointmentTime : ''} type=${bookingType}`);
 
   if (!bookingId || !patientId) {
-    dlog(`[DISPATCH] GUARD FAILED — missing bookingId or patientId | bookingId=${bookingId} patientId=${patientId}`);
+    dlog(bookingId, 'GUARD_FAILED', `missing bookingId or patientId (patientId=${patientId})`);
     console.warn('booking_request: missing bookingId or patientId',
       { bookingId, patientId });
     return;
@@ -839,21 +937,47 @@ async function _handleBookingRequest(io, socket, data = {}) {
     'SELECT booking_date FROM ip_bookings WHERE booking_id = ? LIMIT 1',
     [bookingId]
   );
+  // earlyBookingDate: used below for appointment-aware queue building (apptCtx)
+  // so we don't need a second DB query in the slot-filter section.
+  let earlyBookingDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
   if (bRowDate?.booking_date) {
     const bDate    = (bRowDate.booking_date instanceof Date
       ? bRowDate.booking_date.toISOString()
       : String(bRowDate.booking_date)).split('T')[0];
     const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     if (bDate > todayIST) {
-      dlog(`[DISPATCH] DEFERRED — bookingId=${bookingId} booking_date=${bDate} is future (today=${todayIST}) — waiting for cron scheduler`);
+      dlog(bookingId, 'DEFERRED', `booking_date=${bDate} is future (today=${todayIST}) -> cron scheduler`);
       log('📅', 'SCHEDULED_DEFER', bookingId,
         `booking_date=${bDate} is future — dispatch deferred to cron`);
       socket.emit('booking_scheduled', { bookingId });
       return;
     }
+    earlyBookingDate = bDate;
   }
 
-  dlog(`[DISPATCH] booking_date check passed — proceeding with live dispatch for bookingId=${bookingId}`);
+  // Appointment context for per-slot-aware queue building. Built whenever the
+  // booking has a slotId — not only when an exact appointmentTime was chosen —
+  // so a broad-slot booking (no specific time picked, dispatched immediately) is
+  // also evaluated against its own real time window instead of falling back to
+  // the blunt isAvailable flag:
+  //   - exact appointmentTime chosen → that slot_time is requestedStart
+  //   - broad slotId, no exact time  → "now" (matches how the acceptance-side
+  //     window recording in booking_accepted treats the same case)
+  const apptCtx = (slotId != null)
+    ? (() => {
+        let requestedStart;
+        if (appointmentTime) {
+          const [h, m] = appointmentTime.split(':').map(Number);
+          requestedStart = h * 60 + m;
+        } else {
+          const istNow = new Date(Date.now() + (5 * 60 + 30) * 60 * 1000);
+          requestedStart = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
+        }
+        return { bookingDate: earlyBookingDate, requestedStart };
+      })()
+    : null;
+
+  dlog(bookingId, 'DATE_OK', 'proceeding with live dispatch');
   socket.patientId = patientId;
   // Virtual sockets (cron/admin dispatch) must not overwrite a real patient socket ID.
   if (!socket.isVirtual) {
@@ -928,10 +1052,12 @@ async function _handleBookingRequest(io, socket, data = {}) {
   // Priority 1: technicians matching the booking's branch.
   // Priority 2: any available technician (branch mismatch is better than no one).
   // Priority 3: slot-based fallback (tech offline / all busy).
-  let queue = buildQueue(patientLat, patientLng, actorMap, branchId);
+  // apptCtx passed so _sortedAvailableActors can include appointment-busy techs
+  // who have no overlapping window for this booking's appointment time.
+  let queue = buildQueue(patientLat, patientLng, actorMap, branchId, apptCtx);
 
   if (queue.length === 0 && branchId != null) {
-    const anyBranchQueue = buildQueue(patientLat, patientLng, actorMap, null);
+    const anyBranchQueue = buildQueue(patientLat, patientLng, actorMap, null, apptCtx);
     if (anyBranchQueue.length > 0) {
       queue = anyBranchQueue;
       log('⚠️', 'BRANCH_FALLBACK', bookingId,
@@ -945,7 +1071,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
       const fcmQueue = buildFcmQueue(patientLat, patientLng, null); // no branch filter
       if (fcmQueue.length > 0) {
         _registerFcmTechs(fcmQueue);
-        queue = buildQueue(patientLat, patientLng, actorMap, null);
+        queue = buildQueue(patientLat, patientLng, actorMap, null, apptCtx);
         log('📡', 'LANE2_INJECT', bookingId,
           `all socket techs busy — injected ${fcmQueue.length} FCM-only tech(s)`);
       }
@@ -997,22 +1123,25 @@ async function _handleBookingRequest(io, socket, data = {}) {
       slotTechIds = new Set(techRows.map(r => r.technician_id));
 
       // When the patient chose a specific appointment time, further restrict to
-      // techs who still have that exact time available in ip_available_slots.
+      // techs who declared that time in their schedule.  We intentionally do NOT
+      // check is_available here — it was already set to 0 at booking creation
+      // time.  The question is ownership (which tech declared this time slot?),
+      // not real-time availability, which is handled separately via
+      // technicianActiveSlots in Phase 1+.
       if (appointmentTime && slotTechIds.size > 0) {
         const [availRows] = await db.execute(
           `SELECT DISTINCT ts.technician_id
            FROM ip_available_slots ias
            JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
-           WHERE ts.slot_id      = ?
-             AND ts.slot_date   = ?
-             AND ias.slot_time  = ?
-             AND ias.is_available = 1`,
+           WHERE ts.slot_id    = ?
+             AND ts.slot_date  = ?
+             AND ias.slot_time = ?`,
           [slotId, bookingDate, `${appointmentTime}:00`]
         );
         const timeTechIds = new Set(availRows.map(r => r.technician_id));
         slotTechIds = new Set([...slotTechIds].filter(id => timeTechIds.has(id)));
         log('🕐', 'APPT_TIME_FILTER', bookingId,
-          `time=${appointmentTime} → ${slotTechIds.size} tech(s) have this time available`);
+          `time=${appointmentTime} → ${slotTechIds.size} tech(s) own this appointment time`);
       }
 
       if (slotTechIds.size === 0) {
@@ -1039,7 +1168,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
             .filter(a => slotTechIds.has(a.id));
           if (fcmSlotQueue.length > 0) {
             _registerFcmTechs(fcmSlotQueue);
-            queue = buildQueue(patientLat, patientLng, actorMap, branchId)
+            queue = buildQueue(patientLat, patientLng, actorMap, branchId, apptCtx)
               .filter(a => slotTechIds.has(a.id));
             log('📡', 'SLOT_LANE2_INJECT', bookingId,
               `injected ${fcmSlotQueue.length} FCM-only slot-matched tech(s)`);
@@ -1065,6 +1194,24 @@ async function _handleBookingRequest(io, socket, data = {}) {
     }
   }
 
+  // Appointment overlap filter — final pass over the queue. Removes any tech who
+  // already has a committed window covering this exact requested time. No
+  // exemption for slotTechIds membership: DB slot registration means "this tech
+  // can work this slot type", not "they are free right now" — only a genuine
+  // overlap check answers that, and one accepted slot must never be read as
+  // blocking the tech's other, non-overlapping slots for the rest of the day.
+  // Reuses apptCtx (built above, gated on slotId) so the broad-slotId case — no
+  // exact appointmentTime chosen — is covered too, using "now" as the requested
+  // time. Techs without any technicianActiveSlots entry are unaffected either way.
+  if (apptCtx && queue.length > 0) {
+    const before = queue.length;
+    queue = queue.filter(a => !_hasSlotConflict(a.id, apptCtx.bookingDate, apptCtx.requestedStart));
+    if (queue.length < before) {
+      log('🚦', 'OVERLAP_FILTER', bookingId,
+        `time=${appointmentTime ?? 'now'} — removed ${before - queue.length} tech(s) with conflicting appointment window`);
+    }
+  }
+
   logBlock('📋', `Booking Created  #${bookingId}`, [
     `Patient    : ${patientName} (ID: ${patientId})`,
     `Type       : ${bookingType}`,
@@ -1086,7 +1233,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
     `Online: ${totalOnline}   Available: ${available}   Queued: ${queue.length}`,
   ]);
 
-  dlog(`[DISPATCH] queue built — bookingId=${bookingId} totalOnline=${totalOnline} available=${available} queued=${queue.length} techs=[${queue.map(t => `${t.name}(id=${t.id} dist=${t.dist === Infinity ? 'noGPS' : t.dist.toFixed(1) + 'km'})`).join(', ')}]`);
+  dlog(bookingId, 'QUEUE_BUILT', `${totalOnline} online, ${available} avail -> ${queue.map(t => `${t.name}(${t.id},${t.dist === Infinity ? 'noGPS' : t.dist.toFixed(1) + 'km'})`).join(' ')}`);
 
   dispatchQueues.set(bookingId, {
     bookingData,
@@ -1135,6 +1282,21 @@ module.exports = function bookingSocket(io, socket) {
     socket.technicianId   = technicianId;
     socket.technicianName = technicianName;
 
+    // Phase 3: if the tech has an active appointment window today (recorded in
+    // technicianActiveSlots by Phase 1), keep isAvailable=false so the overlap
+    // check in _sortedAvailableActors governs dispatch instead of the global flag.
+    // Without this, a reconnect would incorrectly mark the tech as free and they
+    // could receive a same-time booking while still mid-collection.
+    const reconnectActiveSlots = technicianActiveSlots.get(technicianId);
+    const hasActiveApptToday   = (() => {
+      if (!reconnectActiveSlots || reconnectActiveSlots.size === 0) return false;
+      const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+      for (const [, win] of reconnectActiveSlots) {
+        if (win.slotDate === today) return true;
+      }
+      return false;
+    })();
+
     onlineTechnicians.set(technicianId, {
       socketId:    socket.id,
       lat:         lat       ?? null,
@@ -1144,7 +1306,7 @@ module.exports = function bookingSocket(io, socket) {
       branchId:    branchId  ?? null,
       fcmToken:    fcmToken  ?? null,
       isOnline:    true,
-      isAvailable: true,
+      isAvailable: !hasActiveApptToday,
     });
 
     // Lane 2 pool — survives socket disconnects; cleared only on technician_offline.
@@ -1164,23 +1326,34 @@ module.exports = function bookingSocket(io, socket) {
       );
     }
 
-    dbRun(
-      `INSERT INTO ip_technician_live_location
-         (technician_id, socket_id, session_id, latitude, longitude,
-          online_status, task_status, last_ping_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'online', 'idle', NOW(), NOW())
-       ON DUPLICATE KEY UPDATE
-         socket_id     = VALUES(socket_id),
-         session_id    = VALUES(session_id),
-         latitude      = VALUES(latitude),
-         longitude     = VALUES(longitude),
-         online_status = 'online',
-         task_status   = 'idle',
-         booking_id    = NULL,
-         last_ping_at  = NOW(),
-         updated_at    = NOW()`,
-      [technicianId, socket.id, sessionId ?? null, lat ?? null, lng ?? null]
-    );
+    // Phase 3: when reconnecting mid-appointment, only refresh socket/GPS — do NOT
+    // reset task_status to 'idle' or clear booking_id, as the tech is still active.
+    if (hasActiveApptToday) {
+      dbRun(
+        `UPDATE ip_technician_live_location
+         SET socket_id = ?, latitude = ?, longitude = ?, last_ping_at = NOW(), updated_at = NOW()
+         WHERE technician_id = ?`,
+        [socket.id, lat ?? null, lng ?? null, technicianId]
+      );
+    } else {
+      dbRun(
+        `INSERT INTO ip_technician_live_location
+           (technician_id, socket_id, session_id, latitude, longitude,
+            online_status, task_status, last_ping_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'online', 'idle', NOW(), NOW())
+         ON DUPLICATE KEY UPDATE
+           socket_id     = VALUES(socket_id),
+           session_id    = VALUES(session_id),
+           latitude      = VALUES(latitude),
+           longitude     = VALUES(longitude),
+           online_status = 'online',
+           task_status   = 'idle',
+           booking_id    = NULL,
+           last_ping_at  = NOW(),
+           updated_at    = NOW()`,
+        [technicianId, socket.id, sessionId ?? null, lat ?? null, lng ?? null]
+      );
+    }
 
     logBlock('🟢', `Technician Online`, [
       `Technician : ${technicianName} (ID: ${technicianId})`,
@@ -1359,14 +1532,14 @@ module.exports = function bookingSocket(io, socket) {
       driverId,  driverName,  sessionId,
     } = data;
 
-    dlog(`[DISPATCH] booking_accepted received — bookingId=${bookingId} technicianId=${technicianId} technicianName=${technicianName} driverId=${driverId ?? 'none'}`);
+    dlog(bookingId, 'ACCEPT_RECV', `techId=${technicianId ?? 'none'} driverId=${driverId ?? 'none'} name=${technicianName ?? driverName ?? ''}`);
 
     if (!bookingId) { console.warn('booking_accepted: missing bookingId'); return; }
 
     if (acceptedBookings.has(bookingId)) {
       const who = driverName ?? technicianName ??
                   String(driverId ?? technicianId ?? '?');
-      dlog(`[DISPATCH] DUPLICATE_BLOCKED — bookingId=${bookingId} actor=${who} booking already claimed`);
+      dlog(bookingId, 'DUPLICATE_BLOCKED', `actor=${who} -- already claimed`);
       log('🚫', 'DUPLICATE_BLOCKED', bookingId,
         `actor=${who} — booking already claimed by another`);
       return;
@@ -1388,6 +1561,7 @@ module.exports = function bookingSocket(io, socket) {
     const slotInfo        = dispatch?.slotInfo       ?? null;
     const bookingDate     = dispatch?.bookingDate    ?? null;
     const appointmentTime = dispatch?.appointmentTime ?? null;
+    const dispatchSlotId  = dispatch?.slotId         ?? null; // needed by Phase 1 slot recording
     dispatchQueues.delete(bookingId);
 
     const actorMap   = bookingType === 'transport' ? onlineDrivers : onlineTechnicians;
@@ -1541,6 +1715,59 @@ module.exports = function bookingSocket(io, socket) {
         log('💾', 'APPT_SLOT_MARKED', bookingId,
           `tech=${actorId} date=${bookingDate} time=${appointmentTime} → is_available=0`);
       }
+
+      // Record a committed window in technicianActiveSlots for ANY slot-based
+      // acceptance — not just ones with an exact appointmentTime. A booking with
+      // only a broad slotId (no specific time chosen) still has a real duration
+      // configured per technician/slot/date in ip_technician_slots; using
+      // acceptance time as the window start means every accepted slot booking
+      // produces a real interval, so the per-slot eligibility check always has
+      // data to work with (no more "no window recorded" gap for these bookings).
+      if (bookingDate && dispatchSlotId) {
+        ;(async () => {
+          try {
+            const [[slotDef]] = await db.execute(
+              `SELECT duration_minutes FROM ip_technician_slots
+               WHERE technician_id = ? AND slot_id = ? AND slot_date = ? LIMIT 1`,
+              [actorId, dispatchSlotId, bookingDate]
+            );
+            if (!slotDef?.duration_minutes) {
+              dlog(bookingId, 'SLOT_RECORD', `tech=${actorId} slot=${dispatchSlotId} date=${bookingDate} -- no duration_minutes, skipped`);
+              return;
+            }
+
+            let startMinutes;
+            if (appointmentTime) {
+              const [startH, startM] = appointmentTime.split(':').map(Number);
+              startMinutes = startH * 60 + startM;
+            } else {
+              // No specific time chosen (broad-slot booking) — use acceptance
+              // time (IST) as the window start; we don't know which exact
+              // interval inside the bucket the tech will actually work.
+              const istNow = new Date(Date.now() + (5 * 60 + 30) * 60 * 1000);
+              startMinutes = istNow.getUTCHours() * 60 + istNow.getUTCMinutes();
+            }
+            const endMinutes = startMinutes + Number(slotDef.duration_minutes) + APPOINTMENT_BUFFER_MINUTES;
+
+            if (!technicianActiveSlots.has(actorId)) {
+              technicianActiveSlots.set(actorId, new Map());
+            }
+            technicianActiveSlots.get(actorId).set(bookingId, {
+              slotDate:     bookingDate,
+              startMinutes,
+              endMinutes,
+              slotId:       dispatchSlotId,
+            });
+
+            log('🗓️', 'APPT_SLOT_RECORDED', bookingId,
+              `tech=${actorId} window=${String(Math.floor(startMinutes / 60)).padStart(2, '0')}:${String(startMinutes % 60).padStart(2, '0')}–` +
+              `${String(Math.floor(endMinutes / 60)).padStart(2, '0')}:${String(endMinutes % 60).padStart(2, '0')} ` +
+              `(+${APPOINTMENT_BUFFER_MINUTES}min buffer)${appointmentTime ? '' : ' [acceptance-time start, no explicit appointmentTime]'} stored`);
+          } catch (e) {
+            console.error(`❌ [SLOT_RECORD] booking=${bookingId}: ${e.message}`);
+          }
+        })();
+      }
     }
 
     _notifyPatient(io, bookingId, 'booking_accepted', {
@@ -1550,7 +1777,7 @@ module.exports = function bookingSocket(io, socket) {
       trackingId:   String(bookingId),
     });
 
-    dlog(`[DISPATCH] ACCEPTED — bookingId=${bookingId} techId=${actorId} techName=${actorName} | dispatch stopped | patient notified | other techs cancelled`);
+    dlog(bookingId, 'ACCEPTED', `${actorName}(${actorId}) -- dispatch stopped, patient notified`);
     log('👤', 'PATIENT_NOTIFIED', bookingId, 'booking_accepted sent');
 
     sendToBookingOwner(
@@ -1565,7 +1792,7 @@ module.exports = function bookingSocket(io, socket) {
       const entry = actorMap.get(qa.id);
       if (entry?.socketId) {
         io.to(entry.socketId).emit('booking_cancelled', { bookingId });
-        dlog(`[DISPATCH] booking_cancelled sent to techId=${qa.id} techName=${qa.name} (not the acceptor)`);
+        dlog(bookingId, 'CANCEL_SENT', `-> ${qa.name}(${qa.id}) (not the acceptor)`);
       }
     });
   });
@@ -1573,7 +1800,7 @@ module.exports = function bookingSocket(io, socket) {
   // ── Technician rejects (active decline) ─────────────────────────────────────
   socket.on('booking_rejected', (data = {}) => {
     const { bookingId, technicianId } = data;
-    dlog(`[DISPATCH] booking_rejected received — bookingId=${bookingId} techId=${technicianId} → moving to next tech`);
+    dlog(bookingId, 'REJECT_RECV', `techId=${technicianId} -> moving to next`);
     if (!bookingId || !technicianId) return;
 
     dbRun(
@@ -1592,7 +1819,7 @@ module.exports = function bookingSocket(io, socket) {
       dispatch.techIdx++;
       dispatch.attemptNum = 1;
       const nextAfterReject = dispatch.queue[dispatch.techIdx];
-      dlog(`[DISPATCH] REJECTED_MOVE — bookingId=${bookingId} techId=${technicianId} techName=${rejectedName} actively declined → next: ${nextAfterReject ? `${nextAfterReject.name}(id=${nextAfterReject.id})` : 'queue exhausted — expanding'}`);
+      dlog(bookingId, 'DECLINED', `${rejectedName}(${technicianId}) -> next: ${nextAfterReject ? `${nextAfterReject.name}(${nextAfterReject.id})` : 'queue exhausted -- expanding'}`);
       log('❌', 'TECH_REJECTED', bookingId,
         `${rejectedName} (ID: ${technicianId}) declined → next: ${
           nextAfterReject ? `${nextAfterReject.name} (ID: ${nextAfterReject.id})` : 'expanding queue'
@@ -2168,6 +2395,46 @@ module.exports = function bookingSocket(io, socket) {
     bookingRooms.delete(bookingId);
   });
 
+  // ── Stale-notification guard ──────────────────────────────────────────────────
+  // A technician's app may have received an FCM booking_request while fully
+  // killed/backgrounded and never received the later booking_cancelled (that
+  // event is only ever emitted via Socket.IO — TIMEOUT_EXHAUSTED and the
+  // accept-side cancel-others loop both skip any actor with no live socketId).
+  // On resume, the client asks here before resurfacing a locally-cached
+  // pending request, so an already timed-out or already-accepted-by-someone-
+  // else booking is never re-shown. ip_booking_requests is reused as ground
+  // truth rather than in-memory state, since it's per-technician-id keyed and
+  // already gets overwritten/updated at every stage of the dispatch lifecycle.
+  socket.on('check_pending_booking', async (data = {}) => {
+    const { bookingId, technicianId } = data;
+    if (!bookingId || !technicianId) return;
+    let stillPending = false;
+    try {
+      const [[row]] = await db.execute(
+        `SELECT request_status FROM ip_booking_requests WHERE booking_id = ? AND technician_id = ? LIMIT 1`,
+        [bookingId, technicianId]
+      );
+      stillPending = row?.request_status === 'pending';
+    } catch (e) {
+      console.error(`[check_pending_booking] booking=${bookingId} tech=${technicianId}: ${e.message}`);
+      stillPending = false; // fail-safe: don't resurface a stale request on error
+    }
+    socket.emit('pending_booking_status', { bookingId, stillPending });
+    log('🔍', 'CHECK_PENDING', bookingId, `tech=${technicianId} -> stillPending=${stillPending}`);
+  });
+
+  // ── Debug dump (dev/staging only) ────────────────────────────────────────────
+  if (process.env.NODE_ENV !== 'production') {
+    socket.on('debug_dump_slots', () => {
+      const dump = {};
+      technicianActiveSlots.forEach((slots, techId) => {
+        dump[techId] = Object.fromEntries(slots);
+      });
+      log('🔍', 'DEBUG_DUMP_SLOTS', '-', JSON.stringify(dump, null, 2));
+      socket.emit('debug_dump_slots_result', dump);
+    });
+  }
+
   // ── Disconnect cleanup ────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
 
@@ -2182,6 +2449,11 @@ module.exports = function bookingSocket(io, socket) {
         });
         technicianActiveBookings.delete(tid);
         acceptedBookings.delete(activeBookingId);
+        const dcSlots = technicianActiveSlots.get(tid);
+        if (dcSlots) {
+          dcSlots.delete(activeBookingId);
+          if (dcSlots.size === 0) technicianActiveSlots.delete(tid);
+        }
         log('⚠️', 'TECH_DISCONNECT_BOOKING', activeBookingId,
           `tech=${socket.technicianName ?? '?'} id=${tid} — patient notified`);
       }
@@ -2260,4 +2532,78 @@ module.exports.triggerScheduledDispatch = async function(bookingData, io) {
     },
   };
   await _handleBookingRequest(ioRef, virtualSocket, bookingData);
+};
+
+// ── Startup recovery ────────────────────────────────────────────────────────────
+// Called once from server.js after the DB is ready.  Queries today's assigned
+// bookings and re-populates technicianActiveSlots so dispatch does not treat a
+// technician as free after a server restart.
+//
+// Bookings with appointment-time context (slot_time + duration_minutes both set)
+// are loaded into technicianActiveSlots with their window (startMinutes →
+// endMinutes+buffer).  Bookings without appointment context mark the tech
+// globally busy via onlineTechnicians.isAvailable=false (old model; Phase 1+
+// will phase this out once the Flutter app signals technician_online on start).
+module.exports.initDispatchState = async function () {
+  try {
+    const [rows] = await db.execute(
+      `SELECT b.booking_id,
+              b.technician_id,
+              ias.slot_time,
+              ts.duration_minutes,
+              ts.slot_id,
+              DATE_FORMAT(b.booking_date, '%Y-%m-%d') AS booking_date
+       FROM   ip_bookings b
+       LEFT JOIN ip_available_slots  ias ON ias.available_slot_id  = b.available_slot_id
+       LEFT JOIN ip_technician_slots ts  ON ts.tech_slot_id        = ias.technician_slot_id
+       WHERE  b.status        = 'assigned'
+         AND  b.booking_date  = CURDATE()
+         AND  b.technician_id IS NOT NULL
+         AND  b.deleted_at    IS NULL`
+    );
+
+    let slotRecovered = 0;
+    let globalRecovered = 0;
+
+    for (const row of rows) {
+      const techId    = row.technician_id;
+      const bookingId = row.booking_id;
+      // slot_time comes back as a MySQL TIME string "HH:MM:SS"
+      const slotTime  = row.slot_time ? String(row.slot_time).substring(0, 5) : null;
+      const duration  = row.duration_minutes != null ? Number(row.duration_minutes) : null;
+
+      if (!slotTime || !duration) {
+        // No appointment context — fall back to global busy flag (old model)
+        const t = onlineTechnicians.get(techId);
+        if (t) onlineTechnicians.set(techId, { ...t, isAvailable: false });
+        globalRecovered++;
+        dlog(bookingId, 'STARTUP', `tech=${techId} -- no slot/duration, marked globally busy`);
+        continue;
+      }
+
+      const [startH, startM] = slotTime.split(':').map(Number);
+      const startMinutes = startH * 60 + startM;
+      const endMinutes   = startMinutes + duration + APPOINTMENT_BUFFER_MINUTES;
+
+      if (!technicianActiveSlots.has(techId)) {
+        technicianActiveSlots.set(techId, new Map());
+      }
+      technicianActiveSlots.get(techId).set(bookingId, {
+        slotDate:     row.booking_date,
+        startMinutes,
+        endMinutes,
+        slotId:       row.slot_id ?? null,
+      });
+      slotRecovered++;
+      dlog(bookingId, 'STARTUP', `tech=${techId} -- slot ${slotTime}-${String(Math.floor(endMinutes / 60)).padStart(2, '0')}:${String(endMinutes % 60).padStart(2, '0')} recovered`);
+    }
+
+    console.log(
+      `\n✅ [STARTUP] Dispatch state recovered — ` +
+      `${rows.length} assigned booking(s) today: ` +
+      `${slotRecovered} with appointment slot, ${globalRecovered} global-busy`
+    );
+  } catch (e) {
+    console.error(`❌ [STARTUP] initDispatchState failed: ${e.message}`);
+  }
 };

@@ -47,7 +47,11 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-settings.init().then(() => {
+settings.init().then(async () => {
+  // Rebuild in-memory dispatch state from DB before accepting connections.
+  // Ensures assigned bookings from before a restart are not forgotten.
+  await bookingSocket.initDispatchState();
+
   httpServer.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
