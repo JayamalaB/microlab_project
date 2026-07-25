@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/customer_refresh_notifier.dart';
@@ -198,6 +200,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       reportUrl:           b['report_url'] as String?,
       refundAmount:        b['refund_amount'] != null ? double.tryParse(b['refund_amount'].toString()) : null,
       refundStatus:        b['refund_status'] as String?,
+      rescheduleCount:     b['reschedule_count'] != null ? (b['reschedule_count'] as num).toInt() : 0,
     );
   }
 
@@ -734,6 +737,235 @@ void _downloadReport(BuildContext context, BookingModel booking) {
   ));
 }
 
+void _showRescheduleSheet(BuildContext context, BookingModel booking, VoidCallback? onRescheduled) {
+  showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => _RescheduleSheet(
+      booking: booking,
+      onConfirm: (collectionDate, availableSlotId, slotLabel) async {
+        final result = await ApiService.rescheduleBooking(
+          booking.bookingIdNum!,
+          collectionDate: collectionDate,
+          availableSlotId: availableSlotId,
+        );
+        if (!context.mounted) return;
+        if (result['success'] == true) {
+          Navigator.pop(context);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Booking rescheduled to $collectionDate at $slotLabel'),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+          onRescheduled?.call();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(result['message'] ?? 'Could not reschedule'),
+            backgroundColor: const Color(0xFFD32F2F),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
+      },
+    ),
+  );
+}
+
+class _RescheduleSheet extends StatefulWidget {
+  final BookingModel booking;
+  final Future<void> Function(String collectionDate, int availableSlotId, String slotLabel) onConfirm;
+  const _RescheduleSheet({required this.booking, required this.onConfirm});
+
+  @override
+  State<_RescheduleSheet> createState() => _RescheduleSheetState();
+}
+
+class _RescheduleSheetState extends State<_RescheduleSheet> {
+  DateTime? _date;
+  Map<String, dynamic>? _slot; // {time_slot_id, label, time, remaining}
+  List<Map<String, dynamic>> _slots = [];
+  bool _loadingSlots = false;
+  bool _submitting   = false;
+  String _slotError  = '';
+
+  String _toApiDate(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  String _fmtDate(DateTime d) {
+    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const days   = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
+  }
+
+  Future<void> _pickDate() async {
+    final now    = DateTime.now();
+    final picked = await showDatePicker(
+      context:     context,
+      initialDate: _date ?? now,
+      firstDate:   now,
+      lastDate:    now.add(const Duration(days: 30)),
+      helpText:    'SELECT NEW DATE',
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: const ColorScheme.light(
+            primary: Color(0xFF1565C0), onPrimary: Colors.white, surface: Colors.white,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) {
+      setState(() { _date = picked; _slot = null; _slots = []; _slotError = ''; });
+      _loadSlots(picked);
+    }
+  }
+
+  Future<void> _loadSlots(DateTime date) async {
+    setState(() { _loadingSlots = true; _slotError = ''; });
+    try {
+      final branchId   = widget.booking.branch?.id ?? '';
+      final slotType   = widget.booking.mode == 'Home Collection' ? 'home_collection' : 'lab_visit';
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/slots').replace(queryParameters: {
+        'branch_id': branchId,
+        'date':      _toApiDate(date),
+        'slot_type': slotType,
+      });
+      final res  = await http.get(uri).timeout(const Duration(seconds: 10));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (!mounted) return;
+      if (res.statusCode == 200 && body['success'] == true) {
+        final list = (body['slots'] as List).cast<Map<String, dynamic>>();
+        setState(() {
+          _slots        = list;
+          _loadingSlots = false;
+          _slotError    = list.isEmpty ? 'No slots available for this date.' : '';
+        });
+      } else {
+        setState(() { _loadingSlots = false; _slotError = body['message'] as String? ?? 'Could not load slots.'; });
+      }
+    } catch (_) {
+      if (mounted) setState(() { _loadingSlots = false; _slotError = 'Could not reach the server.'; });
+    }
+  }
+
+  Future<void> _submit() async {
+    if (_date == null || _slot == null || _submitting) return;
+    setState(() => _submitting = true);
+    try {
+      await widget.onConfirm(_toApiDate(_date!), _slot!['time_slot_id'] as int, _slot!['label'] as String);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      padding: EdgeInsets.fromLTRB(20, 16, 20, MediaQuery.of(context).padding.bottom + 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(child: Container(width: 36, height: 4, decoration: BoxDecoration(
+            color: AppColors.divider, borderRadius: BorderRadius.circular(2)))),
+          const SizedBox(height: 16),
+          const Text('Reschedule Booking',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          const SizedBox(height: 4),
+          Text('Current: ${widget.booking.timeSlot} · ${_fmtDate(widget.booking.date)}',
+              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+          const SizedBox(height: 20),
+
+          // Date picker
+          GestureDetector(
+            onTap: _pickDate,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+              decoration: BoxDecoration(
+                color: _date != null ? const Color(0xFFF0F7FF) : AppColors.background,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: _date != null ? const Color(0xFF1565C0) : AppColors.divider,
+                    width: _date != null ? 1.5 : 1),
+              ),
+              child: Row(children: [
+                Icon(Icons.event_outlined, size: 18,
+                    color: _date != null ? const Color(0xFF1565C0) : AppColors.textHint),
+                const SizedBox(width: 10),
+                Text(_date != null ? _fmtDate(_date!) : 'Select new date',
+                    style: TextStyle(fontSize: 14,
+                        color: _date != null ? AppColors.textPrimary : AppColors.textHint)),
+                const Spacer(),
+                const Icon(Icons.keyboard_arrow_down_rounded, color: AppColors.textHint),
+              ]),
+            ),
+          ),
+
+          const SizedBox(height: 14),
+
+          // Slots
+          if (_loadingSlots)
+            const Center(child: Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF1565C0)),
+            ))
+          else if (_slotError.isNotEmpty)
+            Text(_slotError, style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)))
+          else if (_slots.isNotEmpty)
+            Wrap(
+              spacing: 8, runSpacing: 8,
+              children: _slots.map((s) {
+                final selected = _slot?['time_slot_id'] == s['time_slot_id'];
+                return GestureDetector(
+                  onTap: () => setState(() => _slot = s),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                    decoration: BoxDecoration(
+                      color: selected ? const Color(0xFF1565C0) : Colors.white,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                          color: selected ? const Color(0xFF1565C0) : AppColors.divider,
+                          width: selected ? 1.5 : 1),
+                    ),
+                    child: Text(s['label'] as String,
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                            color: selected ? Colors.white : AppColors.textPrimary)),
+                  ),
+                );
+              }).toList(),
+            ),
+
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: ElevatedButton(
+              onPressed: (_date != null && _slot != null && !_submitting) ? _submit : null,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1565C0),
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: const Color(0xFF1565C0).withValues(alpha: 0.35),
+                elevation: 0,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              child: _submitting
+                  ? const SizedBox(width: 20, height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Text('Confirm Reschedule',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ─── Booking Card ─────────────────────────────────────────────────────────────
 
 class _BookingCard extends StatelessWidget {
@@ -975,6 +1207,33 @@ class _BookingCard extends StatelessWidget {
                             const Text('Thank you!',
                                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.brandGreen)),
                           ],
+                        ),
+                      ),
+                    ],
+
+                    // Reschedule button
+                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
+                        !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
+                        (booking.collectionStatus == null || booking.collectionStatus == 'assigned')) ...[
+                      const SizedBox(height: 10),
+                      GestureDetector(
+                        onTap: () => _showRescheduleSheet(context, booking, onCancelled),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 9),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF0F7FF),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFF90CAF9)),
+                          ),
+                          child: const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.edit_calendar_outlined, size: 15, color: Color(0xFF1565C0)),
+                              SizedBox(width: 6),
+                              Text('Reschedule',
+                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1565C0))),
+                            ],
+                          ),
                         ),
                       ),
                     ],

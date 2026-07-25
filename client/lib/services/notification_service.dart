@@ -223,6 +223,27 @@ class NotificationService {
       return;
     }
 
+    if (type == 'booking_cancelled') {
+      final title = message.notification?.title ?? 'Booking Cancelled';
+      final body  = message.notification?.body  ?? 'A booking has been cancelled.';
+      _localNotifs.show(
+        message.data['booking_id'].hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _updatesChannelId,
+            _updatesChannelName,
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+        ),
+      );
+      return;
+    }
+
     if (type == 'booking_confirmed' ||
         type == 'technician_assigned' ||
         type == 'technician_en_route' ||

@@ -2,6 +2,7 @@
 const settings = require('../config/settings');
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
+const { messaging } = require('../config/firebase');
 const fs   = require('fs');
 const path = require('path');
 
@@ -19,6 +20,15 @@ function logRefund(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(REFUND_LOG, line, 'utf8');
+}
+
+// ── Notification log ──────────────────────────────────────────────────────────
+const NOTIFY_LOG = path.join(__dirname, '..', 'logs', 'notify.log');
+function logNotify(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+  const line = `[${ist}] ${msg}\n`;
+  process.stdout.write(line);
+  fs.appendFileSync(NOTIFY_LOG, line, 'utf8');
 }
 const { triggerScheduledDispatch } = require('../socket/bookingSocket');
 
@@ -276,6 +286,7 @@ exports.getMyBookings = async (req, res) => {
          b.booking_id              AS booking_id_num,
          b.booking_ref,
          b.visit_group_id,
+         b.reschedule_count,
          b.status                  AS booking_status,
          b.booking_type,
          b.booking_date            AS collection_date,
@@ -432,7 +443,7 @@ exports.cancelBooking = async (req, res) => {
   const { reason } = req.body;
 
   try {
-    const allowedBookingStatuses    = settings.getList('cancel_allowed_booking_statuses',    ['pending', 'scheduled']);
+    const allowedBookingStatuses    = settings.getList('cancel_allowed_booking_statuses',    ['pending', 'scheduled', 'confirmed', 'assigned']);
     const allowedCollectionStatuses = settings.getList('cancel_allowed_collection_statuses', ['assigned', 'en_route', 'arrived']);
     const chargeStatuses            = settings.getList('cancel_charge_trigger_statuses',     ['arrived']);
     const serviceCharge             = parseFloat(settings.get('cancel_service_charge_amount', '0')) || 0;
@@ -440,7 +451,7 @@ exports.cancelBooking = async (req, res) => {
 
     // Verify booking ownership
     const [[booking]] = await db.execute(
-      `SELECT b.booking_id, b.status, b.booking_type, b.total_amount, b.available_slot_id, b.booking_date,
+      `SELECT b.booking_id, b.booking_ref, b.status, b.booking_type, b.total_amount, b.available_slot_id, b.booking_date,
               b.visit_group_id,
               COALESCE(pt.amount_paid, 0) AS amount_paid,
               COALESCE((SELECT SUM(bi.final_price) FROM ip_booking_items bi WHERE bi.booking_id = b.booking_id), 0) AS items_total
@@ -490,7 +501,7 @@ exports.cancelBooking = async (req, res) => {
     let tc = null;
     if (isHomeCollection) {
       const [[row]] = await db.execute(
-        `SELECT collection_status, arrived_at FROM ip_technician_collection WHERE booking_id = ? LIMIT 1`,
+        `SELECT collection_status, arrived_at, technician_id FROM ip_technician_collection WHERE booking_id = ? LIMIT 1`,
         [bookingId]
       );
       tc = row ?? null;
@@ -593,6 +604,49 @@ exports.cancelBooking = async (req, res) => {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
     }).catch(err => console.error('[clientSync] cancel sync failed:', err.message));
+
+    // ── Notify assigned technician ─────────────────────────────────────────────
+    if (isHomeCollection && tc?.technician_id) {
+      logNotify(`[cancel] booking_id=${bookingId} booking_ref=${booking.booking_ref} technician_id=${tc.technician_id} collection_status=${tc.collection_status}`);
+      try {
+        const [[techUser]] = await db.execute(
+          `SELECT u.user_notification_token, u.user_name, u.user_mobile_no, tll.fcm_token AS live_fcm_token
+           FROM ip_technicians t
+           JOIN ip_users u ON u.user_id = t.user_id
+           LEFT JOIN ip_technician_live_location tll ON tll.technician_id = t.technician_id
+           WHERE t.technician_id = ? LIMIT 1`,
+          [tc.technician_id]
+        );
+        const fcmToken = techUser?.user_notification_token || techUser?.live_fcm_token;
+        const tokenSource = techUser?.user_notification_token ? 'ip_users' : (techUser?.live_fcm_token ? 'ip_technician_live_location' : 'MISSING');
+        logNotify(`[cancel] technician_name=${techUser?.user_name ?? 'unknown'} mobile=${techUser?.user_mobile_no ?? 'unknown'} fcm_token=${fcmToken ? fcmToken.slice(0, 20) + '…' : 'MISSING'} source=${tokenSource}`);
+        if (fcmToken && messaging) {
+          await messaging.send({
+            token: fcmToken,
+            notification: {
+              title: 'Booking Cancelled ❌',
+              body:  `Booking ${booking.booking_ref} has been cancelled by the customer. Do not travel to the location.`,
+            },
+            data: {
+              type:        'booking_cancelled',
+              booking_id:  String(bookingId),
+              booking_ref: booking.booking_ref ?? '',
+            },
+            android: {
+              priority: 'high',
+              notification: { channelId: 'booking_updates' },
+            },
+          });
+          logNotify(`✅ FCM sent — booking_id=${bookingId} booking_ref=${booking.booking_ref} technician_id=${tc.technician_id} mobile=${techUser?.user_mobile_no ?? 'unknown'}`);
+        } else {
+          logNotify(`⚠️  FCM skipped — booking_id=${bookingId} reason=${!fcmToken ? 'no FCM token' : 'messaging not initialised'} technician_id=${tc.technician_id}`);
+        }
+      } catch (notifyErr) {
+        logNotify(`❌ FCM error — booking_id=${bookingId} technician_id=${tc.technician_id} error=${notifyErr.message}`);
+      }
+    } else if (isHomeCollection) {
+      logNotify(`[cancel] booking_id=${bookingId} no technician assigned — FCM skipped`);
+    }
 
     logRefund(`[cancel] booking_id=${bookingId} refund=₹${refundAmount} status=${finalRefundStatus} charge=₹${chargeApplied}`);
     res.json({ success: true, refund_amount: refundAmount, refund_status: finalRefundStatus, service_charge_applied: chargeApplied });
@@ -1800,5 +1854,231 @@ exports.createAdminBooking = async (req, res) => {
   }
 };
 
+// ── POST /api/bookings/:bookingId/reschedule ──────────────────────────────────
+exports.rescheduleBooking = async (req, res) => {
+  const clientId  = req.user.client_id;
+  const patientId = req.user.id;
+  const bookingId = parseInt(req.params.bookingId, 10);
+  const { collectionDate, availableSlotId } = req.body;
 
+  if (!collectionDate || !availableSlotId) {
+    return res.status(400).json({ success: false, message: 'collectionDate and availableSlotId are required' });
+  }
 
+  try {
+    // ── Load booking ──────────────────────────────────────────────────────────
+    const [[booking]] = await db.execute(
+      `SELECT b.booking_id, b.booking_ref, b.status, b.booking_type,
+              b.available_slot_id AS old_slot_id, b.booking_date AS old_date,
+              b.reschedule_count, b.visit_group_id
+       FROM ip_bookings b
+       WHERE b.booking_id = ?
+         AND (b.client_id = ? OR b.patient_id = ?)
+         AND b.deleted_at IS NULL
+       LIMIT 1`,
+      [bookingId, clientId, patientId]
+    );
+    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+
+    const bookingType  = booking.booking_type;
+    const suffix       = bookingType === 'home_collection' ? 'home' : 'lab';
+    const isFamily     = !!booking.visit_group_id;
+
+    // ── Load all siblings (includes self) if family booking ───────────────────
+    let allBookings = [booking];
+    if (isFamily) {
+      const [siblings] = await db.execute(
+        `SELECT booking_id, booking_ref, available_slot_id AS old_slot_id, reschedule_count
+         FROM ip_bookings
+         WHERE visit_group_id = ? AND deleted_at IS NULL`,
+        [booking.visit_group_id]
+      );
+      allBookings = siblings;
+      console.log(`[reschedule] family group ${booking.visit_group_id} — ${allBookings.length} member(s)`);
+    }
+
+    // ── Settings checks (use the booking that was tapped) ─────────────────────
+    if (!settings.getBool(`reschedule_enabled_${suffix}`, true)) {
+      return res.status(400).json({ success: false, message: 'Rescheduling is not available for this booking type' });
+    }
+
+    const maxCount = parseInt(settings.get(`reschedule_max_count_${suffix}`, '2'), 10);
+    if ((booking.reschedule_count ?? 0) >= maxCount) {
+      return res.status(400).json({ success: false, message: `Maximum reschedules (${maxCount}) reached for this booking` });
+    }
+
+    const minNoticeHours = parseFloat(settings.get(`reschedule_min_notice_hours_${suffix}`, '0')) || 0;
+    if (minNoticeHours > 0 && booking.old_slot_id) {
+      const [[oldSlot]] = await db.execute(
+        `SELECT slot_time, slot_date FROM ip_available_slots WHERE available_slot_id = ?`,
+        [booking.old_slot_id]
+      );
+      if (oldSlot) {
+        const istOffsetMs    = (5 * 60 + 30) * 60 * 1000;
+        const istNow         = new Date(Date.now() + istOffsetMs);
+        const slotDateTime   = new Date(`${oldSlot.slot_date}T${oldSlot.slot_time}`);
+        const hoursUntilSlot = (slotDateTime - istNow) / 3600000;
+        if (hoursUntilSlot < minNoticeHours) {
+          return res.status(400).json({
+            success: false,
+            message: `Rescheduling must be done at least ${minNoticeHours} hour(s) before your current slot`,
+          });
+        }
+      }
+    }
+
+    // ── Technician collection status check ────────────────────────────────────
+    let tcRow = null;
+    if (bookingType === 'home_collection') {
+      const [[tc]] = await db.execute(
+        `SELECT collection_status, technician_id FROM ip_technician_collection WHERE booking_id = ? LIMIT 1`,
+        [bookingId]
+      );
+      if (tc) {
+        const allowed = settings.getList('reschedule_allowed_collection_statuses', ['assigned']);
+        if (!allowed.includes(tc.collection_status)) {
+          return res.status(400).json({
+            success: false,
+            message: `Cannot reschedule — technician is already ${tc.collection_status.replace(/_/g, ' ')}`,
+          });
+        }
+        tcRow = tc;
+      }
+    }
+
+    // ── Resolve new slot ──────────────────────────────────────────────────────
+    const [[newSlot]] = await db.execute(
+      `SELECT available_slot_id, technician_slot_id, lab_slot_id,
+              TIME_FORMAT(slot_time, '%h:%i %p') AS slot_label
+       FROM ip_available_slots
+       WHERE available_slot_id = ? AND is_available = 1 LIMIT 1`,
+      [availableSlotId]
+    );
+    if (!newSlot) {
+      return res.status(400).json({ success: false, message: 'Selected slot is no longer available' });
+    }
+
+    // ── Transaction ───────────────────────────────────────────────────────────
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // 1. Free the old slot once (shared across all members)
+      const oldSlotId = booking.old_slot_id;
+      if (oldSlotId) {
+        await conn.execute(
+          `UPDATE ip_available_slots SET is_available = 1, updated_at = NOW() WHERE available_slot_id = ?`,
+          [oldSlotId]
+        );
+        const [[oldAvSlot]] = await conn.execute(
+          `SELECT technician_slot_id, lab_slot_id FROM ip_available_slots WHERE available_slot_id = ?`,
+          [oldSlotId]
+        );
+        if (oldAvSlot?.technician_slot_id) {
+          await conn.execute(
+            `UPDATE ip_technician_slots SET booked_count = GREATEST(0, booked_count - 1) WHERE tech_slot_id = ?`,
+            [oldAvSlot.technician_slot_id]
+          );
+        } else if (oldAvSlot?.lab_slot_id) {
+          await conn.execute(
+            `UPDATE ip_lab_slots SET booked_count = GREATEST(0, booked_count - 1) WHERE lab_slot_id = ?`,
+            [oldAvSlot.lab_slot_id]
+          );
+        }
+      }
+
+      // 2. Update ALL members to the new date + slot
+      const allIds = allBookings.map(b => b.booking_id);
+      await conn.execute(
+        `UPDATE ip_bookings
+         SET booking_date      = ?,
+             available_slot_id = ?,
+             lab_slot_id       = ?,
+             reschedule_count  = reschedule_count + 1,
+             updated_at        = NOW()
+         WHERE booking_id IN (${allIds.map(() => '?').join(',')})`,
+        [collectionDate, availableSlotId, newSlot.lab_slot_id ?? null, ...allIds]
+      );
+
+      // 3. Mark new slot as used once (shared across all members)
+      await conn.execute(
+        `UPDATE ip_available_slots SET is_available = 0, updated_at = NOW() WHERE available_slot_id = ?`,
+        [availableSlotId]
+      );
+      if (newSlot.technician_slot_id) {
+        await conn.execute(
+          `UPDATE ip_technician_slots SET booked_count = booked_count + 1 WHERE tech_slot_id = ?`,
+          [newSlot.technician_slot_id]
+        );
+      } else if (newSlot.lab_slot_id) {
+        await conn.execute(
+          `UPDATE ip_lab_slots SET booked_count = booked_count + 1 WHERE lab_slot_id = ?`,
+          [newSlot.lab_slot_id]
+        );
+      }
+
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    // ── Notify technician once ────────────────────────────────────────────────
+    if (bookingType === 'home_collection' && tcRow?.technician_id) {
+      try {
+        const [[techUser]] = await db.execute(
+          `SELECT u.user_notification_token, u.user_name, u.user_mobile_no, tll.fcm_token AS live_fcm_token
+           FROM ip_technicians t
+           JOIN ip_users u ON u.user_id = t.user_id
+           LEFT JOIN ip_technician_live_location tll ON tll.technician_id = t.technician_id
+           WHERE t.technician_id = ? LIMIT 1`,
+          [tcRow.technician_id]
+        );
+        const fcmToken = techUser?.user_notification_token || techUser?.live_fcm_token;
+        const memberNote = isFamily ? ` (${allBookings.length} members)` : '';
+        if (fcmToken && messaging) {
+          await messaging.send({
+            token: fcmToken,
+            notification: {
+              title: 'Booking Rescheduled 🔄',
+              body:  `Booking ${booking.booking_ref}${memberNote} has been rescheduled to ${collectionDate} at ${newSlot.slot_label}.`,
+            },
+            data: {
+              type:        'booking_rescheduled',
+              booking_id:  String(bookingId),
+              booking_ref: booking.booking_ref ?? '',
+            },
+            android: { priority: 'high', notification: { channelId: 'booking_updates' } },
+          });
+          logNotify(`✅ reschedule FCM sent — booking_id=${bookingId} technician_id=${tcRow.technician_id} mobile=${techUser?.user_mobile_no ?? 'unknown'} new_date=${collectionDate} new_slot=${newSlot.slot_label} family=${isFamily}`);
+        } else {
+          logNotify(`⚠️  reschedule FCM skipped — booking_id=${bookingId} technician_id=${tcRow.technician_id} reason=${!fcmToken ? 'no FCM token' : 'messaging not initialised'}`);
+        }
+      } catch (notifyErr) {
+        logNotify(`❌ reschedule FCM error — booking_id=${bookingId} error=${notifyErr.message}`);
+      }
+    }
+
+    // ── Sync all members to client server ─────────────────────────────────────
+    for (const b of allBookings) {
+      syncBookingToClient(b.booking_id, {
+        mobile: req.user.mobile,
+        type:   req.user.user_type ?? 'customer',
+      }).catch(err => console.error(`[clientSync] reschedule sync failed booking_id=${b.booking_id}:`, err.message));
+    }
+
+    console.log(`✅ rescheduleBooking — booking_id=${bookingId} ref=${booking.booking_ref} members=${allBookings.length} new_date=${collectionDate} new_slot=${availableSlotId}`);
+    res.json({
+      success:      true,
+      booking_ref:  booking.booking_ref,
+      new_date:     collectionDate,
+      new_slot:     newSlot.slot_label,
+      members_updated: allBookings.length,
+    });
+  } catch (err) {
+    console.error('❌ rescheduleBooking FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error', detail: err.message });
+  }
+};

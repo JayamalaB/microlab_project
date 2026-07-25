@@ -128,15 +128,23 @@ exports.sendOtp = async (req, res) => {
     }
 
     step = 'sms';
+    writeLog(`[sendOtp] OTP stored — value=${otp} expires=${expiresAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+    writeLog(`[sendOtp] SMS env — api_key=${process.env.PING4SMS_API_KEY ? 'SET' : 'MISSING'} sender=${process.env.PING4SMS_SENDER_ID ?? 'MISSING'} template=${process.env.PING4SMS_LOGIN_TEMPLATE_ID ?? 'MISSING'}`);
     try {
-      writeLog(`[sendOtp] calling SMS gateway — ${elapsed()}`);
+      writeLog(`[sendOtp] calling SMS gateway — target=91${mobile} — ${elapsed()}`);
       const smsResponse = await sms.sendLoginOtp(mobile, otp);
-      writeLog(`[sendOtp] SMS done — ${elapsed()} | response: ${smsResponse}`);
+      const raw = String(smsResponse ?? '').trim();
+      const isSuccess = /^\d+$/.test(raw);
+      const meaning = isSuccess
+        ? `✅ delivered — message_id=${raw}`
+        : `❌ gateway error — ${raw}`;
+      writeLog(`[sendOtp] SMS response — ${elapsed()} | raw="${raw}" | ${meaning}`);
     } catch (smsErr) {
       writeLog(`[sendOtp] SMS failed (non-fatal) — ${elapsed()} | ${smsErr.message}`);
     }
 
     writeLog(`[sendOtp] done — total ${elapsed()}`);
+    
     res.json({
       success: true,
       message: `OTP sent to ${mobile}`,
@@ -430,6 +438,42 @@ exports.verifyOtp = async (req, res) => {
       console.warn('[verifyOtp] micro_patient.php unreachable (non-fatal):', err.message);
     }
 
+    // If new user and client server has profile data, auto-fill from Self patient
+    let profileAutoFilled = false;
+    if (isNewUser && phpPatients.length > 0) {
+      const selfP = phpPatients.find(p => p.relation === 'Self') || phpPatients[0];
+      if (selfP) {
+        const dobParts = selfP.date_of_birth ? selfP.date_of_birth.split('-') : null;
+        const dob = dobParts && dobParts.length === 3
+          ? (dobParts[0].length <= 2 ? `${dobParts[2]}-${dobParts[1]}-${dobParts[0]}` : selfP.date_of_birth)
+          : null;
+
+        await db.query(
+          `UPDATE ip_patients
+           SET patient_name=?, patient_gender=?, patient_city=?, patient_address=?,
+               patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
+               health_conditions=?, patient_photo=?, patient_id_ref=?, updated_at=NOW()
+           WHERE patient_id=?`,
+          [selfP.name, selfP.gender, selfP.location, selfP.address,
+           selfP.email || null, dob, selfP.age || null, selfP.relation || 'Self',
+           selfP.health_condition || null, selfP.photo || null,
+           String(selfP.patient_id), patient.patient_id]
+        );
+        await db.query(
+          `UPDATE ip_users SET user_name=?, user_email=?, user_date_modified=NOW() WHERE user_id=?`,
+          [selfP.name, selfP.email || null, dbUser.user_id]
+        );
+        await db.query(
+          `UPDATE ip_clients SET client_name=?, client_date_modified=NOW() WHERE client_id=?`,
+          [selfP.name, dbUser.client_id]
+        );
+        patient = { ...patient, patient_name: selfP.name, patient_gender: selfP.gender,
+                    patient_city: selfP.location, patient_relation: selfP.relation || 'Self' };
+        profileAutoFilled = true;
+        writeLog(`[verifyOtp] profile auto-filled from client server — mobile=${mobile} name=${selfP.name}`);
+      }
+    }
+
     const token = jwt.sign(
       {
         id:        patient.patient_id,
@@ -451,7 +495,7 @@ exports.verifyOtp = async (req, res) => {
     return res.json({
       success: true,
       message: 'Login successful',
-      data: { token, user: patient, patients: phpPatients, is_new_user: isNewUser },
+      data: { token, user: patient, patients: phpPatients, is_new_user: isNewUser && !profileAutoFilled },
     });
 
   } catch (err) {
