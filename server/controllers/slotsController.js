@@ -23,13 +23,12 @@ exports.getSlots = async (req, res) => {
     });
   }
 
-  // Compute today's date and cutoff time in IST (UTC+5:30) with 1-hour buffer.
+  // Compute today's date and current time in IST (UTC+5:30).
   // Passed as SQL params so no reliance on MySQL timezone config.
   const istOffsetMs = (5 * 60 + 30) * 60 * 1000;
   const istNow      = new Date(Date.now() + istOffsetMs);
   const todayIST    = istNow.toISOString().slice(0, 10); // 'YYYY-MM-DD'
-  const cutoff      = new Date(istNow.getTime() + 30 * 60 * 1000); // +30 min buffer
-  const cutoffTime  = `${String(cutoff.getUTCHours()).padStart(2, '0')}:${String(cutoff.getUTCMinutes()).padStart(2, '0')}:00`;
+  const cutoffTime  = `${String(istNow.getUTCHours()).padStart(2, '0')}:${String(istNow.getUTCMinutes()).padStart(2, '0')}:00`;
   writeLog(`[getSlots] today_IST=${todayIST} cutoff=${cutoffTime}`);
 
   try {

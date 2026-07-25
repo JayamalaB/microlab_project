@@ -5,6 +5,7 @@ const fs     = require('fs');
 const db     = require('../config/db');
 const settings = require('../config/settings');
 const { messaging } = require('../config/firebase');
+const { buildSecureId } = require('../utils/secureId');
 
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'client_sync.log');
 
@@ -146,9 +147,14 @@ async function syncBookingToClient(bookingId, initiator) {
     // 5. Build payload
     const isNewPatient = !patient.patient_id_ref;
 
+    const timestamp = Math.floor(Date.now() / 1000);
+    const secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp));
+
     const payload = {
       mobile_no:    initiator.mobile,
       user_type:    initiator.type,
+      timestamp,
+      secure_id,
       booking_ref:  booking.booking_ref,
       booking_type: booking.booking_type,
       slot_details: {

@@ -6,6 +6,8 @@ ini_set('log_errors', 1);
 ini_set('error_log', __DIR__ . '/logs/php_errors.log');
 date_default_timezone_set('Asia/Kolkata');
 
+$CLIENT_SERVER_SECRET = 'micro123';
+
 $logDir  = __DIR__ . '/logs';
 $logFile = $logDir . '/booking_sync.log';
 if (!file_exists($logDir)) mkdir($logDir, 0777, true);
@@ -18,6 +20,15 @@ function writeLog($lines) {
     $divider = str_repeat('-', 50);
     $entry   = "\n{$divider}\n[{$dateStr}]\n" . implode("\n", $lines) . "\n{$divider}\n";
     file_put_contents($logFile, $entry, FILE_APPEND);
+}
+
+// ── HMAC verify ───────────────────────────────────────────
+
+function verifySecureId($mobile_no, $user_type, $timestamp, $receivedSecureId) {
+    global $CLIENT_SERVER_SECRET;
+    $message  = "{$mobile_no}|{$user_type}|{$timestamp}";
+    $expected = hash_hmac('sha256', $message, $CLIENT_SERVER_SECRET);
+    return hash_equals($expected, $receivedSecureId);
 }
 
 // ── Read request ──────────────────────────────────────────
@@ -37,7 +48,36 @@ if (!$data) {
 
 $mobile_no   = $data['mobile_no']   ?? '';
 $user_type   = $data['user_type']   ?? '';
+$timestamp   = $data['timestamp']   ?? '';
+$secure_id   = $data['secure_id']   ?? '';
 $booking_ref = $data['booking_ref'] ?? '';
+
+// ── Verify secure_id ──────────────────────────────────────
+
+if (empty($mobile_no) || empty($user_type) || empty($timestamp) || empty($secure_id)) {
+    $response = ['status' => 'failure', 'msg' => 'Missing required fields'];
+    writeLog(['REQUEST: missing required fields', 'raw: ' . substr($raw, 0, 300)]);
+    http_response_code(400);
+    echo json_encode($response);
+    exit;
+}
+
+$ageSecs = time() - (int)$timestamp;
+if ($ageSecs < 0 || $ageSecs > 300) {
+    $response = ['status' => 'failure', 'msg' => "Request expired (age: {$ageSecs}s)"];
+    writeLog(["REQUEST: expired timestamp  age={$ageSecs}s  mobile={$mobile_no}"]);
+    http_response_code(401);
+    echo json_encode($response);
+    exit;
+}
+
+if (!verifySecureId($mobile_no, $user_type, $timestamp, $secure_id)) {
+    $response = ['status' => 'failure', 'msg' => 'Invalid secure_id'];
+    writeLog(["REQUEST: invalid secure_id  mobile={$mobile_no}"]);
+    http_response_code(401);
+    echo json_encode($response);
+    exit;
+}
 
 // ── Log incoming payload ──────────────────────────────────
 
@@ -45,6 +85,7 @@ $logLines = [
     'REQUEST',
     "  mobile_no    : {$mobile_no}",
     "  user_type    : {$user_type}",
+    "  timestamp    : {$timestamp}",
     "  booking_ref  : {$booking_ref}",
     "  booking_type : " . ($data['booking_type'] ?? ''),
     "  slot_date    : " . ($data['slot_details']['date'] ?? ''),
@@ -95,9 +136,9 @@ if (!empty($data['payment_details'])) {
 
 // ── Validation ────────────────────────────────────────────
 
-if (empty($mobile_no) || empty($user_type) || empty($booking_ref)) {
-    $response = ['status' => 'failure', 'msg' => 'mobile_no, user_type and booking_ref are required'];
-    $logLines[] = 'RESPONSE  status:400  missing required fields';
+if (empty($booking_ref)) {
+    $response = ['status' => 'failure', 'msg' => 'booking_ref is required'];
+    $logLines[] = 'RESPONSE  status:400  missing booking_ref';
     writeLog($logLines);
     http_response_code(400);
     echo json_encode($response);

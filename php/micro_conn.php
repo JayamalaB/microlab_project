@@ -6,7 +6,7 @@ ini_set('log_errors', 1);
 ini_set('error_log', __DIR__ . '/logs/php_errors.log');
 date_default_timezone_set('Asia/Kolkata');
 
-$CLIENT_SERVER_SECRET = 'replace_with_shared_secret_agreed_with_client_server';
+$CLIENT_SERVER_SECRET = 'micro123';
 
 $logDir  = __DIR__ . '/logs';
 $logFile = $logDir . '/receiver.log';

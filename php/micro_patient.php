@@ -6,7 +6,7 @@ ini_set('log_errors', 1);
 ini_set('error_log', __DIR__ . '/logs/php_errors.log');
 date_default_timezone_set('Asia/Kolkata');
 
-$CLIENT_SERVER_SECRET = 'replace_with_shared_secret_agreed_with_client_server';
+$CLIENT_SERVER_SECRET = 'micro123';
 
 $logDir  = __DIR__ . '/logs';
 $logFile = $logDir . '/patient.log';
@@ -88,14 +88,56 @@ $MOCK_PATIENTS = [
             'patient_id'       => 1,
             'name'             => 'Sara',
             'gender'           => 'Female',
-            'location'         => 'peelamedu',
-            'address'          => '342 sirumangalam',
+            'location'         => 'Peelamedu',
+            'address'          => '342 Sirumangalam',
             'email'            => 'gpushpaganesan@gmail.com',
             'date_of_birth'    => '14-05-1998',
             'age'              => '27',
             'relation'         => 'Self',
-            'health_condition' => 'walker',
+            'health_condition' => 'Walker',
             'photo'            => 'https://test.neuralarc.com/api/uploads/user.jpeg',
+        ],
+    ],
+
+    '9876543211' => [
+        [
+            'patient_id'       => 12,
+            'name'             => 'Rahul Kumar',
+            'gender'           => 'Male',
+            'location'         => 'Gandhipuram',
+            'address'          => '123 Cross Street, Coimbatore',
+            'email'            => 'rahul@example.com',
+            'date_of_birth'    => '10-08-1995',
+            'age'              => '30',
+            'relation'         => 'Self',
+            'health_condition' => 'Healthy',
+            'photo'            => 'https://test.neuralarc.com/api/uploads/user.jpeg',
+        ],
+        [
+            'patient_id'       => 3,
+            'name'             => 'Suresh Kumar',
+            'gender'           => 'Male',
+            'location'         => 'Gandhipuram',
+            'address'          => '123 Cross Street, Coimbatore',
+            'email'            => null,
+            'date_of_birth'    => '15-03-1965',
+            'age'              => '60',
+            'relation'         => 'Father',
+            'health_condition' => 'Diabetic',
+            'photo'            => null,
+        ],
+        [
+            'patient_id'       => 4,
+            'name'             => 'Kavitha Kumar',
+            'gender'           => 'Female',
+            'location'         => 'Gandhipuram',
+            'address'          => '123 Cross Street, Coimbatore',
+            'email'            => null,
+            'date_of_birth'    => '22-07-1968',
+            'age'              => '57',
+            'relation'         => 'Mother',
+            'health_condition' => 'BP, Thyroid',
+            'photo'            => null,
         ],
     ],
 ];
