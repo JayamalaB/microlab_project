@@ -384,9 +384,10 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
     _loadResults();
   }
 
-  Future<void> _loadResults() async {
+  Future<void> _loadResults({bool silent = false}) async {
     final id = widget.booking.bookingIdNum;
     if (id == null) { setState(() => _resultsLoading = false); return; }
+    if (!silent) setState(() => _resultsLoading = true);
     try {
       final data = await ApiService.getBookingResults(id);
       if (mounted) {
@@ -607,7 +608,11 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
           ],
         ),
       ),
-      body: SingleChildScrollView(
+      body: RefreshIndicator(
+        onRefresh: () => _loadResults(silent: true),
+        color: AppColors.brandGreen,
+        child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -757,6 +762,7 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
                     .toList(),
               ),
           ],
+        ),
         ),
       ),
     );

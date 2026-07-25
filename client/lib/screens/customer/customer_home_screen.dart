@@ -78,7 +78,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   MemberModel _patientToMember(PatientModel p) => MemberModel(
     id:              p.patientId.toString(),
     name:            p.name,
-    mobile:          widget.mobile,
+    mobile:          (p.mobile != null && p.mobile!.isNotEmpty) ? p.mobile! : widget.mobile,
     gender:          p.gender,
     location:        p.location,
     address:         p.address,

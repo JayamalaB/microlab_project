@@ -60,6 +60,7 @@ class PatientModel {
   final String? relation;
   final String? healthCondition;
   final String? photo;
+  final String? mobile;
 
   const PatientModel({
     required this.patientId,
@@ -74,6 +75,7 @@ class PatientModel {
     this.relation,
     this.healthCondition,
     this.photo,
+    this.mobile,
   });
 
   factory PatientModel.fromJson(Map<String, dynamic> j) {
@@ -90,6 +92,7 @@ class PatientModel {
       relation:        j['relation']?.toString(),
       healthCondition: j['health_condition']?.toString(),
       photo:           j['photo']?.toString(),
+      mobile:          j['mobile']?.toString(),
     );
   }
 }
@@ -246,6 +249,7 @@ class BookingModel {
   final double? patientLng;         // collection_longitude
   final double? refundAmount;
   final String? refundStatus;       // 'pending' | 'processed' | 'none' | null
+  final int rescheduleCount;
 
   BookingModel({
     required this.id,
@@ -289,6 +293,7 @@ class BookingModel {
     this.patientLng,
     this.refundAmount,
     this.refundStatus,
+    this.rescheduleCount = 0,
   });
 }
 

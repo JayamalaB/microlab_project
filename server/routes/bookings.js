@@ -40,6 +40,9 @@ router.delete('/:bookingId/items/:bookingItemId',  auth, bookingController.remov
 // POST /api/bookings/:bookingId/cancel — customer cancels a booking
 router.post('/:bookingId/cancel', auth, bookingController.cancelBooking);
 
+// POST /api/bookings/:bookingId/reschedule — customer reschedules date/slot
+router.post('/:bookingId/reschedule', auth, bookingController.rescheduleBooking);
+
 // POST /api/bookings/:bookingId/pay — pay a pending booking via Razorpay
 router.post('/:bookingId/pay', auth, bookingController.payBooking);
 
