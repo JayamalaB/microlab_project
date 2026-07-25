@@ -533,6 +533,21 @@ exports.cancelBooking = async (req, res) => {
       [reason ?? null, refundAmount, refundStatus, bookingId]
     );
 
+    // Cascade to ip_technician_collection so the technician's dashboard list
+    // (which filters on collection_status) stops showing this booking as an
+    // active job. Mirrors what the admin cancellation path (updateAdminStatus)
+    // already does — this customer-facing path previously only updated
+    // ip_bookings, leaving the technician's card visible and fully actionable
+    // indefinitely even after the patient cancelled.
+    if (tc) {
+      await db.execute(
+        `UPDATE ip_technician_collection
+         SET collection_status = 'cancelled', updated_at = NOW()
+         WHERE booking_id = ?`,
+        [bookingId]
+      );
+    }
+
     // ── Razorpay refund (fire if paid online) ──────────────────────────────────
     let finalRefundStatus = refundStatus;
     if (refundAmount > 0) {

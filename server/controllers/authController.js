@@ -53,12 +53,22 @@ exports.sendOtp = async (req, res) => {
         const phpResult = await fetchFromRegistry(process.env.JAYAMALA_URL, mobile, 'technician');
         writeLog(`[sendOtp] registry response — ${elapsed()} | status: ${phpResult.body.status}`);
         if (phpResult.body.status !== 'success') {
-          return res.status(403).json({
-            success: false,
-            message: phpResult.body.msg ?? 'Mobile not registered as technician',
-          });
+          // Not found in Jayamala — fall back to local ip_users before rejecting.
+          step = 'local_fallback_lookup';
+          const localTech = await _findLocalTechnicianUser(mobile);
+          if (!localTech) {
+            return res.status(403).json({
+              success: false,
+              message: phpResult.body.msg ?? 'Mobile not registered as technician',
+            });
+          }
+          writeLog(`[sendOtp] not found in Jayamala but found locally — user_id=${localTech.user_id} — ${elapsed()}`);
+          // technicianInfo stays null — falls through to the OTP flow below
+          // exactly like a Jayamala-confirmed technician (response just omits
+          // the registry-sourced name/specialization/photo fields).
+        } else {
+          technicianInfo = phpResult.body.technician;
         }
-        technicianInfo = phpResult.body.technician;
       } catch (regErr) {
         writeLog(`[sendOtp] registry unreachable — ${regErr.message}`);
         return res.status(502).json({ success: false, message: 'Technician registry unreachable. Try again.' });
@@ -174,6 +184,22 @@ async function fetchFromRegistry(url, mobileNo, userType) {
   return { httpStatus: res.status, body };
 }
 
+// ── Local technician fallback lookup ──────────────────────────────────────────
+// Used only when the Jayamala registry responds "not found" for a technician
+// login. Checks whether this mobile is already known locally as a technician
+// (ip_users.user_microlab_type = 'technician'). Shared by sendOtp and
+// verifyOtp so the fallback condition is defined in exactly one place.
+async function _findLocalTechnicianUser(mobile) {
+  const [rows] = await db.query(
+    `SELECT user_id, user_branch_id, user_city
+     FROM ip_users
+     WHERE user_mobile_no = ? AND user_microlab_type = 'technician'
+     LIMIT 1`,
+    [mobile]
+  );
+  return rows[0] ?? null;
+}
+
 exports.verifyOtp = async (req, res) => {
   try {
     const { mobile, otp, role = 'customer' } = req.body;
@@ -207,19 +233,32 @@ exports.verifyOtp = async (req, res) => {
 
     // ── Technician path ───────────────────────────────────────────────────────
     if (role === 'technician') {
-      // Look up PHP registry for canonical technician data
+      // Look up PHP registry for canonical technician data.
+      // t: registry technician object — set only when Jayamala confirms this number.
+      // localTech: ip_users fallback row — set only when Jayamala says not-found
+      //   but this mobile is already known locally as a technician.
+      let t = null;
+      let localTech = null;
       let phpResult;
       try {
         phpResult = await fetchFromRegistry(process.env.JAYAMALA_URL, mobile, 'technician');
       } catch (err) {
         return res.status(502).json({ success: false, message: 'User registry unreachable. Try again.' });
       }
-      if (phpResult.body.status !== 'success') {
-        return res.status(404).json({ success: false, message: phpResult.body.msg ?? 'Technician not registered.' });
+      if (phpResult.body.status === 'success') {
+        t = phpResult.body.technician;
+        writeLog(`[verifyOtp] registry success — mobile=${mobile} branch_id=${t.branch_id} technician_code=${t.technician_code} specialization=${t.specialization} tech_photo=${t.tech_photo} tech_city=${t.tech_city} max_daily_bookings=${t.max_daily_bookings}`);
+      } else {
+        // Not found in Jayamala — fall back to local ip_users before rejecting.
+        localTech = await _findLocalTechnicianUser(mobile);
+        if (!localTech) {
+          return res.status(404).json({ success: false, message: phpResult.body.msg ?? 'Technician not registered.' });
+        }
+        writeLog(`[verifyOtp] not found in Jayamala but found locally — user_id=${localTech.user_id}`);
       }
-      const t = phpResult.body.technician;
 
-      // Find or auto-create ip_technicians row
+      // Find or auto-create ip_technicians row — same lookup regardless of
+      // whether the technician was confirmed via Jayamala or the local fallback.
       const [existingRows] = await db.query(
         `SELECT u.user_id, tech.technician_id, tech.branch_id
          FROM ip_users u
@@ -228,12 +267,41 @@ exports.verifyOtp = async (req, res) => {
          ORDER BY tech.technician_id ASC LIMIT 1`,
         [mobile]
       );
+      writeLog(`[verifyOtp] existingRows found=${existingRows.length} technician_id=${existingRows[0]?.technician_id ?? 'none'} branch_id=${existingRows[0]?.branch_id ?? 'none'}`);
 
       let dbTechnicianId, dbBranchId;
       if (existingRows.length > 0) {
         dbTechnicianId = existingRows[0].technician_id;
         dbBranchId     = existingRows[0].branch_id;
-      } else {
+
+        // Refresh the registry-sourced columns on every login so admin-side
+        // changes (Jayamala, or ip_users in the local-fallback case) reach
+        // ip_technicians instead of being frozen at first-ever login.
+        // COALESCE keeps the existing DB value whenever this login's source
+        // has nothing for that field — an update here can never blank out
+        // previously-set data with NULL. Only these 6 columns have any real
+        // data source in this flow; everything else (tech_address, gps_data,
+        // is_available, technician_active, etc.) is left untouched.
+        const newBranchId = t?.branch_id ?? localTech?.user_branch_id ?? null;
+        const newTechCity = t?.tech_city ?? localTech?.user_city    ?? null;
+        writeLog(`[verifyOtp] refreshing ip_technicians technician_id=${dbTechnicianId} source=${t ? 'jayamala' : 'local_fallback'} newBranchId=${newBranchId} technician_code=${t?.technician_code ?? 'null(coalesce keeps existing)'} tech_photo=${t?.tech_photo ?? 'null(coalesce keeps existing)'} tech_city=${newTechCity} max_daily_bookings=${t?.max_daily_bookings ?? 'null(coalesce keeps existing)'}`);
+        const [updResult] = await db.query(
+          `UPDATE ip_technicians
+           SET branch_id          = COALESCE(?, branch_id),
+               technician_code    = COALESCE(?, technician_code),
+               specialization     = COALESCE(?, specialization),
+               tech_photo         = COALESCE(?, tech_photo),
+               tech_city          = COALESCE(?, tech_city),
+               max_daily_bookings = COALESCE(?, max_daily_bookings)
+           WHERE technician_id = ?`,
+          [newBranchId, t?.technician_code ?? null, t?.specialization ?? null,
+           t?.tech_photo ?? null, newTechCity, t?.max_daily_bookings ?? null,
+           dbTechnicianId]
+        );
+        writeLog(`[verifyOtp] refresh UPDATE result — affectedRows=${updResult.affectedRows} changedRows=${updResult.changedRows}`);
+        dbBranchId = newBranchId ?? dbBranchId;
+      } else if (t) {
+        // Jayamala-sourced insert — unchanged from the existing implementation.
         const [techResult] = await db.query(
           `INSERT INTO ip_technicians
              (user_id, branch_id, technician_code, specialization,
@@ -244,11 +312,34 @@ exports.verifyOtp = async (req, res) => {
         );
         dbTechnicianId = techResult.insertId;
         dbBranchId     = t.branch_id;
+      } else {
+        // Local-fallback insert. ip_technicians.branch_id is NOT NULL with no
+        // schema default, so it must come from ip_users.user_branch_id — the
+        // only field with no Jayamala equivalent that cannot be left NULL.
+        // technician_code/specialization/tech_photo are nullable (no local
+        // source, left NULL); max_daily_bookings/technician_active are omitted
+        // so the schema's own defaults (8 / 1) apply — no invented values.
+        if (localTech.user_branch_id == null) {
+          writeLog(`[verifyOtp] local fallback blocked — ip_users.user_branch_id is NULL for user_id=${localTech.user_id}, cannot satisfy ip_technicians.branch_id (NOT NULL, no default)`);
+          return res.status(422).json({
+            success: false,
+            message: 'Technician found locally but cannot be activated: no branch assigned (ip_users.user_branch_id is empty). Contact admin to assign a branch.',
+          });
+        }
+        const [techResult] = await db.query(
+          `INSERT INTO ip_technicians
+             (user_id, branch_id, technician_code, specialization, tech_photo, tech_city, is_available)
+           VALUES (?, ?, NULL, NULL, NULL, ?, 1)`,
+          [localTech.user_id, localTech.user_branch_id, localTech.user_city ?? null]
+        );
+        dbTechnicianId = techResult.insertId;
+        dbBranchId     = localTech.user_branch_id;
       }
 
       // Re-read branch_id from DB (admin may have changed it)
       const [[dbTech]] = await db.query(
         `SELECT t.branch_id, t.technician_code, t.specialization,
+                t.tech_photo, t.tech_city,
                 u.user_name, u.user_email
          FROM ip_technicians t JOIN ip_users u ON u.user_id = t.user_id
          WHERE t.technician_id = ?`,
@@ -297,12 +388,16 @@ exports.verifyOtp = async (req, res) => {
         data: {
           token,
           user: {
-            technician_id: dbTechnicianId,
-            user_id:       dbUser.user_id,
-            user_name:     dbTech?.user_name ?? t.name,
-            user_email:    dbTech?.user_email ?? t.email,
-            user_mobile_no: mobile,
-            branch_id:     dbBranchId,
+            technician_id:   dbTechnicianId,
+            user_id:         dbUser.user_id,
+            user_name:       dbTech?.user_name ?? t?.name,
+            user_email:      dbTech?.user_email ?? t?.email,
+            user_mobile_no:  mobile,
+            branch_id:       dbBranchId,
+            technician_code: dbTech?.technician_code ?? t?.technician_code ?? null,
+            specialization:  dbTech?.specialization  ?? t?.specialization  ?? null,
+            tech_photo:      dbTech?.tech_photo      ?? t?.tech_photo     ?? null,
+            tech_city:       dbTech?.tech_city       ?? t?.tech_city      ?? null,
           },
           sessionId,
         },

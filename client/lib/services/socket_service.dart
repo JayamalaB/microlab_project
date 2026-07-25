@@ -295,11 +295,15 @@ class SocketService {
   // ── Technician availability state ──────────────────────────────────────────
   // _isAvailable: tech has toggled "Online" on the dashboard.
   // _isBusy:      tech currently has an active booking (accept → complete).
-  //   Reconnect must NOT re-emit technician_online when busy, otherwise the
-  //   server marks the tech available and may assign a second booking.
-  bool _isAvailable    = false;
-  bool _isBusy         = false;
-  int? _activeBookingId;
+  // _appointmentBookingIds: subset of active bookings that are appointment-based.
+  //   For appointment bookings, technician_online IS re-emitted on reconnect
+  //   so the server gets a fresh socket ID and GPS; the server preserves
+  //   isAvailable=false via technicianActiveSlots (Phase 3 server change).
+  //   For non-appointment bookings, reconnect still skips technician_online.
+  bool       _isAvailable    = false;
+  bool       _isBusy         = false;
+  int?       _activeBookingId;
+  final Set<int> _appointmentBookingIds = {};
   double? _lastLat;
   double? _lastLng;
 
@@ -316,6 +320,10 @@ class SocketService {
   // When connectivity is restored and the socket is down, we force an immediate
   // reconnect instead of waiting for socket.io's own retry cycle.
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+
+  // ── Stale pending-booking verification ──────────────────────────────────────
+  // Keyed by bookingId. Resolved by the pending_booking_status listener below.
+  final Map<int, Completer<bool>> _pendingBookingChecks = {};
 
   // Called by NotificationService after getToken() or onTokenRefresh.
   void updateFcmToken(String token) {
@@ -483,9 +491,20 @@ class SocketService {
       return;
     }
     if (_isBusy) {
-      // Mid-booking reconnect: skip registration.
-      // emitCollectionCompleted() re-registers after the booking ends.
-      _log('RECONNECT', 'tech BUSY (booking=$_activeBookingId) — skipping technician_online');
+      // For appointment-based bookings: re-emit technician_online so the server
+      // gets a fresh socket ID and GPS.  The server (Phase 3) will keep
+      // isAvailable=false because technicianActiveSlots still has the window.
+      // For non-appointment bookings: skip — re-emitting would mark the tech
+      // globally available and could cause a double-assignment.
+      final onlyAppointmentActive =
+          _activeBookingId != null &&
+          _appointmentBookingIds.contains(_activeBookingId);
+      if (onlyAppointmentActive) {
+        _emitTechnicianOnline();
+        _log('RECONNECT', 'mid-appointment reconnect — re-emitted technician_online (server preserves busy state)');
+      } else {
+        _log('RECONNECT', 'tech BUSY non-appointment (booking=$_activeBookingId) — skipping technician_online');
+      }
       return;
     }
     _emitTechnicianOnline();
@@ -569,6 +588,17 @@ class SocketService {
       final id = _parseId((data as Map)['bookingId']);
       _log('EVENT', 'booking_timeout  id=$id');
       _bookingTimeoutCtrl.add(id);
+    });
+
+    _socket!.on('pending_booking_status', (data) {
+      try {
+        final map          = Map<String, dynamic>.from(data as Map);
+        final id           = _parseId(map['bookingId']);
+        final stillPending = map['stillPending'] == true;
+        _log('EVENT', 'pending_booking_status  id=$id stillPending=$stillPending');
+        final completer = _pendingBookingChecks.remove(id);
+        if (completer != null && !completer.isCompleted) completer.complete(stillPending);
+      } catch (e) { _log('ERROR', 'pending_booking_status: $e'); }
     });
 
     _socket!.on('slot_no_availability', (data) {
@@ -882,6 +912,7 @@ class SocketService {
     _isAvailable     = false;
     _isBusy          = false;
     _activeBookingId = null;
+    _appointmentBookingIds.clear();
     _lastLat         = null;
     _lastLng         = null;
     _branchId        = null;
@@ -1020,15 +1051,21 @@ class SocketService {
 
   /// Accept a booking.  Sets [_isBusy]=true so reconnect logic and the logout
   /// guard both know an active booking exists.
+  /// Pass [isAppointmentBased]=true when the booking has an appointmentTime —
+  /// the reconnect guard then re-emits technician_online so the server keeps
+  /// the fresh socket ID while still maintaining isAvailable=false via
+  /// technicianActiveSlots.
   void emitBookingAccepted({
     required int    bookingId,
     required int    technicianId,
     required String technicianName,
     int? sessionId,
+    bool isAppointmentBased = false,
   }) {
     _isBusy          = true;
     _activeBookingId = bookingId;
-    _log('BOOKING_ACCEPTED', 'id=$bookingId — marked BUSY');
+    if (isAppointmentBased) _appointmentBookingIds.add(bookingId);
+    _log('BOOKING_ACCEPTED', 'id=$bookingId — marked BUSY${isAppointmentBased ? ' (appointment-based)' : ''}');
 
     _socket?.emit('booking_accepted', {
       'bookingId':      bookingId,
@@ -1046,6 +1083,36 @@ class SocketService {
       'technicianId': technicianId,
     });
     _log('EMIT', 'booking_rejected  id=$bookingId');
+  }
+
+  /// Verifies with the server whether a booking request is still pending for
+  /// this technician before resurfacing a locally-cached (e.g. FCM-persisted)
+  /// booking. A killed/backgrounded app never receives booking_cancelled
+  /// (Socket.IO-only), so this closes that gap: an already timed-out or
+  /// already-accepted-by-someone-else booking is never shown as if still live.
+  /// Fails safe to `false` (treat as stale) on no connection, error, or timeout.
+  Future<bool> checkPendingBooking({
+    required int bookingId,
+    required int technicianId,
+    Duration timeout = const Duration(seconds: 6),
+  }) async {
+    if (!isConnected) {
+      _log('WARN', 'checkPendingBooking  id=$bookingId — not connected, treating as stale');
+      return false;
+    }
+    final completer = Completer<bool>();
+    _pendingBookingChecks[bookingId] = completer;
+    _socket!.emit('check_pending_booking', {
+      'bookingId':    bookingId,
+      'technicianId': technicianId,
+    });
+    _log('EMIT', 'check_pending_booking  id=$bookingId tech=$technicianId');
+
+    return completer.future.timeout(timeout, onTimeout: () {
+      _pendingBookingChecks.remove(bookingId);
+      _log('WARN', 'checkPendingBooking  id=$bookingId — timed out, treating as stale');
+      return false;
+    });
   }
 
   void emitEnRoute({required int bookingId}) {
@@ -1066,6 +1133,7 @@ class SocketService {
   void emitCollectionCompleted({required int bookingId}) {
     _isBusy          = false;
     _activeBookingId = null;
+    _appointmentBookingIds.remove(bookingId);
     _log('BOOKING_COMPLETED', 'id=$bookingId — marked AVAILABLE');
 
     _socket?.emit('collection_completed', {
@@ -1100,6 +1168,7 @@ class SocketService {
   void emitHandedToLab({required int bookingId}) {
     _isBusy          = false;
     _activeBookingId = null;
+    _appointmentBookingIds.remove(bookingId);
     _log('HANDED_TO_LAB', 'id=$bookingId — marked AVAILABLE');
 
     _socket?.emit('handed_to_lab', {
