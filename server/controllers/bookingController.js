@@ -30,7 +30,7 @@ function logNotify(msg) {
   process.stdout.write(line);
   fs.appendFileSync(NOTIFY_LOG, line, 'utf8');
 }
-const { triggerScheduledDispatch } = require('../socket/bookingSocket');
+const { triggerScheduledDispatch, freeTechnician, unassignAndRedispatch } = require('../socket/bookingSocket');
 
 let _io = null;
 exports.setIo = (io) => { _io = io; };
@@ -546,6 +546,13 @@ exports.cancelBooking = async (req, res) => {
          WHERE booking_id = ?`,
         [bookingId]
       );
+      // Reconcile the live dispatch engine's in-memory state — otherwise the
+      // technician stays marked busy for this appointment's slot window until
+      // an unrelated event (disconnect, next job) clears it, wrongly blocking
+      // other appointment-slot bookings from reaching them in the meantime.
+      if (tc.technician_id) {
+        freeTechnician(tc.technician_id, bookingId);
+      }
     }
 
     // ── Razorpay refund (fire if paid online) ──────────────────────────────────
@@ -1958,6 +1965,8 @@ exports.rescheduleBooking = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Selected slot is no longer available' });
     }
 
+    const allIds = allBookings.map(b => b.booking_id);
+
     // ── Transaction ───────────────────────────────────────────────────────────
     const conn = await db.getConnection();
     try {
@@ -1988,7 +1997,6 @@ exports.rescheduleBooking = async (req, res) => {
       }
 
       // 2. Update ALL members to the new date + slot
-      const allIds = allBookings.map(b => b.booking_id);
       await conn.execute(
         `UPDATE ip_bookings
          SET booking_date      = ?,
@@ -2025,40 +2033,23 @@ exports.rescheduleBooking = async (req, res) => {
       conn.release();
     }
 
-    // ── Notify technician once ────────────────────────────────────────────────
+    // ── Unassign + re-dispatch (technician was assigned pre-reschedule) ───────
+    // Reschedule only reaches here while collection_status='assigned' — the
+    // technician hasn't started traveling yet. Rather than silently keeping
+    // them pinned to a new time they may not actually be free for, the booking
+    // is released and re-fed through the exact same nearest-available-
+    // technician dispatch a brand-new booking uses for the new slot — it may
+    // land back on the same technician, or on someone else, decided fairly.
+    // Shared with technician-initiated cancel (technicianController.cancelAssignedBooking).
     if (bookingType === 'home_collection' && tcRow?.technician_id) {
-      try {
-        const [[techUser]] = await db.execute(
-          `SELECT u.user_notification_token, u.user_name, u.user_mobile_no, tll.fcm_token AS live_fcm_token
-           FROM ip_technicians t
-           JOIN ip_users u ON u.user_id = t.user_id
-           LEFT JOIN ip_technician_live_location tll ON tll.technician_id = t.technician_id
-           WHERE t.technician_id = ? LIMIT 1`,
-          [tcRow.technician_id]
-        );
-        const fcmToken = techUser?.user_notification_token || techUser?.live_fcm_token;
-        const memberNote = isFamily ? ` (${allBookings.length} members)` : '';
-        if (fcmToken && messaging) {
-          await messaging.send({
-            token: fcmToken,
-            notification: {
-              title: 'Booking Rescheduled 🔄',
-              body:  `Booking ${booking.booking_ref}${memberNote} has been rescheduled to ${collectionDate} at ${newSlot.slot_label}.`,
-            },
-            data: {
-              type:        'booking_rescheduled',
-              booking_id:  String(bookingId),
-              booking_ref: booking.booking_ref ?? '',
-            },
-            android: { priority: 'high', notification: { channelId: 'booking_updates' } },
-          });
-          logNotify(`✅ reschedule FCM sent — booking_id=${bookingId} technician_id=${tcRow.technician_id} mobile=${techUser?.user_mobile_no ?? 'unknown'} new_date=${collectionDate} new_slot=${newSlot.slot_label} family=${isFamily}`);
-        } else {
-          logNotify(`⚠️  reschedule FCM skipped — booking_id=${bookingId} technician_id=${tcRow.technician_id} reason=${!fcmToken ? 'no FCM token' : 'messaging not initialised'}`);
-        }
-      } catch (notifyErr) {
-        logNotify(`❌ reschedule FCM error — booking_id=${bookingId} error=${notifyErr.message}`);
-      }
+      await unassignAndRedispatch({
+        bookingId,
+        allIds,
+        technicianId: tcRow.technician_id,
+        notifyTitle:  'Booking Rescheduled',
+        notifyBody:   `Booking ${booking.booking_ref} was rescheduled by the customer to ${collectionDate} at ${newSlot.slot_label}. You are no longer assigned — it will be re-dispatched.`,
+        notifyType:   'booking_unassigned',
+      });
     }
 
     // ── Sync all members to client server ─────────────────────────────────────

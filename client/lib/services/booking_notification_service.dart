@@ -258,11 +258,24 @@ class BookingNotificationService {
         _pendingBackgroundBooking = null;
       }
       _lastShownAt.remove(bookingId);
-      if (SocketService.instance.isConnected) {
+      void doEmit() {
         SocketService.instance.emitBookingRejected(
-          bookingId:    booking.bookingId,
+          bookingId:    booking!.bookingId,
           technicianId: SocketService.instance.userId,
         );
+      }
+      if (SocketService.instance.isConnected) {
+        doEmit();
+      } else {
+        // Socket is down (common when app is backgrounded) — queue the emit
+        // for when the socket reconnects so the server actually receives the
+        // decline. Without this, a decline tapped while disconnected is lost
+        // silently: the server just times out and retries this same
+        // technician instead of moving to the next one.
+        SocketService.instance.onConnected
+            .where((connected) => connected)
+            .take(1)
+            .listen((_) => doEmit());
       }
     } else {
       // ── Body tap — open app, show overlay, do not accept/decline ──────────

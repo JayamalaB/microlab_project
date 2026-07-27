@@ -8,6 +8,7 @@ const db   = require('../config/db');
 const fs   = require('fs');
 const path = require('path');
 const sms  = require('../utils/sms');
+const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -176,6 +177,18 @@ exports.logoutTechnician = async (req, res) => {
     );
 
     await connection.commit();
+
+    // Force the technician out of the live dispatch pool regardless of
+    // whether their socket's technician_offline event actually arrived.
+    // That event can silently fail to reach the server if the socket was
+    // already disconnected at logout time — in which case the plain socket
+    // 'disconnect' handler treats it as an accidental drop (45s grace period,
+    // in-memory pool never cleared) rather than an intentional logout. This
+    // REST path updates the same in-memory maps directly, independent of
+    // socket timing, so a logged-out technician stops receiving new
+    // dispatch attempts immediately rather than indefinitely.
+    forceTechnicianOffline(Number(technicianId));
+
     console.log(`✅ Technician ${technicianId} logged out — session closed`);
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (e) {
@@ -184,6 +197,78 @@ exports.logoutTechnician = async (req, res) => {
     res.status(500).json({ success: false, message: e.message });
   } finally {
     connection.release();
+  }
+};
+
+// ── POST /api/technicians/cancel-booking ──────────────────────────────────────
+// Technician-initiated hand-off of an already-accepted job, back before they've
+// started traveling (collection_status='assigned' only — mirrors the same gate
+// patient-side reschedule uses). This is NOT a booking cancellation: the patient
+// keeps their booking, it's released and re-dispatched to find them another
+// technician, exactly like reschedule already does — see unassignAndRedispatch
+// in bookingSocket.js, shared by both flows.
+const CANCEL_REASONS = ['vehicle_issue', 'personal_emergency', 'unreachable_patient', 'other'];
+
+exports.cancelAssignedBooking = async (req, res) => {
+  const technicianId = req.user.id;
+  const { bookingId, reason, note = null } = req.body;
+
+  if (!bookingId) {
+    return res.status(400).json({ success: false, message: 'bookingId is required' });
+  }
+  if (!CANCEL_REASONS.includes(reason)) {
+    return res.status(400).json({
+      success: false,
+      message: `reason is required and must be one of: ${CANCEL_REASONS.join(', ')}`,
+    });
+  }
+
+  try {
+    const [[tc]] = await db.execute(
+      `SELECT tc.collection_status, b.booking_ref, b.visit_group_id
+       FROM ip_technician_collection tc
+       JOIN ip_bookings b ON b.booking_id = tc.booking_id
+       WHERE tc.booking_id = ? AND tc.technician_id = ?
+       LIMIT 1`,
+      [bookingId, technicianId]
+    );
+
+    if (!tc) {
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
+    }
+    if (tc.collection_status !== 'assigned') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel — already ${tc.collection_status.replace(/_/g, ' ')}`,
+      });
+    }
+
+    let allIds = [bookingId];
+    if (tc.visit_group_id) {
+      const [siblings] = await db.execute(
+        `SELECT booking_id FROM ip_bookings WHERE visit_group_id = ? AND deleted_at IS NULL`,
+        [tc.visit_group_id]
+      );
+      allIds = siblings.map(s => s.booking_id);
+    }
+
+    tlog(`[cancelAssignedBooking] technician_id=${technicianId} booking_id=${bookingId} ref=${tc.booking_ref} reason=${reason} note=${note ?? ''} group_size=${allIds.length}`);
+
+    await unassignAndRedispatch({
+      bookingId,
+      allIds,
+      technicianId,
+      notifyTitle: 'Booking Unassigned',
+      notifyBody:  `You are no longer assigned to booking ${tc.booking_ref} (${reason.replace(/_/g, ' ')}). It has been re-dispatched.`,
+      notifyType:  'booking_unassigned',
+      excludeFromRedispatch: true,
+    });
+
+    res.json({ success: true, message: 'Booking released and re-dispatched' });
+  } catch (e) {
+    tlog(`[cancelAssignedBooking] ERROR — technician_id=${technicianId} booking_id=${bookingId} — ${e.message}`);
+    console.error('[cancelAssignedBooking]', e.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 

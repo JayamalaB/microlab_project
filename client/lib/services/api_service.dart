@@ -428,6 +428,37 @@ class ApiService {
     return false;
   }
 
+  // Technician hands off an already-accepted job before starting travel — the
+  // booking is released and re-dispatched to another technician, not cancelled
+  // for the patient. Server only allows this while the job is still 'assigned'.
+  // reason must be one of: vehicle_issue, personal_emergency, unreachable_patient, other.
+  static Future<Map<String, dynamic>> cancelAssignedBooking({
+    required int bookingId,
+    required String reason,
+    String? note,
+  }) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/technicians/cancel-booking'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'bookingId': bookingId,
+          'reason': reason,
+          'note': note,
+        }),
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[cancelAssignedBooking] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
   // Returns [{patientId, patientName, patientMobile}] for additional patients linked to a booking
   // Returns {payment_status, amount_paid, amount_due, total_amount, items_total}
   // for a booking — used by the technician detail screen to get fresh payment

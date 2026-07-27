@@ -764,11 +764,17 @@ class SocketService {
     _persistOnlineState(false);
     _stopHeartbeat();
 
-    if (!isConnected) {
-      _log('OFFLINE', 'socket not connected — state updated locally');
-      return;
+    if (isConnected) {
+      _emitTechnicianOffline();
+    } else {
+      // Socket is down — queue the emit for when it reconnects so the server
+      // actually clears this technician from the dispatch pool. Without this,
+      // the server never learns they went offline: it just treats the eventual
+      // disconnect as accidental (45s grace period, DB stays 'online') and
+      // keeps them dispatch-eligible via FCM indefinitely.
+      _log('OFFLINE', 'socket not connected — queued for reconnect');
+      onConnected.where((connected) => connected).take(1).listen((_) => _emitTechnicianOffline());
     }
-    _emitTechnicianOffline();
   }
 
   // ── Heartbeat helpers ──────────────────────────────────────────────────────
@@ -893,6 +899,13 @@ class SocketService {
     if (_isBusy) {
       _log('DISCONNECT', 'WARNING — active booking=$_activeBookingId at logout');
     }
+    // Best-effort only — unlike goOffline(), there's no point queuing this for
+    // reconnect: the socket is disposed a few lines below regardless. The
+    // technician dashboard's logout flow separately calls
+    // POST /api/technicians/:id/logout, whose handler (logoutTechnician)
+    // independently forces the technician offline via
+    // forceTechnicianOffline(), so correctness doesn't depend on this emit
+    // landing.
     if (userRole == 'technician' && _isAvailable && isConnected) {
       _emitTechnicianOffline();
     } else if (userRole == 'driver' && _isDriverOnline && isConnected) {

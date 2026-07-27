@@ -1323,6 +1323,121 @@ void _resumeJourney() {
     );
   }
 
+  static const _cancelReasons = <String, String>{
+    'vehicle_issue':       'Vehicle issue',
+    'personal_emergency':  'Personal emergency',
+    'unreachable_patient': 'Unable to reach patient',
+    'other':               'Other',
+  };
+
+  Future<Map<String, dynamic>?> _showCancelJobSheet() {
+    String? reason;
+    final noteCtrl = TextEditingController();
+    String? errorText;
+    return showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: EdgeInsets.fromLTRB(
+            20, 20, 20,
+            MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text("Can't make it?",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              const SizedBox(height: 4),
+              const Text(
+                'This job will be released and re-dispatched to another technician. The patient keeps their booking.',
+                style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+              ),
+              const SizedBox(height: 16),
+              ..._cancelReasons.entries.map((e) => RadioListTile<String>(
+                    value: e.key,
+                    groupValue: reason,
+                    onChanged: (v) => setSheet(() { reason = v; errorText = null; }),
+                    title: Text(e.value, style: const TextStyle(fontSize: 13)),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    activeColor: AppColors.brandGreen,
+                  )),
+              if (errorText != null) ...[
+                const SizedBox(height: 4),
+                Text(errorText!, style: const TextStyle(fontSize: 12, color: Colors.red)),
+              ],
+              const SizedBox(height: 8),
+              TextField(
+                controller: noteCtrl,
+                maxLines: 2,
+                decoration: InputDecoration(
+                  hintText: 'Add a note (optional)',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: () {
+                    if (reason == null) { setSheet(() => errorText = 'Select a reason'); return; }
+                    Navigator.pop(ctx, {'reason': reason, 'note': noteCtrl.text.trim()});
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red.shade600,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Confirm — Release Job', style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _cancelJob() async {
+    final choice = await _showCancelJobSheet();
+    if (choice == null || !mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+    final result = await ApiService.cancelAssignedBooking(
+      bookingId: int.tryParse(widget.booking.id) ?? 0,
+      reason:    choice['reason'] as String,
+      note:      (choice['note'] as String?)?.isEmpty == true ? null : choice['note'] as String?,
+    );
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop(); // close loading dialog
+
+    if (result['success'] == true) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Job released — it has been re-dispatched.'),
+        backgroundColor: AppColors.brandGreen,
+      ));
+      Navigator.pop(context, true);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(result['message']?.toString() ?? 'Failed to release job'),
+        backgroundColor: Colors.red,
+      ));
+    }
+  }
+
   void _collectPayment({VoidCallback? onDone}) async {
     final choice = await _showPaymentMethodSheet(
       maxAmount: _amountDue,
@@ -1763,6 +1878,14 @@ void _resumeJourney() {
               ));
             },
           ),
+          // Only before travel starts — matches the server-side gate exactly
+          // (collection_status must still be 'assigned').
+          if (_currentStatus == 'Confirmed')
+            IconButton(
+              icon: const Icon(Icons.cancel_outlined, color: Colors.white),
+              tooltip: "Can't make it",
+              onPressed: _cancelJob,
+            ),
         ],
       ),
       body: ListView(
