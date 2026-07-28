@@ -247,6 +247,7 @@ exports.createBooking = async (req, res) => {
     syncBookingToClient(bookingId, {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
+      action: 'new_booking',
     }).catch(err => console.error('[clientSync] unhandled:', err.message));
 
     res.status(201).json({
@@ -428,6 +429,13 @@ exports.getMyBookings = async (req, res) => {
     logReports('');
     // ── end reports debug ────────────────────────────────────────────────────
 
+    const maxHome = parseInt(settings.get('reschedule_max_count_home', '2'), 10);
+    const maxLab  = parseInt(settings.get('reschedule_max_count_lab',  '2'), 10);
+    rows.forEach(r => {
+      const max = r.booking_type === 'home_collection' ? maxHome : maxLab;
+      r.can_reschedule = (r.reschedule_count ?? 0) < max;
+    });
+
     res.json({ success: true, bookings: rows });
   } catch (err) {
     console.error('❌ getMyBookings FAILED:', err.message);
@@ -603,6 +611,7 @@ exports.cancelBooking = async (req, res) => {
     syncBookingToClient(bookingId, {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
+      action: 'cancel',
     }).catch(err => console.error('[clientSync] cancel sync failed:', err.message));
 
     // ── Notify assigned technician ─────────────────────────────────────────────
@@ -707,6 +716,7 @@ exports.payBooking = async (req, res) => {
     syncBookingToClient(Number(bookingId), {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
+      action: 'payment_update',
     }).catch(err => console.error('[clientSync] unhandled:', err.message));
 
     res.json({ success: true });
@@ -1531,6 +1541,7 @@ exports.createFamilyBooking = async (req, res) => {
         syncBookingToClient(bookingId, {
           mobile: req.user.mobile,
           type:   req.user.user_type ?? 'customer',
+          action: 'new_booking',
         }).catch(err => console.error('[clientSync] unhandled:', err.message));
       }
     }
@@ -2036,14 +2047,16 @@ exports.rescheduleBooking = async (req, res) => {
            WHERE t.technician_id = ? LIMIT 1`,
           [tcRow.technician_id]
         );
-        const fcmToken = techUser?.user_notification_token || techUser?.live_fcm_token;
-        const memberNote = isFamily ? ` (${allBookings.length} members)` : '';
+        const fcmToken    = techUser?.user_notification_token || techUser?.live_fcm_token;
+        const tokenSource = techUser?.user_notification_token ? 'ip_users' : (techUser?.live_fcm_token ? 'ip_technician_live_location' : 'MISSING');
+        const memberNote  = isFamily ? ` (${allBookings.length} members)` : '';
+        logNotify(`[reschedule] technician_name=${techUser?.user_name ?? 'unknown'} mobile=${techUser?.user_mobile_no ?? 'unknown'} fcm_token=${fcmToken ? fcmToken.slice(0, 20) + '…' : 'MISSING'} source=${tokenSource}`);
         if (fcmToken && messaging) {
           await messaging.send({
             token: fcmToken,
             notification: {
-              title: 'Booking Rescheduled 🔄',
-              body:  `Booking ${booking.booking_ref}${memberNote} has been rescheduled to ${collectionDate} at ${newSlot.slot_label}.`,
+              title: 'Booking Rescheduled — You Are Unassigned 🔄',
+              body:  `Booking ${booking.booking_ref}${memberNote} has been rescheduled to ${collectionDate} at ${newSlot.slot_label}. You are no longer assigned. Do not travel to the location.`,
             },
             data: {
               type:        'booking_rescheduled',
@@ -2066,6 +2079,7 @@ exports.rescheduleBooking = async (req, res) => {
       syncBookingToClient(b.booking_id, {
         mobile: req.user.mobile,
         type:   req.user.user_type ?? 'customer',
+        action: 'reschedule',
       }).catch(err => console.error(`[clientSync] reschedule sync failed booking_id=${b.booking_id}:`, err.message));
     }
 

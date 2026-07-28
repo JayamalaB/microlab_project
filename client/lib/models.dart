@@ -250,6 +250,7 @@ class BookingModel {
   final double? refundAmount;
   final String? refundStatus;       // 'pending' | 'processed' | 'none' | null
   final int rescheduleCount;
+  final bool canReschedule;
 
   BookingModel({
     required this.id,
@@ -294,6 +295,7 @@ class BookingModel {
     this.refundAmount,
     this.refundStatus,
     this.rescheduleCount = 0,
+    this.canReschedule = true,
   });
 }
 

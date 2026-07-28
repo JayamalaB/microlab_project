@@ -76,7 +76,7 @@ async function syncBookingToClient(bookingId, initiator) {
     return;
   }
 
-  writeLog(`[clientSync] starting — booking_id=${bookingId} initiator=${initiator.mobile} type=${initiator.type}`);
+  writeLog(`[clientSync] starting — booking_id=${bookingId} initiator=${initiator.mobile} type=${initiator.type} action=${initiator.action ?? 'auto'}`);
 
   // Mark as pending before attempting the HTTP call
   try {
@@ -92,7 +92,7 @@ async function syncBookingToClient(bookingId, initiator) {
     // 1. Booking + slot time
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date,
-              b.total_amount, b.patient_id, b.client_id, b.status,
+              b.total_amount, b.patient_id, b.client_id, b.status, b.bill_id,
               TIME_FORMAT(av.slot_time, '%h:%i %p') AS slot_time
        FROM ip_bookings b
        LEFT JOIN ip_available_slots av ON av.available_slot_id = b.available_slot_id
@@ -155,7 +155,13 @@ async function syncBookingToClient(bookingId, initiator) {
       user_type:    initiator.type,
       timestamp,
       secure_id,
-      booking_ref:  booking.booking_ref,
+      booking_ref:      booking.booking_ref,
+      booking_status:   booking.status,
+      existing_bill_id: booking.bill_id ?? null,
+      action: initiator.action
+        ?? (booking.status === 'cancelled' ? 'cancel'
+          : booking.bill_id               ? 'update'
+          :                                 'new_booking'),
       booking_type: booking.booking_type,
       slot_details: {
         date: formatDate(booking.booking_date),
@@ -237,8 +243,11 @@ async function syncBookingToClient(bookingId, initiator) {
         writeLog(`[clientSync] ✅ patient_id_ref=${result.patient_id} saved — patient_id=${booking.patient_id} booking_id=${bookingId}`);
       }
 
-      // Send "Booking Confirmed" push notification ONLY after successful sync
-      await _sendBookingConfirmedNotification(booking, initiator.mobile);
+      // Send "Booking Confirmed" push ONLY for new bookings, not cancel/reschedule/update
+      const resolvedAction = payload.action;
+      if (resolvedAction === 'new_booking') {
+        await _sendBookingConfirmedNotification(booking, initiator.mobile);
+      }
 
     } else {
       writeLog(`[clientSync] ⚠️  client server failure — ${result.msg ?? 'no message'}`);
