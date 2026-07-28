@@ -201,6 +201,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       refundAmount:        b['refund_amount'] != null ? double.tryParse(b['refund_amount'].toString()) : null,
       refundStatus:        b['refund_status'] as String?,
       rescheduleCount:     b['reschedule_count'] != null ? (b['reschedule_count'] as num).toInt() : 0,
+      canReschedule:       b['can_reschedule'] as bool? ?? true,
     );
   }
 
@@ -1212,7 +1213,8 @@ class _BookingCard extends StatelessWidget {
                     ],
 
                     // Reschedule button
-                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
+                    if (booking.canReschedule &&
+                        (booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
                         !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
                         (booking.collectionStatus == null || booking.collectionStatus == 'assigned')) ...[
                       const SizedBox(height: 10),

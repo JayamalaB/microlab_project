@@ -247,6 +247,7 @@ exports.createBooking = async (req, res) => {
     syncBookingToClient(bookingId, {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
+      action: 'new_booking',
     }).catch(err => console.error('[clientSync] unhandled:', err.message));
 
     res.status(201).json({
@@ -427,6 +428,13 @@ exports.getMyBookings = async (req, res) => {
     }
     logReports('');
     // ── end reports debug ────────────────────────────────────────────────────
+
+    const maxHome = parseInt(settings.get('reschedule_max_count_home', '2'), 10);
+    const maxLab  = parseInt(settings.get('reschedule_max_count_lab',  '2'), 10);
+    rows.forEach(r => {
+      const max = r.booking_type === 'home_collection' ? maxHome : maxLab;
+      r.can_reschedule = (r.reschedule_count ?? 0) < max;
+    });
 
     res.json({ success: true, bookings: rows });
   } catch (err) {
@@ -610,6 +618,7 @@ exports.cancelBooking = async (req, res) => {
     syncBookingToClient(bookingId, {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
+      action: 'cancel',
     }).catch(err => console.error('[clientSync] cancel sync failed:', err.message));
 
     // ── Notify assigned technician ─────────────────────────────────────────────
@@ -714,6 +723,7 @@ exports.payBooking = async (req, res) => {
     syncBookingToClient(Number(bookingId), {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
+      action: 'payment_update',
     }).catch(err => console.error('[clientSync] unhandled:', err.message));
 
     res.json({ success: true });
@@ -1538,6 +1548,7 @@ exports.createFamilyBooking = async (req, res) => {
         syncBookingToClient(bookingId, {
           mobile: req.user.mobile,
           type:   req.user.user_type ?? 'customer',
+          action: 'new_booking',
         }).catch(err => console.error('[clientSync] unhandled:', err.message));
       }
     }
@@ -2057,6 +2068,7 @@ exports.rescheduleBooking = async (req, res) => {
       syncBookingToClient(b.booking_id, {
         mobile: req.user.mobile,
         type:   req.user.user_type ?? 'customer',
+        action: 'reschedule',
       }).catch(err => console.error(`[clientSync] reschedule sync failed booking_id=${b.booking_id}:`, err.message));
     }
 
