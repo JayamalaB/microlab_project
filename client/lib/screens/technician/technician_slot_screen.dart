@@ -528,26 +528,6 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
                 Wrap(
                   spacing: 6,
                   children: [
-                    // None option
-                    GestureDetector(
-                      onTap: () => setState(() => _selectedDurations[k]![slotId] = null),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 140),
-                        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: curDur == null ? AppColors.brandGreen : const Color(0xFFF5F5F5),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: curDur == null ? AppColors.brandGreen : AppColors.divider,
-                          ),
-                        ),
-                        child: Text('No fixed time',
-                            style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                color: curDur == null ? Colors.white : AppColors.textSecondary)),
-                      ),
-                    ),
                     ..._durationOptions.map((min) => GestureDetector(
                       onTap: () => setState(() => _selectedDurations[k]![slotId] = min),
                       child: AnimatedContainer(

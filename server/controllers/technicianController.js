@@ -93,37 +93,72 @@ exports.getHistory = async (req, res) => {
   try {
     tlog(`[getHistory] running SQL query...`);
     const [rows] = await db.execute(
-      `SELECT
-         tc.collection_id,
-         tc.booking_id,
-         tc.collection_status,
-         tc.collection_date,
-         tc.collection_address,
-         tc.assigned_at,
-         tc.collected_at,
-         tc.completed_at,
-         s.slot_label,
-         TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
-         b.city,
-         b.postal_code,
-         b.amount_paid,
-         p.patient_name,
-         p.patient_mobile
-       FROM ip_technician_collection tc
-       JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
-       LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
-       LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
-       LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
-       LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
-       WHERE tc.technician_id = ?
-         AND tc.collection_status IN (
-           'completed','all_collected','collected',
-           'handed_to_lab','sample_collected','collection_started',
-           'cancelled'
-         )
-       ORDER BY COALESCE(tc.completed_at, tc.collected_at, tc.assigned_at) DESC
-       LIMIT 100`,
-      [technicianId]
+      `(
+        SELECT
+           tc.collection_id,
+           tc.booking_id,
+           tc.collection_status,
+           tc.collection_date,
+           tc.collection_address,
+           tc.assigned_at,
+           tc.collected_at,
+           tc.completed_at,
+           s.slot_label,
+           TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
+           b.city,
+           b.postal_code,
+           b.amount_paid,
+           p.patient_name,
+           p.patient_mobile
+         FROM ip_technician_collection tc
+         JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
+         LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
+         LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
+         LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
+         LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
+         WHERE tc.technician_id = ?
+           AND tc.collection_status IN (
+             'completed','all_collected','collected',
+             'handed_to_lab','sample_collected','collection_started',
+             'cancelled'
+           )
+      )
+      UNION ALL
+      (
+        -- Jobs THIS technician accepted and then cancelled. ip_technician_collection
+        -- no longer has a row for them here — it was deleted and (if a replacement
+        -- was found) reassigned to whoever picked it up next — so this branch reads
+        -- straight off ip_bookings.technician_cancelled_by, which survives that.
+        SELECT
+           NULL AS collection_id,
+           b.booking_id,
+           'cancelled' AS collection_status,
+           b.booking_date AS collection_date,
+           b.collection_address,
+           b.technician_cancelled_at AS assigned_at,
+           NULL AS collected_at,
+           b.technician_cancelled_at AS completed_at,
+           s.slot_label,
+           TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
+           b.city,
+           b.postal_code,
+           b.amount_paid,
+           p.patient_name,
+           p.patient_mobile
+         FROM ip_bookings b
+         LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
+         LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
+         LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
+         LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
+         WHERE b.technician_cancelled_by = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM ip_technician_collection tc2
+             WHERE tc2.booking_id = b.booking_id AND tc2.technician_id = ?
+           )
+      )
+      ORDER BY COALESCE(completed_at, collected_at, assigned_at) DESC
+      LIMIT 100`,
+      [technicianId, technicianId, technicianId]
     );
     tlog(`[getHistory] OK — ${rows.length} records returned`);
     if (rows.length > 0) tlog(`[getHistory] first row: booking_id=${rows[0].booking_id} status=${rows[0].collection_status} patient=${rows[0].patient_name}`);
@@ -262,6 +297,8 @@ exports.cancelAssignedBooking = async (req, res) => {
       notifyBody:  `You are no longer assigned to booking ${tc.booking_ref} (${reason.replace(/_/g, ' ')}). It has been re-dispatched.`,
       notifyType:  'booking_unassigned',
       excludeFromRedispatch: true,
+      technicianCancelReason: reason,
+      technicianCancelNote:   note,
     });
 
     res.json({ success: true, message: 'Booking released and re-dispatched' });

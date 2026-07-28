@@ -2024,12 +2024,21 @@ class _TechnicianCard extends StatelessWidget {
         CircleAvatar(
           radius: 26,
           backgroundColor: AppColors.brandGreenSurface,
-          backgroundImage: photoUrl != null && photoUrl!.isNotEmpty
-              ? NetworkImage(photoUrl!)
-              : null,
-          child: photoUrl == null || photoUrl!.isEmpty
-              ? const Icon(Icons.person_outline, size: 26, color: AppColors.brandGreen)
-              : null,
+          // Image.network's errorBuilder (unlike CircleAvatar.backgroundImage,
+          // which has no load-failure fallback) lets a broken/404 photo URL
+          // fall back to the person icon instead of rendering a blank circle.
+          child: photoUrl != null && photoUrl!.isNotEmpty
+              ? ClipOval(
+                  child: Image.network(
+                    photoUrl!,
+                    width: 52,
+                    height: 52,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) =>
+                        const Icon(Icons.person_outline, size: 26, color: AppColors.brandGreen),
+                  ),
+                )
+              : const Icon(Icons.person_outline, size: 26, color: AppColors.brandGreen),
         ),
         const SizedBox(width: 14),
         Expanded(

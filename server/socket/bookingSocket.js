@@ -2576,6 +2576,13 @@ module.exports.triggerScheduledDispatch = async function(bookingData, io) {
 module.exports.unassignAndRedispatch = async function({
   bookingId, allIds, technicianId, notifyTitle, notifyBody, notifyType,
   excludeFromRedispatch = false,
+  // Only set by technician-initiated cancel (cancelAssignedBooking) — reschedule
+  // leaves these null. ip_technician_collection can't hold this itself: it's
+  // one-row-per-booking and gets deleted/overwritten the moment someone else
+  // accepts, so this is recorded on ip_bookings instead, which survives
+  // reassignment untouched.
+  technicianCancelReason = null,
+  technicianCancelNote = null,
 }) {
   try {
     const [[techUser]] = await db.execute(
@@ -2609,6 +2616,18 @@ module.exports.unassignAndRedispatch = async function({
     `UPDATE ip_bookings SET status = 'pending', updated_at = NOW() WHERE booking_id IN (${idPlaceholders})`,
     allIds
   );
+
+  if (technicianCancelReason != null) {
+    await db.execute(
+      `UPDATE ip_bookings
+       SET technician_cancelled_by  = ?,
+           technician_cancel_reason = ?,
+           technician_cancel_note   = ?,
+           technician_cancelled_at  = NOW()
+       WHERE booking_id IN (${idPlaceholders})`,
+      [technicianId, technicianCancelReason, technicianCancelNote, ...allIds]
+    );
+  }
 
   // Which sibling's booking_id is the actual key inside technicianActiveSlots/
   // technicianActiveBookings depends on which one originally triggered
