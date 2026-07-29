@@ -8,6 +8,21 @@ import 'package:microlab/services/api_service.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'technician_active_job_screen.dart';
 
+// Popped by TechnicianBookingDetailScreen (see _exitScreen) when the
+// technician leaves mid-journey from an instance that was itself opened from
+// the live map/active-job screen. Every intermediate layer that pushed
+// TechnicianActiveJobScreen or TechnicianBookingDetailScreen — in either
+// file — must check for this exact value in its own `.then()` and, if seen,
+// immediately pop itself with the same value rather than running its normal
+// completion handling. That cascades the exit signal upward through however
+// many layers actually exist, ending at the Dashboard's own top-level
+// `.then()`, which doesn't recognise this value and simply treats it as "not
+// completed" — stopping the cascade exactly where it should. A fixed
+// "pop N times" shortcut can't work here because the real distance back to
+// the Dashboard varies: TechnicianActiveJobScreen can be reached either
+// directly from the Dashboard, or from inside Manage Booking itself.
+const kExitToDashboard = 'exit_to_dashboard';
+
 // ─── Prescription doc model ──────────────────────────────────────────────────
 
 class _TechPresDoc {
@@ -111,10 +126,19 @@ const List<_JourneyStep> _journeySteps = [
 class TechnicianBookingDetailScreen extends StatefulWidget {
   final TechnicianBooking booking;
   final void Function(TechnicianBooking)? onNewBooking;
+  // True when this screen was pushed on top of the live map/active-job
+  // screen (technician_active_job_screen.dart) rather than directly from the
+  // Dashboard. Lets the exit actions (back / Save Changes) skip past that
+  // screen straight to the Dashboard when the technician leaves mid-journey
+  // — but only then: reaching full completion (Handed to Lab) must still pop
+  // just this screen, so the active-job screen's own completion choreography
+  // (brief "handed over" status, haptic, delayed self-pop) keeps running.
+  final bool cameFromActiveJob;
   const TechnicianBookingDetailScreen({
     super.key,
     required this.booking,
     this.onNewBooking,
+    this.cameFromActiveJob = false,
   });
 
   @override
@@ -457,6 +481,32 @@ class _TechnicianBookingDetailScreenState
     super.dispose();
   }
 
+  // ── Exit ────────────────────────────────────────────────────
+  // Shared by the back arrow, the system back gesture, and the bottom
+  // Save Changes/Done button — all three must behave identically.
+  void _exitScreen() {
+    // Full completion (Handed to Lab) always pops with `true` — every layer
+    // above (map screen, any earlier Manage Booking instance) already reacts
+    // to `true` with its own completion choreography, so this alone already
+    // cascades correctly today; nothing else to signal.
+    if (_isCompleted) {
+      Navigator.of(context).pop(true);
+      return;
+    }
+    // Entered directly from the Dashboard — a single plain pop already lands
+    // there, no cascade needed.
+    if (!widget.cameFromActiveJob) {
+      Navigator.of(context).pop(null);
+      return;
+    }
+    // Leaving mid-journey via a screen that was itself opened from the live
+    // map/active-job screen. The real distance back to the Dashboard isn't
+    // fixed — that screen can itself have been opened from another Manage
+    // Booking instance — so instead of guessing a pop count, signal every
+    // layer above to cascade the same exit upward (see kExitToDashboard).
+    Navigator.of(context).pop(kExitToDashboard);
+  }
+
   // ── Journey advance ───────────────────────────────────────
 
 void _advanceStatus() {
@@ -602,8 +652,11 @@ void _handleStatusTransition(String next) {
             startInEnRoute: true,
           ),
         ),
-      ).then((wasCompleted) {
-        if (wasCompleted == true && mounted) {
+      ).then((result) {
+        if (!mounted) return;
+        if (result == kExitToDashboard) {
+          Navigator.of(context).pop(kExitToDashboard);
+        } else if (result == true) {
           Navigator.of(context).pop(true);
         }
       });
@@ -647,8 +700,11 @@ void _resumeJourney() {
         startInEnRoute: true,
       ),
     ),
-  ).then((wasCompleted) {
-    if (wasCompleted == true && mounted) {
+  ).then((result) {
+    if (!mounted) return;
+    if (result == kExitToDashboard) {
+      Navigator.of(context).pop(kExitToDashboard);
+    } else if (result == true) {
       Navigator.of(context).pop(true);
     }
   });
@@ -686,7 +742,12 @@ void _resumeJourney() {
       builder: (_) => StatefulBuilder(
         builder: (ctx, setDialogState) => Dialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          child: Padding(
+          // Fixed-height Column overflows once the on-screen keyboard opens
+          // and shrinks the available space (the OTP boxes autofocus the
+          // keyboard open immediately). Wrapping in a scroll view lets the
+          // content scroll instead of overflowing, matching the fix already
+          // applied to the payment sheet for the same underlying issue.
+          child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1917,7 +1978,7 @@ void _resumeJourney() {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) Navigator.of(context).pop(_isCompleted ? true : null);
+        if (!didPop) _exitScreen();
       },
       child: Scaffold(
       backgroundColor: const Color(0xFFF4F6F8),
@@ -1926,7 +1987,7 @@ void _resumeJourney() {
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
-          onPressed: () => Navigator.pop(context, _isCompleted ? true : null),  // pops with true only when Handed to Lab
+          onPressed: _exitScreen,
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2843,7 +2904,7 @@ void _resumeJourney() {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                       ));
                     }
-                    Navigator.pop(context, _isCompleted ? true : null);
+                    _exitScreen();
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.brandGreen,
