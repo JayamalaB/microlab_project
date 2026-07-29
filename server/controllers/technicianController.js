@@ -8,6 +8,7 @@ const db   = require('../config/db');
 const fs   = require('fs');
 const path = require('path');
 const sms  = require('../utils/sms');
+const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -92,37 +93,72 @@ exports.getHistory = async (req, res) => {
   try {
     tlog(`[getHistory] running SQL query...`);
     const [rows] = await db.execute(
-      `SELECT
-         tc.collection_id,
-         tc.booking_id,
-         tc.collection_status,
-         tc.collection_date,
-         tc.collection_address,
-         tc.assigned_at,
-         tc.collected_at,
-         tc.completed_at,
-         s.slot_label,
-         TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
-         b.city,
-         b.postal_code,
-         b.amount_paid,
-         p.patient_name,
-         p.patient_mobile
-       FROM ip_technician_collection tc
-       JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
-       LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
-       LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
-       LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
-       LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
-       WHERE tc.technician_id = ?
-         AND tc.collection_status IN (
-           'completed','all_collected','collected',
-           'handed_to_lab','sample_collected','collection_started',
-           'cancelled'
-         )
-       ORDER BY COALESCE(tc.completed_at, tc.collected_at, tc.assigned_at) DESC
-       LIMIT 100`,
-      [technicianId]
+      `(
+        SELECT
+           tc.collection_id,
+           tc.booking_id,
+           tc.collection_status,
+           tc.collection_date,
+           tc.collection_address,
+           tc.assigned_at,
+           tc.collected_at,
+           tc.completed_at,
+           s.slot_label,
+           TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
+           b.city,
+           b.postal_code,
+           b.amount_paid,
+           p.patient_name,
+           p.patient_mobile
+         FROM ip_technician_collection tc
+         JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
+         LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
+         LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
+         LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
+         LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
+         WHERE tc.technician_id = ?
+           AND tc.collection_status IN (
+             'completed','all_collected','collected',
+             'handed_to_lab','sample_collected','collection_started',
+             'cancelled'
+           )
+      )
+      UNION ALL
+      (
+        -- Jobs THIS technician accepted and then cancelled. ip_technician_collection
+        -- no longer has a row for them here — it was deleted and (if a replacement
+        -- was found) reassigned to whoever picked it up next — so this branch reads
+        -- straight off ip_bookings.technician_cancelled_by, which survives that.
+        SELECT
+           NULL AS collection_id,
+           b.booking_id,
+           'cancelled' AS collection_status,
+           b.booking_date AS collection_date,
+           b.collection_address,
+           b.technician_cancelled_at AS assigned_at,
+           NULL AS collected_at,
+           b.technician_cancelled_at AS completed_at,
+           s.slot_label,
+           TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
+           b.city,
+           b.postal_code,
+           b.amount_paid,
+           p.patient_name,
+           p.patient_mobile
+         FROM ip_bookings b
+         LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
+         LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
+         LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
+         LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
+         WHERE b.technician_cancelled_by = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM ip_technician_collection tc2
+             WHERE tc2.booking_id = b.booking_id AND tc2.technician_id = ?
+           )
+      )
+      ORDER BY COALESCE(completed_at, collected_at, assigned_at) DESC
+      LIMIT 100`,
+      [technicianId, technicianId, technicianId]
     );
     tlog(`[getHistory] OK — ${rows.length} records returned`);
     if (rows.length > 0) tlog(`[getHistory] first row: booking_id=${rows[0].booking_id} status=${rows[0].collection_status} patient=${rows[0].patient_name}`);
@@ -176,6 +212,18 @@ exports.logoutTechnician = async (req, res) => {
     );
 
     await connection.commit();
+
+    // Force the technician out of the live dispatch pool regardless of
+    // whether their socket's technician_offline event actually arrived.
+    // That event can silently fail to reach the server if the socket was
+    // already disconnected at logout time — in which case the plain socket
+    // 'disconnect' handler treats it as an accidental drop (45s grace period,
+    // in-memory pool never cleared) rather than an intentional logout. This
+    // REST path updates the same in-memory maps directly, independent of
+    // socket timing, so a logged-out technician stops receiving new
+    // dispatch attempts immediately rather than indefinitely.
+    forceTechnicianOffline(Number(technicianId));
+
     console.log(`✅ Technician ${technicianId} logged out — session closed`);
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (e) {
@@ -184,6 +232,80 @@ exports.logoutTechnician = async (req, res) => {
     res.status(500).json({ success: false, message: e.message });
   } finally {
     connection.release();
+  }
+};
+
+// ── POST /api/technicians/cancel-booking ──────────────────────────────────────
+// Technician-initiated hand-off of an already-accepted job, back before they've
+// started traveling (collection_status='assigned' only — mirrors the same gate
+// patient-side reschedule uses). This is NOT a booking cancellation: the patient
+// keeps their booking, it's released and re-dispatched to find them another
+// technician, exactly like reschedule already does — see unassignAndRedispatch
+// in bookingSocket.js, shared by both flows.
+const CANCEL_REASONS = ['vehicle_issue', 'personal_emergency', 'unreachable_patient', 'other'];
+
+exports.cancelAssignedBooking = async (req, res) => {
+  const technicianId = req.user.id;
+  const { bookingId, reason, note = null } = req.body;
+
+  if (!bookingId) {
+    return res.status(400).json({ success: false, message: 'bookingId is required' });
+  }
+  if (!CANCEL_REASONS.includes(reason)) {
+    return res.status(400).json({
+      success: false,
+      message: `reason is required and must be one of: ${CANCEL_REASONS.join(', ')}`,
+    });
+  }
+
+  try {
+    const [[tc]] = await db.execute(
+      `SELECT tc.collection_status, b.booking_ref, b.visit_group_id
+       FROM ip_technician_collection tc
+       JOIN ip_bookings b ON b.booking_id = tc.booking_id
+       WHERE tc.booking_id = ? AND tc.technician_id = ?
+       LIMIT 1`,
+      [bookingId, technicianId]
+    );
+
+    if (!tc) {
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
+    }
+    if (tc.collection_status !== 'assigned') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel — already ${tc.collection_status.replace(/_/g, ' ')}`,
+      });
+    }
+
+    let allIds = [bookingId];
+    if (tc.visit_group_id) {
+      const [siblings] = await db.execute(
+        `SELECT booking_id FROM ip_bookings WHERE visit_group_id = ? AND deleted_at IS NULL`,
+        [tc.visit_group_id]
+      );
+      allIds = siblings.map(s => s.booking_id);
+    }
+
+    tlog(`[cancelAssignedBooking] technician_id=${technicianId} booking_id=${bookingId} ref=${tc.booking_ref} reason=${reason} note=${note ?? ''} group_size=${allIds.length}`);
+
+    await unassignAndRedispatch({
+      bookingId,
+      allIds,
+      technicianId,
+      notifyTitle: 'Booking Unassigned',
+      notifyBody:  `You are no longer assigned to booking ${tc.booking_ref} (${reason.replace(/_/g, ' ')}). It has been re-dispatched.`,
+      notifyType:  'booking_unassigned',
+      excludeFromRedispatch: true,
+      technicianCancelReason: reason,
+      technicianCancelNote:   note,
+    });
+
+    res.json({ success: true, message: 'Booking released and re-dispatched' });
+  } catch (e) {
+    tlog(`[cancelAssignedBooking] ERROR — technician_id=${technicianId} booking_id=${bookingId} — ${e.message}`);
+    console.error('[cancelAssignedBooking]', e.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
