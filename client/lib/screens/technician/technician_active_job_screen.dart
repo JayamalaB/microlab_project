@@ -666,10 +666,18 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
             testsTotal: 0,
             assignedAt: DateTime.now(),
           ),
+          cameFromActiveJob: true,
         ),
       ),
-    ).then((wasCompleted) {
-      if (wasCompleted == true && mounted) {
+    ).then((result) {
+      if (!mounted) return;
+      if (result == kExitToDashboard) {
+        // Technician left mid-journey, not a real completion — cascade the
+        // same signal upward instead of running the handed-over choreography.
+        Navigator.of(context).pop(kExitToDashboard);
+        return;
+      }
+      if (result == true) {
         // sample_collected and handed_to_lab are already emitted step-by-step
         // inside TechnicianBookingDetailScreen — nothing to emit here.
         ForegroundService.instance.updateText('Ready for booking requests');
