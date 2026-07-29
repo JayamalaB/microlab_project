@@ -212,16 +212,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   Future<void> _pickDate() async {
-    final now      = DateTime.now();
-    final tomorrow = now.add(const Duration(days: 1));
-    // Branch flow allows same-day booking; old flow starts from tomorrow
-    final firstDate = widget.branchId != null ? now : tomorrow;
-    debugPrint('\n📅 [DATE PICKER] branchId=${widget.branchId} → firstDate=${firstDate.toIso8601String().substring(0,10)} (${widget.branchId != null ? 'today allowed' : 'tomorrow earliest'})');
+    final now   = DateTime.now();
+    // Normalize to midnight so the picker's initialDate comparison never fails
+    // when a previously-selected today (midnight) is compared against now (with time).
+    final today = DateTime(now.year, now.month, now.day);
+    // Always allow today — the server controls slot availability for same-day bookings.
+    // Previously the old flow (no branchId) used tomorrow as firstDate, which grayed
+    // out today even when the user expected to book for the same day.
+    debugPrint('\n📅 [DATE PICKER] branchId=${widget.branchId} → firstDate=${today.toIso8601String().substring(0,10)}');
     final picked = await showDatePicker(
       context: context,
-      initialDate: _selectedDate ?? firstDate,
-      firstDate: firstDate,
-      lastDate: now.add(const Duration(days: 30)),
+      initialDate: _selectedDate ?? today,
+      firstDate: today,
+      lastDate: today.add(const Duration(days: 30)),
       helpText: 'SELECT APPOINTMENT DATE',
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
