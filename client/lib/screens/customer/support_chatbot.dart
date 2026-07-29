@@ -2182,10 +2182,10 @@ class _LayerMenu extends StatelessWidget {
       offset: const Offset(0, 8),
       onSelected: onLayerSelected,
       itemBuilder: (_) => [
-        _item(_Layer.staticInfo, '1. Help & FAQ'),
-        _item(_Layer.db,         '2. Tests & Prices'),
-        _item(_Layer.web,        '3. About Lab'),
-        _item(_Layer.book,       '4. Book Test'),
+        _item(_Layer.staticInfo, 'Help & FAQ'),
+        _item(_Layer.db,         'Tests & Prices'),
+        _item(_Layer.web,        'About Lab'),
+        _item(_Layer.book,       'Book Test'),
       ],
     );
   }
@@ -2193,15 +2193,8 @@ class _LayerMenu extends StatelessWidget {
   PopupMenuItem<_Layer> _item(_Layer l, String label) {
     return PopupMenuItem(
       value: l,
-      child: Row(
-        children: [
-          Container(width: 8, height: 8,
-              decoration: BoxDecoration(color: l.accent, shape: BoxShape.circle)),
-          const SizedBox(width: 10),
-          Text(label, style: const TextStyle(
-              fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-        ],
-      ),
+      child: Text(label, style: const TextStyle(
+          fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
     );
   }
 }
@@ -2219,25 +2212,16 @@ class _LayerChip extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 7),
         decoration: BoxDecoration(
-          color: layer.surface,
-          border: Border.all(color: layer.chipBorder, width: 1.5),
+          color: AppColors.brandGreenSurface,
+          border: Border.all(color: AppColors.brandGreenLight, width: 1.5),
           borderRadius: BorderRadius.circular(999),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(width: 6, height: 6,
-                decoration: BoxDecoration(color: layer.accent, shape: BoxShape.circle)),
-            const SizedBox(width: 5),
-            Flexible(
-              child: Text(
-                layer.label,
-                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: layer.accent),
-                overflow: TextOverflow.ellipsis,
-                maxLines: 1,
-              ),
-            ),
-          ],
+        child: Text(
+          layer.label,
+          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.brandGreen),
+          overflow: TextOverflow.ellipsis,
+          maxLines: 1,
+          textAlign: TextAlign.center,
         ),
       ),
     );

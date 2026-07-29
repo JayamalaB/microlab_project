@@ -16,12 +16,18 @@ void main() async {
   // Firebase, foreground service, push notifications — Android only.
   // flutter_foreground_task uses dart:isolate which is not available on Web.
   if (!kIsWeb) {
-    FlutterForegroundTask.initCommunicationPort();
-    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-    await Firebase.initializeApp();
-    await NotificationService.instance.initialize();
-    BookingNotificationService.instance.init();
-    ForegroundService.instance.init();
+    try {
+      FlutterForegroundTask.initCommunicationPort();
+      FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+      await Firebase.initializeApp();
+      await NotificationService.instance.initialize();
+      BookingNotificationService.instance.init();
+      ForegroundService.instance.init();
+    } catch (e) {
+      // Missing/invalid google-services.json (e.g. local dev builds) should
+      // not take down the whole app — push notifications just stay disabled.
+      debugPrint('Firebase/notification init skipped: $e');
+    }
   }
 
   // Status bar style — transparent for splash
