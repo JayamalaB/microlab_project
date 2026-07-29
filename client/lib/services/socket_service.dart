@@ -212,6 +212,7 @@ class ActiveLabBookingInfo {
   final bool enRoute;
   final bool arrived;
   final bool collected;
+  final double? initialDistKm;
 
   const ActiveLabBookingInfo({
     required this.bookingId,
@@ -225,12 +226,14 @@ class ActiveLabBookingInfo {
     this.enRoute = false,
     this.arrived = false,
     this.collected = false,
+    this.initialDistKm,
   });
 
   ActiveLabBookingInfo copyWith({
     bool? enRoute,
     bool? arrived,
     bool? collected,
+    double? initialDistKm,
   }) =>
       ActiveLabBookingInfo(
         bookingId:      bookingId,
@@ -241,9 +244,10 @@ class ActiveLabBookingInfo {
         patientLat:     patientLat,
         patientLng:     patientLng,
         patientAddress: patientAddress,
-        enRoute:        enRoute  ?? this.enRoute,
-        arrived:        arrived  ?? this.arrived,
-        collected:      collected ?? this.collected,
+        enRoute:        enRoute      ?? this.enRoute,
+        arrived:        arrived      ?? this.arrived,
+        collected:      collected    ?? this.collected,
+        initialDistKm:  initialDistKm ?? this.initialDistKm,
       );
 }
 

@@ -483,10 +483,16 @@ class _PatientBookingsPage extends StatefulWidget {
 }
 
 class _PatientBookingsPageState extends State<_PatientBookingsPage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabCtrl;
   late List<BookingModel> _bookings;
   bool _reloading = false;
+
+  StreamSubscription<BookingAcceptedEvent>? _acceptedSub;
+  StreamSubscription<int>? _enRouteSub;
+  StreamSubscription<int>? _arrivedSub;
+  StreamSubscription<int>? _collectedSub;
+  StreamSubscription<bool>? _connectedSub;
 
   static const _tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
 
@@ -495,10 +501,28 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
     super.initState();
     _bookings = List.from(widget.initialBookings);
     _tabCtrl = TabController(length: _tabs.length, vsync: this);
+    WidgetsBinding.instance.addObserver(this);
+    _acceptedSub  = SocketService.instance.onBookingAccepted.listen((_) => _reload());
+    _enRouteSub   = SocketService.instance.onTechnicianEnRoute.listen((_) => _reload());
+    _arrivedSub   = SocketService.instance.onTechnicianArrived.listen((_) => _reload());
+    _collectedSub = SocketService.instance.onCollectionCompleted.listen((_) => _reload());
+    _connectedSub = SocketService.instance.onConnected.listen((_) => _reload());
+    _reload();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _reload();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _acceptedSub?.cancel();
+    _enRouteSub?.cancel();
+    _arrivedSub?.cancel();
+    _collectedSub?.cancel();
+    _connectedSub?.cancel();
     _tabCtrl.dispose();
     super.dispose();
   }
@@ -1317,7 +1341,8 @@ class _BookingDetailSheet extends StatefulWidget {
   State<_BookingDetailSheet> createState() => _BookingDetailSheetState();
 }
 
-class _BookingDetailSheetState extends State<_BookingDetailSheet> {
+class _BookingDetailSheetState extends State<_BookingDetailSheet>
+    with WidgetsBindingObserver {
   bool _isProcessing = false;
 
   // Test results (released only)
@@ -1333,6 +1358,12 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
   double? _patientLat;
   double? _patientLng;
   bool    _isTechRefreshing = false;
+
+  StreamSubscription<BookingAcceptedEvent>? _acceptedSub;
+  StreamSubscription<int>? _enRouteSub;
+  StreamSubscription<int>? _arrivedSub;
+  StreamSubscription<int>? _collectedSub;
+  StreamSubscription<bool>? _connectedSub;
 
   Future<void> _loadResults() async {
     if (widget.booking.bookingIdNum == null) return;
@@ -1353,7 +1384,17 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
     _technicianId      = widget.booking.technicianId;
     _patientLat        = widget.booking.patientLat;
     _patientLng        = widget.booking.patientLng;
+    WidgetsBinding.instance.addObserver(this);
+    _acceptedSub  = SocketService.instance.onBookingAccepted.listen((_) => _refreshTechStatus());
+    _enRouteSub   = SocketService.instance.onTechnicianEnRoute.listen((_) => _refreshTechStatus());
+    _arrivedSub   = SocketService.instance.onTechnicianArrived.listen((_) => _refreshTechStatus());
+    _collectedSub = SocketService.instance.onCollectionCompleted.listen((_) => _refreshTechStatus());
+    _connectedSub = SocketService.instance.onConnected.listen((_) => _refreshTechStatus());
+  }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refreshTechStatus();
   }
 
   Future<void> _refreshTechStatus() async {
@@ -1384,6 +1425,12 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _acceptedSub?.cancel();
+    _enRouteSub?.cancel();
+    _arrivedSub?.cancel();
+    _collectedSub?.cancel();
+    _connectedSub?.cancel();
     clearRazorpay();
     super.dispose();
   }
