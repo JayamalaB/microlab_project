@@ -140,9 +140,17 @@ class _TechnicianBookingDetailScreenState
   bool _docIsPicking = false;
   bool _docVerified  = false;
   bool _docsLoading  = true;
-  // Whether any selected test/package requires a prescription.
+  // Whether the PRIMARY patient's selected test/package requires a prescription.
   // Initialized from widget.booking.docRequired; recalculated once items load.
   late bool _docRequired;
+  // Same requirement, tracked per patient on this visit (primary + family
+  // members) — keyed by patient_id. Populated for the primary from the same
+  // items load as _docRequired, and for each family member by fetching their
+  // own booking's items (see _loadFamilyDocRequirements). A family member's
+  // requirement is otherwise invisible: their tests live on a different
+  // booking_id than this screen's own, so _docRequired alone never sees it.
+  final Map<int, bool> _patientDocRequired = {};
+  bool get _anyDocRequired => _patientDocRequired.values.any((v) => v);
   static const int _docMaxFiles = 5;
   final ImagePicker _picker = ImagePicker();
 
@@ -201,11 +209,17 @@ class _TechnicianBookingDetailScreenState
   // patient with none shows "No Prescription Uploaded" instead of another
   // member's upload.
   List<Map<String, dynamic>> get _visitPatients => [
-        {'id': widget.booking.patientId, 'name': widget.booking.customerName, 'isPrimary': true},
+        {
+          'id':        widget.booking.patientId,
+          'name':      widget.booking.customerName,
+          'isPrimary': true,
+          'bookingId': int.tryParse(widget.booking.id),
+        },
         ..._linkedPatients.map((p) => {
               'id':        (p['patient_id'] as num?)?.toInt(),
               'name':      p['patient_name'] as String? ?? 'Family Member',
               'isPrimary': false,
+              'bookingId': (p['booking_id'] as num?)?.toInt(),
             }),
       ];
 
@@ -254,6 +268,9 @@ class _TechnicianBookingDetailScreenState
     _livePaymentStatus    = widget.booking.paymentStatus;
     _liveAmountPaid       = widget.booking.amountPaid;
     _docRequired          = widget.booking.docRequired;
+    if (widget.booking.patientId != null) {
+      _patientDocRequired[widget.booking.patientId!] = _docRequired;
+    }
     _loadItems();
     _loadDocs();
     _loadLinkedPatients();
@@ -338,12 +355,18 @@ class _TechnicianBookingDetailScreenState
         _originalItemIds = items.map((i) => i['product_id']?.toString() ?? '').toSet();
         _catalogueItems  = catalogue;
         _itemsLoading    = false;
-        // Recalculate from actual items — covers family member bookings and
-        // cases where tests are added/removed during the visit.
+        // Recalculate from actual items — covers tests added/removed during
+        // the visit. Scoped to this booking's own items only; family
+        // members' own requirements are tracked separately (see
+        // _loadFamilyDocRequirements) since their tests live on their own
+        // booking_id, not this one.
         _docRequired = items.any((i) {
           final v = i['doc_required'];
           return v == 1 || v == true || v == '1' || v == 'yes';
         });
+        if (widget.booking.patientId != null) {
+          _patientDocRequired[widget.booking.patientId!] = _docRequired;
+        }
       });
     } catch (e) {
       debugPrint('[_loadItems] ERROR: $e');
@@ -357,8 +380,31 @@ class _TechnicianBookingDetailScreenState
     try {
       final patients = await ApiService.getLinkedPatients(bookingId);
       if (mounted) setState(() => _linkedPatients = patients);
+      _loadFamilyDocRequirements(patients);
     } catch (e) {
       debugPrint('[_loadLinkedPatients] ERROR: $e');
+    }
+  }
+
+  // Each family member's tests live on their OWN booking_id, never this
+  // screen's own — so their prescription requirement is otherwise invisible
+  // to _docRequired/_patientDocRequired. Fetches each member's own items
+  // (same endpoint _loadItems already uses for the primary) to find out.
+  Future<void> _loadFamilyDocRequirements(List<Map<String, dynamic>> patients) async {
+    for (final p in patients) {
+      final pid = (p['patient_id'] as num?)?.toInt();
+      final bid = (p['booking_id'] as num?)?.toInt();
+      if (pid == null || bid == null) continue;
+      try {
+        final items = await ApiService.getBookingItems(bid);
+        final needsDoc = items.any((i) {
+          final v = i['doc_required'];
+          return v == 1 || v == true || v == '1' || v == 'yes';
+        });
+        if (mounted) setState(() => _patientDocRequired[pid] = needsDoc);
+      } catch (e) {
+        debugPrint('[_loadFamilyDocRequirements] patient=$pid ERROR: $e');
+      }
     }
   }
 
@@ -471,11 +517,21 @@ void _advanceStatus() {
     return;
   }
 
-  // Prescription gate: must upload + verify before Sample Collected
-  if (next == 'Sample Collected' && _docRequired) {
-    if (_docUploads.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Upload prescription before collecting the sample.'),
+  // Prescription gate: mandatory for EVERY patient on the visit whose test
+  // requires one — not just the primary patient. Marking Sample Collected
+  // cascades to every family member's booking at once server-side, so this
+  // is the last point where a missing family-member prescription can still
+  // be caught before that happens.
+  if (next == 'Sample Collected' && _anyDocRequired) {
+    final missing = _visitPatients.where((p) {
+      final pid = p['id'] as int?;
+      if (pid == null || _patientDocRequired[pid] != true) return false;
+      return !_docUploads.any((d) => d.patientId == pid);
+    }).toList();
+    if (missing.isNotEmpty) {
+      final names = missing.map((p) => p['name'] as String).join(', ');
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Upload prescription for: $names'),
         backgroundColor: Colors.red,
       ));
       return;
@@ -894,7 +950,13 @@ void _resumeJourney() {
       // Escalate (never de-escalate here) — a test added mid-visit that itself
       // needs a prescription must also trigger the upload/verify gate, not
       // just tests present on the booking when the screen first loaded.
-      if (t['docRequired'] == 'yes') _docRequired = true;
+      // _addTest always adds to this screen's own (primary) booking.
+      if (t['docRequired'] == 'yes') {
+        _docRequired = true;
+        if (widget.booking.patientId != null) {
+          _patientDocRequired[widget.booking.patientId!] = true;
+        }
+      }
     });
     final bookingId = int.tryParse(widget.booking.id) ?? 0;
     final productId = int.tryParse(t['id'] ?? '') ?? 0;
@@ -936,7 +998,7 @@ void _resumeJourney() {
 
   // ── Document ──────────────────────────────────────────────
 
-  void _showDocSourcePicker() {
+  void _showDocSourcePicker({required int targetBookingId, required int targetPatientId}) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -952,18 +1014,22 @@ void _resumeJourney() {
             margin: const EdgeInsets.only(bottom: 16),
             decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
           ),
-          _DocSourceTile(Icons.camera_alt_outlined, 'Camera', 'Take a photo now',
-              () { Navigator.pop(context); _pickDoc(ImageSource.camera); }),
+          _DocSourceTile(Icons.camera_alt_outlined, 'Camera', 'Take a photo now', () {
+            Navigator.pop(context);
+            _pickDoc(ImageSource.camera, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
+          }),
           const SizedBox(height: 8),
-          _DocSourceTile(Icons.photo_library_outlined, 'Gallery', 'Choose from your photos',
-              () { Navigator.pop(context); _pickDoc(ImageSource.gallery); }),
+          _DocSourceTile(Icons.photo_library_outlined, 'Gallery', 'Choose from your photos', () {
+            Navigator.pop(context);
+            _pickDoc(ImageSource.gallery, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
+          }),
           const SizedBox(height: 4),
         ]),
       ),
     );
   }
 
-  Future<void> _pickDoc(ImageSource source) async {
+  Future<void> _pickDoc(ImageSource source, {required int targetBookingId, required int targetPatientId}) async {
     if (_docIsPicking || _docUploads.length >= _docMaxFiles) return;
     setState(() => _docIsPicking = true);
     try {
@@ -976,10 +1042,10 @@ void _resumeJourney() {
             final placeholder = _TechPresDoc(
               bytes: bytes, fileName: f.name,
               uploadedAt: DateTime.now(), isUploading: true,
-              patientId: widget.booking.patientId,
+              patientId: targetPatientId,
             );
             setState(() => _docUploads.add(placeholder));
-            _uploadDoc(placeholder, bytes, f.name);
+            _uploadDoc(placeholder, bytes, f.name, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
           }
         }
       } else {
@@ -989,10 +1055,10 @@ void _resumeJourney() {
           final placeholder = _TechPresDoc(
             bytes: bytes, fileName: image.name,
             uploadedAt: DateTime.now(), isUploading: true,
-            patientId: widget.booking.patientId,
+            patientId: targetPatientId,
           );
           setState(() => _docUploads.add(placeholder));
-          _uploadDoc(placeholder, bytes, image.name);
+          _uploadDoc(placeholder, bytes, image.name, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
         }
       }
     } catch (e) {
@@ -1001,9 +1067,15 @@ void _resumeJourney() {
     setState(() => _docIsPicking = false);
   }
 
-  Future<void> _uploadDoc(_TechPresDoc placeholder, Uint8List bytes, String fileName) async {
-    final bookingId = int.tryParse(widget.booking.id) ?? 0;
-    final patientId = widget.booking.patientId ?? 0;
+  Future<void> _uploadDoc(
+    _TechPresDoc placeholder,
+    Uint8List bytes,
+    String fileName, {
+    required int targetBookingId,
+    required int targetPatientId,
+  }) async {
+    final bookingId = targetBookingId;
+    final patientId = targetPatientId;
     debugPrint('[_uploadDoc] starting — bookingId=$bookingId patientId=$patientId fileName=$fileName');
     try {
       // Step 1: upload file binary → get URL
@@ -2210,10 +2282,10 @@ void _resumeJourney() {
           // ── Prescription / Document ─────────────────────────
           // Shown only when the booking requires a prescription OR when
           // documents have already been uploaded (to avoid hiding existing uploads).
-          if (_docRequired || _docUploads.isNotEmpty) _SectionCard(
+          if (_anyDocRequired || _docUploads.isNotEmpty) _SectionCard(
             title: 'Prescription / Document',
             icon: Icons.description_outlined,
-            badge: _docRequired ? 'REQUIRED' : null,
+            badge: _anyDocRequired ? 'REQUIRED' : null,
             child: _docsLoading
                 ? const Padding(
                     padding: EdgeInsets.symmetric(vertical: 24),
@@ -2223,35 +2295,35 @@ void _resumeJourney() {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: _docRequired
+                  color: _anyDocRequired
                       ? const Color(0xFFFFF3E0)
                       : AppColors.brandGreenSurface,
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                    color: _docRequired
+                    color: _anyDocRequired
                         ? const Color(0xFFFFCC02).withOpacity(0.4)
                         : AppColors.brandGreenLight,
                   ),
                 ),
                 child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Icon(
-                    _docRequired
+                    _anyDocRequired
                         ? Icons.warning_amber_rounded
                         : Icons.info_outline_rounded,
                     size: 13,
-                    color: _docRequired
+                    color: _anyDocRequired
                         ? const Color(0xFFE65100)
                         : AppColors.brandGreen,
                   ),
                   const SizedBox(width: 7),
                   Expanded(child: Text(
-                    _docRequired
-                        ? 'This booking requires a doctor\'s prescription. Upload and verify before collecting sample.'
+                    _anyDocRequired
+                        ? 'A doctor\'s prescription is required — mandatory for every patient whose test needs one. Upload and verify each before collecting samples.'
                         : 'Upload prescription if provided by the customer.',
                     style: TextStyle(
                       fontSize: 12,
                       height: 1.4,
-                      color: _docRequired
+                      color: _anyDocRequired
                           ? const Color(0xFF795548)
                           : AppColors.brandGreen,
                     ),
@@ -2264,28 +2336,49 @@ void _resumeJourney() {
               // members). Each prescription is fetched already tagged with
               // patient_id (see _loadDocs), so filtering here shows only that
               // patient's own document(s) — never another member's by mistake.
-              // Upload stays primary-patient-only for now (matches how
-              // _uploadDoc always attributes new captures) — family members'
-              // prescriptions are the ones already uploaded at booking time.
+              // Upload is available for EVERY patient (not just primary) —
+              // attributed to that patient's own booking_id/patient_id, the
+              // same pattern the customer app already uses successfully for
+              // family bookings (see savePrescription's bookingId/patientId
+              // params — it was never primary-only server-side).
               ..._visitPatients.map((patient) {
                 final pid          = patient['id'] as int?;
+                final patientBookingId = patient['bookingId'] as int?;
                 final pname        = patient['name'] as String;
-                final isPrimary    = patient['isPrimary'] as bool;
+                final needsDoc     = _patientDocRequired[pid] == true;
                 final patientDocs  = _docUploads.where((d) => d.patientId == pid).toList();
-                debugPrint('[render] patient=$pname (id=$pid) docs=${patientDocs.length}');
+                final canUpload    = pid != null && patientBookingId != null;
+                debugPrint('[render] patient=$pname (id=$pid) docs=${patientDocs.length} needsDoc=$needsDoc');
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 14),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(pname,
-                          style: const TextStyle(
-                              fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                      Row(children: [
+                        Text(pname,
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                        if (needsDoc && patientDocs.isEmpty) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF3E0),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Text('REQUIRED',
+                                style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
+                          ),
+                        ],
+                      ]),
                       const SizedBox(height: 8),
                       if (patientDocs.isEmpty)
-                        isPrimary
+                        canUpload
                             ? GestureDetector(
-                                onTap: _docIsPicking ? null : _showDocSourcePicker,
+                                onTap: _docIsPicking
+                                    ? null
+                                    : () => _showDocSourcePicker(
+                                        targetBookingId: patientBookingId, targetPatientId: pid),
                                 child: Container(
                                   width: double.infinity,
                                   padding: const EdgeInsets.symmetric(vertical: 22),
@@ -2339,12 +2432,15 @@ void _resumeJourney() {
                           child: ListView.separated(
                             scrollDirection: Axis.horizontal,
                             itemCount: patientDocs.length +
-                                (isPrimary && patientDocs.length < _docMaxFiles ? 1 : 0),
+                                (canUpload && patientDocs.length < _docMaxFiles ? 1 : 0),
                             separatorBuilder: (_, __) => const SizedBox(width: 8),
                             itemBuilder: (_, i) {
                               if (i == patientDocs.length) {
                                 return _DocAddMoreTile(
-                                  onTap: _docIsPicking ? null : _showDocSourcePicker,
+                                  onTap: _docIsPicking
+                                      ? null
+                                      : () => _showDocSourcePicker(
+                                          targetBookingId: patientBookingId!, targetPatientId: pid!),
                                 );
                               }
                               final doc = patientDocs[i];
@@ -4126,6 +4222,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
           itemBuilder: (_, i) {
             final t = filtered[i];
             final checked = _selectedTestIds.contains(t['id']);
+            final needsDoc = t['docRequired'] == 'yes';
             return CheckboxListTile(
               value: checked,
               onChanged: (v) => setState(() {
@@ -4136,10 +4233,21 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
               contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
               title: Text(t['name'] ?? '',
                   style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
-              subtitle: (t['category'] ?? '').isNotEmpty
-                  ? Text(t['category']!,
-                      style: const TextStyle(fontSize: 11, color: AppColors.brandGreen))
-                  : null,
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if ((t['category'] ?? '').isNotEmpty)
+                    Text(t['category']!,
+                        style: const TextStyle(fontSize: 11, color: AppColors.brandGreen)),
+                  if (needsDoc)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: Text('⚠ Requires prescription — mandatory to upload after adding',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
+                    ),
+                ],
+              ),
               secondary: Text('₹${t['price'] ?? '0'}',
                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
                       color: AppColors.textPrimary)),

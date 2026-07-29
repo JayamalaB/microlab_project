@@ -265,6 +265,32 @@ class NotificationService {
       return;
     }
 
+    if (type == 'booking_unassigned') {
+      // Technician was released from a job — either the patient rescheduled
+      // it, or the technician cancelled it themselves and it's being
+      // re-dispatched to someone else. Same foreground-visibility gap as
+      // booking_rescheduled: Android won't auto-show this while the app is
+      // open, so it needs the same manual _localNotifs.show() here.
+      final title = message.notification?.title ?? 'Booking Unassigned';
+      final body  = message.notification?.body  ?? 'You are no longer assigned to this booking.';
+      _localNotifs.show(
+        message.data['booking_id'].hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _updatesChannelId,
+            _updatesChannelName,
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+        ),
+      );
+      return;
+    }
+
     if (type == 'booking_confirmed' ||
         type == 'technician_assigned' ||
         type == 'technician_en_route' ||
