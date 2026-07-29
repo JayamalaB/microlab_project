@@ -79,12 +79,6 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
   StreamSubscription<int>? _completedSub;
   StreamSubscription<bool>? _connectedSub;
 
-  // Last 4 digits of bookingId
-  String get _pin {
-    final s = widget.bookingId.toString();
-    return s.length >= 4 ? s.substring(s.length - 4) : s.padLeft(4, '0');
-  }
-
   String get _initials {
     final parts = widget.technicianName.trim().split(' ');
     if (parts.length >= 2) return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
@@ -105,6 +99,7 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
     if (stored != null && stored.bookingId == widget.bookingId) {
       _enRoute = stored.enRoute;
       _arrived = stored.arrived;
+      _initialDistKm = stored.initialDistKm;
     }
 
     _setupSocket();
@@ -179,10 +174,14 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
             backgroundColor: AppColors.brandGreen,
             behavior: SnackBarBehavior.floating,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            duration: const Duration(seconds: 3),
+            duration: const Duration(seconds: 2),
           ),
         );
       }
+      // Return to booking detail after briefly showing arrived state
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) Navigator.pop(context);
+      });
     });
 
     _completedSub = SocketService.instance.onCollectionCompleted.listen((id) {
@@ -217,6 +216,10 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
           _arrived = true;
           _enRoute = false;
           debugPrint('   → State: arrived=true');
+          // Technician already arrived — pop back after brief delay
+          Future.delayed(const Duration(seconds: 1), () {
+            if (mounted) Navigator.pop(context);
+          });
         } else if (status == 'collected' ||
             status == 'sample_received' ||
             status == 'test_in_progress' ||
@@ -256,7 +259,14 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
       if (widget.patientLat != null && !_arrived) {
         final patientPos = LatLng(widget.patientLat!, widget.patientLng!);
         final d = _haversineKm(techPos, patientPos);
-        _initialDistKm ??= d;
+        if (_initialDistKm == null) {
+          _initialDistKm = d;
+          final current = SocketService.instance.activeLabBooking.value;
+          if (current != null && current.bookingId == widget.bookingId) {
+            SocketService.instance.activeLabBooking.value =
+                current.copyWith(initialDistKm: d);
+          }
+        }
         if (!mounted) return;
         setState(() => _distKm = d);
       }
@@ -537,7 +547,14 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
     if (widget.patientLat != null && !_arrived) {
       final patientPos = LatLng(widget.patientLat!, widget.patientLng!);
       final d = _haversineKm(newPos, patientPos);
-      _initialDistKm ??= d;
+      if (_initialDistKm == null) {
+        _initialDistKm = d;
+        final current = SocketService.instance.activeLabBooking.value;
+        if (current != null && current.bookingId == widget.bookingId) {
+          SocketService.instance.activeLabBooking.value =
+              current.copyWith(initialDistKm: d);
+        }
+      }
       final speedKmh = (update.speed != null && update.speed! > 0.5)
           ? update.speed! * 3.6
           : 25.0;
@@ -785,97 +802,29 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                 ),
               ),
 
-            // PIN digit boxes + ETA chip row
-            Positioned(
-              bottom: 270,
-              left: 16,
-              right: 16,
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  // PIN card with individual digit boxes
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                      boxShadow: const [
-                        BoxShadow(
-                            color: Colors.black12,
-                            blurRadius: 8,
-                            offset: Offset(0, 2))
-                      ],
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'VERIFICATION PIN',
-                          style: TextStyle(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.textHint,
-                              letterSpacing: 0.5),
-                        ),
-                        const SizedBox(height: 6),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: _pin.split('').map((ch) {
-                            return Container(
-                              margin: const EdgeInsets.only(right: 4),
-                              width: 28,
-                              height: 32,
-                              decoration: BoxDecoration(
-                                color: AppColors.brandGreenSurface,
-                                borderRadius: BorderRadius.circular(6),
-                                border:
-                                    Border.all(color: AppColors.brandGreenLight),
-                              ),
-                              alignment: Alignment.center,
-                              child: Text(
-                                ch,
-                                style: const TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w800,
-                                    color: AppColors.brandGreen),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ],
-                    ),
+            // "Arriving in X min" chip
+            if (!_arrived && _etaMinutes != null)
+              Positioned(
+                bottom: 270,
+                right: 16,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: AppColors.brandGreen,
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 2))
+                    ],
                   ),
-
-                  const Spacer(),
-
-                  // "Arriving in X min" chip
-                  if (!_arrived && _etaMinutes != null)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: AppColors.brandGreen,
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: const [
-                          BoxShadow(
-                              color: Colors.black26,
-                              blurRadius: 8,
-                              offset: Offset(0, 2))
-                        ],
-                      ),
-                      child: Text(
-                        'Arriving in $_etaMinutes min',
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                ],
+                  child: Text(
+                    'Arriving in $_etaMinutes min',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700),
+                  ),
+                ),
               ),
-            ),
 
             // Bottom info card
             Positioned(
