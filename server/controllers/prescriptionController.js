@@ -54,20 +54,37 @@ exports.savePrescription = async (req, res) => {
 };
 
 // ── GET /api/prescriptions/:bookingId ─────────────────────────────────────────
+// Returns documents for this booking AND any sibling bookings sharing the same
+// visit_group_id. Family members added at booking time each get their own
+// booking_id (see createFamilyBooking) — their prescriptions are stored under
+// THAT booking_id, not the parent's, so a plain booking_id match alone would
+// silently miss them. Each doc is tagged with patient_id/booking_id so the
+// caller can attribute it to the correct patient instead of assuming every
+// document belongs to this booking's own primary patient.
 exports.getByBooking = async (req, res) => {
   const { bookingId } = req.params;
-  writeLog(`[getByBooking] bookingId=${bookingId}`);
+  writeLog(`[getByBooking] received — bookingId=${bookingId}`);
   try {
     const [rows] = await db.execute(
-      `SELECT doc_id, file_path, file_name, file_description, doc_status, created_at
-       FROM ip_booking_documents
-       WHERE booking_id = ?
-       ORDER BY created_at ASC`,
-      [bookingId]
+      `SELECT bd.doc_id, bd.file_path, bd.file_name, bd.file_description,
+              bd.doc_status, bd.created_at, bd.booking_id, bd.patient_id
+       FROM ip_booking_documents bd
+       WHERE bd.booking_id = ?
+          OR bd.booking_id IN (
+            SELECT b2.booking_id
+            FROM ip_bookings b1
+            JOIN ip_bookings b2 ON b2.visit_group_id = b1.visit_group_id
+                                AND b2.booking_id    != b1.booking_id
+                                AND b2.deleted_at    IS NULL
+            WHERE b1.booking_id = ? AND b1.visit_group_id IS NOT NULL
+          )
+       ORDER BY bd.created_at ASC`,
+      [bookingId, bookingId]
     );
+    writeLog(`[getByBooking] found=${rows.length} doc(s) — booking_ids=[${[...new Set(rows.map(r => r.booking_id))].join(',')}] patient_ids=[${[...new Set(rows.map(r => r.patient_id))].join(',')}]`);
     res.json({ success: true, docs: rows });
   } catch (err) {
-    writeLog(`[getByBooking] ERROR — ${err.message}`);
+    writeLog(`[getByBooking] ERROR — ${err.message} | code=${err.code} | sql=${err.sql}`);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

@@ -8,6 +8,7 @@ const db   = require('../config/db');
 const fs   = require('fs');
 const path = require('path');
 const sms  = require('../utils/sms');
+const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -15,6 +16,18 @@ function tlog(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(TECH_LOG, line, 'utf8');
+}
+
+const OTP_LOG = path.join(__dirname, '..', 'logs', 'otpinfo.log');
+function otpLog(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
+  const line = `[${ist}] ${msg}\n`;
+  process.stdout.write(line);
+  try {
+    const logsDir = path.join(__dirname, '..', 'logs');
+    if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+    fs.appendFileSync(OTP_LOG, line, 'utf8');
+  } catch (_) {}
 }
 
 // Converts "HH:MM:SS" TIME strings to appointment slot array "HH:MM:00"
@@ -80,37 +93,72 @@ exports.getHistory = async (req, res) => {
   try {
     tlog(`[getHistory] running SQL query...`);
     const [rows] = await db.execute(
-      `SELECT
-         tc.collection_id,
-         tc.booking_id,
-         tc.collection_status,
-         tc.collection_date,
-         tc.collection_address,
-         tc.assigned_at,
-         tc.collected_at,
-         tc.completed_at,
-         s.slot_label,
-         TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
-         b.city,
-         b.postal_code,
-         b.amount_paid,
-         p.patient_name,
-         p.patient_mobile
-       FROM ip_technician_collection tc
-       JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
-       LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
-       LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
-       LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
-       LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
-       WHERE tc.technician_id = ?
-         AND tc.collection_status IN (
-           'completed','all_collected','collected',
-           'handed_to_lab','sample_collected','collection_started',
-           'cancelled'
-         )
-       ORDER BY COALESCE(tc.completed_at, tc.collected_at, tc.assigned_at) DESC
-       LIMIT 100`,
-      [technicianId]
+      `(
+        SELECT
+           tc.collection_id,
+           tc.booking_id,
+           tc.collection_status,
+           tc.collection_date,
+           tc.collection_address,
+           tc.assigned_at,
+           tc.collected_at,
+           tc.completed_at,
+           s.slot_label,
+           TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
+           b.city,
+           b.postal_code,
+           b.amount_paid,
+           p.patient_name,
+           p.patient_mobile
+         FROM ip_technician_collection tc
+         JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
+         LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
+         LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
+         LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
+         LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
+         WHERE tc.technician_id = ?
+           AND tc.collection_status IN (
+             'completed','all_collected','collected',
+             'handed_to_lab','sample_collected','collection_started',
+             'cancelled'
+           )
+      )
+      UNION ALL
+      (
+        -- Jobs THIS technician accepted and then cancelled. ip_technician_collection
+        -- no longer has a row for them here — it was deleted and (if a replacement
+        -- was found) reassigned to whoever picked it up next — so this branch reads
+        -- straight off ip_bookings.technician_cancelled_by, which survives that.
+        SELECT
+           NULL AS collection_id,
+           b.booking_id,
+           'cancelled' AS collection_status,
+           b.booking_date AS collection_date,
+           b.collection_address,
+           b.technician_cancelled_at AS assigned_at,
+           NULL AS collected_at,
+           b.technician_cancelled_at AS completed_at,
+           s.slot_label,
+           TIME_FORMAT(avs.slot_time, '%h:%i %p') AS slot_time_formatted,
+           b.city,
+           b.postal_code,
+           b.amount_paid,
+           p.patient_name,
+           p.patient_mobile
+         FROM ip_bookings b
+         LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
+         LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
+         LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
+         LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
+         WHERE b.technician_cancelled_by = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM ip_technician_collection tc2
+             WHERE tc2.booking_id = b.booking_id AND tc2.technician_id = ?
+           )
+      )
+      ORDER BY COALESCE(completed_at, collected_at, assigned_at) DESC
+      LIMIT 100`,
+      [technicianId, technicianId, technicianId]
     );
     tlog(`[getHistory] OK — ${rows.length} records returned`);
     if (rows.length > 0) tlog(`[getHistory] first row: booking_id=${rows[0].booking_id} status=${rows[0].collection_status} patient=${rows[0].patient_name}`);
@@ -164,6 +212,18 @@ exports.logoutTechnician = async (req, res) => {
     );
 
     await connection.commit();
+
+    // Force the technician out of the live dispatch pool regardless of
+    // whether their socket's technician_offline event actually arrived.
+    // That event can silently fail to reach the server if the socket was
+    // already disconnected at logout time — in which case the plain socket
+    // 'disconnect' handler treats it as an accidental drop (45s grace period,
+    // in-memory pool never cleared) rather than an intentional logout. This
+    // REST path updates the same in-memory maps directly, independent of
+    // socket timing, so a logged-out technician stops receiving new
+    // dispatch attempts immediately rather than indefinitely.
+    forceTechnicianOffline(Number(technicianId));
+
     console.log(`✅ Technician ${technicianId} logged out — session closed`);
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (e) {
@@ -172,6 +232,80 @@ exports.logoutTechnician = async (req, res) => {
     res.status(500).json({ success: false, message: e.message });
   } finally {
     connection.release();
+  }
+};
+
+// ── POST /api/technicians/cancel-booking ──────────────────────────────────────
+// Technician-initiated hand-off of an already-accepted job, back before they've
+// started traveling (collection_status='assigned' only — mirrors the same gate
+// patient-side reschedule uses). This is NOT a booking cancellation: the patient
+// keeps their booking, it's released and re-dispatched to find them another
+// technician, exactly like reschedule already does — see unassignAndRedispatch
+// in bookingSocket.js, shared by both flows.
+const CANCEL_REASONS = ['vehicle_issue', 'personal_emergency', 'unreachable_patient', 'other'];
+
+exports.cancelAssignedBooking = async (req, res) => {
+  const technicianId = req.user.id;
+  const { bookingId, reason, note = null } = req.body;
+
+  if (!bookingId) {
+    return res.status(400).json({ success: false, message: 'bookingId is required' });
+  }
+  if (!CANCEL_REASONS.includes(reason)) {
+    return res.status(400).json({
+      success: false,
+      message: `reason is required and must be one of: ${CANCEL_REASONS.join(', ')}`,
+    });
+  }
+
+  try {
+    const [[tc]] = await db.execute(
+      `SELECT tc.collection_status, b.booking_ref, b.visit_group_id
+       FROM ip_technician_collection tc
+       JOIN ip_bookings b ON b.booking_id = tc.booking_id
+       WHERE tc.booking_id = ? AND tc.technician_id = ?
+       LIMIT 1`,
+      [bookingId, technicianId]
+    );
+
+    if (!tc) {
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
+    }
+    if (tc.collection_status !== 'assigned') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot cancel — already ${tc.collection_status.replace(/_/g, ' ')}`,
+      });
+    }
+
+    let allIds = [bookingId];
+    if (tc.visit_group_id) {
+      const [siblings] = await db.execute(
+        `SELECT booking_id FROM ip_bookings WHERE visit_group_id = ? AND deleted_at IS NULL`,
+        [tc.visit_group_id]
+      );
+      allIds = siblings.map(s => s.booking_id);
+    }
+
+    tlog(`[cancelAssignedBooking] technician_id=${technicianId} booking_id=${bookingId} ref=${tc.booking_ref} reason=${reason} note=${note ?? ''} group_size=${allIds.length}`);
+
+    await unassignAndRedispatch({
+      bookingId,
+      allIds,
+      technicianId,
+      notifyTitle: 'Booking Unassigned',
+      notifyBody:  `You are no longer assigned to booking ${tc.booking_ref} (${reason.replace(/_/g, ' ')}). It has been re-dispatched.`,
+      notifyType:  'booking_unassigned',
+      excludeFromRedispatch: true,
+      technicianCancelReason: reason,
+      technicianCancelNote:   note,
+    });
+
+    res.json({ success: true, message: 'Booking released and re-dispatched' });
+  } catch (e) {
+    tlog(`[cancelAssignedBooking] ERROR — technician_id=${technicianId} booking_id=${bookingId} — ${e.message}`);
+    console.error('[cancelAssignedBooking]', e.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
@@ -353,33 +487,41 @@ exports.saveSlots = async (req, res) => {
         for (const slotId of day.slot_ids) {
           const durationMinutes = durMap[String(slotId)] ? Number(durMap[String(slotId)]) : null;
 
-          const [ins] = await connection.query(
-            `INSERT INTO ip_technician_slots
-               (technician_id, slot_id, slot_date, branch_id, max_bookings, is_available, duration_minutes, created_by)
-             VALUES (?, ?, ?, ?, 5, 1, ?, ?)`,
-            [technicianId, slotId, day.date, branchId, durationMinutes, technicianId]
-          );
-          const techSlotId = ins.insertId;
-
-          // Generate per-appointment-time rows in ip_avilable_slots when duration is set
+          // When duration is set, calculate interval count first so max_bookings
+          // reflects actual capacity rather than a hardcoded guess.
+          let times = [];
+          let maxBookings = 5; // sensible default for no-duration slots
           if (durationMinutes) {
             const [[slotDef]] = await connection.query(
               'SELECT slot_start, slot_end FROM ip_slots WHERE slot_id = ?',
               [slotId]
             );
             if (slotDef) {
-              const times = _generateIntervals(slotDef.slot_start, slotDef.slot_end, durationMinutes);
-              for (const t of times) {
-                await connection.query(
-                  `INSERT INTO ip_available_slots
-                     (booking_type, technician_slot_id, slot_date, slot_time, is_available, created_at)
-                   VALUES ('home_collection', ?, ?, ?, 1, NOW())`,
-                  [techSlotId, day.date, t]
-                );
-              }
-              totalIntervals += times.length;
-              console.log(`   slot_id=${slotId} date=${day.date} ${durationMinutes}min → ${times.length} intervals`);
+              times = _generateIntervals(slotDef.slot_start, slotDef.slot_end, durationMinutes);
+              maxBookings = times.length || 1; // at least 1 to avoid zero-cap edge case
             }
+          }
+
+          const [ins] = await connection.query(
+            `INSERT INTO ip_technician_slots
+               (technician_id, slot_id, slot_date, branch_id, max_bookings, is_available, duration_minutes, created_by)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+            [technicianId, slotId, day.date, branchId, maxBookings, durationMinutes, technicianId]
+          );
+          const techSlotId = ins.insertId;
+
+          // Insert per-appointment-time rows when duration is set (times already computed above)
+          if (durationMinutes && times.length > 0) {
+            for (const t of times) {
+              await connection.query(
+                `INSERT INTO ip_available_slots
+                   (booking_type, technician_slot_id, slot_date, slot_time, is_available, created_at)
+                 VALUES ('home_collection', ?, ?, ?, 1, NOW())`,
+                [techSlotId, day.date, t]
+              );
+            }
+            totalIntervals += times.length;
+            console.log(`   slot_id=${slotId} date=${day.date} ${durationMinutes}min → ${times.length} intervals, max_bookings=${maxBookings}`);
           }
         }
       }
@@ -493,58 +635,80 @@ exports.getAll = async (req, res) => {
 // Inherits date/address/coords from the parent booking so the new job appears
 // ── POST /api/technicians/collect-payment ─────────────────────────────────────
 // Records a payment collected on-site by the technician and marks the booking paid
+// Records a payment collected by a technician on-site — supports both full
+// and partial amounts, and either Razorpay or Cash. amount may be less than
+// the booking's remaining balance: the row is left with payment_status =
+// 'partial' and the real amount_due, rather than always forcing amount_due
+// to 0 — the remainder can be collected later in a follow-up call.
 exports.collectPayment = async (req, res) => {
-  const technicianId = req.user.id;
-  const { bookingId, razorpayPaymentId, amount } = req.body;
+  const technicianId  = req.user.id;
+  const { bookingId, razorpayPaymentId, amount, paymentMethod = 'RAZORPAY' } = req.body;
 
-  if (!bookingId || !razorpayPaymentId || !amount) {
-    return res.status(400).json({ success: false, message: 'bookingId, razorpayPaymentId and amount are required' });
+  if (!bookingId || !amount) {
+    return res.status(400).json({ success: false, message: 'bookingId and amount are required' });
+  }
+  if (paymentMethod === 'RAZORPAY' && !razorpayPaymentId) {
+    return res.status(400).json({ success: false, message: 'razorpayPaymentId is required for Razorpay payments' });
   }
 
   try {
-    // Path A: parent booking — verify technician assignment via ip_technician_collection
-    const [result] = await db.execute(
-      `UPDATE ip_bookings b
-       INNER JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
-       SET b.payment_status = 'paid', b.amount_paid = b.amount_paid + ?, b.amount_due = 0, b.updated_at = NOW()
-       WHERE b.booking_id = ? AND tc.technician_id = ?`,
-      [amount, bookingId, technicianId]
-    );
-
-    if (result.affectedRows === 0) {
-      // Path B: sibling booking — no ip_technician_collection row, but verify the parent is assigned
-      const [sibResult] = await db.execute(
-        `UPDATE ip_bookings b
-         SET b.payment_status = 'paid', b.amount_paid = b.amount_paid + ?, b.amount_due = 0, b.updated_at = NOW()
-         WHERE b.booking_id = ?
-           AND b.visit_group_id IS NOT NULL
-           AND EXISTS (
+    // Verify this technician owns the booking — either directly (parent, via
+    // ip_technician_collection) or as a sibling of a booking they own (same
+    // visit_group_id) — and read the current totals in the same query.
+    const [[booking]] = await db.execute(
+      `SELECT b.booking_id, b.total_amount, b.amount_paid
+       FROM ip_bookings b
+       WHERE b.booking_id = ?
+         AND (
+           EXISTS (SELECT 1 FROM ip_technician_collection tc WHERE tc.booking_id = b.booking_id AND tc.technician_id = ?)
+           OR (b.visit_group_id IS NOT NULL AND EXISTS (
              SELECT 1 FROM ip_bookings parent
              INNER JOIN ip_technician_collection tc ON tc.booking_id = parent.booking_id AND tc.technician_id = ?
              WHERE parent.visit_group_id = b.visit_group_id
-           )`,
-        [amount, bookingId, technicianId]
-      );
-      if (sibResult.affectedRows === 0) {
-        console.warn(`⚠️  collectPayment — no rows updated for booking_id=${bookingId} technician_id=${technicianId}`);
-        return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
-      }
+           ))
+         )`,
+      [bookingId, technicianId, technicianId]
+    );
+
+    if (!booking) {
+      console.warn(`⚠️  collectPayment — booking_id=${bookingId} not found or not assigned to technician_id=${technicianId}`);
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
     }
+
+    const totalAmount      = parseFloat(booking.total_amount) || 0;
+    const currentPaid      = parseFloat(booking.amount_paid) || 0;
+    const newAmountPaid    = currentPaid + Number(amount);
+    const newAmountDue     = Math.max(0, totalAmount - newAmountPaid);
+    const newPaymentStatus = newAmountDue <= 0 ? 'paid' : 'partial';
+
+    await db.execute(
+      `UPDATE ip_bookings
+       SET payment_status = ?, amount_paid = ?, amount_due = ?, updated_at = NOW()
+       WHERE booking_id = ?`,
+      [newPaymentStatus, newAmountPaid, newAmountDue, bookingId]
+    );
 
     // Update payment transaction record (best-effort — works for both parent and sibling bookings)
     await db.execute(
       `UPDATE ip_payment_transactions
-       SET payment_status = 'paid', transaction_status = 'completed',
-           payment_type = 'RAZORPAY', payment_mode = 'RAZORPAY',
-           amount_paid = ?, amount_due = 0,
-           gateway_transaction_id = ?, gateway_status = 'captured',
-           paid_at = NOW(), updated_at = NOW()
+       SET payment_status = ?, transaction_status = ?,
+           payment_type = ?, payment_mode = ?,
+           amount_paid = ?, amount_due = ?, is_partial = ?,
+           gateway_transaction_id = ?, gateway_status = ?,
+           collected_by = ?, paid_at = NOW(), updated_at = NOW()
        WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
-      [amount, razorpayPaymentId, bookingId]
+      [
+        newPaymentStatus, newPaymentStatus === 'paid' ? 'completed' : 'partial',
+        paymentMethod, paymentMethod,
+        newAmountPaid, newAmountDue, newPaymentStatus === 'paid' ? 0 : 1,
+        paymentMethod === 'RAZORPAY' ? razorpayPaymentId : null,
+        paymentMethod === 'RAZORPAY' ? 'captured' : 'cash_collected',
+        technicianId, bookingId,
+      ]
     );
 
-    console.log(`✅ collectPayment — booking_id=${bookingId} paid ₹${amount} by technician_id=${technicianId}`);
-    res.json({ success: true });
+    console.log(`✅ collectPayment — booking_id=${bookingId} method=${paymentMethod} +₹${amount} → paid=₹${newAmountPaid} due=₹${newAmountDue} status=${newPaymentStatus} by technician_id=${technicianId}`);
+    res.json({ success: true, amountPaid: newAmountPaid, amountDue: newAmountDue, paymentStatus: newPaymentStatus });
   } catch (err) {
     console.error('❌ collectPayment FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -979,49 +1143,24 @@ exports.getBookingFamily = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Booking not found' });
     }
 
-    // Family members are in SIBLING bookings (same visit_group_id), not the same
-    // booking as the primary patient. Search via two paths and UNION them:
-    //
-    // Path A — via visit_group_id: find patients in any sibling booking that
-    //   shares a visit group with any of the primary patient's past bookings.
-    //
-    // Path B — direct co-booking (legacy): find patients who appeared in the
-    //   exact same booking row as the primary patient (for older data).
+    // Family members = other patients registered under the same client_id
+    // (the same account/family grouping used everywhere else in the app —
+    // e.g. the customer-side "Add Family Member" flow at checkout). The
+    // previous version only found patients who had ALREADY shared a
+    // visit_group_id or booking row with this patient, which is impossible
+    // for a patient's first-ever family addition (no such history exists
+    // yet) — it always returned empty in exactly the case this feature is
+    // for, silently falling through to the "new patient" form every time.
     const [members] = await db.execute(
-      `SELECT DISTINCT p.patient_id, p.patient_name, p.patient_mobile,
-                       p.patient_relation, p.patient_age, p.patient_gender
-       FROM ip_patients p
-       WHERE p.client_id   = ?
-         AND p.patient_id != ?
-         AND p.deleted_at IS NULL
-         AND p.patient_id IN (
-           -- Path A: sibling patients via visit_group_id
-           SELECT DISTINCT pb.patient_id
-           FROM ip_patient_bookings pb
-           JOIN ip_bookings b ON b.booking_id = pb.booking_id
-           WHERE b.visit_group_id IS NOT NULL
-             AND b.deleted_at     IS NULL
-             AND b.visit_group_id IN (
-               SELECT DISTINCT b2.visit_group_id
-               FROM ip_bookings b2
-               JOIN ip_patient_bookings pb2 ON pb2.booking_id = b2.booking_id
-               WHERE pb2.patient_id = ?
-                 AND b2.visit_group_id IS NOT NULL
-                 AND b2.deleted_at    IS NULL
-             )
-           UNION
-           -- Path B: legacy — patients in the same booking row
-           SELECT DISTINCT pb.patient_id
-           FROM ip_patient_bookings pb
-           WHERE pb.booking_id IN (
-             SELECT pb2.booking_id
-             FROM ip_patient_bookings pb2
-             WHERE pb2.patient_id = ?
-           )
-         )
-       ORDER BY p.patient_name ASC
+      `SELECT patient_id, patient_name, patient_mobile,
+              patient_relation, patient_age, patient_gender
+       FROM ip_patients
+       WHERE client_id   = ?
+         AND patient_id != ?
+         AND deleted_at IS NULL
+       ORDER BY patient_name ASC
        LIMIT 10`,
-      [booking.client_id, booking.patient_id, booking.patient_id, booking.patient_id]
+      [booking.client_id, booking.patient_id]
     );
 
     res.json({ success: true, members });
@@ -1044,45 +1183,73 @@ exports.generateBookingOtp = async (req, res) => {
 
   const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES ?? '10');
 
+  otpLog(`[GENERATE] ── START ── booking_id=${bookingId} tech_id=${technicianId}`);
+
   try {
-    // Verify assignment and fetch patient mobile in one query
+    // Verify assignment and fetch OTP recipient mobile.
+    // If the booking was created by a logged-in account owner (family head), send to their
+    // registered login number (ip_users.user_mobile_no) so the person physically present
+    // with the technician receives the OTP — not the patient the test is booked for.
+    // Falls back to ip_patients.patient_mobile for self-bookings and cases where
+    // created_by is null or does not match any ip_users row.
     const [[row]] = await db.execute(
-      `SELECT p.patient_mobile, p.patient_name
+      `SELECT COALESCE(u.user_mobile_no, p.patient_mobile) AS patient_mobile,
+              p.patient_name,
+              p.patient_mobile   AS raw_patient_mobile,
+              b.created_by,
+              u.user_id          AS creator_user_id,
+              u.user_mobile_no   AS creator_mobile
        FROM ip_technician_collection tc
        JOIN ip_bookings b ON b.booking_id = tc.booking_id
        JOIN ip_patients p ON p.patient_id = b.patient_id
+       LEFT JOIN ip_users u ON u.user_id = b.created_by
        WHERE tc.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL LIMIT 1`,
       [bookingId, technicianId]
     );
 
     if (!row) {
+      otpLog(`[GENERATE] ❌ LOOKUP FAILED — no row found for booking_id=${bookingId} tech_id=${technicianId} (booking missing, not assigned, or deleted)`);
       return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
+    }
+
+    otpLog(`[GENERATE] DB lookup OK — patient_name="${row.patient_name}" raw_patient_mobile=${row.raw_patient_mobile ?? 'NULL'} created_by=${row.created_by ?? 'NULL'} creator_user_id=${row.creator_user_id ?? 'NULL'} creator_mobile=${row.creator_mobile ?? 'NULL'} resolved_mobile=${row.patient_mobile ?? 'NULL'}`);
+
+    if (!row.patient_mobile) {
+      otpLog(`[GENERATE] ⚠️  resolved mobile is NULL — SMS will not be sent (patient_mobile and creator_mobile are both NULL)`);
     }
 
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
 
-    await db.execute(
+    const [updateRes] = await db.execute(
       `UPDATE ip_technician_collection
        SET collection_otp = ?, collection_otp_expiry = DATE_ADD(NOW(), INTERVAL ? MINUTE), otp_attempts = 0
        WHERE booking_id = ? AND technician_id = ?`,
       [otp, expiryMinutes, bookingId, technicianId]
     );
+    otpLog(`[GENERATE] OTP stored in DB — affected_rows=${updateRes.affectedRows} expiry=${expiryMinutes}min`);
 
-    // Send SMS — non-fatal: OTP is stored even if SMS fails
-    try {
-      const smsRes = await sms.sendBookingOtp(row.patient_mobile, otp);
-      console.log(`✅ generateBookingOtp — booking_id=${bookingId} | SMS: ${smsRes}`);
-    } catch (smsErr) {
-      console.warn(`⚠️  generateBookingOtp — SMS failed (non-fatal): ${smsErr.message}`);
+    if (updateRes.affectedRows === 0) {
+      otpLog(`[GENERATE] ⚠️  OTP UPDATE hit 0 rows — ip_technician_collection row may be missing for booking_id=${bookingId} tech_id=${technicianId}`);
     }
 
-    const mobile = row.patient_mobile ?? '';
-    const maskedMobile = mobile.length >= 10
-      ? `${mobile.slice(0, 3)}****${mobile.slice(7)}`
+    // Send SMS — non-fatal: OTP is stored even if SMS fails
+    const targetMobile = row.patient_mobile ?? '';
+    otpLog(`[GENERATE] SMS target — mobile="${targetMobile}" api_key_set=${!!process.env.PING4SMS_API_KEY} sender_set=${!!process.env.PING4SMS_SENDER_ID} template_id=${process.env.PING4SMS_BOOKING_OTP_TEMPLATE_ID ?? 'NOT SET'}`);
+    try {
+      const smsRes = await sms.sendBookingOtp(targetMobile, otp);
+      otpLog(`[GENERATE] ✅ SMS sent — mobile=${targetMobile} response="${smsRes}"`);
+    } catch (smsErr) {
+      otpLog(`[GENERATE] ❌ SMS FAILED — mobile=${targetMobile} error="${smsErr.message}"`);
+    }
+
+    const maskedMobile = targetMobile.length >= 10
+      ? `${targetMobile.slice(0, 3)}****${targetMobile.slice(7)}`
       : '****';
 
+    otpLog(`[GENERATE] ── DONE ── success=true maskedMobile=${maskedMobile}`);
     res.json({ success: true, maskedMobile });
   } catch (err) {
+    otpLog(`[GENERATE] ❌ SERVER ERROR — ${err.message}`);
     console.error('❌ generateBookingOtp FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -1194,6 +1361,8 @@ exports.resendBookingOtp = async (req, res) => {
 
   const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES ?? '10');
 
+  otpLog(`[RESEND] ── START ── booking_id=${bookingId} tech_id=${technicianId}`);
+
   try {
     // Check cooldown: if OTP remaining time > (expiryMinutes - 1) minutes, resend too soon
     const [[cooldownRow]] = await db.execute(
@@ -1205,41 +1374,56 @@ exports.resendBookingOtp = async (req, res) => {
     );
 
     if (cooldownRow) {
+      otpLog(`[RESEND] ⏱  cooldown active — too soon to resend for booking_id=${bookingId}`);
       return res.status(429).json({ success: false, message: 'Please wait 60 seconds before resending OTP.' });
     }
 
-    // Fetch patient mobile
+    // Fetch OTP recipient mobile — same logic as generateBookingOtp:
+    // prefer the booking creator's login number over the patient's number.
     const [[row]] = await db.execute(
-      `SELECT p.patient_mobile
+      `SELECT COALESCE(u.user_mobile_no, p.patient_mobile) AS patient_mobile,
+              p.patient_mobile   AS raw_patient_mobile,
+              b.created_by,
+              u.user_id          AS creator_user_id,
+              u.user_mobile_no   AS creator_mobile
        FROM ip_technician_collection tc
        JOIN ip_bookings b ON b.booking_id = tc.booking_id
        JOIN ip_patients p ON p.patient_id = b.patient_id
+       LEFT JOIN ip_users u ON u.user_id = b.created_by
        WHERE tc.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL LIMIT 1`,
       [bookingId, technicianId]
     );
 
     if (!row) {
+      otpLog(`[RESEND] ❌ LOOKUP FAILED — no row found for booking_id=${bookingId} tech_id=${technicianId}`);
       return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
     }
 
+    otpLog(`[RESEND] DB lookup OK — raw_patient_mobile=${row.raw_patient_mobile ?? 'NULL'} created_by=${row.created_by ?? 'NULL'} creator_user_id=${row.creator_user_id ?? 'NULL'} creator_mobile=${row.creator_mobile ?? 'NULL'} resolved_mobile=${row.patient_mobile ?? 'NULL'}`);
+
     const otp = Math.floor(1000 + Math.random() * 9000).toString();
 
-    await db.execute(
+    const [updateRes] = await db.execute(
       `UPDATE ip_technician_collection
        SET collection_otp = ?, collection_otp_expiry = DATE_ADD(NOW(), INTERVAL ? MINUTE), otp_attempts = 0
        WHERE booking_id = ? AND technician_id = ?`,
       [otp, expiryMinutes, bookingId, technicianId]
     );
+    otpLog(`[RESEND] OTP stored in DB — affected_rows=${updateRes.affectedRows}`);
 
+    const targetMobile = row.patient_mobile ?? '';
+    otpLog(`[RESEND] SMS target — mobile="${targetMobile}" template_id=${process.env.PING4SMS_BOOKING_OTP_TEMPLATE_ID ?? 'NOT SET'}`);
     try {
-      const smsRes = await sms.sendBookingOtp(row.patient_mobile, otp);
-      console.log(`✅ resendBookingOtp — booking_id=${bookingId} | SMS: ${smsRes}`);
+      const smsRes = await sms.sendBookingOtp(targetMobile, otp);
+      otpLog(`[RESEND] ✅ SMS sent — mobile=${targetMobile} response="${smsRes}"`);
     } catch (smsErr) {
-      console.warn(`⚠️  resendBookingOtp — SMS failed (non-fatal): ${smsErr.message}`);
+      otpLog(`[RESEND] ❌ SMS FAILED — mobile=${targetMobile} error="${smsErr.message}"`);
     }
 
+    otpLog(`[RESEND] ── DONE ── success=true`);
     res.json({ success: true });
   } catch (err) {
+    otpLog(`[RESEND] ❌ SERVER ERROR — ${err.message}`);
     console.error('❌ resendBookingOtp FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }

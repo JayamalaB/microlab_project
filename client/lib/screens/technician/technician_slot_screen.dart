@@ -16,7 +16,7 @@ class TechnicianSlotScreen extends StatefulWidget {
   State<TechnicianSlotScreen> createState() => _TechnicianSlotScreenState();
 }
 
-class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
+class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _masterSlots = [];
   bool _slotsLoading = true;
 
@@ -67,6 +67,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
       _selectedDurations[_key(d)] = <int, int?>{};
     }
     _loadSlots();
+    WidgetsBinding.instance.addObserver(this);
     // Rebuild every minute so past-slot locks apply without a network call.
     _slotRefreshTimer = Timer.periodic(
       const Duration(minutes: 1),
@@ -75,7 +76,13 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _loadSlots();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _slotRefreshTimer?.cancel();
     super.dispose();
   }
@@ -521,26 +528,6 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
                 Wrap(
                   spacing: 6,
                   children: [
-                    // None option
-                    GestureDetector(
-                      onTap: () => setState(() => _selectedDurations[k]![slotId] = null),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 140),
-                        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: curDur == null ? AppColors.brandGreen : const Color(0xFFF5F5F5),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: curDur == null ? AppColors.brandGreen : AppColors.divider,
-                          ),
-                        ),
-                        child: Text('No fixed time',
-                            style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                color: curDur == null ? Colors.white : AppColors.textSecondary)),
-                      ),
-                    ),
                     ..._durationOptions.map((min) => GestureDetector(
                       onTap: () => setState(() => _selectedDurations[k]![slotId] = min),
                       child: AnimatedContainer(
@@ -720,8 +707,15 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> {
         _buildDayTabs(),
         const Divider(height: 1, color: AppColors.divider),
         Expanded(
-            child: ColoredBox(
-                color: AppColors.background, child: _buildSlotPanel())),
+          child: ColoredBox(
+            color: AppColors.background,
+            child: RefreshIndicator(
+              onRefresh: () async => _loadSlots(),
+              color: AppColors.brandGreen,
+              child: _buildSlotPanel(),
+            ),
+          ),
+        ),
       ]);
     }
 

@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_service.dart';
 import 'booking_notification_service.dart';
+import 'customer_refresh_notifier.dart';
 import 'socket_service.dart';
 
 // ─── FCM background handler ───────────────────────────────────────────────────
@@ -222,6 +223,74 @@ class NotificationService {
       return;
     }
 
+    if (type == 'booking_cancelled') {
+      final title = message.notification?.title ?? 'Booking Cancelled';
+      final body  = message.notification?.body  ?? 'A booking has been cancelled.';
+      _localNotifs.show(
+        message.data['booking_id'].hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _updatesChannelId,
+            _updatesChannelName,
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+        ),
+      );
+      return;
+    }
+
+    if (type == 'booking_rescheduled') {
+      final title = message.notification?.title ?? 'Booking Rescheduled';
+      final body  = message.notification?.body  ?? 'A booking has been rescheduled. You are no longer assigned.';
+      _localNotifs.show(
+        message.data['booking_id'].hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _updatesChannelId,
+            _updatesChannelName,
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+        ),
+      );
+      return;
+    }
+
+    if (type == 'booking_unassigned') {
+      // Technician was released from a job — either the patient rescheduled
+      // it, or the technician cancelled it themselves and it's being
+      // re-dispatched to someone else. Same foreground-visibility gap as
+      // booking_rescheduled: Android won't auto-show this while the app is
+      // open, so it needs the same manual _localNotifs.show() here.
+      final title = message.notification?.title ?? 'Booking Unassigned';
+      final body  = message.notification?.body  ?? 'You are no longer assigned to this booking.';
+      _localNotifs.show(
+        message.data['booking_id'].hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _updatesChannelId,
+            _updatesChannelName,
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+        ),
+      );
+      return;
+    }
+
     if (type == 'booking_confirmed' ||
         type == 'technician_assigned' ||
         type == 'technician_en_route' ||
@@ -244,6 +313,11 @@ class NotificationService {
           ),
         ),
       );
+      // Fire in-process bus so foregrounded screens reload immediately.
+      final event = type == 'results_released'
+          ? CustomerRefreshEvent.reportReady
+          : CustomerRefreshEvent.bookingStatusChanged;
+      CustomerRefreshNotifier.instance.fire(event);
     }
   }
 }

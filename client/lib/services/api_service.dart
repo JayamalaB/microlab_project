@@ -393,11 +393,15 @@ class ApiService {
     return false;
   }
 
-  // Records on-site payment collected by technician and marks booking paid in DB
+  // Records on-site payment collected by technician and marks booking paid in DB.
+  // paymentMethod: 'RAZORPAY' (default, requires razorpayPaymentId) or 'CASH'
+  // (razorpayPaymentId not required). amount may be less than the full amount
+  // due — the server tracks the remaining balance as a partial payment.
   static Future<bool> collectPayment({
     required int bookingId,
-    required String razorpayPaymentId,
+    String? razorpayPaymentId,
     required double amount,
+    String paymentMethod = 'RAZORPAY',
   }) async {
     final token = await getToken();
     if (token == null) return false;
@@ -412,6 +416,7 @@ class ApiService {
           'bookingId': bookingId,
           'razorpayPaymentId': razorpayPaymentId,
           'amount': amount,
+          'paymentMethod': paymentMethod,
         }),
       ).timeout(const Duration(seconds: 15));
       final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -423,9 +428,44 @@ class ApiService {
     return false;
   }
 
+  // Technician hands off an already-accepted job before starting travel — the
+  // booking is released and re-dispatched to another technician, not cancelled
+  // for the patient. Server only allows this while the job is still 'assigned'.
+  // reason must be one of: vehicle_issue, personal_emergency, unreachable_patient, other.
+  static Future<Map<String, dynamic>> cancelAssignedBooking({
+    required int bookingId,
+    required String reason,
+    String? note,
+  }) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/technicians/cancel-booking'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'bookingId': bookingId,
+          'reason': reason,
+          'note': note,
+        }),
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[cancelAssignedBooking] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
   // Returns [{patientId, patientName, patientMobile}] for additional patients linked to a booking
-  // Returns {payment_status, amount_paid, amount_due} for a booking — used by
-  // the technician detail screen to get fresh payment info on every open.
+  // Returns {payment_status, amount_paid, amount_due, total_amount, items_total}
+  // for a booking — used by the technician detail screen to get fresh payment
+  // info on every open. total_amount is fixed at booking creation (tests +
+  // service charge at that time); items_total reflects the CURRENT item list
+  // (including tests added at the door), so total_amount - items_total is only
+  // meaningful against the ORIGINAL item set, not the live one.
   static Future<Map<String, dynamic>?> getBookingPaymentInfo(int bookingId) async {
     final token = await getToken();
     if (token == null) return null;
@@ -441,6 +481,8 @@ class ApiService {
           'payment_status': b['payment_status'],
           'amount_paid':    b['amount_paid'],
           'amount_due':     b['amount_due'],
+          'total_amount':   b['total_amount'],
+          'items_total':    b['items_total'],
         };
       }
     } catch (e) {
@@ -478,10 +520,11 @@ class ApiService {
         return (body['data'] as List).map((p) {
           final m = p as Map<String, dynamic>;
           return {
-            'id':       m['id']?.toString() ?? '',
-            'name':     m['name']?.toString() ?? '',
-            'category': m['category']?.toString() ?? 'General',
-            'price':    (m['final_price'] as num?)?.toStringAsFixed(0) ?? '0',
+            'id':           m['id']?.toString() ?? '',
+            'name':         m['name']?.toString() ?? '',
+            'category':     m['category']?.toString() ?? 'General',
+            'price':        (m['final_price'] as num?)?.toStringAsFixed(0) ?? '0',
+            'docRequired':  m['doc_req']?.toString() ?? 'no',
           };
         }).toList();
       }
@@ -969,6 +1012,18 @@ class ApiService {
       }
     } catch (_) {}
     return [];
+  }
+
+  static Future<Map<String, dynamic>> rescheduleBooking(
+      int bookingIdNum, {required String collectionDate, required int availableSlotId}) async {
+    final token = await getToken();
+    if (token == null) throw Exception('Not authenticated');
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/bookings/$bookingIdNum/reschedule'),
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode({'collectionDate': collectionDate, 'availableSlotId': availableSlotId}),
+    ).timeout(const Duration(seconds: 15));
+    return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
   static Future<Map<String, dynamic>> cancelBooking(int bookingIdNum, {String? reason}) async {

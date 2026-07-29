@@ -68,6 +68,9 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await settings.init();
   await initKnowledge();
+  // Rebuild in-memory dispatch state from DB before accepting connections.
+  // Ensures assigned bookings from before a restart are not forgotten.
+  await bookingSocket.initDispatchState();
   httpServer.listen(PORT, () => {
     console.log(`🚀 MicroLab server running on http://localhost:${PORT}`);
     console.log(`🎙️  Sarvam API key: ${process.env.SARVAM_API_KEY ? '✓ loaded' : '✗ MISSING — voice will fail'}`);

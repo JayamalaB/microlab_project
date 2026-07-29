@@ -302,10 +302,11 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
     _timer?.cancel();
     HapticFeedback.mediumImpact();
     SocketService.instance.emitBookingAccepted(
-      bookingId:      widget.booking.bookingId,
-      technicianId:   SocketService.instance.userId,
-      technicianName: SocketService.instance.userName,
-      sessionId:      SocketService.instance.sessionId,
+      bookingId:          widget.booking.bookingId,
+      technicianId:       SocketService.instance.userId,
+      technicianName:     SocketService.instance.userName,
+      sessionId:          SocketService.instance.sessionId,
+      isAppointmentBased: widget.booking.appointmentTime != null,
     );
     Navigator.of(context).pop(true);
   }

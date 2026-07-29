@@ -2208,6 +2208,14 @@ class _TestDetailSheet extends StatelessWidget {
     required this.onToggleCart,
   });
 
+  String _formatTat(String raw) {
+    final hours = int.tryParse(raw);
+    if (hours == null) return raw;
+    if (hours < 24) return '$hours hour${hours == 1 ? '' : 's'}';
+    final days = hours ~/ 24;
+    return '$days day${days == 1 ? '' : 's'}';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -2292,10 +2300,35 @@ class _TestDetailSheet extends StatelessWidget {
                   const Divider(height: 1),
                   const SizedBox(height: 16),
                   _InfoRow('Category', test.category),
-                  _InfoRow('Report Status', test.reportStatus),
+                  _InfoRow('Report Status', _formatTat(test.reportStatus)),
                   _InfoRow('Prescription',
                       test.docRequired ? 'Required' : 'Not required',
                       highlight: test.docRequired),
+                  if (test.preInstructions != null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE8F5E9),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: AppColors.brandGreen.withValues(alpha: 0.3)),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.checklist_rounded, size: 13, color: AppColors.brandGreen),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'Preparation: ${test.preInstructions!}',
+                              style: const TextStyle(fontSize: 11, color: Color(0xFF2E7D32), height: 1.4),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
                   if (test.docRequired) ...[
                     const SizedBox(height: 8),
                     Container(

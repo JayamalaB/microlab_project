@@ -8,6 +8,21 @@ import 'package:microlab/services/api_service.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'technician_active_job_screen.dart';
 
+// Popped by TechnicianBookingDetailScreen (see _exitScreen) when the
+// technician leaves mid-journey from an instance that was itself opened from
+// the live map/active-job screen. Every intermediate layer that pushed
+// TechnicianActiveJobScreen or TechnicianBookingDetailScreen — in either
+// file — must check for this exact value in its own `.then()` and, if seen,
+// immediately pop itself with the same value rather than running its normal
+// completion handling. That cascades the exit signal upward through however
+// many layers actually exist, ending at the Dashboard's own top-level
+// `.then()`, which doesn't recognise this value and simply treats it as "not
+// completed" — stopping the cascade exactly where it should. A fixed
+// "pop N times" shortcut can't work here because the real distance back to
+// the Dashboard varies: TechnicianActiveJobScreen can be reached either
+// directly from the Dashboard, or from inside Manage Booking itself.
+const kExitToDashboard = 'exit_to_dashboard';
+
 // ─── Prescription doc model ──────────────────────────────────────────────────
 
 class _TechPresDoc {
@@ -18,6 +33,11 @@ class _TechPresDoc {
   final DateTime uploadedAt;
   bool isUploading;
   String docStatus;
+  // Which patient this document belongs to — the booking's own primary
+  // patient, or a family member's, when this visit has more than one.
+  // Populated from ip_booking_documents.patient_id on fetch, or defaults to
+  // the primary patient for docs the technician uploads from this screen.
+  final int? patientId;
 
   _TechPresDoc({
     this.docId,
@@ -27,6 +47,7 @@ class _TechPresDoc {
     required this.uploadedAt,
     this.isUploading = false,
     this.docStatus = 'pending_review',
+    this.patientId,
   });
 
   bool get isVerified => docStatus == 'verified';
@@ -105,10 +126,19 @@ const List<_JourneyStep> _journeySteps = [
 class TechnicianBookingDetailScreen extends StatefulWidget {
   final TechnicianBooking booking;
   final void Function(TechnicianBooking)? onNewBooking;
+  // True when this screen was pushed on top of the live map/active-job
+  // screen (technician_active_job_screen.dart) rather than directly from the
+  // Dashboard. Lets the exit actions (back / Save Changes) skip past that
+  // screen straight to the Dashboard when the technician leaves mid-journey
+  // — but only then: reaching full completion (Handed to Lab) must still pop
+  // just this screen, so the active-job screen's own completion choreography
+  // (brief "handed over" status, haptic, delayed self-pop) keeps running.
+  final bool cameFromActiveJob;
   const TechnicianBookingDetailScreen({
     super.key,
     required this.booking,
     this.onNewBooking,
+    this.cameFromActiveJob = false,
   });
 
   @override
@@ -134,9 +164,17 @@ class _TechnicianBookingDetailScreenState
   bool _docIsPicking = false;
   bool _docVerified  = false;
   bool _docsLoading  = true;
-  // Whether any selected test/package requires a prescription.
+  // Whether the PRIMARY patient's selected test/package requires a prescription.
   // Initialized from widget.booking.docRequired; recalculated once items load.
   late bool _docRequired;
+  // Same requirement, tracked per patient on this visit (primary + family
+  // members) — keyed by patient_id. Populated for the primary from the same
+  // items load as _docRequired, and for each family member by fetching their
+  // own booking's items (see _loadFamilyDocRequirements). A family member's
+  // requirement is otherwise invisible: their tests live on a different
+  // booking_id than this screen's own, so _docRequired alone never sees it.
+  final Map<int, bool> _patientDocRequired = {};
+  bool get _anyDocRequired => _patientDocRequired.values.any((v) => v);
   static const int _docMaxFiles = 5;
   final ImagePicker _picker = ImagePicker();
 
@@ -145,6 +183,9 @@ class _TechnicianBookingDetailScreenState
   double _sessionPaymentCollected = 0.0;
   late String _livePaymentStatus;  // refreshed from server; starts from widget value
   late double _liveAmountPaid;     // refreshed from server; starts from widget value
+  // Fixed at booking creation (tests + service charge at that time) — used to
+  // back out the true service charge amount via _serviceCharge below.
+  double _totalAmount = 0.0;
 
   // Visit members linked to this booking (refreshed after each add)
   List<Map<String, dynamic>> _linkedPatients = [];
@@ -164,19 +205,60 @@ class _TechnicianBookingDetailScreenState
   double get _testsTotal =>
       _selectedTests.fold(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
 
-  double get _serviceChargePaid => widget.booking.serviceChargePaid;
+  // Sum of only the tests that existed when the booking was first created —
+  // used (not _testsTotal, which includes tests added later at the door) to
+  // back out the true, stable service charge amount below.
+  double get _originalItemsTotal => _selectedTests
+      .where((t) => _originalItemIds.contains(t['id']))
+      .fold(0.0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
+
+  // total_amount is fixed at booking creation (original tests + service
+  // charge). Subtracting the original tests' total isolates the service
+  // charge — stable regardless of tests added/removed after that point.
+  double get _serviceCharge {
+    final sc = _totalAmount - _originalItemsTotal;
+    return sc < 0.0 ? 0.0 : sc;
+  }
 
   double get _amountDue {
-    final due = _testsTotal - (_liveAmountPaid + _sessionPaymentCollected);
+    final due = (_testsTotal + _serviceCharge) - (_liveAmountPaid + _sessionPaymentCollected);
     return due < 0.0 ? 0.0 : due;
   }
 
   bool get _paymentDone => _amountDue <= 0.0;
 
-  // True when any sibling booking added this session still has an unpaid balance.
-  bool get _hasUnpaidSiblings => _linkedPatients.any((c) {
-    final due = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
-    return due > 0 && c['payment_status'] != 'paid';
+  // All patients on this visit — the booking's own primary patient plus any
+  // family members added at booking time. Drives the per-patient prescription
+  // grouping so each document renders only under its actual patient, and a
+  // patient with none shows "No Prescription Uploaded" instead of another
+  // member's upload.
+  List<Map<String, dynamic>> get _visitPatients => [
+        {
+          'id':        widget.booking.patientId,
+          'name':      widget.booking.customerName,
+          'isPrimary': true,
+          'bookingId': int.tryParse(widget.booking.id),
+        },
+        ..._linkedPatients.map((p) => {
+              'id':        (p['patient_id'] as num?)?.toInt(),
+              'name':      p['patient_name'] as String? ?? 'Family Member',
+              'isPrimary': false,
+              'bookingId': (p['booking_id'] as num?)?.toInt(),
+            }),
+      ];
+
+  // True once any payment — full or partial — has been recorded for this
+  // visit. The completion gate only requires SOME payment to have been
+  // collected, not the full amount: any remaining balance is settled later
+  // (e.g. at report delivery), so it must not block finishing this visit.
+  bool get _paymentInitiated =>
+      _paymentDone || _liveAmountPaid > 0 || _sessionPaymentCollected > 0;
+
+  // True when any sibling booking added this session has NO payment recorded
+  // at all yet (fully pending) — a partial payment on a sibling is enough.
+  bool get _hasUnsettledSiblings => _linkedPatients.any((c) {
+    final status = c['payment_status'] as String?;
+    return status != 'paid' && status != 'partial';
   });
 
   // A test is locked when it was already paid for:
@@ -210,6 +292,9 @@ class _TechnicianBookingDetailScreenState
     _livePaymentStatus    = widget.booking.paymentStatus;
     _liveAmountPaid       = widget.booking.amountPaid;
     _docRequired          = widget.booking.docRequired;
+    if (widget.booking.patientId != null) {
+      _patientDocRequired[widget.booking.patientId!] = _docRequired;
+    }
     _loadItems();
     _loadDocs();
     _loadLinkedPatients();
@@ -227,6 +312,7 @@ class _TechnicianBookingDetailScreenState
       setState(() {
         _livePaymentStatus = data['payment_status'] as String? ?? _livePaymentStatus;
         _liveAmountPaid    = double.tryParse(data['amount_paid']?.toString() ?? '') ?? _liveAmountPaid;
+        _totalAmount       = double.tryParse(data['total_amount']?.toString() ?? '') ?? _totalAmount;
       });
     } catch (e) {
       debugPrint('[_refreshPaymentInfo] $e');
@@ -235,12 +321,15 @@ class _TechnicianBookingDetailScreenState
 
   Future<void> _loadDocs() async {
     final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    debugPrint('[_loadDocs] fetching prescriptions for bookingId=$bookingId');
     if (bookingId == 0) {
       if (mounted) setState(() => _docsLoading = false);
       return;
     }
     try {
       final docs = await ApiService.getPrescriptions(bookingId);
+      debugPrint('[_loadDocs] received ${docs.length} doc(s) — '
+          'patientIds=${docs.map((d) => d['patient_id']).toSet()}');
       if (!mounted) return;
       setState(() {
         for (final d in docs) {
@@ -250,11 +339,13 @@ class _TechnicianBookingDetailScreenState
             fileName:   d['file_name'] as String? ?? 'document',
             uploadedAt: DateTime.tryParse(d['created_at']?.toString() ?? '') ?? DateTime.now(),
             docStatus:  d['doc_status'] as String? ?? 'pending_review',
+            patientId:  (d['patient_id'] as num?)?.toInt(),
           ));
         }
         _docVerified = _docUploads.isNotEmpty && _docUploads.every((d) => d.isVerified);
         _docsLoading = false;
       });
+      debugPrint('[_loadDocs] render state — _docUploads=${_docUploads.length} _docVerified=$_docVerified');
     } catch (e) {
       debugPrint('[_loadDocs] ERROR: $e');
       if (mounted) setState(() => _docsLoading = false);
@@ -288,12 +379,18 @@ class _TechnicianBookingDetailScreenState
         _originalItemIds = items.map((i) => i['product_id']?.toString() ?? '').toSet();
         _catalogueItems  = catalogue;
         _itemsLoading    = false;
-        // Recalculate from actual items — covers family member bookings and
-        // cases where tests are added/removed during the visit.
+        // Recalculate from actual items — covers tests added/removed during
+        // the visit. Scoped to this booking's own items only; family
+        // members' own requirements are tracked separately (see
+        // _loadFamilyDocRequirements) since their tests live on their own
+        // booking_id, not this one.
         _docRequired = items.any((i) {
           final v = i['doc_required'];
           return v == 1 || v == true || v == '1' || v == 'yes';
         });
+        if (widget.booking.patientId != null) {
+          _patientDocRequired[widget.booking.patientId!] = _docRequired;
+        }
       });
     } catch (e) {
       debugPrint('[_loadItems] ERROR: $e');
@@ -307,8 +404,31 @@ class _TechnicianBookingDetailScreenState
     try {
       final patients = await ApiService.getLinkedPatients(bookingId);
       if (mounted) setState(() => _linkedPatients = patients);
+      _loadFamilyDocRequirements(patients);
     } catch (e) {
       debugPrint('[_loadLinkedPatients] ERROR: $e');
+    }
+  }
+
+  // Each family member's tests live on their OWN booking_id, never this
+  // screen's own — so their prescription requirement is otherwise invisible
+  // to _docRequired/_patientDocRequired. Fetches each member's own items
+  // (same endpoint _loadItems already uses for the primary) to find out.
+  Future<void> _loadFamilyDocRequirements(List<Map<String, dynamic>> patients) async {
+    for (final p in patients) {
+      final pid = (p['patient_id'] as num?)?.toInt();
+      final bid = (p['booking_id'] as num?)?.toInt();
+      if (pid == null || bid == null) continue;
+      try {
+        final items = await ApiService.getBookingItems(bid);
+        final needsDoc = items.any((i) {
+          final v = i['doc_required'];
+          return v == 1 || v == true || v == '1' || v == 'yes';
+        });
+        if (mounted) setState(() => _patientDocRequired[pid] = needsDoc);
+      } catch (e) {
+        debugPrint('[_loadFamilyDocRequirements] patient=$pid ERROR: $e');
+      }
     }
   }
 
@@ -361,6 +481,32 @@ class _TechnicianBookingDetailScreenState
     super.dispose();
   }
 
+  // ── Exit ────────────────────────────────────────────────────
+  // Shared by the back arrow, the system back gesture, and the bottom
+  // Save Changes/Done button — all three must behave identically.
+  void _exitScreen() {
+    // Full completion (Handed to Lab) always pops with `true` — every layer
+    // above (map screen, any earlier Manage Booking instance) already reacts
+    // to `true` with its own completion choreography, so this alone already
+    // cascades correctly today; nothing else to signal.
+    if (_isCompleted) {
+      Navigator.of(context).pop(true);
+      return;
+    }
+    // Entered directly from the Dashboard — a single plain pop already lands
+    // there, no cascade needed.
+    if (!widget.cameFromActiveJob) {
+      Navigator.of(context).pop(null);
+      return;
+    }
+    // Leaving mid-journey via a screen that was itself opened from the live
+    // map/active-job screen. The real distance back to the Dashboard isn't
+    // fixed — that screen can itself have been opened from another Manage
+    // Booking instance — so instead of guessing a pop count, signal every
+    // layer above to cascade the same exit upward (see kExitToDashboard).
+    Navigator.of(context).pop(kExitToDashboard);
+  }
+
   // ── Journey advance ───────────────────────────────────────
 
 void _advanceStatus() {
@@ -369,9 +515,11 @@ void _advanceStatus() {
   final next = _nextStatus;
   if (next == null) return;
 
-  // OTP step: all payments (parent + siblings) must be settled first
+  // OTP step: some payment (full or partial) must be recorded first for
+  // both the parent booking and any siblings — a remaining balance no
+  // longer blocks this, only a complete absence of payment does.
   if (next == 'OTP Verified') {
-    if ((_amountDue > 0) || _hasUnpaidSiblings) {
+    if (!_paymentInitiated || _hasUnsettledSiblings) {
       _showCompleteSheet();
     } else {
       _showOtpDialog();
@@ -381,7 +529,7 @@ void _advanceStatus() {
 
   // Final step: payment check, then confirm, then emit handed_to_lab
   if (next == 'Handed to Lab') {
-    if (_amountDue > 0 || _hasUnpaidSiblings) {
+    if (!_paymentInitiated || _hasUnsettledSiblings) {
       _showCompleteSheet();
       return;
     }
@@ -419,11 +567,21 @@ void _advanceStatus() {
     return;
   }
 
-  // Prescription gate: must upload + verify before Sample Collected
-  if (next == 'Sample Collected' && _docRequired) {
-    if (_docUploads.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Upload prescription before collecting the sample.'),
+  // Prescription gate: mandatory for EVERY patient on the visit whose test
+  // requires one — not just the primary patient. Marking Sample Collected
+  // cascades to every family member's booking at once server-side, so this
+  // is the last point where a missing family-member prescription can still
+  // be caught before that happens.
+  if (next == 'Sample Collected' && _anyDocRequired) {
+    final missing = _visitPatients.where((p) {
+      final pid = p['id'] as int?;
+      if (pid == null || _patientDocRequired[pid] != true) return false;
+      return !_docUploads.any((d) => d.patientId == pid);
+    }).toList();
+    if (missing.isNotEmpty) {
+      final names = missing.map((p) => p['name'] as String).join(', ');
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Upload prescription for: $names'),
         backgroundColor: Colors.red,
       ));
       return;
@@ -494,8 +652,11 @@ void _handleStatusTransition(String next) {
             startInEnRoute: true,
           ),
         ),
-      ).then((wasCompleted) {
-        if (wasCompleted == true && mounted) {
+      ).then((result) {
+        if (!mounted) return;
+        if (result == kExitToDashboard) {
+          Navigator.of(context).pop(kExitToDashboard);
+        } else if (result == true) {
           Navigator.of(context).pop(true);
         }
       });
@@ -539,8 +700,11 @@ void _resumeJourney() {
         startInEnRoute: true,
       ),
     ),
-  ).then((wasCompleted) {
-    if (wasCompleted == true && mounted) {
+  ).then((result) {
+    if (!mounted) return;
+    if (result == kExitToDashboard) {
+      Navigator.of(context).pop(kExitToDashboard);
+    } else if (result == true) {
       Navigator.of(context).pop(true);
     }
   });
@@ -578,7 +742,12 @@ void _resumeJourney() {
       builder: (_) => StatefulBuilder(
         builder: (ctx, setDialogState) => Dialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          child: Padding(
+          // Fixed-height Column overflows once the on-screen keyboard opens
+          // and shrinks the available space (the OTP boxes autofocus the
+          // keyboard open immediately). Wrapping in a scroll view lets the
+          // content scroll instead of overflowing, matching the fix already
+          // applied to the payment sheet for the same underlying issue.
+          child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -745,7 +914,11 @@ void _resumeJourney() {
 
     if (result?['success'] == true) {
       setState(() { _isVerifyingOtp = false; _currentStatus = 'OTP Verified'; });
-      if (ctx.mounted) Navigator.pop(ctx);
+      // Pop via the stable outer context (root navigator) rather than the
+      // dialog's inner StatefulBuilder ctx, which can go stale across the
+      // await above and silently skip the pop while still being "mounted"
+      // enough for the earlier check to pass.
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: const Text('OTP verified — tap "Hand Over to Lab" to complete'),
         backgroundColor: AppColors.brandGreen,
@@ -835,6 +1008,16 @@ void _resumeJourney() {
       _selectedTests.add({...Map<String, String>.from(t), 'bookingItemId': ''});
       _showAddTest = false;
       _searchQuery = '';
+      // Escalate (never de-escalate here) — a test added mid-visit that itself
+      // needs a prescription must also trigger the upload/verify gate, not
+      // just tests present on the booking when the screen first loaded.
+      // _addTest always adds to this screen's own (primary) booking.
+      if (t['docRequired'] == 'yes') {
+        _docRequired = true;
+        if (widget.booking.patientId != null) {
+          _patientDocRequired[widget.booking.patientId!] = true;
+        }
+      }
     });
     final bookingId = int.tryParse(widget.booking.id) ?? 0;
     final productId = int.tryParse(t['id'] ?? '') ?? 0;
@@ -876,7 +1059,7 @@ void _resumeJourney() {
 
   // ── Document ──────────────────────────────────────────────
 
-  void _showDocSourcePicker() {
+  void _showDocSourcePicker({required int targetBookingId, required int targetPatientId}) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -892,18 +1075,22 @@ void _resumeJourney() {
             margin: const EdgeInsets.only(bottom: 16),
             decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
           ),
-          _DocSourceTile(Icons.camera_alt_outlined, 'Camera', 'Take a photo now',
-              () { Navigator.pop(context); _pickDoc(ImageSource.camera); }),
+          _DocSourceTile(Icons.camera_alt_outlined, 'Camera', 'Take a photo now', () {
+            Navigator.pop(context);
+            _pickDoc(ImageSource.camera, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
+          }),
           const SizedBox(height: 8),
-          _DocSourceTile(Icons.photo_library_outlined, 'Gallery', 'Choose from your photos',
-              () { Navigator.pop(context); _pickDoc(ImageSource.gallery); }),
+          _DocSourceTile(Icons.photo_library_outlined, 'Gallery', 'Choose from your photos', () {
+            Navigator.pop(context);
+            _pickDoc(ImageSource.gallery, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
+          }),
           const SizedBox(height: 4),
         ]),
       ),
     );
   }
 
-  Future<void> _pickDoc(ImageSource source) async {
+  Future<void> _pickDoc(ImageSource source, {required int targetBookingId, required int targetPatientId}) async {
     if (_docIsPicking || _docUploads.length >= _docMaxFiles) return;
     setState(() => _docIsPicking = true);
     try {
@@ -916,9 +1103,10 @@ void _resumeJourney() {
             final placeholder = _TechPresDoc(
               bytes: bytes, fileName: f.name,
               uploadedAt: DateTime.now(), isUploading: true,
+              patientId: targetPatientId,
             );
             setState(() => _docUploads.add(placeholder));
-            _uploadDoc(placeholder, bytes, f.name);
+            _uploadDoc(placeholder, bytes, f.name, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
           }
         }
       } else {
@@ -928,9 +1116,10 @@ void _resumeJourney() {
           final placeholder = _TechPresDoc(
             bytes: bytes, fileName: image.name,
             uploadedAt: DateTime.now(), isUploading: true,
+            patientId: targetPatientId,
           );
           setState(() => _docUploads.add(placeholder));
-          _uploadDoc(placeholder, bytes, image.name);
+          _uploadDoc(placeholder, bytes, image.name, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
         }
       }
     } catch (e) {
@@ -939,12 +1128,20 @@ void _resumeJourney() {
     setState(() => _docIsPicking = false);
   }
 
-  Future<void> _uploadDoc(_TechPresDoc placeholder, Uint8List bytes, String fileName) async {
-    final bookingId = int.tryParse(widget.booking.id) ?? 0;
-    final patientId = widget.booking.patientId ?? 0;
+  Future<void> _uploadDoc(
+    _TechPresDoc placeholder,
+    Uint8List bytes,
+    String fileName, {
+    required int targetBookingId,
+    required int targetPatientId,
+  }) async {
+    final bookingId = targetBookingId;
+    final patientId = targetPatientId;
+    debugPrint('[_uploadDoc] starting — bookingId=$bookingId patientId=$patientId fileName=$fileName');
     try {
       // Step 1: upload file binary → get URL
       final url = await ApiService.uploadFile(bytes.toList(), fileName);
+      debugPrint('[_uploadDoc] upload result — url=$url');
       if (url == null || !mounted) {
         setState(() => _docUploads.remove(placeholder));
         return;
@@ -953,6 +1150,7 @@ void _resumeJourney() {
       final docId = await ApiService.savePrescriptionDoc(
         bookingId: bookingId, patientId: patientId, imageUrl: url,
       );
+      debugPrint('[_uploadDoc] savePrescriptionDoc result — docId=$docId');
       if (!mounted) return;
       setState(() {
         final idx = _docUploads.indexOf(placeholder);
@@ -961,6 +1159,7 @@ void _resumeJourney() {
           _docUploads[idx] = _TechPresDoc(
             docId: docId, url: url, fileName: fileName,
             uploadedAt: DateTime.now(), docStatus: 'pending_review',
+            patientId: patientId,
           );
         } else {
           _docUploads.removeAt(idx);
@@ -977,32 +1176,53 @@ void _resumeJourney() {
     }
   }
 
-  void _viewDocImage(int index) {
+  // Takes the doc object itself (not a raw index) — the Prescription section
+  // now renders per-patient FILTERED sublists, so an index local to one
+  // patient's thumbnails would not line up with _docUploads's own indices.
+  void _viewDocImage(_TechPresDoc doc) {
+    final index = _docUploads.indexOf(doc);
+    if (index == -1) return;
     Navigator.push(context, MaterialPageRoute(
         builder: (_) => _DocImageViewerPage(images: _docUploads, initialIndex: index)));
   }
 
-  Future<void> _deleteDocImage(int index) async {
-    final doc = _docUploads[index];
+  Future<void> _deleteDocImage(_TechPresDoc doc) async {
     if (doc.isUploading) return; // wait for upload to finish first
+    debugPrint('[_deleteDocImage] deleting docId=${doc.docId} patientId=${doc.patientId}');
     if (doc.docId != null) {
       final ok = await ApiService.deletePrescription(doc.docId!);
       if (!ok || !mounted) return;
     }
     setState(() {
-      _docUploads.removeAt(index);
+      _docUploads.remove(doc);
       if (_docUploads.isEmpty) _docVerified = false;
     });
   }
 
   Future<void> _markDocsVerified() async {
+    bool anyFailed = false;
     for (final doc in _docUploads) {
       if (doc.docId != null && !doc.isVerified) {
         final ok = await ApiService.verifyPrescription(doc.docId!);
-        if (ok && mounted) setState(() => doc.docStatus = 'verified');
+        if (ok && mounted) {
+          setState(() => doc.docStatus = 'verified');
+        } else {
+          anyFailed = true;
+        }
       }
     }
-    if (mounted) setState(() => _docVerified = true);
+    if (!mounted) return;
+    // Derive _docVerified from actual per-doc status rather than forcing it
+    // true — a failed verify call must not silently satisfy the "Sample
+    // Collected" gate for a document still pending_review server-side.
+    setState(() => _docVerified = _docUploads.every((d) => d.isVerified));
+    if (anyFailed) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Some documents could not be verified — please retry.'),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
   }
 
   // ── Payment ───────────────────────────────────────────────
@@ -1072,10 +1292,10 @@ void _resumeJourney() {
                 title: 'Verify OTP',
                 subtitle: 'Ask customer for the OTP sent to their phone',
                 done: _currentStatus == 'OTP Verified' || _isCompleted,
-                locked: !_paymentDone || _hasUnpaidSiblings,
+                locked: !_paymentInitiated || _hasUnsettledSiblings,
                 buttonLabel: (_currentStatus == 'OTP Verified' || _isCompleted) ? 'Verified ✓' : 'Verify OTP',
                 buttonColor: AppColors.brandGreen,
-                onTap: (!_paymentDone || _hasUnpaidSiblings || _currentStatus == 'OTP Verified' || _isCompleted)
+                onTap: (!_paymentInitiated || _hasUnsettledSiblings || _currentStatus == 'OTP Verified' || _isCompleted)
                     ? null
                     : () {
                         Navigator.pop(ctx);
@@ -1109,12 +1329,267 @@ void _resumeJourney() {
     );
   }
 
-  void _collectPayment({VoidCallback? onDone}) {
+  // ── Payment method + amount picker ────────────────────────
+  // Lets the technician choose Cash or Razorpay, and optionally collect less
+  // than the full amount due — a partial payment, with the remaining balance
+  // settled later (e.g. at report delivery) rather than blocking this visit.
+  Future<Map<String, dynamic>?> _showPaymentMethodSheet({
+    required double maxAmount,
+    required String subtitle,
+    bool allowPartial = true,
+  }) {
+    final amountCtrl = TextEditingController(text: maxAmount.toStringAsFixed(0));
+    String method = 'RAZORPAY';
+    String? errorText;
+    return showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          // viewInsets.bottom is the on-screen keyboard's height — without it,
+          // the sheet's bottom padding only ever accounts for the safe-area
+          // inset, so opening the keyboard pushes the TextField/buttons off
+          // the bottom of the screen instead of the sheet shifting up to
+          // stay above it.
+          padding: EdgeInsets.fromLTRB(
+            20, 20, 20,
+            MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Collect Payment',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              const SizedBox(height: 4),
+              Text(subtitle, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+              const SizedBox(height: 18),
+
+              if (allowPartial) ...[
+                const Text('Amount to collect',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: amountCtrl,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: false),
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  onChanged: (_) { if (errorText != null) setSheet(() => errorText = null); },
+                  decoration: InputDecoration(
+                    prefixText: '₹ ',
+                    errorText: errorText,
+                    helperText: 'Full amount due: ₹${maxAmount.toInt()} — enter less to pay partially',
+                    helperMaxLines: 2,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+              ] else
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: AppColors.background,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Amount', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                      Text('₹${maxAmount.toInt()}',
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                    ],
+                  ),
+                ),
+              const SizedBox(height: 18),
+
+              const Text('Payment method',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+              const SizedBox(height: 8),
+              Row(children: [
+                Expanded(
+                  child: _PaymentMethodChip(
+                    label: 'Razorpay',
+                    icon: Icons.credit_card_rounded,
+                    selected: method == 'RAZORPAY',
+                    onTap: () => setSheet(() => method = 'RAZORPAY'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _PaymentMethodChip(
+                    label: 'Cash',
+                    icon: Icons.payments_outlined,
+                    selected: method == 'CASH',
+                    onTap: () => setSheet(() => method = 'CASH'),
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 22),
+
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: () {
+                    final amt = double.tryParse(amountCtrl.text) ?? 0;
+                    if (amt <= 0) { setSheet(() => errorText = 'Enter an amount greater than 0'); return; }
+                    if (amt > maxAmount) { setSheet(() => errorText = 'Cannot exceed ₹${maxAmount.toInt()}'); return; }
+                    Navigator.pop(ctx, {'method': method, 'amount': amt});
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.brandGreen,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: Text(method == 'CASH' ? 'Confirm Cash Received' : 'Continue to Razorpay',
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static const _cancelReasons = <String, String>{
+    'vehicle_issue':       'Vehicle issue',
+    'personal_emergency':  'Personal emergency',
+    'unreachable_patient': 'Unable to reach patient',
+    'other':               'Other',
+  };
+
+  Future<Map<String, dynamic>?> _showCancelJobSheet() {
+    String? reason;
+    final noteCtrl = TextEditingController();
+    String? errorText;
+    return showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: EdgeInsets.fromLTRB(
+            20, 20, 20,
+            MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text("Can't make it?",
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              const SizedBox(height: 4),
+              const Text(
+                'This job will be released and re-dispatched to another technician. The patient keeps their booking.',
+                style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+              ),
+              const SizedBox(height: 16),
+              ..._cancelReasons.entries.map((e) => RadioListTile<String>(
+                    value: e.key,
+                    groupValue: reason,
+                    onChanged: (v) => setSheet(() { reason = v; errorText = null; }),
+                    title: Text(e.value, style: const TextStyle(fontSize: 13)),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    activeColor: AppColors.brandGreen,
+                  )),
+              if (errorText != null) ...[
+                const SizedBox(height: 4),
+                Text(errorText!, style: const TextStyle(fontSize: 12, color: Colors.red)),
+              ],
+              const SizedBox(height: 8),
+              TextField(
+                controller: noteCtrl,
+                maxLines: 2,
+                decoration: InputDecoration(
+                  hintText: 'Add a note (optional)',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                ),
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: () {
+                    if (reason == null) { setSheet(() => errorText = 'Select a reason'); return; }
+                    Navigator.pop(ctx, {'reason': reason, 'note': noteCtrl.text.trim()});
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red.shade600,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Confirm — Release Job', style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _cancelJob() async {
+    final choice = await _showCancelJobSheet();
+    if (choice == null || !mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+    final result = await ApiService.cancelAssignedBooking(
+      bookingId: int.tryParse(widget.booking.id) ?? 0,
+      reason:    choice['reason'] as String,
+      note:      (choice['note'] as String?)?.isEmpty == true ? null : choice['note'] as String?,
+    );
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop(); // close loading dialog
+
+    if (result['success'] == true) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Job released — it has been re-dispatched.'),
+        backgroundColor: AppColors.brandGreen,
+      ));
+      Navigator.pop(context, true);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(result['message']?.toString() ?? 'Failed to release job'),
+        backgroundColor: Colors.red,
+      ));
+    }
+  }
+
+  void _collectPayment({VoidCallback? onDone}) async {
+    final choice = await _showPaymentMethodSheet(
+      maxAmount: _amountDue,
+      subtitle: 'Tests + service charge due for ${widget.booking.customerName}',
+    );
+    if (choice == null || !mounted) return;
+    final method = choice['method'] as String;
+    final amount = choice['amount'] as double;
+
+    if (method == 'CASH') {
+      await _collectCashPayment(amount: amount, onDone: onDone);
+      return;
+    }
+
     setState(() => _isProcessingPayment = true);
 
     final options = {
       'key': 'rzp_test_SonqjjPurqlLci',
-      'amount': (_amountDue * 100).toInt(),
+      'amount': (amount * 100).toInt(),
       'name': 'MicroLab',
       'description': _selectedTests.map((t) => t['name']).join(', '),
       'prefill': {
@@ -1132,14 +1607,15 @@ void _resumeJourney() {
       options: options,
       onSuccess: (paymentId) {
         // Capture amount + test IDs before state changes
-        final paidAmount      = _amountDue;
+        final paidAmount      = amount;
         final bookingId       = int.tryParse(widget.booking.id) ?? 0;
         final nowPaidTestIds  = _selectedTests.map((t) => t['id'] ?? '').toSet();
+        final stillDue        = paidAmount < _amountDue;
         setState(() {
           _isProcessingPayment     = false;
           _sessionPaymentCollected += paidAmount;
-          _livePaymentStatus       = 'paid';
-          _paidTestIds             = {..._paidTestIds, ...nowPaidTestIds};
+          _livePaymentStatus       = stillDue ? 'partial' : 'paid';
+          if (!stillDue) _paidTestIds = {..._paidTestIds, ...nowPaidTestIds};
         });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('Payment of ₹${paidAmount.toInt()} received · $paymentId'),
@@ -1154,6 +1630,7 @@ void _resumeJourney() {
             bookingId: bookingId,
             razorpayPaymentId: paymentId,
             amount: paidAmount,
+            paymentMethod: 'RAZORPAY',
           );
           if (mounted) _refreshPaymentInfo();
           if (!ok && mounted) {
@@ -1178,16 +1655,102 @@ void _resumeJourney() {
     );
   }
 
+  // Cash counterpart to _collectPayment — no Razorpay checkout, just a direct
+  // server record. Supports the same partial-amount capability.
+  Future<void> _collectCashPayment({required double amount, VoidCallback? onDone}) async {
+    setState(() => _isProcessingPayment = true);
+    final bookingId      = int.tryParse(widget.booking.id) ?? 0;
+    final nowPaidTestIds = _selectedTests.map((t) => t['id'] ?? '').toSet();
+    final stillDue       = amount < _amountDue;
+
+    final ok = await ApiService.collectPayment(
+      bookingId: bookingId,
+      amount: amount,
+      paymentMethod: 'CASH',
+    );
+    if (!mounted) return;
+    setState(() {
+      _isProcessingPayment = false;
+      if (ok) {
+        _sessionPaymentCollected += amount;
+        _livePaymentStatus       = stillDue ? 'partial' : 'paid';
+        if (!stillDue) _paidTestIds = {..._paidTestIds, ...nowPaidTestIds};
+      }
+    });
+    if (ok) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('₹${amount.toInt()} cash received'),
+        backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+      onDone?.call();
+      _refreshPaymentInfo();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Failed to record cash payment — please retry'),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
+  }
+
   // Collect payment for a visit-member's sibling booking (separate from the parent's payment)
   void _collectVisitMemberPayment({
     required int siblingBookingId,
     required double amountDue,
     required String patientName,
-  }) {
+  }) async {
     if (amountDue <= 0) return;
+    final choice = await _showPaymentMethodSheet(
+      maxAmount: amountDue,
+      subtitle: 'Tests due for $patientName',
+    );
+    if (choice == null || !mounted) return;
+    final method = choice['method'] as String;
+    final amount = choice['amount'] as double;
+    final stillDue = amount < amountDue;
+
+    void applyLocalUpdate(String paymentId) {
+      if (!mounted) return;
+      setState(() {
+        _linkedPatients = _linkedPatients.map((p) {
+          if ((p['booking_id'] as num?)?.toInt() == siblingBookingId) {
+            return {...p, 'payment_status': stillDue ? 'partial' : 'paid', 'amount_due': stillDue ? amountDue - amount : 0.0};
+          }
+          return p;
+        }).toList();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('₹${amount.toInt()} received for $patientName · $paymentId'),
+        backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+    }
+
+    if (method == 'CASH') {
+      final ok = await ApiService.collectPayment(
+        bookingId: siblingBookingId,
+        amount: amount,
+        paymentMethod: 'CASH',
+      );
+      if (ok) {
+        applyLocalUpdate('cash');
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to record cash payment — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+      if (mounted) _loadLinkedPatients();
+      return;
+    }
+
     final options = {
       'key': 'rzp_test_SonqjjPurqlLci',
-      'amount': (amountDue * 100).toInt(),
+      'amount': (amount * 100).toInt(),
       'name': 'MicroLab',
       'description': 'Tests for $patientName',
       'prefill': {
@@ -1204,27 +1767,13 @@ void _resumeJourney() {
     openRazorpay(
       options: options,
       onSuccess: (paymentId) async {
-        // Optimistic UI update: mark this sibling as paid in the local list
-        if (mounted) {
-          setState(() {
-            _linkedPatients = _linkedPatients.map((p) {
-              if ((p['booking_id'] as num?)?.toInt() == siblingBookingId) {
-                return {...p, 'payment_status': 'paid', 'amount_due': 0.0};
-              }
-              return p;
-            }).toList();
-          });
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('₹${amountDue.toInt()} received for $patientName · $paymentId'),
-            backgroundColor: AppColors.brandGreen,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
-        }
+        // Optimistic UI update
+        applyLocalUpdate(paymentId);
         final ok = await ApiService.collectPayment(
           bookingId: siblingBookingId,
           razorpayPaymentId: paymentId,
-          amount: amountDue,
+          amount: amount,
+          paymentMethod: 'RAZORPAY',
         );
         if (!ok && mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -1250,10 +1799,16 @@ void _resumeJourney() {
     );
   }
 
-  // Collects a single combined Razorpay payment for all unpaid bookings (parent + siblings).
-  // Each booking's ip_payment_transactions row is updated individually using the same
-  // Razorpay payment ID — existing per-booking data structure is not changed.
-  void _collectAllPayment() {
+  // Collects a single combined payment (Razorpay or Cash) for all unpaid
+  // bookings (parent + siblings), at the full combined amount — partial
+  // payment is not supported here, since splitting a partial amount fairly
+  // across multiple bookings has no well-defined rule. For partial payment,
+  // collect each booking individually via _collectPayment/_collectVisitMemberPayment.
+  // For Razorpay, each booking's ip_payment_transactions row is updated
+  // individually using the same Razorpay payment ID — existing per-booking
+  // data structure is not changed. For Cash, each booking gets its own
+  // separate collectPayment call (no shared gateway reference to reuse).
+  void _collectAllPayment() async {
     final unpaidItems = <Map<String, dynamic>>[];
 
     if (!_paymentDone && _amountDue > 0) {
@@ -1280,12 +1835,96 @@ void _resumeJourney() {
 
     final totalAmount = unpaidItems.fold<double>(0, (s, i) => s + (i['amount'] as double));
 
+    final choice = await _showPaymentMethodSheet(
+      maxAmount: totalAmount,
+      subtitle: 'Combined payment · ${unpaidItems.length} members',
+    );
+    if (choice == null || !mounted) return;
+    final method        = choice['method'] as String;
+    final enteredAmount = choice['amount'] as double;
+
+    // Sequential/waterfall allocation: fill each booking's due amount in list
+    // order (parent first, then siblings) until the entered amount runs out.
+    // A booking with zero allocated here is untouched — no collectPayment call,
+    // its payment_status stays exactly as it was.
+    double remaining = enteredAmount;
+    final allocations = unpaidItems.map((item) {
+      final due       = item['amount'] as double;
+      final allocated = remaining <= 0 ? 0.0 : (remaining >= due ? due : remaining);
+      remaining -= allocated;
+      return {...item, 'allocated': allocated};
+    }).toList();
+    final toCharge = allocations.where((a) => (a['allocated'] as double) > 0).toList();
+
+    void applySuccessState(String paymentRef) {
+      setState(() {
+        _isProcessingPayment = false;
+        for (final a in allocations) {
+          final allocated = a['allocated'] as double;
+          if (allocated <= 0) continue;
+          final due        = a['amount'] as double;
+          final fullyPaid  = allocated >= due;
+          if (a['isParent'] == true) {
+            _sessionPaymentCollected += allocated;
+            if (fullyPaid) {
+              _livePaymentStatus = 'paid';
+              _paidTestIds       = {..._paidTestIds, ..._selectedTests.map((t) => t['id'] ?? '').toSet()};
+            } else {
+              _livePaymentStatus = 'partial';
+            }
+          } else {
+            final sibId = a['bookingId'] as int;
+            _linkedPatients = _linkedPatients.map((p) {
+              if ((p['booking_id'] as num?)?.toInt() != sibId) return p;
+              return {
+                ...p,
+                'payment_status': fullyPaid ? 'paid' : 'partial',
+                'amount_due':     (due - allocated).clamp(0, due),
+              };
+            }).toList();
+          }
+        }
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content:         Text('₹${enteredAmount.toInt()} received · $paymentRef'),
+        backgroundColor: AppColors.brandGreen,
+        behavior:        SnackBarBehavior.floating,
+        shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
+    }
+
+    if (method == 'CASH') {
+      setState(() => _isProcessingPayment = true);
+      var allOk = true;
+      for (final a in toCharge) {
+        final ok = await ApiService.collectPayment(
+          bookingId:     a['bookingId'] as int,
+          amount:        a['allocated'] as double,
+          paymentMethod: 'CASH',
+        );
+        if (!ok) allOk = false;
+      }
+      if (!mounted) return;
+      applySuccessState('cash');
+      if (!allOk) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Some cash payments failed to sync — contact support'),
+          backgroundColor: Colors.orange,
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 6),
+        ));
+      }
+      _refreshPaymentInfo();
+      _loadLinkedPatients();
+      return;
+    }
+
     setState(() => _isProcessingPayment = true);
 
     openRazorpay(
       options: {
         'key':         'rzp_test_SonqjjPurqlLci',
-        'amount':      (totalAmount * 100).toInt(),
+        'amount':      (enteredAmount * 100).toInt(),
         'name':        'MicroLab',
         'description': 'Combined payment · ${unpaidItems.length} members',
         'prefill': {
@@ -1300,32 +1939,14 @@ void _resumeJourney() {
       },
       onSuccess: (paymentId) async {
         if (!mounted) return;
-        setState(() {
-          _isProcessingPayment = false;
-          final parentItem = unpaidItems.where((i) => i['isParent'] == true).toList();
-          if (parentItem.isNotEmpty) {
-            _sessionPaymentCollected += parentItem.first['amount'] as double;
-            _livePaymentStatus        = 'paid';
-            _paidTestIds              = {..._paidTestIds, ..._selectedTests.map((t) => t['id'] ?? '').toSet()};
-          }
-          _linkedPatients = _linkedPatients.map((p) {
-            final sibId = (p['booking_id'] as num?)?.toInt();
-            final inList = unpaidItems.any((i) => i['bookingId'] == sibId && i['isParent'] == false);
-            return inList ? {...p, 'payment_status': 'paid', 'amount_due': 0.0} : p;
-          }).toList();
-        });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content:         Text('Combined ₹${totalAmount.toInt()} received · $paymentId'),
-          backgroundColor: AppColors.brandGreen,
-          behavior:        SnackBarBehavior.floating,
-          shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        applySuccessState(paymentId);
         // Persist each booking's record individually with the same Razorpay ID
-        for (final item in unpaidItems) {
+        for (final a in toCharge) {
           await ApiService.collectPayment(
-            bookingId:         item['bookingId'] as int,
+            bookingId:         a['bookingId'] as int,
             razorpayPaymentId: paymentId,
-            amount:            item['amount']    as double,
+            amount:            a['allocated'] as double,
+            paymentMethod:     'RAZORPAY',
           );
         }
         if (mounted) {
@@ -1357,7 +1978,7 @@ void _resumeJourney() {
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
-        if (!didPop) Navigator.of(context).pop(_isCompleted ? true : null);
+        if (!didPop) _exitScreen();
       },
       child: Scaffold(
       backgroundColor: const Color(0xFFF4F6F8),
@@ -1366,7 +1987,7 @@ void _resumeJourney() {
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
-          onPressed: () => Navigator.pop(context, _isCompleted ? true : null),  // pops with true only when Handed to Lab
+          onPressed: _exitScreen,
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1390,6 +2011,14 @@ void _resumeJourney() {
               ));
             },
           ),
+          // Only before travel starts — matches the server-side gate exactly
+          // (collection_status must still be 'assigned').
+          if (_currentStatus == 'Confirmed')
+            IconButton(
+              icon: const Icon(Icons.cancel_outlined, color: Colors.white),
+              tooltip: "Can't make it",
+              onPressed: _cancelJob,
+            ),
         ],
       ),
       body: ListView(
@@ -1697,7 +2326,11 @@ void _resumeJourney() {
                   const Divider(height: 20),
                   _BillRow('Tests Total', '₹${_testsTotal.toInt()}', bold: true, green: true),
                   const SizedBox(height: 4),
-                  _BillRow('Service Charge', '₹${_serviceChargePaid.toInt()} (paid at booking)', sub: true),
+                  _BillRow(
+                    'Service Charge',
+                    '₹${_serviceCharge.toInt()}${_livePaymentStatus == 'paid' ? ' (paid at booking)' : ' (due now)'}',
+                    sub: true,
+                  ),
                   const Divider(height: 16),
                   _BillRow('Amount Due Now', '₹${_amountDue.toInt()}', bold: true, green: true),
                 ],
@@ -1710,10 +2343,10 @@ void _resumeJourney() {
           // ── Prescription / Document ─────────────────────────
           // Shown only when the booking requires a prescription OR when
           // documents have already been uploaded (to avoid hiding existing uploads).
-          if (_docRequired || _docUploads.isNotEmpty) _SectionCard(
+          if (_anyDocRequired || _docUploads.isNotEmpty) _SectionCard(
             title: 'Prescription / Document',
             icon: Icons.description_outlined,
-            badge: _docRequired ? 'REQUIRED' : null,
+            badge: _anyDocRequired ? 'REQUIRED' : null,
             child: _docsLoading
                 ? const Padding(
                     padding: EdgeInsets.symmetric(vertical: 24),
@@ -1723,35 +2356,35 @@ void _resumeJourney() {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: _docRequired
+                  color: _anyDocRequired
                       ? const Color(0xFFFFF3E0)
                       : AppColors.brandGreenSurface,
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(
-                    color: _docRequired
+                    color: _anyDocRequired
                         ? const Color(0xFFFFCC02).withOpacity(0.4)
                         : AppColors.brandGreenLight,
                   ),
                 ),
                 child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Icon(
-                    _docRequired
+                    _anyDocRequired
                         ? Icons.warning_amber_rounded
                         : Icons.info_outline_rounded,
                     size: 13,
-                    color: _docRequired
+                    color: _anyDocRequired
                         ? const Color(0xFFE65100)
                         : AppColors.brandGreen,
                   ),
                   const SizedBox(width: 7),
                   Expanded(child: Text(
-                    _docRequired
-                        ? 'This booking requires a doctor\'s prescription. Upload and verify before collecting sample.'
+                    _anyDocRequired
+                        ? 'A doctor\'s prescription is required — mandatory for every patient whose test needs one. Upload and verify each before collecting samples.'
                         : 'Upload prescription if provided by the customer.',
                     style: TextStyle(
                       fontSize: 12,
                       height: 1.4,
-                      color: _docRequired
+                      color: _anyDocRequired
                           ? const Color(0xFF795548)
                           : AppColors.brandGreen,
                     ),
@@ -1760,72 +2393,130 @@ void _resumeJourney() {
               ),
               const SizedBox(height: 12),
 
-              if (_docUploads.isNotEmpty) ...[
-                SizedBox(
-                  height: 104,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: _docUploads.length +
-                        (_docUploads.length < _docMaxFiles ? 1 : 0),
-                    separatorBuilder: (_, __) => const SizedBox(width: 8),
-                    itemBuilder: (_, i) {
-                      if (i == _docUploads.length) {
-                        return _DocAddMoreTile(
-                          onTap: _docIsPicking ? null : _showDocSourcePicker,
-                        );
-                      }
-                      return _DocThumbnailCard(
-                        doc: _docUploads[i],
-                        onView: () => _viewDocImage(i),
-                        onDelete: () { _deleteDocImage(i); },
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '${_docUploads.length} of $_docMaxFiles image${_docUploads.length == 1 ? '' : 's'} uploaded',
-                  style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
-                ),
-                const SizedBox(height: 12),
-              ],
-
-              if (_docUploads.isEmpty)
-                GestureDetector(
-                  onTap: _docIsPicking ? null : _showDocSourcePicker,
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(vertical: 22),
-                    decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.divider, width: 1.5),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        _docIsPicking
-                            ? const SizedBox(
-                                width: 24, height: 24,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: AppColors.brandGreen))
-                            : const Icon(Icons.upload_file_outlined,
-                                size: 28, color: AppColors.brandGreen),
-                        const SizedBox(height: 8),
-                        Text(
-                          _docIsPicking ? 'Picking…' : 'Tap to upload prescription',
-                          style: const TextStyle(
-                              fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen),
+              // One section per patient in this visit (primary + any family
+              // members). Each prescription is fetched already tagged with
+              // patient_id (see _loadDocs), so filtering here shows only that
+              // patient's own document(s) — never another member's by mistake.
+              // Upload is available for EVERY patient (not just primary) —
+              // attributed to that patient's own booking_id/patient_id, the
+              // same pattern the customer app already uses successfully for
+              // family bookings (see savePrescription's bookingId/patientId
+              // params — it was never primary-only server-side).
+              ..._visitPatients.map((patient) {
+                final pid          = patient['id'] as int?;
+                final patientBookingId = patient['bookingId'] as int?;
+                final pname        = patient['name'] as String;
+                final needsDoc     = _patientDocRequired[pid] == true;
+                final patientDocs  = _docUploads.where((d) => d.patientId == pid).toList();
+                final canUpload    = pid != null && patientBookingId != null;
+                debugPrint('[render] patient=$pname (id=$pid) docs=${patientDocs.length} needsDoc=$needsDoc');
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [
+                        Text(pname,
+                            style: const TextStyle(
+                                fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                        if (needsDoc && patientDocs.isEmpty) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFF3E0),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Text('REQUIRED',
+                                style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
+                          ),
+                        ],
+                      ]),
+                      const SizedBox(height: 8),
+                      if (patientDocs.isEmpty)
+                        canUpload
+                            ? GestureDetector(
+                                onTap: _docIsPicking
+                                    ? null
+                                    : () => _showDocSourcePicker(
+                                        targetBookingId: patientBookingId, targetPatientId: pid),
+                                child: Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.symmetric(vertical: 22),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.background,
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: AppColors.divider, width: 1.5),
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      _docIsPicking
+                                          ? const SizedBox(
+                                              width: 24, height: 24,
+                                              child: CircularProgressIndicator(
+                                                  strokeWidth: 2, color: AppColors.brandGreen))
+                                          : const Icon(Icons.upload_file_outlined,
+                                              size: 28, color: AppColors.brandGreen),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        _docIsPicking ? 'Picking…' : 'Tap to upload prescription',
+                                        style: const TextStyle(
+                                            fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen),
+                                      ),
+                                      const SizedBox(height: 3),
+                                      Text(
+                                        'Up to $_docMaxFiles images · JPG or PNG',
+                                        style: const TextStyle(fontSize: 11, color: AppColors.textHint),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              )
+                            : Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                decoration: BoxDecoration(
+                                  color: AppColors.background,
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: AppColors.divider),
+                                ),
+                                child: const Center(
+                                  child: Text('No Prescription Uploaded',
+                                      style: TextStyle(
+                                          fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic)),
+                                ),
+                              )
+                      else
+                        SizedBox(
+                          height: 104,
+                          child: ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: patientDocs.length +
+                                (canUpload && patientDocs.length < _docMaxFiles ? 1 : 0),
+                            separatorBuilder: (_, __) => const SizedBox(width: 8),
+                            itemBuilder: (_, i) {
+                              if (i == patientDocs.length) {
+                                return _DocAddMoreTile(
+                                  onTap: _docIsPicking
+                                      ? null
+                                      : () => _showDocSourcePicker(
+                                          targetBookingId: patientBookingId!, targetPatientId: pid!),
+                                );
+                              }
+                              final doc = patientDocs[i];
+                              return _DocThumbnailCard(
+                                doc: doc,
+                                onView: () => _viewDocImage(doc),
+                                onDelete: () => _deleteDocImage(doc),
+                              );
+                            },
+                          ),
                         ),
-                        const SizedBox(height: 3),
-                        Text(
-                          'Up to $_docMaxFiles images · JPG or PNG',
-                          style: const TextStyle(fontSize: 11, color: AppColors.textHint),
-                        ),
-                      ],
-                    ),
+                    ],
                   ),
-                ),
+                );
+              }),
 
               if (_docUploads.isNotEmpty && !_docVerified) ...[
                 const SizedBox(height: 10),
@@ -1879,10 +2570,12 @@ void _resumeJourney() {
                     const SizedBox(width: 8),
                     Expanded(child: Text(
                       _paymentDone
-                          ? 'Service charge ₹${_serviceChargePaid.toInt()} paid at booking. All tests also paid.'
+                          ? (_livePaymentStatus == 'paid'
+                              ? 'Service charge ₹${_serviceCharge.toInt()} paid at booking. All tests also paid.'
+                              : 'All dues collected — service charge ₹${_serviceCharge.toInt()} + tests.')
                           : _livePaymentStatus == 'paid'
                               ? 'Original booking (₹${_liveAmountPaid.toInt()}) paid. Collect additional tests: ₹${_amountDue.toInt()}'
-                              : 'Service charge ₹${_serviceChargePaid.toInt()} paid at booking. Collect tests amount: ₹${_amountDue.toInt()}',
+                              : 'Service charge ₹${_serviceCharge.toInt()} not yet paid. Collect total due: ₹${_amountDue.toInt()}',
                       style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
                     )),
                   ]),
@@ -2211,7 +2904,7 @@ void _resumeJourney() {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                       ));
                     }
-                    Navigator.pop(context, _isCompleted ? true : null);
+                    _exitScreen();
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.brandGreen,
@@ -2291,6 +2984,50 @@ class _InfoRow extends StatelessWidget {
           Expanded(child: Text(value,
               style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textPrimary))),
         ]),
+      );
+}
+
+// ─── Payment Method Chip ──────────────────────────────────────────────────────
+
+class _PaymentMethodChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  const _PaymentMethodChip({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: selected ? AppColors.brandGreenSurface : Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: selected ? AppColors.brandGreen : AppColors.divider,
+              width: selected ? 1.5 : 1,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 20, color: selected ? AppColors.brandGreen : AppColors.textSecondary),
+              const SizedBox(height: 4),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: selected ? AppColors.brandGreen : AppColors.textSecondary)),
+            ],
+          ),
+        ),
       );
 }
 
@@ -3546,6 +4283,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
           itemBuilder: (_, i) {
             final t = filtered[i];
             final checked = _selectedTestIds.contains(t['id']);
+            final needsDoc = t['docRequired'] == 'yes';
             return CheckboxListTile(
               value: checked,
               onChanged: (v) => setState(() {
@@ -3556,10 +4294,21 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
               contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
               title: Text(t['name'] ?? '',
                   style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
-              subtitle: (t['category'] ?? '').isNotEmpty
-                  ? Text(t['category']!,
-                      style: const TextStyle(fontSize: 11, color: AppColors.brandGreen))
-                  : null,
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if ((t['category'] ?? '').isNotEmpty)
+                    Text(t['category']!,
+                        style: const TextStyle(fontSize: 11, color: AppColors.brandGreen)),
+                  if (needsDoc)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: Text('⚠ Requires prescription — mandatory to upload after adding',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
+                    ),
+                ],
+              ),
               secondary: Text('₹${t['price'] ?? '0'}',
                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
                       color: AppColors.textPrimary)),

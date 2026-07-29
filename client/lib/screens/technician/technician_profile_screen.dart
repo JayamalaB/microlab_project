@@ -30,17 +30,17 @@ class TechnicianProfileScreen extends StatefulWidget {
       _TechnicianProfileScreenState();
 }
 
-class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
+class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with WidgetsBindingObserver {
   bool _isEditing    = false;
   bool _statsLoading = true;
 
   // ── Profile fields (loaded from SharedPreferences + API) ─────────────────────
   String _name           = '';
   String _email          = '';
-  String _experience     = '';
   String _technicianCode = '';
   String _branchName     = '';
   String _photoUrl       = '';
+  String _techCity       = '';
   List<String> _specializations = [];
 
   // ── Today's stats (loaded from API) ──────────────────────────────────────────
@@ -51,7 +51,6 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
 
   late TextEditingController _nameCtrl;
   late TextEditingController _emailCtrl;
-  late TextEditingController _expCtrl;
 
   late List<String> _editingSpecs;
 
@@ -65,9 +64,23 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
     super.initState();
     _nameCtrl     = TextEditingController();
     _emailCtrl    = TextEditingController();
-    _expCtrl      = TextEditingController();
     _editingSpecs = [];
     _loadProfile();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      final prefs = SharedPreferences.getInstance();
+      prefs.then((p) {
+        final techId = p.getInt('user_id') ?? 0;
+        if (techId > 0) {
+          setState(() => _statsLoading = true);
+          _loadStats(techId);
+        }
+      });
+    }
   }
 
   Future<void> _loadProfile() async {
@@ -93,6 +106,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
         _technicianCode = code;
         _branchName     = city;
         _photoUrl       = photo;
+        _techCity       = city;
         _specializations = specs;
         _nameCtrl.text  = name;
         _emailCtrl.text = email;
@@ -134,9 +148,9 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _nameCtrl.dispose();
     _emailCtrl.dispose();
-    _expCtrl.dispose();
     super.dispose();
   }
 
@@ -164,7 +178,6 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
   void _cancelEdit() {
     _nameCtrl.text = _name;
     _emailCtrl.text = _email;
-    _expCtrl.text = _experience;
     setState(() => _isEditing = false);
   }
 
@@ -245,11 +258,9 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
   void _save() {
     final name = _nameCtrl.text.trim();
     final email = _emailCtrl.text.trim();
-    final exp = _expCtrl.text.trim();
     setState(() {
       if (name.isNotEmpty) _name = name;
       _email = email;
-      if (exp.isNotEmpty) _experience = exp;
       _specializations = List.from(_editingSpecs);
       _isEditing = false;
     });
@@ -353,7 +364,17 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
       ),
     );
 
-    final body = ListView(
+    final body = RefreshIndicator(
+      onRefresh: () async {
+        final prefs = await SharedPreferences.getInstance();
+        final techId = prefs.getInt('user_id') ?? 0;
+        if (techId > 0) {
+          setState(() => _statsLoading = true);
+          await _loadStats(techId);
+        }
+      },
+      color: AppColors.brandGreen,
+      child: ListView(
       padding: const EdgeInsets.fromLTRB(16, 20, 16, 80),
       children: [
         // ── Profile card ─────────────────────────────────────
@@ -484,18 +505,11 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
                     value: _email.isNotEmpty ? _email : '—'),
               const _HDivider(),
 
-              // ── Experience (editable) ─────────────────────
-              if (_isEditing)
-                _EditField(
-                  controller: _expCtrl,
-                  hint: 'e.g. 6 years',
-                  icon: Icons.work_outline_rounded,
-                )
-              else
-                _InfoRow(
-                    icon: Icons.work_outline_rounded,
-                    label: 'Experience',
-                    value: _experience),
+              // ── City (locked) ──────────────────────────────
+              _LockedRow(
+                  icon: Icons.location_city_outlined,
+                  label: 'City',
+                  value: _techCity.isNotEmpty ? _techCity : '—'),
 
               // ── Save / Cancel ─────────────────────────────
               if (_isEditing) ...[
@@ -650,6 +664,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> {
           ),
         ],
       ],
+      ),
     );
 
     if (widget.embedded) {

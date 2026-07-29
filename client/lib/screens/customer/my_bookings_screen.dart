@@ -1,11 +1,16 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/customer_refresh_notifier.dart';
 import 'package:microlab/services/razorpay_service.dart';
+import 'package:microlab/services/socket_service.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
 import 'tracking_map_screen.dart';
@@ -20,16 +25,29 @@ class MyBookingsScreen extends StatefulWidget {
   State<MyBookingsScreen> createState() => _MyBookingsScreenState();
 }
 
-class _MyBookingsScreenState extends State<MyBookingsScreen> {
+class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBindingObserver {
   List<BookingModel> _bookings = [];
   bool _isLoading = true;
   String? _error;
+
+  StreamSubscription<BookingAcceptedEvent>? _acceptedSub;
+  StreamSubscription<int>? _enRouteSub;
+  StreamSubscription<int>? _arrivedSub;
+  StreamSubscription<int>? _collectedSub;
+  StreamSubscription<bool>? _connectedSub;
 
   @override
   void initState() {
     super.initState();
     _loadBookings();
     widget.refreshTrigger?.addListener(_loadBookings);
+    WidgetsBinding.instance.addObserver(this);
+    CustomerRefreshNotifier.instance.addListener(_onFcmRefresh);
+    _acceptedSub  = SocketService.instance.onBookingAccepted.listen((_) => _loadBookings());
+    _enRouteSub   = SocketService.instance.onTechnicianEnRoute.listen((_) => _loadBookings());
+    _arrivedSub   = SocketService.instance.onTechnicianArrived.listen((_) => _loadBookings());
+    _collectedSub = SocketService.instance.onCollectionCompleted.listen((_) => _loadBookings());
+    _connectedSub = SocketService.instance.onConnected.listen((_) => _loadBookings());
   }
 
   Future<void> _loadBookings() async {
@@ -180,6 +198,10 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
       rating:              b['overall_rating'] != null ? (b['overall_rating'] as num).toInt() : null,
       feedbackComment:     b['feedback_comments'] as String?,
       reportUrl:           b['report_url'] as String?,
+      refundAmount:        b['refund_amount'] != null ? double.tryParse(b['refund_amount'].toString()) : null,
+      refundStatus:        b['refund_status'] as String?,
+      rescheduleCount:     b['reschedule_count'] != null ? (b['reschedule_count'] as num).toInt() : 0,
+      canReschedule:       b['can_reschedule'] as bool? ?? true,
     );
   }
 
@@ -201,7 +223,26 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
   @override
   void dispose() {
     widget.refreshTrigger?.removeListener(_loadBookings);
+    WidgetsBinding.instance.removeObserver(this);
+    CustomerRefreshNotifier.instance.removeListener(_onFcmRefresh);
+    _acceptedSub?.cancel();
+    _enRouteSub?.cancel();
+    _arrivedSub?.cancel();
+    _collectedSub?.cancel();
+    _connectedSub?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _loadBookings();
+  }
+
+  void _onFcmRefresh() {
+    if (CustomerRefreshNotifier.instance.lastEvent ==
+        CustomerRefreshEvent.bookingStatusChanged) {
+      _loadBookings();
+    }
   }
 
   @override
@@ -276,36 +317,49 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
 
     final groups = _patientGroups;
     if (groups.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(40),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 72, height: 72,
-                decoration: const BoxDecoration(
-                    color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-                child: const Icon(Icons.calendar_today_outlined,
-                    size: 32, color: AppColors.brandGreen),
+      return RefreshIndicator(
+        onRefresh: () async => _loadBookings(),
+        color: AppColors.brandGreen,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: SizedBox(
+            height: MediaQuery.of(context).size.height * 0.7,
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 72, height: 72,
+                      decoration: const BoxDecoration(
+                          color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+                      child: const Icon(Icons.calendar_today_outlined,
+                          size: 32, color: AppColors.brandGreen),
+                    ),
+                    const SizedBox(height: 16),
+                    const Text('No bookings yet',
+                        style: TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Your booked tests will appear here.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
+                    ),
+                  ],
+                ),
               ),
-              const SizedBox(height: 16),
-              const Text('No bookings yet',
-                  style: TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-              const SizedBox(height: 8),
-              const Text(
-                'Your booked tests will appear here.',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
-              ),
-            ],
+            ),
           ),
         ),
       );
     }
 
-    return ColoredBox(
+    return RefreshIndicator(
+      onRefresh: () async => _loadBookings(),
+      color: AppColors.brandGreen,
+      child: ColoredBox(
       color: const Color(0xFFF4F6F8),
       child: ListView.builder(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
@@ -328,6 +382,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> {
             },
           );
         },
+      ),
       ),
     );
   }
@@ -428,10 +483,16 @@ class _PatientBookingsPage extends StatefulWidget {
 }
 
 class _PatientBookingsPageState extends State<_PatientBookingsPage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabCtrl;
   late List<BookingModel> _bookings;
   bool _reloading = false;
+
+  StreamSubscription<BookingAcceptedEvent>? _acceptedSub;
+  StreamSubscription<int>? _enRouteSub;
+  StreamSubscription<int>? _arrivedSub;
+  StreamSubscription<int>? _collectedSub;
+  StreamSubscription<bool>? _connectedSub;
 
   static const _tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
 
@@ -440,10 +501,28 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
     super.initState();
     _bookings = List.from(widget.initialBookings);
     _tabCtrl = TabController(length: _tabs.length, vsync: this);
+    WidgetsBinding.instance.addObserver(this);
+    _acceptedSub  = SocketService.instance.onBookingAccepted.listen((_) => _reload());
+    _enRouteSub   = SocketService.instance.onTechnicianEnRoute.listen((_) => _reload());
+    _arrivedSub   = SocketService.instance.onTechnicianArrived.listen((_) => _reload());
+    _collectedSub = SocketService.instance.onCollectionCompleted.listen((_) => _reload());
+    _connectedSub = SocketService.instance.onConnected.listen((_) => _reload());
+    _reload();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _reload();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _acceptedSub?.cancel();
+    _enRouteSub?.cancel();
+    _arrivedSub?.cancel();
+    _collectedSub?.cancel();
+    _connectedSub?.cancel();
     _tabCtrl.dispose();
     super.dispose();
   }
@@ -669,18 +748,234 @@ void _showCancelSheet(BuildContext context, BookingModel booking, bool chargeApp
   );
 }
 
-void _downloadReport(BuildContext context, BookingModel booking) {
-  // TODO: url_launcher → launch(booking.reportUrl!)
-  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-    content: Row(children: [
-      const Icon(Icons.download_outlined, color: Colors.white, size: 16),
-      const SizedBox(width: 8),
-      Expanded(child: Text('Downloading report for ${booking.member.name}…')),
-    ]),
-    backgroundColor: AppColors.brandGreen,
-    behavior: SnackBarBehavior.floating,
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-  ));
+
+void _showRescheduleSheet(BuildContext context, BookingModel booking, VoidCallback? onRescheduled) {
+  showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => _RescheduleSheet(
+      booking: booking,
+      onConfirm: (collectionDate, availableSlotId, slotLabel) async {
+        final result = await ApiService.rescheduleBooking(
+          booking.bookingIdNum!,
+          collectionDate: collectionDate,
+          availableSlotId: availableSlotId,
+        );
+        if (!context.mounted) return;
+        if (result['success'] == true) {
+          Navigator.pop(context);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Booking rescheduled to $collectionDate at $slotLabel'),
+            backgroundColor: AppColors.brandGreen,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+          onRescheduled?.call();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(result['message'] ?? 'Could not reschedule'),
+            backgroundColor: const Color(0xFFD32F2F),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
+        }
+      },
+    ),
+  );
+}
+
+class _RescheduleSheet extends StatefulWidget {
+  final BookingModel booking;
+  final Future<void> Function(String collectionDate, int availableSlotId, String slotLabel) onConfirm;
+  const _RescheduleSheet({required this.booking, required this.onConfirm});
+
+  @override
+  State<_RescheduleSheet> createState() => _RescheduleSheetState();
+}
+
+class _RescheduleSheetState extends State<_RescheduleSheet> {
+  DateTime? _date;
+  Map<String, dynamic>? _slot; // {time_slot_id, label, time, remaining}
+  List<Map<String, dynamic>> _slots = [];
+  bool _loadingSlots = false;
+  bool _submitting   = false;
+  String _slotError  = '';
+
+  String _toApiDate(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  String _fmtDate(DateTime d) {
+    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const days   = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+    return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
+  }
+
+  Future<void> _pickDate() async {
+    final now    = DateTime.now();
+    final picked = await showDatePicker(
+      context:     context,
+      initialDate: _date ?? now,
+      firstDate:   now,
+      lastDate:    now.add(const Duration(days: 30)),
+      helpText:    'SELECT NEW DATE',
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: const ColorScheme.light(
+            primary: Color(0xFF1565C0), onPrimary: Colors.white, surface: Colors.white,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) {
+      setState(() { _date = picked; _slot = null; _slots = []; _slotError = ''; });
+      _loadSlots(picked);
+    }
+  }
+
+  Future<void> _loadSlots(DateTime date) async {
+    setState(() { _loadingSlots = true; _slotError = ''; });
+    try {
+      final branchId   = widget.booking.branch?.id ?? '';
+      final slotType   = widget.booking.mode == 'Home Collection' ? 'home_collection' : 'lab_visit';
+      final uri = Uri.parse('${AppConstants.serverUrl}/api/slots').replace(queryParameters: {
+        'branch_id': branchId,
+        'date':      _toApiDate(date),
+        'slot_type': slotType,
+      });
+      final res  = await http.get(uri).timeout(const Duration(seconds: 10));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (!mounted) return;
+      if (res.statusCode == 200 && body['success'] == true) {
+        final list = (body['slots'] as List).cast<Map<String, dynamic>>();
+        setState(() {
+          _slots        = list;
+          _loadingSlots = false;
+          _slotError    = list.isEmpty ? 'No slots available for this date.' : '';
+        });
+      } else {
+        setState(() { _loadingSlots = false; _slotError = body['message'] as String? ?? 'Could not load slots.'; });
+      }
+    } catch (_) {
+      if (mounted) setState(() { _loadingSlots = false; _slotError = 'Could not reach the server.'; });
+    }
+  }
+
+  Future<void> _submit() async {
+    if (_date == null || _slot == null || _submitting) return;
+    setState(() => _submitting = true);
+    try {
+      await widget.onConfirm(_toApiDate(_date!), _slot!['time_slot_id'] as int, _slot!['label'] as String);
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      padding: EdgeInsets.fromLTRB(20, 16, 20, MediaQuery.of(context).padding.bottom + 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(child: Container(width: 36, height: 4, decoration: BoxDecoration(
+            color: AppColors.divider, borderRadius: BorderRadius.circular(2)))),
+          const SizedBox(height: 16),
+          const Text('Reschedule Booking',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          const SizedBox(height: 4),
+          Text('Current: ${widget.booking.timeSlot} · ${_fmtDate(widget.booking.date)}',
+              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+          const SizedBox(height: 20),
+
+          // Date picker
+          GestureDetector(
+            onTap: _pickDate,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+              decoration: BoxDecoration(
+                color: _date != null ? const Color(0xFFF0F7FF) : AppColors.background,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: _date != null ? const Color(0xFF1565C0) : AppColors.divider,
+                    width: _date != null ? 1.5 : 1),
+              ),
+              child: Row(children: [
+                Icon(Icons.event_outlined, size: 18,
+                    color: _date != null ? const Color(0xFF1565C0) : AppColors.textHint),
+                const SizedBox(width: 10),
+                Text(_date != null ? _fmtDate(_date!) : 'Select new date',
+                    style: TextStyle(fontSize: 14,
+                        color: _date != null ? AppColors.textPrimary : AppColors.textHint)),
+                const Spacer(),
+                const Icon(Icons.keyboard_arrow_down_rounded, color: AppColors.textHint),
+              ]),
+            ),
+          ),
+
+          const SizedBox(height: 14),
+
+          // Slots
+          if (_loadingSlots)
+            const Center(child: Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF1565C0)),
+            ))
+          else if (_slotError.isNotEmpty)
+            Text(_slotError, style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)))
+          else if (_slots.isNotEmpty)
+            Wrap(
+              spacing: 8, runSpacing: 8,
+              children: _slots.map((s) {
+                final selected = _slot?['time_slot_id'] == s['time_slot_id'];
+                return GestureDetector(
+                  onTap: () => setState(() => _slot = s),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                    decoration: BoxDecoration(
+                      color: selected ? const Color(0xFF1565C0) : Colors.white,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                          color: selected ? const Color(0xFF1565C0) : AppColors.divider,
+                          width: selected ? 1.5 : 1),
+                    ),
+                    child: Text(s['label'] as String,
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                            color: selected ? Colors.white : AppColors.textPrimary)),
+                  ),
+                );
+              }).toList(),
+            ),
+
+          const SizedBox(height: 20),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: ElevatedButton(
+              onPressed: (_date != null && _slot != null && !_submitting) ? _submit : null,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1565C0),
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: const Color(0xFF1565C0).withValues(alpha: 0.35),
+                elevation: 0,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              child: _submitting
+                  ? const SizedBox(width: 20, height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Text('Confirm Reschedule',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 // ─── Booking Card ─────────────────────────────────────────────────────────────
@@ -850,6 +1145,18 @@ class _BookingCard extends StatelessWidget {
                             if (booking.paymentType == 'service_charge')
                               Text('Due at collection: ₹${(booking.grandTotal - booking.paidAmount).toInt()}',
                                   style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                            if (booking.status == 'Cancelled' && (booking.refundAmount ?? 0) > 0)
+                              Text(
+                                booking.refundStatus == 'processed'
+                                    ? 'Refund of ₹${booking.refundAmount!.toInt()} initiated · 5–7 days'
+                                    : 'Refund of ₹${booking.refundAmount!.toInt()} pending',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: booking.refundStatus == 'processed'
+                                      ? AppColors.brandGreen
+                                      : const Color(0xFFE65100),
+                                ),
+                              ),
                           ],
                         ),
                         Row(
@@ -916,6 +1223,34 @@ class _BookingCard extends StatelessWidget {
                       ),
                     ],
 
+                    // Reschedule button
+                    if (booking.canReschedule &&
+                        (booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
+                        !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
+                        (booking.collectionStatus == null || booking.collectionStatus == 'assigned')) ...[
+                      const SizedBox(height: 10),
+                      GestureDetector(
+                        onTap: () => _showRescheduleSheet(context, booking, onCancelled),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 9),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF0F7FF),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFF90CAF9)),
+                          ),
+                          child: const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.edit_calendar_outlined, size: 15, color: Color(0xFF1565C0)),
+                              SizedBox(width: 6),
+                              Text('Reschedule',
+                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1565C0))),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+
                     // Cancel button — only for pending/scheduled/confirmed, future dates,
                     // and before technician starts collection
                     if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
@@ -947,30 +1282,6 @@ class _BookingCard extends StatelessWidget {
                       ),
                     ],
 
-                    // Download report for completed bookings
-                    if (booking.status == 'Completed' && booking.reportUrl != null) ...[
-                      const SizedBox(height: 10),
-                      GestureDetector(
-                        onTap: () => _downloadReport(context, booking),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 9),
-                          decoration: BoxDecoration(
-                            color: AppColors.brandGreenSurface,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: AppColors.brandGreenLight),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: const [
-                              Icon(Icons.download_outlined, size: 16, color: AppColors.brandGreen),
-                              SizedBox(width: 6),
-                              Text('Download Report',
-                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
                   ],
                 ),
               ),
@@ -993,7 +1304,8 @@ class _BookingDetailSheet extends StatefulWidget {
   State<_BookingDetailSheet> createState() => _BookingDetailSheetState();
 }
 
-class _BookingDetailSheetState extends State<_BookingDetailSheet> {
+class _BookingDetailSheetState extends State<_BookingDetailSheet>
+    with WidgetsBindingObserver {
   bool _isProcessing = false;
 
   // Test results (released only)
@@ -1009,6 +1321,12 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
   double? _patientLat;
   double? _patientLng;
   bool    _isTechRefreshing = false;
+
+  StreamSubscription<BookingAcceptedEvent>? _acceptedSub;
+  StreamSubscription<int>? _enRouteSub;
+  StreamSubscription<int>? _arrivedSub;
+  StreamSubscription<int>? _collectedSub;
+  StreamSubscription<bool>? _connectedSub;
 
   Future<void> _loadResults() async {
     if (widget.booking.bookingIdNum == null) return;
@@ -1029,7 +1347,17 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
     _technicianId      = widget.booking.technicianId;
     _patientLat        = widget.booking.patientLat;
     _patientLng        = widget.booking.patientLng;
+    WidgetsBinding.instance.addObserver(this);
+    _acceptedSub  = SocketService.instance.onBookingAccepted.listen((_) => _refreshTechStatus());
+    _enRouteSub   = SocketService.instance.onTechnicianEnRoute.listen((_) => _refreshTechStatus());
+    _arrivedSub   = SocketService.instance.onTechnicianArrived.listen((_) => _refreshTechStatus());
+    _collectedSub = SocketService.instance.onCollectionCompleted.listen((_) => _refreshTechStatus());
+    _connectedSub = SocketService.instance.onConnected.listen((_) => _refreshTechStatus());
+  }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refreshTechStatus();
   }
 
   Future<void> _refreshTechStatus() async {
@@ -1060,6 +1388,12 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _acceptedSub?.cancel();
+    _enRouteSub?.cancel();
+    _arrivedSub?.cancel();
+    _collectedSub?.cancel();
+    _connectedSub?.cancel();
     clearRazorpay();
     super.dispose();
   }
@@ -1524,25 +1858,6 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet> {
                           );
                         }).toList(),
                       ),
-                    if (b.reportUrl != null) ...[
-                      const SizedBox(height: 12),
-                      GestureDetector(
-                        onTap: () => _downloadReport(context, b),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 13),
-                          decoration: BoxDecoration(
-                            color: AppColors.brandGreen,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                            Icon(Icons.download_outlined, size: 18, color: Colors.white),
-                            SizedBox(width: 8),
-                            Text('Download Report',
-                                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
-                          ]),
-                        ),
-                      ),
-                    ],
                   ],
                 ],
               ),
@@ -1583,6 +1898,7 @@ class _TechnicianCard extends StatelessWidget {
       case 'en_route':           return 'On the way';
       case 'arrived':            return 'Arrived';
       case 'collection_started': return 'Collection Started';
+      case 'otp_verified':        return 'Sample Collected';
       case 'sample_collected':   return 'Sample Collected';
       case 'handed_to_lab':      return 'Handed to Lab';
       default:                   return 'Assigned';
@@ -1594,6 +1910,7 @@ class _TechnicianCard extends StatelessWidget {
       case 'en_route':           return const Color(0xFF1565C0);
       case 'arrived':            return const Color(0xFF2E7D32);
       case 'collection_started': return const Color(0xFF6A1B9A);
+      case 'otp_verified':        return const Color(0xFF2E7D32);
       case 'sample_collected':   return const Color(0xFF2E7D32);
       case 'handed_to_lab':      return AppColors.brandGreen;
       default:                   return AppColors.brandGreen;
@@ -1700,12 +2017,21 @@ class _TechnicianCard extends StatelessWidget {
         CircleAvatar(
           radius: 26,
           backgroundColor: AppColors.brandGreenSurface,
-          backgroundImage: photoUrl != null && photoUrl!.isNotEmpty
-              ? NetworkImage(photoUrl!)
-              : null,
-          child: photoUrl == null || photoUrl!.isEmpty
-              ? const Icon(Icons.person_outline, size: 26, color: AppColors.brandGreen)
-              : null,
+          // Image.network's errorBuilder (unlike CircleAvatar.backgroundImage,
+          // which has no load-failure fallback) lets a broken/404 photo URL
+          // fall back to the person icon instead of rendering a blank circle.
+          child: photoUrl != null && photoUrl!.isNotEmpty
+              ? ClipOval(
+                  child: Image.network(
+                    photoUrl!,
+                    width: 52,
+                    height: 52,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) =>
+                        const Icon(Icons.person_outline, size: 26, color: AppColors.brandGreen),
+                  ),
+                )
+              : const Icon(Icons.person_outline, size: 26, color: AppColors.brandGreen),
         ),
         const SizedBox(width: 14),
         Expanded(

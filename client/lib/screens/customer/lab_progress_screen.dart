@@ -32,11 +32,15 @@ class _LabProgressScreenState extends State<LabProgressScreen> {
   StreamSubscription<int>? _receivedSub;
   StreamSubscription<int>? _testingSub;
   StreamSubscription<ReportReadyEvent>? _reportSub;
+  StreamSubscription<bool>? _connectedSub;
 
   @override
   void initState() {
     super.initState();
     _fetchLabStatus();
+
+    // Re-fetch on reconnect so a socket drop mid-visit doesn't leave a stale stage.
+    _connectedSub = SocketService.instance.onConnected.listen((_) => _fetchLabStatus());
 
     _receivedSub = SocketService.instance.onSampleReceived.listen((id) {
       if (id != widget.bookingId || !mounted) return;
@@ -62,6 +66,7 @@ class _LabProgressScreenState extends State<LabProgressScreen> {
 
   @override
   void dispose() {
+    _connectedSub?.cancel();
     _receivedSub?.cancel();
     _testingSub?.cancel();
     _reportSub?.cancel();

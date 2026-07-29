@@ -242,21 +242,31 @@ class _BookingList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (bookings.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 64, height: 64,
-              decoration: const BoxDecoration(
-                  color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-              child: const Icon(Icons.history_outlined, size: 30, color: AppColors.brandGreen),
+      return RefreshIndicator(
+        onRefresh: () async => onRefresh(),
+        color: AppColors.brandGreen,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: SizedBox(
+            height: 400,
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 64, height: 64,
+                    decoration: const BoxDecoration(
+                        color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+                    child: const Icon(Icons.history_outlined, size: 30, color: AppColors.brandGreen),
+                  ),
+                  const SizedBox(height: 14),
+                  const Text('No records yet',
+                      style: TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                ],
+              ),
             ),
-            const SizedBox(height: 14),
-            const Text('No records yet',
-                style: TextStyle(
-                    fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-          ],
+          ),
         ),
       );
     }

@@ -126,6 +126,25 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
         BookingNotificationService.instance.consumePendingBackgroundBooking();
     if (booking == null) return;
 
+    // The booking may have already timed out or been accepted by another
+    // technician while this device was offline/killed — booking_cancelled only
+    // reaches a live socket, so a killed app never received it. Verify with the
+    // server before resurfacing a possibly-stale request.
+    _verifyAndShowPendingBooking(booking);
+  }
+
+  Future<void> _verifyAndShowPendingBooking(SocketBooking booking) async {
+    final stillPending = await SocketService.instance.checkPendingBooking(
+      bookingId:    booking.bookingId,
+      technicianId: SocketService.instance.userId,
+    );
+    if (!mounted || _overlayOpen || !_isOnline) return;
+    if (!stillPending) {
+      debugPrint('[LIFECYCLE] Pending booking #${booking.bookingId} — stale (already resolved), discarding');
+      BookingNotificationService.instance.cancelBookingNotification(booking.bookingId);
+      return;
+    }
+
     debugPrint('[LIFECYCLE] Pending booking #${booking.bookingId} — showing overlay');
     // Dismiss the notification since the overlay now takes over as the primary UI.
     BookingNotificationService.instance
@@ -336,10 +355,11 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   void _emitAcceptThenHandle(SocketBooking booking) {
     void emit() {
       SocketService.instance.emitBookingAccepted(
-        bookingId:      booking.bookingId,
-        technicianId:   SocketService.instance.userId,
-        technicianName: SocketService.instance.userName,
-        sessionId:      SocketService.instance.sessionId,
+        bookingId:          booking.bookingId,
+        technicianId:       SocketService.instance.userId,
+        technicianName:     SocketService.instance.userName,
+        sessionId:          SocketService.instance.sessionId,
+        isAppointmentBased: booking.appointmentTime != null,
       );
     }
 

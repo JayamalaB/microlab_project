@@ -9,6 +9,7 @@ router.post('/collect-payment',         auth, technicianController.collectPaymen
 router.post('/add-visit-member',        auth, technicianController.addVisitMember);
 router.get('/patient-lookup',           auth, technicianController.lookupPatient);
 router.get('/booking-family',           auth, technicianController.getBookingFamily);
+router.post('/cancel-booking',          auth, technicianController.cancelAssignedBooking);
 
 // Booking OTP (sample-collection handoff)
 router.post('/booking-otp/generate',    auth, technicianController.generateBookingOtp);
