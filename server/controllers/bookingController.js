@@ -1235,6 +1235,17 @@ exports.updateAdminStatus = async (req, res) => {
            WHERE booking_id = ? AND technician_id != ? AND request_status = 'pending'`,
           [bookingId, assignedTechId]
         );
+
+        // Same notification the natural in-app accept flow sends
+        // (bookingSocket.js's booking_accepted handler) — admin-assigned
+        // bookings previously left the patient with no indication a
+        // technician had been assigned at all.
+        sendToBookingOwner(
+          bookingId,
+          'Technician Assigned 🧑‍⚕️',
+          `${techName || 'Your technician'} has been assigned to your booking. They will be on their way soon.`,
+          { type: 'technician_assigned', booking_id: String(bookingId) }
+        );
       }
     } else if (status === 'cancelled') {
       await db.execute(
