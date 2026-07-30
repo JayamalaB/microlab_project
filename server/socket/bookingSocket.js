@@ -571,14 +571,13 @@ async function dispatchAttempt(io, bookingId) {
             'Patient notified.',
           ]);
         }
-        if (bookingType !== 'transport') {
-          dbRun(
-            `UPDATE ip_booking_requests
-             SET request_status = 'expired'
-             WHERE booking_id = ? AND request_status = 'pending'`,
-            [bookingId]
-          );
-        }
+        // Deliberately NOT marking ip_booking_requests as 'expired' here — the
+        // booking stays pending indefinitely for manual admin assignment (see
+        // updateAdminStatus), which already expires every other technician's
+        // pending row once someone is actually assigned. See
+        // check_pending_booking below for why leaving these rows pending is
+        // safe: it now checks the booking's real assignment state rather than
+        // trusting this per-technician row alone.
         return;
       }
     }
@@ -2421,19 +2420,32 @@ module.exports = function bookingSocket(io, socket) {
   // accept-side cancel-others loop both skip any actor with no live socketId).
   // On resume, the client asks here before resurfacing a locally-cached
   // pending request, so an already timed-out or already-accepted-by-someone-
-  // else booking is never re-shown. ip_booking_requests is reused as ground
-  // truth rather than in-memory state, since it's per-technician-id keyed and
-  // already gets overwritten/updated at every stage of the dispatch lifecycle.
+  // else booking is never re-shown.
+  //
+  // A dispatch-exhausted booking is now deliberately left at
+  // ip_booking_requests.request_status = 'pending' indefinitely (see the
+  // ALL_EXHAUSTED branch above) so it stays available for manual admin
+  // assignment — which means this technician's own row alone can no longer
+  // answer "is this still genuinely up for grabs". It's only reliably
+  // superseded once someone is actually assigned (updateAdminStatus expires
+  // every other pending row at that point) — but checking
+  // ip_technician_collection directly, rather than trusting that row's
+  // bookkeeping to always be in sync, is the actual ground truth: if nobody
+  // is assigned yet, a late technician resurfacing this is legitimately still
+  // eligible to accept it.
   socket.on('check_pending_booking', async (data = {}) => {
     const { bookingId, technicianId } = data;
     if (!bookingId || !technicianId) return;
     let stillPending = false;
     try {
       const [[row]] = await db.execute(
-        `SELECT request_status FROM ip_booking_requests WHERE booking_id = ? AND technician_id = ? LIMIT 1`,
+        `SELECT br.request_status,
+                (SELECT COUNT(*) FROM ip_technician_collection tc WHERE tc.booking_id = br.booking_id) AS assigned_count
+         FROM ip_booking_requests br
+         WHERE br.booking_id = ? AND br.technician_id = ? LIMIT 1`,
         [bookingId, technicianId]
       );
-      stillPending = row?.request_status === 'pending';
+      stillPending = row?.request_status === 'pending' && Number(row?.assigned_count ?? 0) === 0;
     } catch (e) {
       console.error(`[check_pending_booking] booking=${bookingId} tech=${technicianId}: ${e.message}`);
       stillPending = false; // fail-safe: don't resurface a stale request on error

@@ -1,30 +1,50 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-import 'package:medicollect/main.dart';
+import 'package:microlab/screens/customer/booking_widgets.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  Widget wrap(Widget child) =>
+      MaterialApp(home: Scaffold(body: Center(child: child)));
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  group('BookingStatusBadge', () {
+    testWidgets('shows Completed text', (tester) async {
+      await tester.pumpWidget(wrap(const BookingStatusBadge(status: 'Completed')));
+      expect(find.text('Completed'), findsOneWidget);
+    });
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    testWidgets('shows Cancelled text', (tester) async {
+      await tester.pumpWidget(wrap(const BookingStatusBadge(status: 'Cancelled')));
+      expect(find.text('Cancelled'), findsOneWidget);
+    });
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    testWidgets('shows In Progress text', (tester) async {
+      await tester.pumpWidget(wrap(const BookingStatusBadge(status: 'In Progress')));
+      expect(find.text('In Progress'), findsOneWidget);
+    });
+
+    testWidgets('shows arbitrary status text', (tester) async {
+      await tester.pumpWidget(wrap(const BookingStatusBadge(status: 'Pending')));
+      expect(find.text('Pending'), findsOneWidget);
+    });
+
+    testWidgets('Completed uses check_circle icon', (tester) async {
+      await tester.pumpWidget(wrap(const BookingStatusBadge(status: 'Completed')));
+      expect(find.byIcon(Icons.check_circle_outline), findsOneWidget);
+    });
+
+    testWidgets('Cancelled uses cancel icon', (tester) async {
+      await tester.pumpWidget(wrap(const BookingStatusBadge(status: 'Cancelled')));
+      expect(find.byIcon(Icons.cancel_outlined), findsOneWidget);
+    });
+
+    testWidgets('In Progress uses directions_run icon', (tester) async {
+      await tester.pumpWidget(wrap(const BookingStatusBadge(status: 'In Progress')));
+      expect(find.byIcon(Icons.directions_run_rounded), findsOneWidget);
+    });
+
+    testWidgets('unknown status uses person_pin icon', (tester) async {
+      await tester.pumpWidget(wrap(const BookingStatusBadge(status: 'Scheduled')));
+      expect(find.byIcon(Icons.person_pin_outlined), findsOneWidget);
+    });
   });
 }
