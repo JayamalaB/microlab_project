@@ -63,6 +63,20 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
     }
   }
 
+  // The primary/self profile is the row with patient_relation = 'Self' (same
+  // convention the server uses — see patientsController.js's ORDER BY and its
+  // `rawPatients.find(p => p.relation === 'Self')`). Falls back to a mobile match,
+  // then null — the chatbot's own inline login form covers "not loaded yet".
+  String? get _selfPatientId {
+    for (final m in _members) {
+      if (m.relation?.toLowerCase() == 'self') return m.id;
+    }
+    for (final m in _members) {
+      if (m.mobile == widget.mobile) return m.id;
+    }
+    return null;
+  }
+
   static DateTime? _parseDob(String? s) {
     if (s == null || s.isEmpty) return null;
     final parts = s.split('-');
@@ -295,11 +309,12 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
               ),
             ],
           ),
-          // Chatbot FAB — sits above the cart bar when visible (cart bar top ≈ 96px)
-          const Positioned(
+          // Chatbot FAB — patientId is the logged-in customer's own self profile;
+          // null (not loaded yet / no self record) falls back to the inline login form.
+          Positioned(
             right: 16,
             bottom: 110,
-            child: SupportChatbotButton(),
+            child: SupportChatbotButton(patientId: _selfPatientId),
           ),
         ],
       ),

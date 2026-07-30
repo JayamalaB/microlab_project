@@ -13,18 +13,12 @@ class OtpScreen extends StatefulWidget {
   final String mobile;
   final String userRole;
   final String? devOtp; // dev only — remove before production
-  final String? technicianName;
-  final String? technicianPhoto;
-  final String? technicianSpecialization;
 
   const OtpScreen({
     super.key,
     required this.mobile,
     required this.userRole,
     this.devOtp,
-    this.technicianName,
-    this.technicianPhoto,
-    this.technicianSpecialization,
   });
 
   @override
@@ -326,81 +320,6 @@ class _OtpScreenState extends State<OtpScreen> {
                 ),
 
                 const SizedBox(height: 32),
-
-                // Technician info card (shown only for technician role)
-                if (widget.userRole == 'technician' && widget.technicianName != null)
-                  Container(
-                    margin: const EdgeInsets.only(bottom: 24),
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: AppColors.brandGreenLight),
-                    ),
-                    child: Row(
-                      children: [
-                        // Avatar / photo
-                        Container(
-                          width: 52,
-                          height: 52,
-                          decoration: BoxDecoration(
-                            color: AppColors.brandGreen.withValues(alpha: 0.15),
-                            shape: BoxShape.circle,
-                          ),
-                          child: ClipOval(
-                            child: (widget.technicianPhoto != null && widget.technicianPhoto!.isNotEmpty)
-                                ? Image.network(
-                                    widget.technicianPhoto!,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => const Icon(
-                                        Icons.person_rounded,
-                                        color: AppColors.brandGreen, size: 28),
-                                  )
-                                : const Icon(Icons.person_rounded,
-                                    color: AppColors.brandGreen, size: 28),
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        // Name + role
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                widget.technicianName!,
-                                style: const TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w600,
-                                  color: AppColors.textPrimary,
-                                ),
-                              ),
-                              if (widget.technicianSpecialization != null &&
-                                  widget.technicianSpecialization!.isNotEmpty) ...[
-                                const SizedBox(height: 3),
-                                Text(
-                                  widget.technicianSpecialization!,
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: AppColors.brandGreen,
-                                  ),
-                                ),
-                              ],
-                              const SizedBox(height: 3),
-                              const Text(
-                                'Technician account verified',
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: AppColors.textSecondary,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const Icon(Icons.verified_rounded,
-                            color: AppColors.brandGreen, size: 20),
-                      ],
-                    ),
-                  ),
 
                 const Text(
                   'Verify OTP',

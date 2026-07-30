@@ -149,11 +149,6 @@ exports.sendOtp = async (req, res) => {
     res.json({
       success: true,
       message: `OTP sent to ${mobile}`,
-      ...(technicianInfo && {
-        name:           technicianInfo.name ?? technicianInfo.technician_name ?? null,
-        specialization: technicianInfo.specialization ?? null,
-        photo:          technicianInfo.tech_photo ?? null,
-      }),
     });
   } catch (err) {
     const errDetail = `step=${step} | ${err.message} | code=${err.code} | sqlState=${err.sqlState} | sql=${err.sql}`;
