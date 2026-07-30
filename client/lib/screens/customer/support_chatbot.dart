@@ -551,10 +551,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   @override
   void initState() {
     super.initState();
-    // TEMPORARY: hardcoded fallback patient_id for testing until real app-level login
-    // wiring is in place. Remove the `?? '51'` once dynamic patient IDs are available —
-    // the login-form fallback below still fires normally whenever this ends up null.
-    _verifiedPatientId = widget.patientId ?? '51';
+    _verifiedPatientId = widget.patientId;
     _recorder  = AudioRecorder();
     _ttsPlayer = AudioPlayer();
     _msgs.add(const _Msg(

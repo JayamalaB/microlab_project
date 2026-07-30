@@ -101,7 +101,12 @@ class LLMRetriever {
                 lastBranchName:  null,
                 lastCity:        null,
                 lastIntent:      null,
-                lastActive:      Date.now()
+                lastActive:      Date.now(),
+                // Set by _resolveTargetPatient when a booking/technician question
+                // matched more than one family member — remembers the original
+                // question so a bare-name follow-up reply ("yuvan") can re-run it
+                // instead of being classified as a brand-new, unrelated question.
+                pendingClarification: null,
             });
             console.log(`🆕 New session: ${sessionId}`);
         }
@@ -133,6 +138,17 @@ class LLMRetriever {
         return resolved;
     }
 
+    // A short reply with none of the strong intent keywords in it — the shape of
+    // an answer to "could you specify which one by name?" ("yuvan"), not a new,
+    // unrelated question. Deliberately conservative (short + no intent keywords)
+    // so a genuinely new question during the same session isn't hijacked.
+    _looksLikeNameReply(text) {
+        const t = text.trim();
+        if (!t || t.split(/\s+/).length > 4) return false;
+        return !(BOOKING_QUERY_PATTERN.test(t) || TECHNICIAN_QUERY_PATTERN.test(t) ||
+                 PATIENT_PROFILE_PATTERN.test(t) || CLIENT_ACCOUNT_PATTERN.test(t));
+    }
+
     _pruneExpiredSessions() {
         const now = Date.now();
         let pruned = 0;
@@ -144,9 +160,23 @@ class LLMRetriever {
 
     async answerWithLLM(question, sessionId, opts = {}) {
         console.log(`🤖 [${sessionId}] Processing: "${question}"`);
-        const isPronoun     = PRONOUN_PATTERN.test(question);
         const skipKnowledge = opts.skipKnowledge === true;
         const patientId     = opts.patientId || null;
+        const session       = this._getSession(sessionId);
+
+        // Resuming a pending "which family member?" disambiguation — a short
+        // bare-name reply ("yuvan") doesn't itself contain any booking/technician
+        // keywords, so re-run classification on the ORIGINAL question instead
+        // (which will naturally re-derive booking_query + relation="father"),
+        // carrying the reply forward as entities.person_name to narrow it down.
+        let forcedPersonName = null;
+        if (session.pendingClarification && this._looksLikeNameReply(question)) {
+            forcedPersonName = question.trim();
+            question = session.pendingClarification.originalQuestion;
+        }
+        session.pendingClarification = null;
+
+        const isPronoun     = PRONOUN_PATTERN.test(question);
 
         // ── 1. Parse intent ────────────────────────────────────────────────────
         const intentData = !isPronoun ? await llmService.parseIntent(question) : null;
@@ -179,6 +209,7 @@ class LLMRetriever {
         }
 
         const entities  = this._resolveContext(sessionId, question, intentData?.entities || {});
+        if (forcedPersonName) entities.person_name = forcedPersonName;
 
         // ── Intent safety-nets ─────────────────────────────────────────────────
         const qLow   = question.toLowerCase();
@@ -230,14 +261,26 @@ class LLMRetriever {
             };
         }
 
+        // Regex fallback for relation extraction — GPT's entity extraction for
+        // relation/person_name isn't reliable enough alone. Feeds both the family-scope
+        // profile lookup below and the booking/technician family-member resolution.
+        if (!entities.relation) {
+            const relMatch = question.match(RELATION_PATTERN);
+            if (relMatch) entities.relation = relMatch[1];
+        }
+
         // Bookings span 3 tables (ip_bookings + ip_available_slots for the exact slot
         // time, ip_booking_items, ip_booking_documents) and need multiple queries, so it
         // gets its own handler instead of the single-SQL build/execute/format pipeline
         // used below for the other intents.
         if (intent === 'booking_query') {
+            const { targetPatientId, subjectName, failMessage } = await this._resolveTargetPatient(patientId, entities, sessionId, question);
+            if (failMessage) {
+                return { question, answer: failMessage, context_used: { intent, from_cache: false, session_id: sessionId } };
+            }
             const explicitLimit = this._extractBookingLimit(question);
             const isHistory = !!explicitLimit || BOOKING_HISTORY_PATTERN.test(question) || entities.booking_history === true;
-            const { answer, dataFound } = await this.answerBookingQuery(patientId, isHistory, explicitLimit);
+            const { answer, dataFound } = await this.answerBookingQuery(targetPatientId, isHistory, explicitLimit, subjectName);
             this._updateSession(sessionId, intent, entities);
             llmService.saveToMemory(sessionId, question, answer);
             return {
@@ -254,9 +297,13 @@ class LLMRetriever {
         // technician_id, scoped to this patient) with ip_technicians (the actual profile)
         // — a second table the generic single-SQL pipeline below doesn't support.
         if (intent === 'technician_info_query') {
+            const { targetPatientId, subjectName, failMessage } = await this._resolveTargetPatient(patientId, entities, sessionId, question);
+            if (failMessage) {
+                return { question, answer: failMessage, context_used: { intent, from_cache: false, session_id: sessionId } };
+            }
             const bookingRef = question.match(BOOKING_REF_PATTERN)?.[0] || null;
             const bookingIdMention = bookingRef ? null : (question.match(BOOKING_ID_MENTION_PATTERN)?.[1] || null);
-            const { answer, dataFound } = await this.answerTechnicianQuery(patientId, bookingRef, bookingIdMention);
+            const { answer, dataFound } = await this.answerTechnicianQuery(targetPatientId, bookingRef, bookingIdMention, subjectName);
             this._updateSession(sessionId, intent, entities);
             llmService.saveToMemory(sessionId, question, answer);
             return {
@@ -271,12 +318,7 @@ class LLMRetriever {
 
         // "my profile" / "my blood group" → the logged-in patient's own row only.
         // "family members" / "my mother's ..." → join across client_id to include
-        // everyone registered under the same account. GPT's entity extraction for
-        // relation/person_name isn't reliable enough alone, so fall back to a regex.
-        if (intent === 'patient_profile_query' && !entities.relation) {
-            const relMatch = question.match(RELATION_PATTERN);
-            if (relMatch) entities.relation = relMatch[1];
-        }
+        // everyone registered under the same account.
         const isFamilyScope = intent === 'patient_profile_query' &&
             (FAMILY_SCOPE_PATTERN.test(question) || !!entities.relation || !!entities.person_name);
 
@@ -402,6 +444,88 @@ class LLMRetriever {
                `WHERE p.patient_id = '${pid}' LIMIT 1`;
     }
 
+    // "father's booking" / "my son's technician" — resolves a specific family member's
+    // own patient_id by joining off the logged-in patient's client_id, same pattern as
+    // buildPatientProfileQuery's family-scope branch. Returns a tri-state result so
+    // callers can distinguish a clean match from "no such relation" vs "ambiguous".
+    async resolveFamilyPatientId(selfPatientId, relation, personName) {
+        if (!selfPatientId || (!relation && !personName)) return { status: 'not_found' };
+        const pid = String(selfPatientId).replace(/'/g, "''");
+        const conditions = [`p1.patient_id = '${pid}'`, 'p2.deleted_at IS NULL'];
+
+        if (relation) {
+            conditions.push(`LOWER(p2.patient_relation) LIKE '%${relation.toLowerCase().replace(/'/g, "''")}%'`);
+        }
+        if (personName) {
+            const n = personName.toLowerCase().replace(/'/g, "''");
+            conditions.push(`(LOWER(p2.patient_name) LIKE '%${n}%' OR LOWER(p2.patient_surname) LIKE '%${n}%')`);
+        }
+
+        const sql = `SELECT p2.patient_id, p2.patient_name, p2.patient_surname, p2.patient_relation ` +
+            `FROM ip_patients p1 JOIN ip_patients p2 ON p2.client_id = p1.client_id ` +
+            `WHERE ${conditions.join(' AND ')} LIMIT 20`;
+
+        let rows = [];
+        try {
+            console.log(`🔍 SQL: ${sql}`);
+            [rows] = await db.pool.execute(sql);
+        } catch (err) {
+            console.error('Family resolution query error:', err);
+            return { status: 'error' };
+        }
+
+        if (rows.length === 0) {
+            // Distinguish "no family members registered at all" from "you have
+            // family members, just none matching this relation/name" — the first
+            // deserves a plainer, more accurate reply than a generic no-match one.
+            try {
+                const countSql = `SELECT COUNT(*) AS cnt FROM ip_patients p1 ` +
+                    `JOIN ip_patients p2 ON p2.client_id = p1.client_id ` +
+                    `WHERE p1.patient_id = '${pid}' AND p2.deleted_at IS NULL AND p2.patient_id != '${pid}'`;
+                const [[{ cnt }]] = await db.pool.execute(countSql);
+                if (Number(cnt) === 0) return { status: 'no_family' };
+            } catch (err) {
+                console.error('Family count query error:', err);
+            }
+            return { status: 'not_found' };
+        }
+
+        const named = (r) => [r.patient_name, r.patient_surname].filter(Boolean).join(' ') || 'Unnamed';
+        if (rows.length > 1) {
+            return { status: 'ambiguous', candidates: rows.map(r => ({ patientId: r.patient_id, name: named(r) })) };
+        }
+        return { status: 'resolved', patientId: rows[0].patient_id, name: named(rows[0]) };
+    }
+
+    // Shared by booking_query/technician_info_query: if the question named a specific
+    // family member, resolve their own patient_id via resolveFamilyPatientId; otherwise
+    // the logged-in patient's own id is used untouched. On zero/ambiguous matches,
+    // returns failMessage so the caller can short-circuit instead of querying at all.
+    // On ambiguous, also remembers the original question in the session so a
+    // bare-name follow-up reply can resume it (see _looksLikeNameReply).
+    async _resolveTargetPatient(patientId, entities, sessionId, question) {
+        if (!entities.relation && !entities.person_name) {
+            return { targetPatientId: patientId, subjectName: null };
+        }
+        const resolved = await this.resolveFamilyPatientId(patientId, entities.relation, entities.person_name);
+        if (resolved.status === 'resolved') {
+            return { targetPatientId: resolved.patientId, subjectName: resolved.name };
+        }
+        const who = entities.relation || entities.person_name;
+        if (resolved.status === 'ambiguous') {
+            this._getSession(sessionId).pendingClarification = { originalQuestion: question };
+            const names = resolved.candidates.map(c => c.name).join(', ');
+            return { failMessage: `👨‍👩‍👧‍👦 More than one match for "${who}": ${names}. Could you specify which one by name?` };
+        }
+        if (resolved.status === 'no_family') {
+            return { failMessage: `👨‍👩‍👧‍👦 You don't have any family members added to your account yet.` };
+        }
+        if (resolved.status === 'not_found') {
+            return { failMessage: `🔍 No family member matching "${who}" found on your account. Please contact us at 0422 4354242.` };
+        }
+        return { failMessage: `⚠️ Could not resolve family member. Please try again or call 0422 4354242.` };
+    }
+
     // Parses an explicit count out of "last two bookings" / "past 3 bookings" / "last
     // couple of bookings" — returns null if the question didn't name a specific count
     // (caller then falls back to 1 for the latest, or 20 for a full history).
@@ -414,12 +538,14 @@ class LLMRetriever {
     }
 
     // Bookings, scoped strictly to this patient_id (not the whole family/client_id —
-    // per spec, only the particular patient's own bookings). Resolves the exact
-    // appointment slot via ip_available_slots (ip_bookings only stores the slot id),
-    // then pulls the line items and a document count for each booking found. Runs as
-    // several queries rather than one big join so item/document rows never duplicate
-    // the booking row (and so "no items" doesn't silently drop a booking via INNER JOIN).
-    async answerBookingQuery(patientId, isHistory, explicitLimit) {
+    // only the particular patient's own bookings; the caller — _resolveTargetPatient —
+    // already picked which patient_id that is, self or a named family member).
+    // Resolves the exact appointment slot via ip_available_slots (ip_bookings only
+    // stores the slot id), then pulls the line items and a document count for each
+    // booking found. Runs as several queries rather than one big join so item/document
+    // rows never duplicate the booking row (and so "no items" doesn't silently drop a
+    // booking via INNER JOIN).
+    async answerBookingQuery(patientId, isHistory, explicitLimit, subjectName) {
         if (!patientId) return { answer: '🔐 To view your booking details, please make sure you are logged in.', dataFound: 0 };
         const pid = String(patientId).replace(/'/g, "''");
         const limit = explicitLimit || (isHistory ? 20 : 1);
@@ -449,7 +575,8 @@ class LLMRetriever {
         }
 
         if (bookings.length === 0) {
-            return { answer: `🔍 No booking found for your account. Please contact us at 0422 4354242.`, dataFound: 0 };
+            const whoseAccount = subjectName ? `${subjectName}'s account` : 'your account';
+            return { answer: `🔍 No booking found for ${whoseAccount}. Please contact us at 0422 4354242.`, dataFound: 0 };
         }
 
         const idList = bookings.map(b => `'${String(b.booking_id).replace(/'/g, "''")}'`).join(',');
@@ -497,7 +624,7 @@ class LLMRetriever {
         }
 
         return {
-            answer: this.formatBookingDetails(bookings, itemsByBooking, docCountByBooking, reportsByBooking, isHistory),
+            answer: this.formatBookingDetails(bookings, itemsByBooking, docCountByBooking, reportsByBooking, isHistory, subjectName),
             dataFound: bookings.length,
         };
     }
@@ -550,15 +677,16 @@ class LLMRetriever {
         return lines.join('\n');
     }
 
-    formatBookingDetails(bookings, itemsByBooking, docCountByBooking, reportsByBooking, isHistory) {
+    formatBookingDetails(bookings, itemsByBooking, docCountByBooking, reportsByBooking, isHistory, subjectName) {
+        const whose = subjectName ? `${subjectName}'s` : 'Your';
         if (!bookings || bookings.length === 0) {
-            return `🔍 No booking found for your account. Please contact us at 0422 4354242.`;
+            return `🔍 No booking found for ${subjectName ? `${subjectName}'s account` : 'your account'}. Please contact us at 0422 4354242.`;
         }
         if (!isHistory) {
-            return `🧾 Your latest booking:\n\n${this._renderBooking(bookings[0], itemsByBooking, docCountByBooking, reportsByBooking, null)}`;
+            return `🧾 ${whose} latest booking:\n\n${this._renderBooking(bookings[0], itemsByBooking, docCountByBooking, reportsByBooking, null)}`;
         }
         const rendered = bookings.map((b, i) => this._renderBooking(b, itemsByBooking, docCountByBooking, reportsByBooking, i + 1));
-        return `📋 Your booking history:\n\n${rendered.join('\n\n')}`;
+        return `📋 ${whose} booking history:\n\n${rendered.join('\n\n')}`;
     }
 
     // Technician assigned to one of the patient's bookings — defaults to the latest
@@ -566,7 +694,7 @@ class LLMRetriever {
     // booking id ("booking 87"). Always re-verifies the booking belongs to this patient_id
     // before joining ip_technicians, so a booking_ref can't be used to probe another
     // patient's technician.
-    async answerTechnicianQuery(patientId, bookingRef, bookingIdMention) {
+    async answerTechnicianQuery(patientId, bookingRef, bookingIdMention, subjectName) {
         if (!patientId) return { answer: '🔐 To view technician details, please make sure you are logged in.', dataFound: 0 };
         const pid = String(patientId).replace(/'/g, "''");
 
@@ -593,20 +721,21 @@ class LLMRetriever {
         }
 
         if (rows.length === 0) {
-            const scope = bookingRef ? `booking ${bookingRef}` : bookingIdMention ? `booking #${bookingIdMention}` : 'your account';
+            const scope = bookingRef ? `booking ${bookingRef}` : bookingIdMention ? `booking #${bookingIdMention}` : (subjectName ? `${subjectName}'s account` : 'your account');
             return { answer: `🔍 No booking found for ${scope}. Please contact us at 0422 4354242.`, dataFound: 0 };
         }
 
-        return { answer: this.formatTechnicianInfo(rows[0]), dataFound: 1 };
+        return { answer: this.formatTechnicianInfo(rows[0], subjectName), dataFound: 1 };
     }
 
-    formatTechnicianInfo(row) {
+    formatTechnicianInfo(row, subjectName) {
         const label = row.booking_ref || `#${row.booking_id}`;
+        const whoseBooking = subjectName ? `${subjectName}'s booking ${label}` : `booking ${label}`;
         if (!row.technician_id) {
-            return `🔍 No technician has been assigned yet for booking ${label}.`;
+            return `🔍 No technician has been assigned yet for ${whoseBooking}.`;
         }
 
-        const lines = [`👷 Technician for booking ${label}:`];
+        const lines = [`👷 Technician for ${whoseBooking}:`];
         lines.push(`   • Name: ${row.technician_name || 'Nil'}`);
         if (row.technician_code)   lines.push(`   • Technician Code: ${row.technician_code}`);
         if (row.specialization)    lines.push(`   • Specialization: ${row.specialization}`);
