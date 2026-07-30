@@ -1,5 +1,6 @@
 const express = require('express');
-const cors = require('cors');
+const cors    = require('cors');
+const path    = require('path');
 const http = require('http');
 const { Server } = require('socket.io');
 const bookingSocket = require('./socket/bookingSocket');
@@ -8,6 +9,7 @@ const settings = require('./config/settings');
 require('dotenv').config();
 
 const app = express();
+const { init: initKnowledge, reloadQA } = require('./services/knowledgeService');
 const httpServer = http.createServer(app);
 
 const io = new Server(httpServer, {
@@ -26,10 +28,15 @@ require('./scheduler/dispatchScheduler')(io);
 
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', require('express').static(require('path').join(__dirname, 'uploads')));
+
+// Serve banner images at /banners/<filename>
+app.use('/banners', express.static(path.join(__dirname, 'banners')));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Routes
 app.use('/api/auth',         require('./routes/auth'));
+app.use('/api/chat',         require('./routes/chat'));
+app.use(require('./routes/voice'));  // /transcribe  /speak  /speak-multi  /speak-stream
 app.use('/api/tests',        require('./routes/tests'));
 app.use('/api/bookings',     require('./routes/bookings'));
 app.use('/api/technicians',  require('./routes/technicians'));
@@ -43,16 +50,31 @@ app.use('/api/feedback',               require('./routes/feedback'));
 app.use('/api/prescription-requests',  require('./routes/prescriptionRequests'));
 
 app.get('/', (req, res) => {
-  res.json({ success: true, message: 'MediCollect API running' });
+  res.json({ success: true, message: 'MicroLab API running' });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// Hot-reload FAQ without restarting
+app.post('/api/reload-qa', (req, res) => {
+  const result = reloadQA();
+  res.json({ success: true, ...result });
 });
 
 const PORT = process.env.PORT || 3000;
-settings.init().then(async () => {
+
+async function start() {
+  await settings.init();
+  await initKnowledge();
   // Rebuild in-memory dispatch state from DB before accepting connections.
   // Ensures assigned bookings from before a restart are not forgotten.
   await bookingSocket.initDispatchState();
-
   httpServer.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`🚀 MicroLab server running on http://localhost:${PORT}`);
+    console.log(`🎙️  Sarvam API key: ${process.env.SARVAM_API_KEY ? '✓ loaded' : '✗ MISSING — voice will fail'}`);
   });
-});
+}
+
+start();

@@ -1,15 +1,25 @@
-# Node
+# Dependencies
+node_modules/
+client/node_modules/
 server/node_modules/
 
-# Flutter/Dart
-client/.dart_tool/
-client/.flutter-plugins
-client/.flutter-plugins-dependencies
-client/build/
-
-# Environment — never commit secrets
+# Environment (contains API keys — never commit)
 server/.env
+.env
 
 # Firebase credentials — contain API keys / admin access
 server/firebase-service-account.json
 client/android/app/google-services.json
+
+# Flutter build outputs
+client/build/
+client/.dart_tool/
+client/.flutter-plugins
+client/.flutter-plugins-dependencies
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+*.iml
