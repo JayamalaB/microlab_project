@@ -52,11 +52,8 @@ class _LoginScreenState extends State<LoginScreen> {
           context,
           MaterialPageRoute(
             builder: (_) => OtpScreen(
-              mobile:                    _mobileController.text.trim(),
-              userRole:                  _selectedRole,
-              technicianName:            result['name']           as String?,
-              technicianPhoto:           result['photo']          as String?,
-              technicianSpecialization:  result['specialization'] as String?,
+              mobile:   _mobileController.text.trim(),
+              userRole: _selectedRole,
             ),
           ),
         );
