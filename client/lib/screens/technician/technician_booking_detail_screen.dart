@@ -180,6 +180,7 @@ class _TechnicianBookingDetailScreenState
 
   // Payment — live values fetched from server in initState, overriding immutable widget.booking fields
   bool _isProcessingPayment = false;
+  bool _isReloading = false;
   double _sessionPaymentCollected = 0.0;
   late String _livePaymentStatus;  // refreshed from server; starts from widget value
   late double _liveAmountPaid;     // refreshed from server; starts from widget value
@@ -317,6 +318,34 @@ class _TechnicianBookingDetailScreenState
     } catch (e) {
       debugPrint('[_refreshPaymentInfo] $e');
     }
+  }
+
+  // Manual "Reload" — re-pulls payment status (this booking + any family
+  // members added this visit) from the server so a payment the patient just
+  // made on their own phone shows up without leaving/reopening the screen.
+  // Deliberately does NOT touch _currentStatus/docs/session-collected-amount —
+  // only the server-sourced payment fields that _paymentInitiated/
+  // _hasUnsettledSiblings read, so the technician's in-progress journey state
+  // is never reset by a reload.
+  Future<void> _reloadBookingData() async {
+    if (_isReloading) return;
+    setState(() => _isReloading = true);
+    try {
+      await Future.wait([
+        _refreshPaymentInfo(),
+        _loadLinkedPatients(),
+      ]);
+    } finally {
+      if (mounted) setState(() => _isReloading = false);
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: const Text('Booking details refreshed'),
+      backgroundColor: AppColors.brandGreen,
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 2),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    ));
   }
 
   Future<void> _loadDocs() async {
@@ -2000,6 +2029,16 @@ void _resumeJourney() {
           ],
         ),
         actions: [
+          IconButton(
+            icon: _isReloading
+                ? const SizedBox(
+                    width: 18, height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  )
+                : const Icon(Icons.refresh_rounded, color: Colors.white),
+            tooltip: 'Reload booking details',
+            onPressed: _isReloading ? null : _reloadBookingData,
+          ),
           IconButton(
             icon: const Icon(Icons.phone_outlined, color: Colors.white),
             onPressed: () {
