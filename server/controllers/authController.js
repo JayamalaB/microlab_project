@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { forceTechnicianOffline } = require('../socket/bookingSocket');
 
 const LOG_DIR  = path.join(__dirname, '..', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'otp.log');
@@ -525,7 +526,7 @@ exports.registerFcmToken = async (req, res) => {
 
 exports.logout = async (req, res) => {
   try {
-    const { user_id } = req.user;
+    const { user_id, role, id: technicianId } = req.user;
 
     await db.query(
       `UPDATE ip_users
@@ -534,6 +535,41 @@ exports.logout = async (req, res) => {
        WHERE user_id = ?`,
       [user_id]
     );
+
+    // Technician logout: close active session, mark offline, remove from dispatch pool.
+    if (role === 'technician' && technicianId) {
+      const connection = await db.getConnection();
+      try {
+        await connection.beginTransaction();
+        await connection.query(
+          `UPDATE ip_technician_sessions
+           SET ended_at = NOW(), session_status = 'ended'
+           WHERE technician_id = ? AND ended_at IS NULL`,
+          [technicianId]
+        );
+        await connection.query(
+          `UPDATE ip_technician_live_location
+           SET online_status = 'offline', socket_id = NULL, updated_at = NOW()
+           WHERE technician_id = ?`,
+          [technicianId]
+        );
+        await connection.query(
+          `UPDATE ip_users u
+           JOIN ip_technicians t ON t.user_id = u.user_id
+           SET u.is_logged_in = 0, u.user_date_modified = NOW()
+           WHERE t.technician_id = ?`,
+          [technicianId]
+        );
+        await connection.commit();
+      } catch (e) {
+        await connection.rollback();
+        console.error('[logout] technician cleanup error:', e.message);
+      } finally {
+        connection.release();
+      }
+      forceTechnicianOffline(Number(technicianId));
+      console.log(`🚪 [logout] technician_id=${technicianId} fully logged out`);
+    }
 
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (err) {
