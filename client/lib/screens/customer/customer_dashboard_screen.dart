@@ -469,268 +469,272 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final body = CustomScrollView(
+    final body = NestedScrollView(
       controller: _scrollController,
-        slivers: [
-          // ── App Bar ──────────────────────────────────────
-          SliverAppBar(
-            pinned: true,
-            elevation: 0,
-            backgroundColor: AppColors.brandGreen,
-            leading: widget.embedded
-                ? IconButton(
-                    icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                        color: Colors.white, size: 18),
-                    onPressed: widget.onBack,
-                  )
-                : IconButton(
-                    icon: const Icon(Icons.menu_rounded, color: Colors.white),
-                    onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-                  ),
-            title: _HeaderTitle(member: widget.member, isVip: widget.isVip),
-            actions: [
-              // Cart
-              Stack(
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.shopping_cart_outlined,
-                        color: Colors.white, size: 24),
-                    onPressed: _cart.isEmpty ? null : _showCart,
-                  ),
-                  if (_cart.isNotEmpty)
-                    Positioned(
-                      right: 6,
-                      top: 6,
-                      child: Container(
-                        width: 18,
-                        height: 18,
-                        decoration: const BoxDecoration(
-                          color: Colors.orange,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Center(
-                          child: Text('${_cart.length}',
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w700)),
-                        ),
+      headerSliverBuilder: (context, _) => [
+        // ── App Bar ──────────────────────────────────────
+        SliverAppBar(
+          pinned: true,
+          elevation: 0,
+          backgroundColor: AppColors.brandGreen,
+          leading: widget.embedded
+              ? IconButton(
+                  icon: const Icon(Icons.arrow_back_ios_new_rounded,
+                      color: Colors.white, size: 18),
+                  onPressed: widget.onBack,
+                )
+              : IconButton(
+                  icon: const Icon(Icons.menu_rounded, color: Colors.white),
+                  onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+                ),
+          title: _HeaderTitle(member: widget.member, isVip: widget.isVip),
+          actions: [
+            // Cart
+            Stack(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.shopping_cart_outlined,
+                      color: Colors.white, size: 24),
+                  onPressed: _cart.isEmpty ? null : _showCart,
+                ),
+                if (_cart.isNotEmpty)
+                  Positioned(
+                    right: 6,
+                    top: 6,
+                    child: Container(
+                      width: 18,
+                      height: 18,
+                      decoration: const BoxDecoration(
+                        color: Colors.orange,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Center(
+                        child: Text('${_cart.length}',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w700)),
                       ),
                     ),
-                ],
-              ),
-              const SizedBox(width: 4),
-            ],
-            bottom: PreferredSize(
-              preferredSize: const Size.fromHeight(60),
-              child: Container(
-                color: AppColors.brandGreen,
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                child: _LocationBar(
-                  mode: _mode,
-                  selectedBranch: _selectedBranch,
-                  pincode: _pincode,
-                  city: _city,
-                  onTap: _showLocationSheet,
-                ),
+                  ),
+              ],
+            ),
+            const SizedBox(width: 4),
+          ],
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(60),
+            child: Container(
+              color: AppColors.brandGreen,
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: _LocationBar(
+                mode: _mode,
+                selectedBranch: _selectedBranch,
+                pincode: _pincode,
+                city: _city,
+                onTap: _showLocationSheet,
               ),
             ),
           ),
+        ),
+      ],
+      body: RefreshIndicator(
+        onRefresh: _loadTests,
+        color: AppColors.brandGreen,
+        backgroundColor: Colors.white,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 16),
 
-          SliverToBoxAdapter(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 16),
+              // ── Trust banner ──────────────────────────
+              const _TrustBanner(),
 
-                // ── Trust banner ──────────────────────────
-                const _TrustBanner(),
+              const SizedBox(height: 16),
 
-                const SizedBox(height: 16),
-
-                // ── Search + Upload ───────────────────────
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Container(
-                          height: 46,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: AppColors.divider),
-                          ),
-                          child: TextField(
-                            controller: _searchController,
-                            style: const TextStyle(
-                                fontSize: 14, color: AppColors.textPrimary),
-                            decoration: const InputDecoration(
-                              hintText: 'Search tests & packages…',
-                              hintStyle: TextStyle(
-                                  fontSize: 14, color: AppColors.textHint),
-                              prefixIcon: Icon(Icons.search_rounded,
-                                  size: 20, color: AppColors.textHint),
-                              border: InputBorder.none,
-                              contentPadding:
-                                  EdgeInsets.symmetric(vertical: 12),
-                            ),
+              // ── Search + Upload ───────────────────────
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.divider),
+                        ),
+                        child: TextField(
+                          controller: _searchController,
+                          style: const TextStyle(
+                              fontSize: 14, color: AppColors.textPrimary),
+                          decoration: const InputDecoration(
+                            hintText: 'Search tests & packages…',
+                            hintStyle: TextStyle(
+                                fontSize: 14, color: AppColors.textHint),
+                            prefixIcon: Icon(Icons.search_rounded,
+                                size: 20, color: AppColors.textHint),
+                            border: InputBorder.none,
+                            contentPadding:
+                                EdgeInsets.symmetric(vertical: 12),
                           ),
                         ),
                       ),
-                      const SizedBox(width: 10),
-                      // Upload prescription
-                      GestureDetector(
-                        onTap: _uploadPrescription,
-                        child: Container(
-                          width: 46,
-                          height: 46,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: AppColors.divider),
-                          ),
-                          child: const Icon(Icons.upload_file_outlined,
-                              size: 22, color: AppColors.brandGreen),
+                    ),
+                    const SizedBox(width: 10),
+                    // Upload prescription
+                    GestureDetector(
+                      onTap: _uploadPrescription,
+                      child: Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.divider),
                         ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                const SizedBox(height: 16),
-
-                // ── Filters: Offers toggle + Category chips ───
-                SizedBox(
-                  height: 34,
-                  child: ListView(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    scrollDirection: Axis.horizontal,
-                    children: [
-                      // Special Offers chip (always first)
-                      GestureDetector(
-                        onTap: () => setState(() => _showOffersOnly = !_showOffersOnly),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          margin: const EdgeInsets.only(right: 8),
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: _showOffersOnly ? const Color(0xFFE65100) : Colors.white,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: _showOffersOnly ? const Color(0xFFE65100) : AppColors.divider,
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.local_offer_rounded,
-                                  size: 12,
-                                  color: _showOffersOnly ? Colors.white : const Color(0xFFE65100)),
-                              const SizedBox(width: 5),
-                              Text('Special Offers',
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                      color: _showOffersOnly ? Colors.white : const Color(0xFFE65100))),
-                            ],
-                          ),
-                        ),
-                      ),
-                      // Category chips
-                      ..._categories.map((cat) {
-                        final selected = _selectedCategory == cat;
-                        return GestureDetector(
-                          onTap: () => setState(() => _selectedCategory = cat),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 180),
-                            margin: const EdgeInsets.only(right: 8),
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: selected ? AppColors.brandGreen : Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: selected ? AppColors.brandGreen : AppColors.divider,
-                              ),
-                            ),
-                            child: Text(cat,
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                    color: selected ? Colors.white : AppColors.textSecondary)),
-                          ),
-                        );
-                      }),
-                    ],
-                  ),
-                ),
-
-                const SizedBox(height: 20),
-
-                // ── Content ───────────────────────────────
-                if (!_modeChosen)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 40, horizontal: 16),
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.touch_app_outlined, size: 36, color: AppColors.brandGreen),
-                          SizedBox(height: 12),
-                          Text(
-                            'Select a booking type to see available tests',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 14, color: AppColors.textSecondary, height: 1.5),
-                          ),
-                        ],
-                      ),
-                    ),
-                  )
-                else if (_loadingTests)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 60),
-                    child: Center(
-                      child: CircularProgressIndicator(color: AppColors.brandGreen),
-                    ),
-                  )
-                else if (_filteredTests.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 40, horizontal: 16),
-                    child: Center(
-                      child: Text('No tests found',
-                          style: TextStyle(fontSize: 14, color: AppColors.textSecondary)),
-                    ),
-                  )
-                else ...[
-                  // Tests — full-width list
-                  if (_filteredTests.isNotEmpty) ...[
-                    _SectionHeader(
-                      title: _searchQuery.isNotEmpty
-                          ? '${_filteredTests.length} result${_filteredTests.length == 1 ? "" : "s"}'
-                          : 'Tests & Packages',
-                    ),
-                    const SizedBox(height: 10),
-                    ListView.separated(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      itemCount: _filteredTests.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 10),
-                      itemBuilder: (_, i) => _TestCard(
-                        test: _filteredTests[i],
-                        inCart: _inCart(_filteredTests[i]),
-                        onAdd: () => _toggleCart(_filteredTests[i]),
-                        onTap: () => _showTestDetail(_filteredTests[i]),
+                        child: const Icon(Icons.upload_file_outlined,
+                            size: 22, color: AppColors.brandGreen),
                       ),
                     ),
                   ],
-                ],
+                ),
+              ),
 
-                const SizedBox(height: 120),
+              const SizedBox(height: 16),
+
+              // ── Filters: Offers toggle + Category chips ───
+              SizedBox(
+                height: 34,
+                child: ListView(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  scrollDirection: Axis.horizontal,
+                  children: [
+                    // Special Offers chip (always first)
+                    GestureDetector(
+                      onTap: () => setState(() => _showOffersOnly = !_showOffersOnly),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        margin: const EdgeInsets.only(right: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: _showOffersOnly ? const Color(0xFFE65100) : Colors.white,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: _showOffersOnly ? const Color(0xFFE65100) : AppColors.divider,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.local_offer_rounded,
+                                size: 12,
+                                color: _showOffersOnly ? Colors.white : const Color(0xFFE65100)),
+                            const SizedBox(width: 5),
+                            Text('Special Offers',
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: _showOffersOnly ? Colors.white : const Color(0xFFE65100))),
+                          ],
+                        ),
+                      ),
+                    ),
+                    // Category chips
+                    ..._categories.map((cat) {
+                      final selected = _selectedCategory == cat;
+                      return GestureDetector(
+                        onTap: () => setState(() => _selectedCategory = cat),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          margin: const EdgeInsets.only(right: 8),
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: selected ? AppColors.brandGreen : Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: selected ? AppColors.brandGreen : AppColors.divider,
+                            ),
+                          ),
+                          child: Text(cat,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: selected ? Colors.white : AppColors.textSecondary)),
+                        ),
+                      );
+                    }),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              // ── Content ───────────────────────────────
+              if (!_modeChosen)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 40, horizontal: 16),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.touch_app_outlined, size: 36, color: AppColors.brandGreen),
+                        SizedBox(height: 12),
+                        Text(
+                          'Select a booking type to see available tests',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 14, color: AppColors.textSecondary, height: 1.5),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else if (_loadingTests)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 60),
+                  child: Center(
+                    child: CircularProgressIndicator(color: AppColors.brandGreen),
+                  ),
+                )
+              else if (_filteredTests.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 40, horizontal: 16),
+                  child: Center(
+                    child: Text('No tests found',
+                        style: TextStyle(fontSize: 14, color: AppColors.textSecondary)),
+                  ),
+                )
+              else ...[
+                if (_filteredTests.isNotEmpty) ...[
+                  _SectionHeader(
+                    title: _searchQuery.isNotEmpty
+                        ? '${_filteredTests.length} result${_filteredTests.length == 1 ? "" : "s"}'
+                        : 'Tests & Packages',
+                  ),
+                  const SizedBox(height: 10),
+                  ListView.separated(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    itemCount: _filteredTests.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 10),
+                    itemBuilder: (_, i) => _TestCard(
+                      test: _filteredTests[i],
+                      inCart: _inCart(_filteredTests[i]),
+                      onAdd: () => _toggleCart(_filteredTests[i]),
+                      onTap: () => _showTestDetail(_filteredTests[i]),
+                    ),
+                  ),
+                ],
               ],
-            ),
+
+              const SizedBox(height: 120),
+            ],
           ),
-        ],
+        ),
+      ),
     );
 
     // Combined banner: lab collection (top) + active ride (below)

@@ -748,19 +748,6 @@ void _showCancelSheet(BuildContext context, BookingModel booking, bool chargeApp
   );
 }
 
-void _downloadReport(BuildContext context, BookingModel booking) {
-  // TODO: url_launcher → launch(booking.reportUrl!)
-  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-    content: Row(children: [
-      const Icon(Icons.download_outlined, color: Colors.white, size: 16),
-      const SizedBox(width: 8),
-      Expanded(child: Text('Downloading report for ${booking.member.name}…')),
-    ]),
-    backgroundColor: AppColors.brandGreen,
-    behavior: SnackBarBehavior.floating,
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-  ));
-}
 
 void _showRescheduleSheet(BuildContext context, BookingModel booking, VoidCallback? onRescheduled) {
   showModalBottomSheet(
@@ -1295,30 +1282,6 @@ class _BookingCard extends StatelessWidget {
                       ),
                     ],
 
-                    // Download report for completed bookings
-                    if (booking.status == 'Completed' && booking.reportUrl != null) ...[
-                      const SizedBox(height: 10),
-                      GestureDetector(
-                        onTap: () => _downloadReport(context, booking),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 9),
-                          decoration: BoxDecoration(
-                            color: AppColors.brandGreenSurface,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: AppColors.brandGreenLight),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: const [
-                              Icon(Icons.download_outlined, size: 16, color: AppColors.brandGreen),
-                              SizedBox(width: 6),
-                              Text('Download Report',
-                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
                   ],
                 ),
               ),
@@ -1895,25 +1858,6 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                           );
                         }).toList(),
                       ),
-                    if (b.reportUrl != null) ...[
-                      const SizedBox(height: 12),
-                      GestureDetector(
-                        onTap: () => _downloadReport(context, b),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 13),
-                          decoration: BoxDecoration(
-                            color: AppColors.brandGreen,
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                            Icon(Icons.download_outlined, size: 18, color: Colors.white),
-                            SizedBox(width: 8),
-                            Text('Download Report',
-                                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
-                          ]),
-                        ),
-                      ),
-                    ],
                   ],
                 ],
               ),

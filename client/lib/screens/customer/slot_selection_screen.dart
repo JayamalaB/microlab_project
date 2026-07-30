@@ -95,12 +95,16 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
   // ── Date picker ────────────────────────────────────────────────────────────
 
   Future<void> _pickDate() async {
-    final now    = DateTime.now();
+    final now   = DateTime.now();
+    // Normalize to midnight — the picker returns dates at midnight, so firstDate
+    // must also be midnight or initialDate (a prior selection) will be "before"
+    // firstDate and today gets greyed out on subsequent opens.
+    final today = DateTime(now.year, now.month, now.day);
     final picked = await showDatePicker(
       context:     context,
-      initialDate: _selectedDate ?? now,
-      firstDate:   now,                              // today allowed
-      lastDate:    now.add(const Duration(days: 30)),
+      initialDate: _selectedDate ?? today,
+      firstDate:   today,                            // today allowed
+      lastDate:    today.add(const Duration(days: 30)),
       helpText:    'SELECT COLLECTION DATE',
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
