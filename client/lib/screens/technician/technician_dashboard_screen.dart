@@ -21,7 +21,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
-import 'package:microlab/screens/customer/support_chatbot.dart';
 import 'package:microlab/screens/shared/onboarding_screen.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -1088,11 +1087,6 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                       onLogout: () => _handleLogout(),
                     )),
               ],
-            ),
-            const Positioned(
-              right: 16,
-              bottom: 88,
-              child: SupportChatbotButton(),
             ),
           ],
         ),
