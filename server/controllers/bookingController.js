@@ -325,7 +325,8 @@ exports.getMyBookings = async (req, res) => {
              IFNULL(bi.product_id, '0'),                                          ':::',
              IFNULL(bi.product_name_snapshot, IFNULL(pkg.product_name, 'Test')), ':::',
              IFNULL(bi.final_price, '0'),                                         ':::',
-             'test'
+             'test',                                                               ':::',
+             IFNULL(pkg.pre_instructions, '')
            ) END
            ORDER BY bi.booking_item_id SEPARATOR '|||'
          ) AS test_items,

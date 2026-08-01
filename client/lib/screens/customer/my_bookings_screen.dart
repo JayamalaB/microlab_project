@@ -106,6 +106,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       final name      = parts.length > 1 ? parts[1] : 'Unknown';
       final price     = parts.length > 2 ? (double.tryParse(parts[2]) ?? 0.0) : 0.0;
       final type      = parts.length > 3 ? parts[3] : 'test';
+      final preInstr  = parts.length > 4 && parts[4].isNotEmpty ? parts[4] : null;
       return TestModel(
         id: productId,
         name: name,
@@ -117,6 +118,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
         finalPrice: price,
         docRequired: false,
         reportStatus: '',
+        preInstructions: preInstr,
       );
     }).toList();
 
@@ -1172,8 +1174,8 @@ class _BookingCard extends StatelessWidget {
                       ],
                     ),
 
-                    // Feedback button for completed bookings
-                    if (booking.status == 'Completed' && booking.rating == null) ...[
+                    // Feedback button for completed or sample-collected bookings
+                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected') && booking.rating == null) ...[
                       const SizedBox(height: 10),
                       GestureDetector(
                         onTap: () => _showFeedback(context, booking, onRefresh: onFeedbackSubmitted),
@@ -1198,7 +1200,7 @@ class _BookingCard extends StatelessWidget {
                     ],
 
                     // Show existing rating
-                    if (booking.status == 'Completed' && booking.rating != null) ...[
+                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected') && booking.rating != null) ...[
                       const SizedBox(height: 10),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1614,6 +1616,65 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                       t.name, '₹${t.finalPrice.toInt()}', valueBold: true,
                     )).toList(),
                   ),
+
+                  // Pre-test instructions (only if any test has them)
+                  Builder(builder: (context) {
+                    final withInstr = b.tests
+                        .where((t) => t.preInstructions != null)
+                        .toList();
+                    if (withInstr.isEmpty) return const SizedBox.shrink();
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Preparation Instructions',
+                              style: TextStyle(
+                                  fontSize: 13, fontWeight: FontWeight.w600,
+                                  color: AppColors.textSecondary, letterSpacing: 0.3)),
+                          const SizedBox(height: 10),
+                          Container(
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFFDE7),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFFFFEB3B)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: withInstr.map((t) => Padding(
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    const Icon(Icons.info_outline_rounded,
+                                        size: 15, color: Color(0xFFF9A825)),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(t.name,
+                                              style: const TextStyle(
+                                                  fontSize: 12, fontWeight: FontWeight.w600,
+                                                  color: AppColors.textPrimary)),
+                                          const SizedBox(height: 2),
+                                          Text(t.preInstructions!,
+                                              style: const TextStyle(
+                                                  fontSize: 12, color: AppColors.textSecondary,
+                                                  height: 1.4)),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              )).toList(),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
 
                   if (_canEditTests) ...[
                     const SizedBox(height: 10),
