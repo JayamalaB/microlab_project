@@ -657,9 +657,7 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
                     // Service charge applies only when this booking carries a service
                     // charge component (home collection fee) and technician has arrived.
                     // Family members whose booking has no service charge never get deducted.
-                    final chargeApplies = b.collectionStatus == 'arrived' &&
-                        b.mode == 'Home Collection' &&
-                        b.serviceCharge > 0;
+                    const chargeApplies = false;
                     return _BookingCard(
                       booking: b,
                       chargeApplies: chargeApplies,
