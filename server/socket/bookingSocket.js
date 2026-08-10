@@ -22,6 +22,7 @@
 const db              = require('../config/db');
 const { messaging }   = require('../config/firebase');
 const { sendToBookingOwner } = require('../services/customerPush');
+const { findEligibleBranches } = require('../services/branchEligibility');
 const fs              = require('fs');
 const path            = require('path');
 
@@ -547,6 +548,64 @@ async function dispatchAttempt(io, bookingId) {
               ),
             ]);
             continue; // restart loop: dispatch next available tech
+          }
+        }
+
+        // ── Cross-branch fallback ──────────────────────────────────────────
+        // This branch's technicians are now genuinely exhausted — same-branch
+        // expansion, the FCM lane, and the slot-constraint-lift lane above all
+        // came up empty. Before giving up on the whole booking, check whether
+        // another eligible branch (same rules used at branch-selection time:
+        // an online technician + an available slot for this date) still has
+        // capacity. If so, switch this dispatch cycle to that branch and let
+        // it run through the exact same exhaustion sequence again — this is
+        // pure state mutation (queue reset to empty, branch swapped), not a
+        // second dispatch implementation: `continue` re-enters this same
+        // while-loop, which re-does lane 1/2/2.5 above, now scoped to the new
+        // branch. Only when every eligible branch has been tried does this
+        // fall through to the unchanged ALL_EXHAUSTED/booking_timeout below.
+        //
+        // Defensive design, not an assumption that every dispatch-state
+        // object was created with these fields: `triedBranchIds` lazily
+        // initializes if missing (e.g. a dispatch cycle started via the Lane
+        // 3 slot-based path, which doesn't set it), and `originalSlotTechIds`
+        // being absent just means this particular dispatch cycle skips
+        // resetting the slot constraint on branch-switch rather than
+        // crashing. A missing/absent field here must never break dispatch.
+        if (bookingType !== 'transport'
+            && bookingData.patientLat != null && bookingData.patientLng != null) {
+          if (!dispatch.triedBranchIds) {
+            dispatch.triedBranchIds = new Set(bookingData.branchId != null ? [bookingData.branchId] : []);
+          }
+          if (dispatch.branchCandidates === null || dispatch.branchCandidates === undefined) {
+            const fallbackDate = dispatch.bookingDate
+              || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+            dispatch.branchCandidates = await findEligibleBranches(
+              bookingData.patientLat, bookingData.patientLng, fallbackDate
+            );
+            dlog(bookingId, 'BRANCH_CANDIDATES',
+              dispatch.branchCandidates.length > 0
+                ? `${dispatch.branchCandidates.length} eligible branch(es): ` +
+                  dispatch.branchCandidates.map(c => `${c.name}(${c.branchId},${c.distKm.toFixed(1)}km)`).join(', ')
+                : 'no eligible branches found');
+          }
+
+          const nextBranch = dispatch.branchCandidates.find(c => !dispatch.triedBranchIds.has(c.branchId));
+          if (nextBranch) {
+            dlog(bookingId, 'BRANCH_EXHAUSTED',
+              `branch=${bookingData.branchId ?? 'none'} ${bookingData.branchName ?? ''} exhausted -> trying next branch`);
+            dispatch.triedBranchIds.add(nextBranch.branchId);
+            bookingData.branchId   = nextBranch.branchId;
+            bookingData.branchName = nextBranch.name;
+            dispatch.queue         = [];
+            dispatch.techIdx       = 0;
+            dispatch.attemptNum    = 1;
+            if (dispatch.originalSlotTechIds !== undefined) {
+              dispatch.slotTechIds = dispatch.originalSlotTechIds ? new Set(dispatch.originalSlotTechIds) : null;
+            }
+            dlog(bookingId, 'NEXT_BRANCH',
+              `branch=${nextBranch.branchId} ${nextBranch.name} (${nextBranch.distKm.toFixed(2)}km)`);
+            continue; // restart loop: re-enters lane 1/2/2.5 above, scoped to the new branch
           }
         }
 
@@ -1284,8 +1343,26 @@ async function _handleBookingRequest(io, socket, data = {}) {
     bookingType,
     slotId:          slotId ?? null,
     slotTechIds:     slotTechIds,
-    bookingDate:     bookingDate,
+    // slotTechIds gets mutated in place (set to null) by the Lane 2.5
+    // constraint-lift below. Keep an untouched copy so that if cross-branch
+    // fallback switches to a different branch, that branch gets its own full
+    // slot -> FCM -> lift sequence, instead of inheriting a constraint that
+    // was already lifted for the PREVIOUS branch.
+    originalSlotTechIds: slotTechIds ? new Set(slotTechIds) : null,
+    // bookingDate stays null when this booking has no slotId (see `let
+    // bookingDate = null` above) — but the cross-branch fallback below needs
+    // a real date to check candidate branches' slot availability, so fall
+    // back to earlyBookingDate (already resolved to a real date earlier in
+    // this function) rather than leaving it null.
+    bookingDate:     bookingDate ?? earlyBookingDate,
     appointmentTime: appointmentTime ?? null,
+    // Cross-branch dispatch fallback state (see the exhaustion block in
+    // dispatchAttempt). triedBranchIds seeds with the originally-requested
+    // branch so that branch is never re-tried; branchCandidates is computed
+    // lazily on first exhaustion, not here, to avoid an extra DB round-trip
+    // on the common case where the first technician just accepts.
+    triedBranchIds:  new Set(branchId != null ? [branchId] : []),
+    branchCandidates: null,
   });
 
   dispatchAttempt(io, bookingId);
@@ -1678,11 +1755,24 @@ module.exports = function bookingSocket(io, socket) {
         );
       });
 
+      // branch_id is written here (not left as whatever it was at booking
+      // creation) because cross-branch dispatch fallback may have switched
+      // bd.branchId to a different branch than the one originally requested,
+      // if the original branch's technicians were all exhausted first — this
+      // makes the final DB record reflect the branch whose technician
+      // actually accepted, not the one the patient was first shown.
+      // COALESCE guards against bd.branchId ever being null/undefined here
+      // (e.g. dispatch state missing at accept time) silently wiping out an
+      // already-correct branch_id — same safety pattern already used
+      // elsewhere in this codebase (authController.js's ip_technicians
+      // refresh) for exactly this "don't let a missing value blank out
+      // existing data" reason.
       dbRun(
         `UPDATE ip_bookings
-         SET status = 'assigned', technician_id = ?, technician_name = ?, updated_at = NOW()
+         SET status = 'assigned', technician_id = ?, technician_name = ?,
+             branch_id = COALESCE(?, branch_id), updated_at = NOW()
          WHERE booking_id = ?`,
-        [actorId, actorName || null, bookingId]
+        [actorId, actorName || null, bd.branchId ?? null, bookingId]
       );
 
       dbRun(
@@ -1994,6 +2084,45 @@ module.exports = function bookingSocket(io, socket) {
     .catch(e => {
       clog(`[sample_collected] DB ERROR — booking_id=${bookingId}  error="${e.message}"  code=${e.code}`);
     });
+
+    // Mirrors the ip_bookings.status='collected' write already done in the
+    // handed_to_lab handler below — just triggered one step earlier in the
+    // same journey, so the main booking status reflects "sample collected"
+    // immediately instead of only once the technician later hands off to the
+    // lab. handed_to_lab still runs its own identical UPDATE afterward; since
+    // the value is the same ('collected'), that is a harmless no-op re-write.
+    dbRun(
+      `UPDATE ip_bookings
+       SET status = 'collected', updated_at = NOW()
+       WHERE booking_id = ?`,
+      [bookingId]
+    );
+
+    // Cascade to sibling bookings in the same visit group — same pattern as
+    // handed_to_lab's sibling cascade. Only ip_bookings.status needs handling
+    // here; siblings' ip_technician_collection.collection_status is already
+    // cascaded by the existing _cascadeTcStatus() call below.
+    ;(async () => {
+      try {
+        const [[parentRow]] = await db.execute(
+          'SELECT visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
+          [bookingId]
+        );
+        if (parentRow?.visit_group_id) {
+          const vgId = parentRow.visit_group_id;
+          dbRun(
+            `UPDATE ip_bookings
+             SET status = 'collected', updated_at = NOW()
+             WHERE visit_group_id = ? AND booking_id != ?`,
+            [vgId, bookingId]
+          );
+          clog(`[sample_collected] sibling cascade — visit_group=${vgId} booking=${bookingId}`);
+        }
+      } catch (e) {
+        console.error(`[sample_collected] sibling cascade error: ${e.message}`);
+      }
+    })();
+
     _cascadeTcStatus(bookingId, 'sample_collected', 'collected_at');
     _notifyPatient(io, bookingId, 'sample_collected', { bookingId });
   });
