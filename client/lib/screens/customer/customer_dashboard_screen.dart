@@ -1403,12 +1403,20 @@ class _LocationSheetState extends State<_LocationSheet> {
     debugPrint('──────────────────────────────────────────────────\n');
     if (_mode == 'Home Collection') {
       if (_gpsSelected && _gpsLat != null && _gpsLng != null) {
-        // Use GPS location
-        widget.onAddressChanged(_gpsAddress);
+        // Use GPS location.
+        // lat/lng MUST fire before address — onAddressChanged synchronously
+        // triggers _tryExtractPincodeFromAddress -> _autoDetectBranch, which
+        // reads _lat/_lng to build the branch-lookup request. Firing address
+        // first sent that request with lat/lng still null, so the GPS
+        // eligibility walk (online tech + slots) never ran for real
+        // Current-Live-Location taps — it silently fell through to the
+        // city/name text-match steps instead. Same ordering hazard as the
+        // manual branch below, just previously unhandled here.
         widget.onLatLngChanged?.call(_gpsLat, _gpsLng);
+        widget.onAddressChanged(_gpsAddress);
         widget.onPincodeChanged(null);
         widget.onCityChanged(null);
-      } 
+      }
       else if (_manualSelected && _manualLat != null && _manualLng != null) {
         // Use manual pincode-based location.
         // city MUST fire before pincode so _city is ready when auto-detect triggers.

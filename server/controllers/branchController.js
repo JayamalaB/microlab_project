@@ -1,6 +1,7 @@
 const db   = require('../config/db');
 const fs   = require('fs');
 const path = require('path');
+const { haversineKm, _technicianSummaries, _hasAvailableSlots } = require('../services/branchEligibility');
 
 // ── File logging — same pattern as otp.log (authController.js) and
 //    dispatch.log/collection.log (socket/bookingSocket.js): timestamped,
@@ -29,53 +30,6 @@ function _fmtTimeLabel(timeStr) {
 // "06:30:00" → "06:30"
 function _fmtTime(timeStr) {
   return timeStr.slice(0, 5);
-}
-
-// Haversine distance in km between two lat/lng points
-function haversineKm(lat1, lng1, lat2, lng2) {
-  const R    = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a    = Math.sin(dLat / 2) ** 2
-             + Math.cos(lat1 * Math.PI / 180)
-             * Math.cos(lat2 * Math.PI / 180)
-             * Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.asin(Math.sqrt(a));
-}
-
-// Diagnostic-only: technician headcount per branch (total / online / offline /
-// available / busy). Branch assignment (ip_technicians.branch_id) and live
-// status (ip_technician_live_location) are not date-dependent, so this can be
-// logged right at branch-match time, unlike slot registrations. Read-only —
-// never affects which branch is matched.
-async function _technicianSummaries(branchIds) {
-  if (!branchIds || branchIds.length === 0) return new Map();
-  const placeholders = branchIds.map(() => '?').join(',');
-  const [rows] = await db.execute(
-    `SELECT
-       t.branch_id,
-       COUNT(*)                                                       AS total,
-       SUM(CASE WHEN ll.online_status = 'online' THEN 1 ELSE 0 END)   AS online,
-       SUM(CASE WHEN ll.online_status IS NULL
-                 OR ll.online_status != 'online' THEN 1 ELSE 0 END)   AS offline,
-       SUM(CASE WHEN ll.task_status = 'idle' THEN 1 ELSE 0 END)       AS available,
-       SUM(CASE WHEN ll.task_status IS NOT NULL
-                 AND ll.task_status != 'idle' THEN 1 ELSE 0 END)      AS busy
-     FROM ip_technicians t
-     LEFT JOIN ip_technician_live_location ll ON ll.technician_id = t.technician_id
-     WHERE t.branch_id IN (${placeholders})
-     GROUP BY t.branch_id`,
-    branchIds
-  );
-  const map = new Map();
-  rows.forEach(r => map.set(r.branch_id, {
-    total:     Number(r.total),
-    online:    Number(r.online),
-    offline:   Number(r.offline),
-    available: Number(r.available),
-    busy:      Number(r.busy),
-  }));
-  return map;
 }
 
 function _fmtTechSummary(s) {
@@ -145,33 +99,6 @@ function _fmtTechTable(branchName, branchId, techs) {
     (unknown ? ` / ${unknown} no live-location data` : '')
   );
   return lines.join('\n');
-}
-
-// GPS-fallback walk: how many nearest candidates to check before giving up.
-// Same env-var-overridable pattern as MAX_DRIVERS/APPOINTMENT_BUFFER_MINUTES
-// in socket/bookingSocket.js. Caps worst-case query count when nothing nearby
-// qualifies (protects against scanning every branch in the DB).
-const MAX_BRANCH_FALLBACK_CANDIDATES = parseInt(process.env.MAX_BRANCH_FALLBACK_CANDIDATES, 10) || 8;
-
-// Existence-only check reusing the exact WHERE conditions from
-// getAvailableSlots' core query below — same capacity/registration logic,
-// just LIMIT 1 instead of fetching full slot + time-interval data. Used by
-// the GPS eligibility walk to test "does this branch have >=1 bookable slot
-// for this date" without duplicating the slot-fetching logic.
-async function _hasAvailableSlots(branchId, date) {
-  const [[row]] = await db.execute(
-    `SELECT 1
-     FROM ip_technician_slots ts
-     JOIN ip_slots s ON s.slot_id = ts.slot_id
-     WHERE ts.branch_id    = ?
-       AND ts.slot_date    = ?
-       AND ts.is_available = 1
-       AND ts.booked_count < ts.max_bookings
-       AND s.slot_active   = 1
-     LIMIT 1`,
-    [branchId, date]
-  );
-  return !!row;
 }
 
 // ── GET /api/branches/lookup?pincode=&place=&lat=&lng=&date= ─────────────────
@@ -286,17 +213,16 @@ exports.lookupBranch = async (req, res) => {
         // ── Eligibility walk (GPS path only) ────────────────────────────────
         // Business requirement: don't just take the nearest branch — walk
         // nearest-first until one has >=1 online technician AND >=1 bookable
-        // slot for lookupDate. Bounded by MAX_BRANCH_FALLBACK_CANDIDATES so a
-        // day where nothing qualifies doesn't scan the whole branch table.
-        // Reuses the haversine sort above and the tech summaries already
-        // fetched for the full dump — no new distance/eligibility algorithm,
-        // no duplicate technician query.
-        const candidatePool = withDist.slice(0, MAX_BRANCH_FALLBACK_CANDIDATES);
-        blog(`   🔎 eligibility walk (online tech + slots for ${lookupDate}) — checking nearest ${candidatePool.length}:`);
+        // slot for lookupDate. No cap on how many are checked — every branch
+        // with an eligible technician must be reachable, not just the nearest
+        // handful by rank. Reuses the haversine sort above and the tech
+        // summaries already fetched for the full dump — no new distance/
+        // eligibility algorithm, no duplicate technician query.
+        blog(`   🔎 eligibility walk (online tech + slots for ${lookupDate}) — checking all ${withDist.length}:`);
 
         let winner = null;
-        for (let i = 0; i < candidatePool.length; i++) {
-          const cand = candidatePool[i];
+        for (let i = 0; i < withDist.length; i++) {
+          const cand = withDist[i];
           const techSummary   = allTechSummaries.get(cand.branch_id);
           const hasOnlineTech = !!(techSummary && techSummary.online > 0);
           // Only bother querying slots if there's an online tech at all —
@@ -327,7 +253,7 @@ exports.lookupBranch = async (req, res) => {
         } else {
           gpsExhausted = true;
           blog(
-            `   ✗ [GPS FALLBACK EXHAUSTED] checked ${candidatePool.length} nearest branch(es) for ${lookupDate}` +
+            `   ✗ [GPS FALLBACK EXHAUSTED] checked all ${withDist.length} nearby branch(es) for ${lookupDate}` +
             ` — none had an online technician with an available slot` +
             (place ? `  (city/name-LIKE fallback SKIPPED for place="${place}" — would bypass the eligibility check)` : '')
           );
