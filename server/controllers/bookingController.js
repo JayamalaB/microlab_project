@@ -520,13 +520,52 @@ exports.cancelBooking = async (req, res) => {
     }
 
     // Calculate refund
-    const amountPaid          = parseFloat(booking.amount_paid) || 0;
-    const techHasArrived      = isHomeCollection && tc && chargeStatuses.includes(tc.collection_status);
-    // Use the actual service charge on this booking (total - tests).
-    // For family bookings the service charge sits only on one member's booking;
-    // if this booking has no service charge component, nothing is deducted.
+    const amountPaid           = parseFloat(booking.amount_paid) || 0;
+    const techHasArrived       = isHomeCollection && tc && chargeStatuses.includes(tc.collection_status);
     const bookingServiceCharge = Math.max(0, parseFloat(booking.total_amount) - parseFloat(booking.items_total));
-    const chargeApplied        = techHasArrived && bookingServiceCharge > 0 ? bookingServiceCharge : 0;
+
+    // For family bookings: if this booking carries the service charge and a sibling
+    // is still active, retain the charge and transfer it to the sibling's total —
+    // the technician is still visiting for them. Last member to cancel gets a full refund.
+    logRefund(`[transfer-check] booking_id=${bookingId} visit_group_id=${booking.visit_group_id ?? 'NULL'} bookingServiceCharge=₹${bookingServiceCharge}`);
+    let siblingToTransfer = null;
+    let inheritedChargeOriginalPayer = null;
+    if (booking.visit_group_id && bookingServiceCharge > 0) {
+      const [siblings] = await db.execute(
+        `SELECT booking_id, booking_ref FROM ip_bookings
+         WHERE visit_group_id = ? AND booking_id != ? AND status NOT IN ('cancelled') AND deleted_at IS NULL
+         ORDER BY booking_id ASC LIMIT 1`,
+        [booking.visit_group_id, bookingId]
+      );
+      siblingToTransfer = siblings[0] ?? null;
+      logRefund(`[transfer-check] sibling_query ran — found=${siblingToTransfer ? `booking_id=${siblingToTransfer.booking_id} ref=${siblingToTransfer.booking_ref}` : 'NONE'}`);
+
+      if (!siblingToTransfer) {
+        // Last sibling cancelling — find the cancelled booking that originally paid the
+        // service charge so we can refund the retained ₹79 back to their Razorpay payment.
+        const [[originalPayer]] = await db.execute(
+          `SELECT b.booking_id, b.booking_ref, b.patient_id, pt.gateway_transaction_id
+           FROM ip_bookings b
+           LEFT JOIN ip_payment_transactions pt
+             ON pt.booking_id = b.booking_id AND (pt.is_refund = 0 OR pt.is_refund IS NULL)
+           WHERE b.visit_group_id = ?
+             AND b.booking_id != ?
+             AND b.status = 'cancelled'
+             AND b.deleted_at IS NULL
+             AND pt.gateway_transaction_id IS NOT NULL
+           ORDER BY b.booking_id ASC LIMIT 1`,
+          [booking.visit_group_id, bookingId]
+        );
+        inheritedChargeOriginalPayer = originalPayer ?? null;
+        logRefund(`[inherited-charge] last sibling — original payer=${inheritedChargeOriginalPayer ? `booking_id=${inheritedChargeOriginalPayer.booking_id} gateway=${inheritedChargeOriginalPayer.gateway_transaction_id}` : 'NOT FOUND'}`);
+      }
+    } else {
+      logRefund(`[transfer-check] skipped — ${!booking.visit_group_id ? 'visit_group_id is NULL' : 'bookingServiceCharge is 0'}`);
+    }
+
+    const chargeApplied = (techHasArrived || siblingToTransfer) && bookingServiceCharge > 0
+      ? bookingServiceCharge
+      : 0;
     const refundAmount         = Math.max(0, amountPaid - chargeApplied);
     const refundStatus         = amountPaid > 0 ? 'pending' : 'none';
 
@@ -541,6 +580,15 @@ exports.cancelBooking = async (req, res) => {
        WHERE booking_id = ?`,
       [reason ?? null, refundAmount, refundStatus, bookingId]
     );
+
+    // Transfer service charge to the next active sibling so they carry it going forward
+    if (siblingToTransfer && bookingServiceCharge > 0) {
+      await db.execute(
+        `UPDATE ip_bookings SET total_amount = total_amount + ? WHERE booking_id = ?`,
+        [bookingServiceCharge, siblingToTransfer.booking_id]
+      );
+      logRefund(`[transfer] ₹${bookingServiceCharge} added to booking_id=${siblingToTransfer.booking_id} ref=${siblingToTransfer.booking_ref}`);
+    }
 
     // Cascade to ip_technician_collection so the technician's dashboard list
     // (which filters on collection_status) stops showing this booking as an
@@ -616,6 +664,56 @@ exports.cancelBooking = async (req, res) => {
       }
     }
 
+    // Last sibling cancelled — refund the retained service charge from the original payer's payment
+    if (inheritedChargeOriginalPayer && bookingServiceCharge > 0) {
+      try {
+        const rzpKeyId     = process.env.RAZORPAY_KEY_ID;
+        const rzpKeySecret = process.env.RAZORPAY_KEY_SECRET;
+        const authHeader   = 'Basic ' + Buffer.from(`${rzpKeyId}:${rzpKeySecret}`).toString('base64');
+        const rzpRes = await fetch(
+          `https://api.razorpay.com/v1/payments/${inheritedChargeOriginalPayer.gateway_transaction_id}/refund`,
+          {
+            method:  'POST',
+            headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ amount: Math.round(bookingServiceCharge * 100) }),
+          }
+        );
+        const rzpBody = await rzpRes.json();
+        if (rzpRes.ok && rzpBody.id) {
+          const scRefundRef = `RFN${Date.now()}SC`;
+          await db.execute(
+            `INSERT INTO ip_payment_transactions
+               (transaction_ref, booking_id, patient_id, payment_type,
+                gross_amount, net_amount, amount_paid, amount_due,
+                currency, payment_status, transaction_status, is_refund,
+                gateway_transaction_id, gateway_status, paid_at)
+             VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'refunded', NOW())`,
+            [scRefundRef, inheritedChargeOriginalPayer.booking_id, inheritedChargeOriginalPayer.patient_id ?? null,
+             bookingServiceCharge, bookingServiceCharge, bookingServiceCharge, rzpBody.id]
+          );
+          await db.execute(
+            `UPDATE ip_bookings SET refund_amount = refund_amount + ?, refund_status = 'processed' WHERE booking_id = ?`,
+            [bookingServiceCharge, inheritedChargeOriginalPayer.booking_id]
+          );
+          logRefund(`✅ SC-REFUND SUCCESS — original_booking_id=${inheritedChargeOriginalPayer.booking_id} refund_id=${rzpBody.id} amount=₹${bookingServiceCharge}`);
+        } else {
+          // Razorpay failed — still update DB so UI shows the correct total refund amount.
+          // The pending ₹ will be processed manually or retried later.
+          await db.execute(
+            `UPDATE ip_bookings SET refund_amount = refund_amount + ? WHERE booking_id = ?`,
+            [bookingServiceCharge, inheritedChargeOriginalPayer.booking_id]
+          );
+          logRefund(`❌ SC-REFUND FAILED — original_booking_id=${inheritedChargeOriginalPayer.booking_id} amount=₹${bookingServiceCharge} response=${JSON.stringify(rzpBody)}`);
+        }
+      } catch (scErr) {
+        await db.execute(
+          `UPDATE ip_bookings SET refund_amount = refund_amount + ? WHERE booking_id = ?`,
+          [bookingServiceCharge, inheritedChargeOriginalPayer.booking_id]
+        );
+        logRefund(`❌ SC-REFUND ERROR — original_booking_id=${inheritedChargeOriginalPayer.booking_id} error=${scErr.message}`);
+      }
+    }
+
     syncBookingToClient(bookingId, {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
@@ -665,8 +763,8 @@ exports.cancelBooking = async (req, res) => {
       logNotify(`[cancel] booking_id=${bookingId} no technician assigned — FCM skipped`);
     }
 
-    logRefund(`[cancel] booking_id=${bookingId} refund=₹${refundAmount} status=${finalRefundStatus} charge=₹${chargeApplied}`);
-    res.json({ success: true, refund_amount: refundAmount, refund_status: finalRefundStatus, service_charge_applied: chargeApplied });
+    logRefund(`[cancel] booking_id=${bookingId} refund=₹${refundAmount} status=${finalRefundStatus} charge=₹${chargeApplied} transferred_to=${siblingToTransfer?.booking_id ?? 'none'}`);
+    res.json({ success: true, refund_amount: refundAmount, refund_status: finalRefundStatus, service_charge_applied: chargeApplied, service_charge_transferred: !!siblingToTransfer });
   } catch (err) {
     console.error('❌ cancelBooking FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -702,7 +800,7 @@ exports.payBooking = async (req, res) => {
       `UPDATE ip_payment_transactions
        SET payment_type = 'RAZORPAY',
            payment_status = 'paid', transaction_status = 'completed',
-           amount_paid = ?, amount_due = 0,
+           amount_paid = amount_paid + ?, amount_due = 0,
            gateway_transaction_id = ?, gateway_order_id = ?,
            gateway_status = 'success', paid_at = NOW(), updated_at = NOW()
        WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
@@ -712,7 +810,7 @@ exports.payBooking = async (req, res) => {
     await conn.execute(
       `UPDATE ip_bookings
        SET status = 'confirmed', payment_status = 'paid',
-           amount_paid = ?, amount_due = 0, updated_at = NOW()
+           amount_paid = amount_paid + ?, amount_due = 0, updated_at = NOW()
        WHERE booking_id = ?`,
       [amount, bookingId]
     );

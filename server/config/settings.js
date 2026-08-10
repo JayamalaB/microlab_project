@@ -26,7 +26,7 @@ function getBool(key, defaultValue = false) {
 
 function getList(key, defaultValue = []) {
   const val = get(key);
-  if (!val) return defaultValue;
+  if (val === null || val === undefined) return defaultValue;
   return val.split(',').map(s => s.trim()).filter(Boolean);
 }
 
