@@ -884,7 +884,9 @@ exports.getItems = async (req, res) => {
               COALESCE(bi.product_name_snapshot, p.product_name) AS name,
               COALESCE(p.product_category, 'General')            AS category,
               bi.final_price                                      AS price,
-              CASE WHEN p.document_required IN (1, '1', 'yes') THEN 1 ELSE 0 END AS doc_required
+              CASE WHEN p.document_required IN (1, '1', 'yes') THEN 1 ELSE 0 END AS doc_required,
+              bi.item_status,
+              bi.collected_at                                     AS collected_at
        FROM ip_booking_items bi
        LEFT JOIN ip_products p ON p.product_id = bi.product_id
        WHERE bi.booking_id = ?
@@ -894,6 +896,105 @@ exports.getItems = async (req, res) => {
     res.json({ success: true, items: rows });
   } catch (err) {
     console.error('❌ getItems FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── PATCH /api/bookings/:bookingId/items/:bookingItemId/collected ─────────────
+// Technician checklist toggle: marks (or unmarks) one test/package as
+// physically collected. Purely a per-item tracking flag — does not read or
+// write ip_bookings.status, ip_technician_collection.collection_status, or
+// anything else in the existing booking/collection status flow.
+//
+// Reuses the pre-existing item_status column (already has ~1,256 rows from
+// admin/reporting use, values 'pending'/'completed') rather than a separate
+// checklist-specific column — so this MUST write the exact same lowercase
+// vocabulary already in use ('pending'/'completed'), not a
+// technician-specific wording, or admin queries filtering on these exact
+// strings would silently stop matching items the technician has touched.
+exports.setItemCollected = async (req, res) => {
+  const { bookingId, bookingItemId } = req.params;
+  const { status } = req.body;
+  if (status !== 'completed' && status !== 'pending') {
+    return res.status(400).json({ success: false, message: "status must be 'completed' or 'pending'" });
+  }
+  try {
+    const [result] = await db.execute(
+      `UPDATE ip_booking_items
+       SET item_status = ?, collected_at = ${status === 'completed' ? 'NOW()' : 'NULL'}
+       WHERE booking_item_id = ? AND booking_id = ?`,
+      [status, bookingItemId, bookingId]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Booking item not found' });
+    }
+    res.json({ success: true, bookingItemId: Number(bookingItemId), status });
+  } catch (err) {
+    console.error('❌ setItemCollected FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── POST /api/bookings/:bookingId/collection-photo ────────────────────────────
+// Sample-collection proof photo. Reuses the existing generic /api/upload
+// pipeline (client uploads the camera image there first and gets a URL back)
+// and the existing ip_booking_documents table (already booking_id-scoped),
+// the same way prescriptions are stored — but tagged with
+// file_description='collection_proof' instead of 'prescription' so it is a
+// distinct record type in the same table, not mixed into prescription data.
+// getByBooking (prescriptionController.js) is filtered to file_description=
+// 'prescription' so these rows never leak into the existing prescription
+// list UI — that filter is the only other change this feature required.
+exports.saveCollectionProofPhoto = async (req, res) => {
+  const { bookingId } = req.params;
+  const { imageUrl } = req.body;
+  if (!imageUrl) {
+    return res.status(400).json({ success: false, message: 'imageUrl is required' });
+  }
+  try {
+    const [[booking]] = await db.execute(
+      `SELECT patient_id FROM ip_bookings WHERE booking_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [bookingId]
+    );
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    const uploadedBy = req.user.user_id ?? req.user.userId ?? null;
+    const fileName = imageUrl.split('/').pop().split('?')[0] || 'collection_proof.jpg';
+    const [result] = await db.execute(
+      `INSERT INTO ip_booking_documents
+         (booking_id, booking_item_id, patient_id, file_path, file_name,
+          file_description, uploaded_by, doc_status, created_at)
+       VALUES (?, NULL, ?, ?, ?, 'collection_proof', ?, 'pending_review', NOW())`,
+      [bookingId, booking.patient_id, imageUrl, fileName, uploadedBy]
+    );
+    res.status(201).json({ success: true, docId: result.insertId });
+  } catch (err) {
+    console.error('❌ saveCollectionProofPhoto FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── GET /api/bookings/:bookingId/collection-photo ─────────────────────────────
+// Returns the current sample-collection proof photo for this booking, if any
+// — lets the Manage Booking screen show "Added"/"Not Added" and the thumbnail
+// on load, and after a retake (a retake simply inserts a new row via the POST
+// above; this always returns the most recent one, so old retaken photos are
+// kept in ip_booking_documents as history rather than deleted).
+exports.getCollectionProofPhoto = async (req, res) => {
+  const { bookingId } = req.params;
+  try {
+    const [[doc]] = await db.execute(
+      `SELECT doc_id, file_path, file_name, created_at
+       FROM ip_booking_documents
+       WHERE booking_id = ? AND file_description = 'collection_proof'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [bookingId]
+    );
+    res.json({ success: true, doc: doc ?? null });
+  } catch (err) {
+    console.error('❌ getCollectionProofPhoto FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

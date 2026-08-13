@@ -1090,6 +1090,13 @@ exports.addVisitMember = async (req, res) => {
          parent.collection_address, parent.collection_latitude, parent.collection_longitude,
          patientId || null, parent.slot_id ?? null]
       );
+      // Mirror into ip_patient_bookings — its row for this new booking was
+      // just inserted above (patient → booking link), so it's guaranteed
+      // to exist here.
+      await conn.execute(
+        `UPDATE ip_patient_bookings SET collection_status = 'arrived' WHERE booking_id = ?`,
+        [newBookingId]
+      );
 
       results.push({ newBookingId, bookingRef, patientId, totalAmount });
       console.log(`   ✅ addVisitMember — booking_id=${newBookingId} ref=${bookingRef}`);
@@ -1320,6 +1327,18 @@ exports.verifyBookingOtp = async (req, res) => {
       [bookingId, technicianId]
     );
 
+    // Mirror into ip_patient_bookings — wrapped defensively so a failure
+    // here never turns an already-successful OTP verification into an
+    // error response.
+    try {
+      await db.execute(
+        `UPDATE ip_patient_bookings SET collection_status = 'otp_verified' WHERE booking_id = ?`,
+        [bookingId]
+      );
+    } catch (e) {
+      console.error(`❌ [verifyBookingOtp] ip_patient_bookings mirror failed booking=${bookingId}: ${e.message}`);
+    }
+
     // Cascade otp_verified to sibling bookings in the same visit group
     try {
       const [[vgRow]] = await db.execute(
@@ -1333,6 +1352,13 @@ exports.verifyBookingOtp = async (req, res) => {
            SET tc.collection_status = 'otp_verified',
                tc.otp_verified_at   = NOW(),
                tc.updated_at        = NOW()
+           WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+          [vgRow.visit_group_id, bookingId]
+        );
+        await db.execute(
+          `UPDATE ip_patient_bookings pb
+           JOIN ip_bookings b ON b.booking_id = pb.booking_id
+           SET pb.collection_status = 'otp_verified'
            WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
           [vgRow.visit_group_id, bookingId]
         );

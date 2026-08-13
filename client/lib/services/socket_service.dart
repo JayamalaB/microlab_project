@@ -1182,15 +1182,25 @@ class SocketService {
   }
 
   /// Final technician step.  Stores [completed_at] in DB, frees the technician.
-  void emitHandedToLab({required int bookingId}) {
+  /// receivedByName: who the technician handed the samples to at the lab —
+  /// self-reported, optional. handoverBranchId: override for which
+  /// branch/lab received it; omit to let the server default to the
+  /// booking's own branch.
+  void emitHandedToLab({
+    required int bookingId,
+    String? receivedByName,
+    int? handoverBranchId,
+  }) {
     _isBusy          = false;
     _activeBookingId = null;
     _appointmentBookingIds.remove(bookingId);
     _log('HANDED_TO_LAB', 'id=$bookingId — marked AVAILABLE');
 
     _socket?.emit('handed_to_lab', {
-      'bookingId':    bookingId,
-      'technicianId': userId,
+      'bookingId':        bookingId,
+      'technicianId':     userId,
+      'receivedByName':   receivedByName,
+      'handoverBranchId': handoverBranchId,
     });
 
     if (_isAvailable && isConnected && _lastLat != null) {

@@ -69,7 +69,7 @@ exports.getByBooking = async (req, res) => {
       `SELECT bd.doc_id, bd.file_path, bd.file_name, bd.file_description,
               bd.doc_status, bd.created_at, bd.booking_id, bd.patient_id
        FROM ip_booking_documents bd
-       WHERE bd.booking_id = ?
+       WHERE (bd.booking_id = ?
           OR bd.booking_id IN (
             SELECT b2.booking_id
             FROM ip_bookings b1
@@ -77,7 +77,8 @@ exports.getByBooking = async (req, res) => {
                                 AND b2.booking_id    != b1.booking_id
                                 AND b2.deleted_at    IS NULL
             WHERE b1.booking_id = ? AND b1.visit_group_id IS NOT NULL
-          )
+          ))
+         AND bd.file_description = 'prescription'
        ORDER BY bd.created_at ASC`,
       [bookingId, bookingId]
     );

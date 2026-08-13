@@ -212,27 +212,36 @@ exports.lookupBranch = async (req, res) => {
 
         // ── Eligibility walk (GPS path only) ────────────────────────────────
         // Business requirement: don't just take the nearest branch — walk
-        // nearest-first until one has >=1 online technician AND >=1 bookable
-        // slot for lookupDate. No cap on how many are checked — every branch
-        // with an eligible technician must be reachable, not just the nearest
-        // handful by rank. Reuses the haversine sort above and the tech
-        // summaries already fetched for the full dump — no new distance/
-        // eligibility algorithm, no duplicate technician query.
-        blog(`   🔎 eligibility walk (online tech + slots for ${lookupDate}) — checking all ${withDist.length}:`);
+        // nearest-first until one has >=1 bookable slot for lookupDate. No
+        // cap on how many are checked — every branch with real capacity
+        // must be reachable, not just the nearest handful by rank. Reuses
+        // the haversine sort above and the tech summaries already fetched
+        // for the full dump — no new distance/eligibility algorithm, no
+        // duplicate technician query.
+        //
+        // hasOnlineTech is still computed and logged below (for visibility
+        // into who's currently reachable), but it is NOT part of the
+        // qualification decision: a technician's real-time online_status
+        // has no bearing on whether they'll be free for a date/time that
+        // hasn't been chosen yet (no time is known at this stage — see
+        // findEligibleBranches in branchEligibility.js for the time-aware
+        // check used once dispatch does know the requested time). Capacity
+        // (_hasAvailableSlots) is the sole gate now, so a branch is never
+        // skipped just because its technician happens to be busy on an
+        // unrelated, non-conflicting booking.
+        blog(`   🔎 eligibility walk (slot capacity for ${lookupDate}) — checking all ${withDist.length}:`);
 
         let winner = null;
         for (let i = 0; i < withDist.length; i++) {
           const cand = withDist[i];
           const techSummary   = allTechSummaries.get(cand.branch_id);
           const hasOnlineTech = !!(techSummary && techSummary.online > 0);
-          // Only bother querying slots if there's an online tech at all —
-          // cheap short-circuit, avoids a slot query per candidate.
-          const hasSlots  = hasOnlineTech ? await _hasAvailableSlots(cand.branch_id, lookupDate) : false;
-          const qualifies = hasOnlineTech && hasSlots;
+          const hasSlots      = await _hasAvailableSlots(cand.branch_id, lookupDate);
+          const qualifies     = hasSlots;
 
           blog(
             `      ${i + 1}. id=${cand.branch_id}  ${cand.name}  ${cand.distKm.toFixed(2)} km` +
-            `  |  slots=${hasOnlineTech ? (hasSlots ? 'yes' : 'no') : 'skipped (no online tech)'}` +
+            `  |  slots=${hasSlots ? 'yes' : 'no'}  |  online-tech=${hasOnlineTech ? 'yes' : 'no'}` +
             `  → ${qualifies ? 'QUALIFIES' : 'skip'}`
           );
 
@@ -247,14 +256,14 @@ exports.lookupBranch = async (req, res) => {
             `   ✅ ${isFallback ? 'FALLBACK match' : 'matched by nearest distance'} — ${winner.name}` +
             ` (${winner.distKm.toFixed(2)} km away)` +
             (isFallback
-              ? `  — nearest branch (id=${withDist[0].branch_id} ${withDist[0].name}) had no online tech / no slots for ${lookupDate}`
+              ? `  — nearest branch (id=${withDist[0].branch_id} ${withDist[0].name}) had no available slot for ${lookupDate}`
               : '')
           );
         } else {
           gpsExhausted = true;
           blog(
             `   ✗ [GPS FALLBACK EXHAUSTED] checked all ${withDist.length} nearby branch(es) for ${lookupDate}` +
-            ` — none had an online technician with an available slot` +
+            ` — none had an available slot` +
             (place ? `  (city/name-LIKE fallback SKIPPED for place="${place}" — would bypass the eligibility check)` : '')
           );
         }

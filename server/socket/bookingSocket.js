@@ -22,7 +22,11 @@
 const db              = require('../config/db');
 const { messaging }   = require('../config/firebase');
 const { sendToBookingOwner } = require('../services/customerPush');
-const { findEligibleBranches } = require('../services/branchEligibility');
+const {
+  findEligibleBranches,
+  technicianActiveSlots,
+  _hasSlotConflict,
+} = require('../services/branchEligibility');
 const fs              = require('fs');
 const path            = require('path');
 
@@ -138,13 +142,10 @@ const fcmOnlineTechnicians = new Map(); // technicianId → { fcmToken, lat, lng
 const technicianActiveBookings = new Map(); // technicianId → bookingId
 const driverActiveBookings     = new Map(); // driverId     → bookingId
 
-// ── Appointment-based slot tracking (Phase 0 — declared; Phase 1 will populate) ─
-// technicianId → Map<bookingId, { slotDate, startMinutes, endMinutes, slotId }>
-// Each inner entry represents one committed appointment window.  When Phase 1
-// populates this on booking_accepted, dispatch can check overlaps instead of
-// relying on the global isAvailable flag for appointment-time bookings.
-// Rebuilt from DB on server start by initDispatchState().
-const technicianActiveSlots = new Map();
+// technicianActiveSlots is imported from ../services/branchEligibility —
+// moved there so branch-eligibility checks can share the exact same
+// committed-window data dispatch uses, instead of a second copy. See that
+// file for the full comment/lifecycle notes.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  LOGGING
@@ -273,6 +274,16 @@ async function _cascadeTcStatus(bookingId, status, timestampCol) {
        WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
       [status, vgId, bookingId]
     );
+    // Mirror the same status into ip_patient_bookings for sibling bookings —
+    // keeps the patient-link table's collection_status consistent with
+    // ip_technician_collection for every booking sharing this visit group.
+    dbRun(
+      `UPDATE ip_patient_bookings pb
+       JOIN ip_bookings b ON b.booking_id = pb.booking_id
+       SET pb.collection_status = ?
+       WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+      [status, vgId, bookingId]
+    );
   } catch (e) {
     console.error(`❌ [_cascadeTcStatus] booking=${bookingId} status=${status}: ${e.message}`);
   }
@@ -350,21 +361,8 @@ function buildFcmQueue(patientLat, patientLng, branchId = null) {
   return entries;
 }
 
-// ── Phase 2 — Appointment slot overlap check ───────────────────────────────────
-// Returns true if the given technician already has a committed appointment window
-// on bookingDate that covers requestedStart (minutes since midnight).
-// Techs with no entry in technicianActiveSlots (old model) always return false —
-// their availability is governed by the global isAvailable flag instead.
-function _hasSlotConflict(techId, bookingDate, requestedStart) {
-  const activeSlots = technicianActiveSlots.get(techId);
-  if (!activeSlots || activeSlots.size === 0) return false;
-  for (const [, win] of activeSlots) {
-    if (win.slotDate !== bookingDate) continue;
-    // Conflict: new appointment starts inside an existing committed window
-    if (requestedStart >= win.startMinutes && requestedStart < win.endMinutes) return true;
-  }
-  return false;
-}
+// _hasSlotConflict is imported from ../services/branchEligibility — see
+// that file for the implementation (moved verbatim, unchanged).
 
 // Temporarily register Lane 2 techs into onlineTechnicians so dispatchAttempt can
 // find and track them.  Their real entry replaces this when they reconnect.
@@ -581,7 +579,8 @@ async function dispatchAttempt(io, bookingId) {
             const fallbackDate = dispatch.bookingDate
               || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
             dispatch.branchCandidates = await findEligibleBranches(
-              bookingData.patientLat, bookingData.patientLng, fallbackDate
+              bookingData.patientLat, bookingData.patientLng, fallbackDate,
+              apptCtxD?.requestedStart ?? null
             );
             dlog(bookingId, 'BRANCH_CANDIDATES',
               dispatch.branchCandidates.length > 0
@@ -1708,6 +1707,12 @@ module.exports = function bookingSocket(io, socket) {
       ).then(([r]) => {
         log('💾', 'TCB_CREATED', bookingId,
           `tech=${actorName} rows=${r.affectedRows}`);
+        // Mirror the technician-side status into ip_patient_bookings for
+        // this booking (see plan: technician collection_status sync).
+        dbRun(
+          `UPDATE ip_patient_bookings SET collection_status = 'assigned' WHERE booking_id = ?`,
+          [bookingId]
+        );
         // Cascade assignment to sibling bookings in the same visit group
         ;(async () => {
           try {
@@ -1742,6 +1747,13 @@ module.exports = function bookingSocket(io, socket) {
                SET technician_id = ?, technician_name = ?, updated_at = NOW()
                WHERE visit_group_id = ? AND booking_id != ? AND deleted_at IS NULL`,
               [actorId, actorName || null, vgId, bookingId]
+            );
+            dbRun(
+              `UPDATE ip_patient_bookings pb
+               JOIN ip_bookings b ON b.booking_id = pb.booking_id
+               SET pb.collection_status = 'assigned'
+               WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+              [vgId, bookingId]
             );
             log('💾', 'TCB_SIBLING_CASCADE', bookingId,
               `visit_group=${vgId} tech=${actorName}`);
@@ -1948,6 +1960,10 @@ module.exports = function bookingSocket(io, socket) {
        WHERE booking_id = ?`,
       [bookingId]
     );
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'en_route' WHERE booking_id = ?`,
+      [bookingId]
+    );
     _cascadeTcStatus(bookingId, 'en_route', 'en_route_at');
     dbRun(
       `UPDATE ip_technician_live_location
@@ -1972,6 +1988,10 @@ module.exports = function bookingSocket(io, socket) {
       `UPDATE ip_technician_collection
        SET collection_status = 'arrived', arrived_at = NOW(), updated_at = NOW()
        WHERE booking_id = ?`,
+      [bookingId]
+    );
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'arrived' WHERE booking_id = ?`,
       [bookingId]
     );
     _cascadeTcStatus(bookingId, 'arrived', 'arrived_at');
@@ -2002,6 +2022,10 @@ module.exports = function bookingSocket(io, socket) {
       `UPDATE ip_technician_collection
        SET collection_status = 'all_collected', collected_at = NOW(), updated_at = NOW()
        WHERE booking_id = ?`,
+      [bookingId]
+    );
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'all_collected' WHERE booking_id = ?`,
       [bookingId]
     );
     _cascadeTcStatus(bookingId, 'all_collected', 'collected_at');
@@ -2055,6 +2079,10 @@ module.exports = function bookingSocket(io, socket) {
     .catch(e => {
       clog(`[collection_started] DB ERROR — booking_id=${bookingId}  error="${e.message}"  code=${e.code}`);
     });
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'collection_started' WHERE booking_id = ?`,
+      [bookingId]
+    );
     _cascadeTcStatus(bookingId, 'collection_started', 'collection_started_at');
     _notifyPatient(io, bookingId, 'collection_started', { bookingId });
   });
@@ -2084,6 +2112,11 @@ module.exports = function bookingSocket(io, socket) {
     .catch(e => {
       clog(`[sample_collected] DB ERROR — booking_id=${bookingId}  error="${e.message}"  code=${e.code}`);
     });
+
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'sample_collected' WHERE booking_id = ?`,
+      [bookingId]
+    );
 
     // Mirrors the ip_bookings.status='collected' write already done in the
     // handed_to_lab handler below — just triggered one step earlier in the
@@ -2130,8 +2163,9 @@ module.exports = function bookingSocket(io, socket) {
   // Final technician step — stores completed_at timestamp, frees the technician
   socket.on('handed_to_lab', (data = {}) => {
     clog(`[handed_to_lab] RAW event received | data=${JSON.stringify(data)}`);
-    const { bookingId, technicianId } = data;
-    clog(`[handed_to_lab] parsed bookingId=${bookingId}  technicianId=${technicianId}`);
+    const { bookingId, technicianId, receivedByName = null, handoverBranchId = null } = data;
+    clog(`[handed_to_lab] parsed bookingId=${bookingId}  technicianId=${technicianId}` +
+         `  receivedByName=${receivedByName ?? '—'}  handoverBranchId=${handoverBranchId ?? '—'}`);
     if (!bookingId || !technicianId) {
       clog(`[handed_to_lab] GUARD FAILED — dropped. bookingId falsy=${!bookingId}  technicianId falsy=${!technicianId}`);
       return;
@@ -2152,22 +2186,45 @@ module.exports = function bookingSocket(io, socket) {
        WHERE booking_id = ?`,
       [bookingId]
     );
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'handed_to_lab' WHERE booking_id = ?`,
+      [bookingId]
+    );
 
-    // Cascade to sibling bookings in the same visit group (technician-added members)
+    // Handover tracking + sibling cascade in one pass — fetches the
+    // booking's own branch_id (used as the handover branch unless the
+    // client explicitly overrides it) and visit_group_id together, since
+    // both are needed here and neither was fetched above.
+    // submitted_to_branch_id/submitted_at are pre-existing columns on this
+    // table (never previously wired to any code) that already mean exactly
+    // "which branch this was submitted to, and when" — reused here instead
+    // of adding new columns. No separate handover-status column needed
+    // either: collection_status='handed_to_lab' (set above) already is
+    // that signal.
     ;(async () => {
       try {
         const [[parentRow]] = await db.execute(
-          'SELECT visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
+          'SELECT branch_id, visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
           [bookingId]
         );
+        const resolvedBranchId = handoverBranchId ?? parentRow?.branch_id ?? null;
+
+        dbRun(
+          `UPDATE ip_technician_collection
+           SET submitted_to_branch_id = ?, submitted_at = NOW(), received_by_name = ?
+           WHERE booking_id = ?`,
+          [resolvedBranchId, receivedByName, bookingId]
+        );
+
         if (parentRow?.visit_group_id) {
           const vgId = parentRow.visit_group_id;
           dbRun(
             `UPDATE ip_technician_collection tc
              JOIN ip_bookings b ON b.booking_id = tc.booking_id
-             SET tc.collection_status = 'handed_to_lab', tc.completed_at = NOW(), tc.updated_at = NOW()
+             SET tc.collection_status = 'handed_to_lab', tc.completed_at = NOW(), tc.updated_at = NOW(),
+                 tc.submitted_to_branch_id = ?, tc.submitted_at = NOW(), tc.received_by_name = ?
              WHERE b.visit_group_id = ? AND b.booking_id != ?`,
-            [vgId, bookingId]
+            [resolvedBranchId, receivedByName, vgId, bookingId]
           );
           dbRun(
             `UPDATE ip_bookings
@@ -2175,10 +2232,17 @@ module.exports = function bookingSocket(io, socket) {
              WHERE visit_group_id = ? AND booking_id != ?`,
             [vgId, bookingId]
           );
+          dbRun(
+            `UPDATE ip_patient_bookings pb
+             JOIN ip_bookings b ON b.booking_id = pb.booking_id
+             SET pb.collection_status = 'handed_to_lab'
+             WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+            [vgId, bookingId]
+          );
           clog(`[handed_to_lab] sibling cascade — visit_group=${vgId} booking=${bookingId}`);
         }
       } catch (e) {
-        console.error(`[handed_to_lab] sibling cascade error: ${e.message}`);
+        console.error(`[handed_to_lab] sibling cascade / handover-tracking error: ${e.message}`);
       }
     })();
 

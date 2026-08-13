@@ -393,6 +393,81 @@ class ApiService {
     return false;
   }
 
+  // Technician checklist toggle — marks (or unmarks) one test/package as
+  // physically collected. Purely a per-item tracking flag, independent of
+  // the booking/collection status flow (sample_collected, etc.).
+  static Future<bool> setBookingItemCollected({
+    required int bookingId,
+    required int bookingItemId,
+    required bool collected,
+  }) async {
+    final token = await getToken();
+    if (token == null) return false;
+    try {
+      final res = await http.patch(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/items/$bookingItemId/collected'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        // Server reuses the pre-existing item_status column (also written by
+        // admin/reporting flows), so we must match its exact lowercase
+        // vocabulary: 'completed' / 'pending'.
+        body: jsonEncode({'status': collected ? 'completed' : 'pending'}),
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      return body['success'] == true;
+    } catch (e) {
+      debugPrint('[setBookingItemCollected] ERROR: $e');
+    }
+    return false;
+  }
+
+  // Associates an already-uploaded (via uploadFile) proof-of-collection photo
+  // URL with a booking_id. Separate from savePrescriptionDoc/ip_prescriptions
+  // so it does not appear in the prescription document list.
+  static Future<bool> saveCollectionProofPhoto({
+    required int bookingId,
+    required String imageUrl,
+  }) async {
+    final token = await getToken();
+    if (token == null) return false;
+    try {
+      final res = await http.post(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/collection-photo'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'imageUrl': imageUrl}),
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      return body['success'] == true;
+    } catch (e) {
+      debugPrint('[saveCollectionProofPhoto] ERROR: $e');
+    }
+    return false;
+  }
+
+  // Fetches the current sample-collection proof photo for a booking, if any
+  // — used to render "Added"/"Not Added" and the thumbnail when the Manage
+  // Booking screen loads (a retake replaces this with the newest photo).
+  static Future<Map<String, dynamic>?> getCollectionProofPhoto(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/collection-photo'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return body['doc'] as Map<String, dynamic>?;
+    } catch (e) {
+      debugPrint('[getCollectionProofPhoto] ERROR: $e');
+    }
+    return null;
+  }
+
   // Records on-site payment collected by technician and marks booking paid in DB.
   // paymentMethod: 'RAZORPAY' (default, requires razorpayPaymentId) or 'CASH'
   // (razorpayPaymentId not required). amount may be less than the full amount

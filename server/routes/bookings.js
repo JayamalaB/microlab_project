@@ -36,6 +36,12 @@ router.get('/:bookingId/linked-patients',          auth, bookingController.getLi
 router.post('/:bookingId/items',                   auth, bookingController.addItem);
 // DELETE /api/bookings/:bookingId/items/:id — remove a test from a booking
 router.delete('/:bookingId/items/:bookingItemId',  auth, bookingController.removeItem);
+// PATCH /api/bookings/:bookingId/items/:bookingItemId/collected — technician checklist toggle
+router.patch('/:bookingId/items/:bookingItemId/collected', auth, bookingController.setItemCollected);
+// POST /api/bookings/:bookingId/collection-photo — technician's sample-collection proof photo
+router.post('/:bookingId/collection-photo', auth, bookingController.saveCollectionProofPhoto);
+// GET  /api/bookings/:bookingId/collection-photo — current proof photo (if any)
+router.get('/:bookingId/collection-photo', auth, bookingController.getCollectionProofPhoto);
 
 // POST /api/bookings/:bookingId/cancel — customer cancels a booking
 router.post('/:bookingId/cancel', auth, bookingController.cancelBooking);
