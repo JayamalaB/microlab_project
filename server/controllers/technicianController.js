@@ -656,7 +656,7 @@ exports.collectPayment = async (req, res) => {
     // ip_technician_collection) or as a sibling of a booking they own (same
     // visit_group_id) — and read the current totals in the same query.
     const [[booking]] = await db.execute(
-      `SELECT b.booking_id, b.total_amount, b.amount_paid
+      `SELECT b.booking_id, b.patient_id, b.total_amount, b.amount_paid
        FROM ip_bookings b
        WHERE b.booking_id = ?
          AND (
@@ -688,22 +688,23 @@ exports.collectPayment = async (req, res) => {
       [newPaymentStatus, newAmountPaid, newAmountDue, bookingId]
     );
 
-    // Update payment transaction record (best-effort — works for both parent and sibling bookings)
+    const txnRef = `TXN${Date.now()}TC`;
+    const isPartial = newAmountDue > 0 ? 1 : 0;
     await db.execute(
-      `UPDATE ip_payment_transactions
-       SET payment_status = ?, transaction_status = ?,
-           payment_type = ?, payment_mode = ?,
-           amount_paid = ?, amount_due = ?, is_partial = ?,
-           gateway_transaction_id = ?, gateway_status = ?,
-           collected_by = ?, paid_at = NOW(), updated_at = NOW()
-       WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
+      `INSERT INTO ip_payment_transactions
+         (transaction_ref, booking_id, patient_id, payment_type, payment_mode,
+          gross_amount, net_amount, amount_paid, amount_due,
+          currency, payment_status, transaction_status, is_refund, is_partial,
+          gateway_transaction_id, gateway_status, collected_by, paid_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INR', ?, ?, 0, ?, ?, ?, ?, NOW())`,
       [
+        txnRef, bookingId, booking.patient_id, paymentMethod, paymentMethod,
+        amount, amount, amount, newAmountDue,
         newPaymentStatus, newPaymentStatus === 'paid' ? 'completed' : 'partial',
-        paymentMethod, paymentMethod,
-        newAmountPaid, newAmountDue, newPaymentStatus === 'paid' ? 0 : 1,
+        isPartial,
         paymentMethod === 'RAZORPAY' ? razorpayPaymentId : null,
         paymentMethod === 'RAZORPAY' ? 'captured' : 'cash_collected',
-        technicianId, bookingId,
+        technicianId,
       ]
     );
 

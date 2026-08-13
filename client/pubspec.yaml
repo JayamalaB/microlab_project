@@ -57,6 +57,7 @@ flutter:
     - assets/banners/banner3.png
     - assets/sounds/beeb_sound.mp3
     - assets/icon/app_icon.png
+    - assets/icon/MicroLab-Logo.jpeg
 
 flutter_launcher_icons:
   android: true
