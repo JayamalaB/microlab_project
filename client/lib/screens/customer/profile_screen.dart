@@ -115,7 +115,11 @@ class ProfileScreen extends StatelessWidget {
 
     final header = Container(
       color: AppColors.brandGreen,
-      padding: EdgeInsets.fromLTRB(16, topPad + 16, 8, 14),
+      width: double.infinity,
+      height: topPad + 56,
+      padding: EdgeInsets.only(top: topPad),
+      child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         children: [
           const Text('Profile',
@@ -156,6 +160,7 @@ class ProfileScreen extends StatelessWidget {
             ),
           ),
         ],
+      ),
       ),
     );
 

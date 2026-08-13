@@ -86,12 +86,18 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
 
   static String _mapStatus(String raw) {
     switch (raw) {
+      case 'pending':    return 'Pending';
       case 'scheduled':  return 'Scheduled';
       case 'confirmed':  return 'Confirmed';
+      case 'assigned':   return 'Technician Allocated';
+      case 'arrived':    return 'Technician Arrived';
       case 'collected':  return 'Sample Collected';
+      case 'submitted':  return 'Handed to Lab';
       case 'completed':  return 'Completed';
       case 'cancelled':  return 'Cancelled';
-      default:           return 'Pending';
+      default:           return raw.isNotEmpty
+          ? raw[0].toUpperCase() + raw.substring(1)
+          : 'Unknown';
     }
   }
 
@@ -265,16 +271,18 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
           Container(
             width: double.infinity,
             color: AppColors.brandGreen,
-            padding: EdgeInsets.fromLTRB(
-                0, MediaQuery.of(context).padding.top + 16, 0, 18),
-            child: const Text(
-              'My Bookings',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.2),
+            height: MediaQuery.of(context).padding.top + 56,
+            padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
+            child: const Align(
+              alignment: Alignment.center,
+              child: Text(
+                'My Bookings',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.2),
+              ),
             ),
           ),
           Expanded(child: _buildBody()),
@@ -504,8 +512,11 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
   StreamSubscription<int>? _arrivedSub;
   StreamSubscription<int>? _collectedSub;
   StreamSubscription<bool>? _connectedSub;
+  Timer? _pollTimer;
 
   static const _tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
+
+  static const _activeStatuses = {'pending', 'confirmed', 'assigned', 'arrived'};
 
   @override
   void initState() {
@@ -519,11 +530,24 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
     _collectedSub = SocketService.instance.onCollectionCompleted.listen((_) => _reload());
     _connectedSub = SocketService.instance.onConnected.listen((_) => _reload());
     _reload();
+    _startPollIfNeeded();
+  }
+
+  void _startPollIfNeeded() {
+    _pollTimer?.cancel();
+    final hasActive = _bookings.any((b) => _activeStatuses.contains(b.status.toLowerCase()));
+    if (!hasActive) return;
+    _pollTimer = Timer.periodic(const Duration(seconds: 30), (_) => _reload());
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _reload();
+    if (state == AppLifecycleState.resumed) {
+      _reload();
+      _startPollIfNeeded();
+    } else if (state == AppLifecycleState.paused) {
+      _pollTimer?.cancel();
+    }
   }
 
   @override
@@ -534,6 +558,7 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
     _arrivedSub?.cancel();
     _collectedSub?.cancel();
     _connectedSub?.cancel();
+    _pollTimer?.cancel();
     _tabCtrl.dispose();
     super.dispose();
   }
@@ -548,6 +573,7 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
           _bookings = all.where((b) => b.member.id == widget.member.id).toList();
           _reloading = false;
         });
+        _startPollIfNeeded();
       }
     } catch (_) {
       if (mounted) setState(() => _reloading = false);
@@ -1009,25 +1035,31 @@ class _BookingCard extends StatelessWidget {
 
   Color _statusColor(String s) {
     switch (s) {
-      case 'Completed':        return AppColors.brandGreen;
-      case 'Sample Collected': return const Color(0xFF2E7D32);
-      case 'Confirmed':        return const Color(0xFF1565C0);
-      case 'In Progress':      return const Color(0xFF1565C0);
-      case 'Cancelled':        return const Color(0xFFD32F2F);
-      case 'Scheduled':        return const Color(0xFF6A1B9A);
-      default:                 return const Color(0xFFE65100); // Pending
+      case 'Completed':             return AppColors.brandGreen;
+      case 'Sample Collected':      return const Color(0xFF2E7D32);
+      case 'Handed to Lab':         return const Color(0xFF2E7D32);
+      case 'Technician Arrived':    return const Color(0xFF2E7D32);
+      case 'Confirmed':             return const Color(0xFF1565C0);
+      case 'Technician Allocated':  return const Color(0xFF1565C0);
+      case 'In Progress':           return const Color(0xFF1565C0);
+      case 'Cancelled':             return const Color(0xFFD32F2F);
+      case 'Scheduled':             return const Color(0xFF6A1B9A);
+      default:                      return const Color(0xFFE65100);
     }
   }
 
   IconData _statusIcon(String s) {
     switch (s) {
-      case 'Completed':        return Icons.check_circle_outline;
-      case 'Sample Collected': return Icons.science_outlined;
-      case 'Confirmed':        return Icons.event_available_outlined;
-      case 'In Progress':      return Icons.directions_run_rounded;
-      case 'Cancelled':        return Icons.cancel_outlined;
-      case 'Scheduled':        return Icons.event_outlined;
-      default:                 return Icons.hourglass_empty_rounded; // Pending
+      case 'Completed':             return Icons.check_circle_outline;
+      case 'Sample Collected':      return Icons.science_outlined;
+      case 'Handed to Lab':         return Icons.local_shipping_outlined;
+      case 'Technician Arrived':    return Icons.door_front_door_outlined;
+      case 'Confirmed':             return Icons.event_available_outlined;
+      case 'Technician Allocated':  return Icons.assignment_ind_outlined;
+      case 'In Progress':           return Icons.directions_run_rounded;
+      case 'Cancelled':             return Icons.cancel_outlined;
+      case 'Scheduled':             return Icons.event_outlined;
+      default:                      return Icons.hourglass_empty_rounded;
     }
   }
 
@@ -1186,7 +1218,7 @@ class _BookingCard extends StatelessWidget {
                     ),
 
                     // Feedback button for completed or sample-collected bookings
-                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'collected') && booking.rating == null) ...[
+                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'collected') && booking.rating == null) ...[
                       const SizedBox(height: 10),
                       GestureDetector(
                         onTap: () => _showFeedback(context, booking, onRefresh: onFeedbackSubmitted),
@@ -1211,7 +1243,7 @@ class _BookingCard extends StatelessWidget {
                     ],
 
                     // Show existing rating
-                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'collected') && booking.rating != null) ...[
+                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'collected') && booking.rating != null) ...[
                       const SizedBox(height: 10),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),

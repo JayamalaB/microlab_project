@@ -310,8 +310,8 @@ exports.getMyBookings = async (req, res) => {
          TIME_FORMAT(av.slot_time, '%h:%i %p') AS slot_time_formatted,
          COALESCE(bpt.payment_status,
            IF(bpt.transaction_status='completed','paid','pending')) AS payment_status,
-         bpt.amount_paid,
-         bpt.amount_due,
+         b.amount_paid,
+         b.amount_due,
          (SELECT bd.doc_status
           FROM ip_booking_documents bd
           WHERE bd.booking_id = b.booking_id AND bd.file_description = 'prescription'
@@ -786,7 +786,7 @@ exports.payBooking = async (req, res) => {
     await conn.beginTransaction();
 
     const [[booking]] = await conn.execute(
-      `SELECT booking_id, patient_id, total_amount
+      `SELECT booking_id, patient_id, total_amount, status
        FROM ip_bookings
        WHERE booking_id = ? AND client_id = ? AND deleted_at IS NULL`,
       [bookingId, clientId]
@@ -796,25 +796,27 @@ exports.payBooking = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Booking not found' });
     }
 
+    const txnRef = `TXN${Date.now()}`;
     await conn.execute(
-      `UPDATE ip_payment_transactions
-       SET payment_type = 'RAZORPAY',
-           payment_status = 'paid', transaction_status = 'completed',
-           amount_paid = amount_paid + ?, amount_due = 0,
-           gateway_transaction_id = ?, gateway_order_id = ?,
-           gateway_status = 'success', paid_at = NOW(), updated_at = NOW()
-       WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
-      [amount, razorpayPaymentId, razorpayOrderId ?? null, bookingId]
+      `INSERT INTO ip_payment_transactions
+         (transaction_ref, booking_id, patient_id, payment_type, payment_mode,
+          gross_amount, net_amount, amount_paid, amount_due,
+          currency, payment_status, transaction_status, is_refund, is_partial,
+          gateway_transaction_id, gateway_order_id, gateway_status, paid_at)
+       VALUES (?, ?, ?, 'RAZORPAY', 'RAZORPAY', ?, ?, ?, 0, 'INR', 'paid', 'completed', 0, 0, ?, ?, 'success', NOW())`,
+      [txnRef, bookingId, booking.patient_id, amount, amount, amount, razorpayPaymentId, razorpayOrderId ?? null]
     );
 
+    // Only advance status to 'confirmed' if still pending — never overwrite a field status
+    const advanceStatus = booking.status === 'pending';
     await conn.execute(
       `UPDATE ip_bookings
-       SET status = 'confirmed', payment_status = 'paid',
+       SET ${advanceStatus ? "status = 'confirmed'," : ''} payment_status = 'paid',
            amount_paid = amount_paid + ?, amount_due = 0, updated_at = NOW()
        WHERE booking_id = ?`,
       [amount, bookingId]
     );
-
+    
     await conn.commit();
     console.log(`✅ payBooking → booking_id=${bookingId} paid ₹${amount}`);
 

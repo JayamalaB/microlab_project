@@ -100,8 +100,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // API-loaded slots used when branchId is provided.
   List<TimeSlot>              _branchSlots    = [];
   List<Map<String, dynamic>>  _branchSlotsRaw = []; // includes timeIntervals
-  bool                        _loadingSlots   = false;
-  String                      _slotsError     = '';
+  bool                        _loadingSlots        = false;
+  String                      _slotsError          = '';
+  bool                        _fallbackDateChanged = false;
   TimeInterval?               _selectedAppointmentTime;
 
   List<TimeSlot> get _availableSlots =>
@@ -247,6 +248,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         _branchSlots             = [];
         _branchSlotsRaw          = [];
         _slotsError              = '';
+        _fallbackDateChanged     = false;
       });
       if (widget.branchId != null) {
         debugPrint('   → branchId=${widget.branchId} — loading API slots');
@@ -298,12 +300,33 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           )).toList();
           debugPrint('   ✅ slots     : ${list.length} available');
           for (final s in list) { debugPrint('      • [${s.id}] ${s.label} (${s.time})'); }
-          setState(() {
-            _branchSlotsRaw = rawList;
-            _branchSlots    = list;
-            _loadingSlots   = false;
-            _slotsError     = list.isEmpty ? 'No slots available for this date. Try another date.' : '';
-          });
+          if (list.isEmpty) {
+            final fbData = body['fallback'] as Map<String, dynamic>?;
+            if (fbData != null) {
+              final fb = TimeSlot(id: '', label: fbData['label'] as String, time: '');
+              final fbDateStr = fbData['date'] as String?;
+              final fbDate    = fbDateStr != null ? DateTime.tryParse(fbDateStr) : null;
+              setState(() {
+                _branchSlotsRaw = [];
+                _branchSlots    = [fb];
+                _loadingSlots   = false;
+                _slotsError     = '';
+                if (fbDate != null && fbDate != _selectedDate) {
+                _fallbackDateChanged = true;
+                _selectedDate        = fbDate;
+              }
+              });
+            } else {
+              setState(() { _branchSlotsRaw = []; _branchSlots = []; _loadingSlots = false; _slotsError = 'No upcoming slots available. Please contact us.'; });
+            }
+          } else {
+            setState(() {
+              _branchSlotsRaw = rawList;
+              _branchSlots    = list;
+              _loadingSlots   = false;
+              _slotsError     = '';
+            });
+          }
         } else {
           debugPrint('   ⚠️  API returned success=false: ${body['message']}');
           setState(() { _loadingSlots = false; _slotsError = body['message'] as String? ?? 'Could not load slots.'; });
@@ -349,24 +372,52 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
       );
     }
-    return Wrap(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (_fallbackDateChanged) ...[
+          Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: AppColors.amberSurface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.amber.withValues(alpha: 0.3)),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.info_outline_rounded, size: 14, color: AppColors.amber),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'No slots on your selected date. Appointment date updated to the next available day.',
+                    style: TextStyle(fontSize: 12, color: AppColors.amber, height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+        Wrap(
       spacing: 10,
       runSpacing: 10,
       children: _availableSlots.map((slot) {
-        final isSelected = _selectedSlot?.id == slot.id;
+        final isSelected  = _selectedSlot?.id == slot.id;
+        final isFallback  = slot.id.isEmpty;
+        final activeColor = isFallback ? AppColors.amber : AppColors.brandGreen;
         return GestureDetector(
           onTap: () => setState(() {
             _selectedSlot            = slot;
-            _selectedAppointmentTime = null; // reset when slot changes
+            _selectedAppointmentTime = null;
           }),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
             padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
             decoration: BoxDecoration(
-              color: isSelected ? AppColors.brandGreen : Colors.white,
+              color: isSelected ? activeColor : Colors.white,
               borderRadius: BorderRadius.circular(10),
               border: Border.all(
-                color: isSelected ? AppColors.brandGreen : AppColors.divider,
+                color: isSelected ? activeColor : (isFallback ? AppColors.amber : AppColors.divider),
                 width: isSelected ? 1.5 : 1,
               ),
             ),
@@ -374,10 +425,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
-                    color: isSelected ? Colors.white : AppColors.textPrimary)),
+                    color: isSelected
+                        ? Colors.white
+                        : (isFallback ? AppColors.amber : AppColors.textPrimary))),
           ),
         );
       }).toList(),
+        ),
+      ],
     );
   }
 
