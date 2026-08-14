@@ -1353,10 +1353,6 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     with WidgetsBindingObserver {
   bool _isProcessing = false;
 
-  // Test results (released only)
-  List<Map<String, dynamic>> _testResults = [];
-  bool _resultsLoading = false;
-
   // Live technician state — refreshed on demand
   String? _collectionStatus;
   String? _technicianName;
@@ -1574,17 +1570,9 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     }
   }
 
-  Future<void> _loadResults() async {
-    if (widget.booking.bookingIdNum == null) return;
-    setState(() => _resultsLoading = true);
-    final results = await ApiService.getBookingResults(widget.booking.bookingIdNum!);
-    if (mounted) setState(() { _testResults = results; _resultsLoading = false; });
-  }
-
   @override
   void initState() {
     super.initState();
-    if (widget.booking.status == 'Completed') _loadResults();
     // Seed from the snapshot passed in
     _collectionStatus  = widget.booking.collectionStatus;
     _technicianName    = widget.booking.technicianName;
@@ -2105,103 +2093,6 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                     ),
                   ],
 
-                  // Report section for completed bookings
-                  if (b.status == 'Completed') ...[
-                    const SizedBox(height: 16),
-                    Row(children: [
-                      const Icon(Icons.science_outlined, size: 15, color: AppColors.textHint),
-                      const SizedBox(width: 6),
-                      const Text('Test Results',
-                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-                      const Spacer(),
-                      if (_resultsLoading)
-                        const SizedBox(width: 14, height: 14,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
-                    ]),
-                    const SizedBox(height: 10),
-                    if (_resultsLoading)
-                      const SizedBox.shrink()
-                    else if (_testResults.isEmpty)
-                      Container(
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: AppColors.background,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: AppColors.divider),
-                        ),
-                        child: const Row(children: [
-                          Icon(Icons.hourglass_empty_rounded, size: 16, color: AppColors.textHint),
-                          SizedBox(width: 8),
-                          Text('Results not available yet',
-                              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                        ]),
-                      )
-                    else
-                      Column(
-                        children: _testResults.map((r) {
-                          final flag = r['result_flag'] as String? ?? '';
-                          final flagColor = flag == 'critical' ? const Color(0xFFD32F2F)
-                              : (flag == 'high' || flag == 'low') ? const Color(0xFFE65100)
-                              : AppColors.brandGreen;
-                          final flagLabel = flag == 'critical' ? 'Critical'
-                              : flag == 'high' ? 'High'
-                              : flag == 'low'  ? 'Low'
-                              : 'Normal';
-                          final releasedAt = r['released_at'] as String?;
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 8),
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: flagColor.withValues(alpha: 0.04),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: flagColor.withValues(alpha: 0.2)),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Row(children: [
-                                  Expanded(child: Text(r['test_name'] as String? ?? '',
-                                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                          color: AppColors.textPrimary))),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                    decoration: BoxDecoration(
-                                      color: flagColor.withValues(alpha: 0.12),
-                                      borderRadius: BorderRadius.circular(20),
-                                    ),
-                                    child: Text(flagLabel,
-                                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
-                                            color: flagColor)),
-                                  ),
-                                ]),
-                                const SizedBox(height: 6),
-                                Row(children: [
-                                  Text(
-                                    '${r['result_value'] ?? '—'} ${r['result_unit'] ?? ''}'.trim(),
-                                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: flagColor),
-                                  ),
-                                  if (r['reference_range'] != null) ...[
-                                    const SizedBox(width: 10),
-                                    Text('Ref: ${r['reference_range']}',
-                                        style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                                  ],
-                                ]),
-                                if (r['result_remarks'] != null && (r['result_remarks'] as String).isNotEmpty) ...[
-                                  const SizedBox(height: 4),
-                                  Text(r['result_remarks'] as String,
-                                      style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                                ],
-                                if (releasedAt != null) ...[
-                                  const SizedBox(height: 4),
-                                  Text('Released: ${_formatDate(DateTime.tryParse(releasedAt) ?? DateTime.now())}',
-                                      style: const TextStyle(fontSize: 10, color: AppColors.textHint)),
-                                ],
-                              ],
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                  ],
                 ],
               ),
             ),

@@ -1256,11 +1256,6 @@ exports.updateLabStatus = async (req, res) => {
   }
 };
 exports.releaseResult = async (req, res) => {
-  const secret = process.env.ADMIN_WEBHOOK_SECRET;
-  if (!secret || req.headers['x-admin-secret'] !== secret) {
-    return res.status(401).json({ success: false, message: 'Unauthorized' });
-  }
-
   const { bookingId, resultId } = req.params;
   try {
     const [[result]] = await db.execute(
@@ -1302,7 +1297,7 @@ exports.updateAdminStatus = async (req, res) => {
   const BOOKING_STATUS_MAP = {
     pending:              'pending',
     confirmed:            'confirmed',
-    technician_assigned:  'confirmed',   // tech assigned → booking is confirmed
+    technician_assigned:  'assigned',    // matches socket flow → UI shows "Technician Allocated"
     en_route:              null,
     arrived:               null,
     sample_collected:      null,

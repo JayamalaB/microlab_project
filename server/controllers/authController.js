@@ -82,10 +82,19 @@ exports.sendOtp = async (req, res) => {
     step = 'select_user';
     writeLog(`[sendOtp] SELECT ip_users — ${elapsed()}`);
     const [existing] = await db.query(
-      'SELECT user_id, client_id FROM ip_users WHERE user_mobile_no = ?',
+      'SELECT user_id, client_id, user_microlab_type FROM ip_users WHERE user_mobile_no = ?',
       [mobile]
     );
     writeLog(`[sendOtp] select done — found=${existing.length} — ${elapsed()}`);
+
+    // Block technician numbers from logging in as customer
+    if (role !== 'technician' && existing.length > 0 && existing[0].user_microlab_type === 'technician') {
+      writeLog(`[sendOtp] rejected — mobile=${mobile} is a technician account`);
+      return res.status(403).json({
+        success: false,
+        message: 'This number is registered as a technician account. Please use another number to login as customer.',
+      });
+    }
 
     if (existing.length === 0) {
       step = 'insert_user';
