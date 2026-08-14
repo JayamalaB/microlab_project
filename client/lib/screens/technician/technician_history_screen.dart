@@ -68,7 +68,7 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
             final rawStatus = map['collection_status'] as String? ?? '';
             const completedStatuses = {
               'completed', 'all_collected', 'collected',
-              'handed_to_lab', 'sample_collected', 'collection_started',
+              'handed_to_lab', 'handed_to_lab_pending', 'sample_collected', 'collection_started',
             };
             final status = completedStatuses.contains(rawStatus)
                 ? 'Completed'

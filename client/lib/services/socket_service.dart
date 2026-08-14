@@ -1186,15 +1186,38 @@ class SocketService {
   /// self-reported, optional. handoverBranchId: override for which
   /// branch/lab received it; omit to let the server default to the
   /// booking's own branch.
-  void emitHandedToLab({
+  ///
+  /// Returns the server's actual acknowledgement rather than assuming
+  /// success — the previous fire-and-forget emit() gave the caller no way
+  /// to know whether the DB update actually happened (a dropped server-side
+  /// guard or a disconnected socket looked identical to success). Resolves
+  /// {'success': true, ...} only once the server confirms the DB write, or
+  /// {'success': false, 'message': ...} on a reported failure or a 15s
+  /// timeout with no reply. Local "technician available again" state is
+  /// only updated on confirmed success — on failure the technician is still
+  /// mid-job and shouldn't be marked free for new dispatch.
+  Future<Map<String, dynamic>> emitHandedToLab({
     required int bookingId,
     String? receivedByName,
     int? handoverBranchId,
-  }) {
-    _isBusy          = false;
-    _activeBookingId = null;
-    _appointmentBookingIds.remove(bookingId);
-    _log('HANDED_TO_LAB', 'id=$bookingId — marked AVAILABLE');
+  }) async {
+    if (_socket == null || !isConnected) {
+      _log('HANDED_TO_LAB', 'FAILED — socket not connected  id=$bookingId');
+      return {
+        'success': false,
+        'message': 'Not connected — check your internet connection and try again.',
+      };
+    }
+
+    final completer = Completer<Map<String, dynamic>>();
+    void Function(dynamic)? ackHandler;
+    ackHandler = (data) {
+      final map = data as Map;
+      if ((map['bookingId'] as num?)?.toInt() != bookingId) return; // not this submission
+      if (ackHandler != null) _socket?.off('handed_to_lab_ack', ackHandler);
+      if (!completer.isCompleted) completer.complete(Map<String, dynamic>.from(map));
+    };
+    _socket?.on('handed_to_lab_ack', ackHandler);
 
     _socket?.emit('handed_to_lab', {
       'bookingId':        bookingId,
@@ -1202,12 +1225,36 @@ class SocketService {
       'receivedByName':   receivedByName,
       'handoverBranchId': handoverBranchId,
     });
+    _log('HANDED_TO_LAB', 'emitted, awaiting ack — id=$bookingId');
 
-    if (_isAvailable && isConnected && _lastLat != null) {
-      _emitTechnicianOnline();
-      _log('HANDED_TO_LAB', 're-emitted technician_online');
+    final result = await completer.future.timeout(
+      const Duration(seconds: 15),
+      onTimeout: () {
+        if (ackHandler != null) _socket?.off('handed_to_lab_ack', ackHandler);
+        _log('HANDED_TO_LAB', 'TIMEOUT waiting for ack — id=$bookingId');
+        return {
+          'success': false,
+          'message': 'Request timed out — check your connection and try again.',
+        };
+      },
+    );
+
+    if (result['success'] == true) {
+      _isBusy          = false;
+      _activeBookingId = null;
+      _appointmentBookingIds.remove(bookingId);
+      _log('HANDED_TO_LAB', 'ack success — id=$bookingId — marked AVAILABLE');
+
+      if (_isAvailable && isConnected && _lastLat != null) {
+        _emitTechnicianOnline();
+        _log('HANDED_TO_LAB', 're-emitted technician_online');
+      }
+      _availabilityCtrl.add(_isAvailable);
+    } else {
+      _log('HANDED_TO_LAB', 'ack failure — id=$bookingId — ${result['message']}');
     }
-    _availabilityCtrl.add(_isAvailable);
+
+    return result;
   }
 
   /// Location relay during active tracking (technician → patient).

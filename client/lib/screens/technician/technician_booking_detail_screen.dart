@@ -760,6 +760,12 @@ Future<void> _showHandOverToLabDialog() async {
   final branchSearchCtrl = TextEditingController();
   BranchModel? selectedBranch;
   bool showBranchSearch = false;
+  // Submission state — the dialog now stays open and shows real progress
+  // instead of closing immediately and assuming success (see
+  // SocketService.emitHandedToLab: it now awaits a real server
+  // acknowledgement instead of firing-and-forgetting).
+  bool isSubmitting = false;
+  String? submitError;
 
   showDialog(
     context: context,
@@ -769,7 +775,9 @@ Future<void> _showHandOverToLabDialog() async {
         final filteredBranches = query.isEmpty
             ? _labBranches
             : _labBranches.where((b) => b.name.toLowerCase().contains(query)).toList();
-        final canConfirm = selectedBranch != null && receivedByCtrl.text.trim().isNotEmpty;
+        final canConfirm = selectedBranch != null &&
+            receivedByCtrl.text.trim().isNotEmpty &&
+            !isSubmitting;
 
         return AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -888,31 +896,61 @@ Future<void> _showHandOverToLabDialog() async {
                         borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
                   ),
                 ),
+
+                if (submitError != null) ...[
+                  const SizedBox(height: 12),
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Icon(Icons.error_outline_rounded, size: 15, color: Color(0xFFD32F2F)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(submitError!,
+                          style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F))),
+                    ),
+                  ]),
+                ],
               ],
             ),
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(dialogCtx),
+              onPressed: isSubmitting ? null : () => Navigator.pop(dialogCtx),
               child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
             ),
             ElevatedButton(
-              onPressed: !canConfirm ? null : () {
-                Navigator.pop(dialogCtx);
+              onPressed: !canConfirm ? null : () async {
+                setDialogState(() {
+                  isSubmitting = true;
+                  submitError  = null;
+                });
+
                 final bookingId = int.tryParse(widget.booking.id) ?? 0;
-                SocketService.instance.emitHandedToLab(
+                final result = await SocketService.instance.emitHandedToLab(
                   bookingId:        bookingId,
                   receivedByName:   receivedByCtrl.text.trim(),
                   handoverBranchId: int.tryParse(selectedBranch!.id),
                 );
-                setState(() => _currentStatus = 'Handed to Lab');
+
+                if (result['success'] == true) {
+                  if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+                  if (mounted) setState(() => _currentStatus = 'Handed to Lab');
+                } else if (dialogCtx.mounted) {
+                  setDialogState(() {
+                    isSubmitting = false;
+                    submitError  = result['message'] as String? ?? 'Failed to submit — please try again.';
+                  });
+                }
               },
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.brandGreen, elevation: 0,
                 disabledBackgroundColor: AppColors.divider,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
-              child: const Text('Confirm', style: TextStyle(color: Colors.white)),
+              child: isSubmitting
+                  ? const SizedBox(
+                      width: 18, height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    )
+                  : const Text('Confirm', style: TextStyle(color: Colors.white)),
             ),
           ],
         );

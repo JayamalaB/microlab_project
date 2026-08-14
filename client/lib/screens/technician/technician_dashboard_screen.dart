@@ -436,12 +436,21 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
               ? (DateTime.tryParse(dateStr)?.toLocal() ?? DateTime.now())
               : DateTime.now();
           final cs = map['collection_status'] as String? ?? '';
+          // 'handed_to_lab_pending'/'handed_to_lab' both map to the same
+          // 'Handed to Lab' journey-step label — that's the exact status
+          // string TechnicianBookingDetailScreen's _journeySteps list uses
+          // for its final step (technician_booking_detail_screen.dart), so
+          // reopening a submitted-but-not-yet-admin-verified booking still
+          // resolves to a valid step index there instead of silently
+          // falling through to 'Confirmed'.
           final status = cs == 'en_route'             ? 'Journey Started'
               : cs == 'arrived'             ? 'Destination Reached'
               : cs == 'collection_started'  ? 'Collection Started'
               : cs == 'collected'           ? 'Sample Collected'
               : cs == 'sample_collected'    ? 'Sample Collected'
               : cs == 'otp_verified'        ? 'OTP Verified'
+              : cs == 'handed_to_lab_pending' ? 'Handed to Lab'
+              : cs == 'handed_to_lab'         ? 'Handed to Lab'
               : 'Confirmed';
           debugPrint('   → booking_id=${map['booking_id']} status=$cs → $status  patient=${map['patient_name']}');
           return TechnicianBooking(

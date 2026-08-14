@@ -1301,7 +1301,7 @@ class _BookingCard extends StatelessWidget {
                     if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
                         !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
                         !const {'collection_started', 'otp_verified', 'sample_collected',
-                                 'handed_to_lab', 'collected', 'completed',
+                                 'handed_to_lab', 'handed_to_lab_pending', 'collected', 'completed',
                                  'all_collected', 'cancelled'}
                             .contains(booking.collectionStatus)) ...[
                       const SizedBox(height: 10),
@@ -1672,7 +1672,8 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
   bool get _canEditTests {
     if (b.paymentStatus == 'paid') return false;
     const blocked = {
-      'en_route', 'arrived', 'collection_started', 'sample_collected', 'handed_to_lab'
+      'en_route', 'arrived', 'collection_started', 'sample_collected',
+      'handed_to_lab', 'handed_to_lab_pending',
     };
     if (b.collectionStatus != null && blocked.contains(b.collectionStatus)) return false;
     return b.status == 'Pending' || b.status == 'Confirmed' || b.status == 'Scheduled';
@@ -2242,6 +2243,7 @@ class _TechnicianCard extends StatelessWidget {
       case 'collection_started': return 'Collection Started';
       case 'otp_verified':        return 'Sample Collected';
       case 'sample_collected':   return 'Sample Collected';
+      case 'handed_to_lab_pending': return 'Sample Submitted';
       case 'handed_to_lab':      return 'Handed to Lab';
       default:                   return 'Assigned';
     }
@@ -2254,6 +2256,7 @@ class _TechnicianCard extends StatelessWidget {
       case 'collection_started': return const Color(0xFF6A1B9A);
       case 'otp_verified':        return const Color(0xFF2E7D32);
       case 'sample_collected':   return const Color(0xFF2E7D32);
+      case 'handed_to_lab_pending': return AppColors.brandGreen;
       case 'handed_to_lab':      return AppColors.brandGreen;
       default:                   return AppColors.brandGreen;
     }
@@ -2399,6 +2402,7 @@ class _TechnicianCard extends StatelessWidget {
         ),
         if (mobile != null && mobile!.isNotEmpty &&
             collectionStatus != 'sample_collected' &&
+            collectionStatus != 'handed_to_lab_pending' &&
             collectionStatus != 'handed_to_lab')
           GestureDetector(
             onTap: () => launchUrl(Uri(scheme: 'tel', path: mobile)),

@@ -2161,25 +2161,67 @@ module.exports = function bookingSocket(io, socket) {
   });
 
   // Final technician step — stores completed_at timestamp, frees the technician
-  socket.on('handed_to_lab', (data = {}) => {
+  socket.on('handed_to_lab', async (data = {}) => {
     clog(`[handed_to_lab] RAW event received | data=${JSON.stringify(data)}`);
     const { bookingId, technicianId, receivedByName = null, handoverBranchId = null } = data;
     clog(`[handed_to_lab] parsed bookingId=${bookingId}  technicianId=${technicianId}` +
          `  receivedByName=${receivedByName ?? '—'}  handoverBranchId=${handoverBranchId ?? '—'}`);
+
+    // Acknowledgement — previously this handler was fire-and-forget from the
+    // client's perspective (plain socket.emit with no reply), so a dropped
+    // guard, a disconnected socket, or a DB error all looked identical to
+    // "succeeded" on the technician's screen: the UI flipped to "Handed to
+    // Lab" locally regardless of whether anything was actually persisted.
+    // Every exit path below now replies with 'handed_to_lab_ack' so the
+    // client only shows success once the primary DB write is confirmed.
     if (!bookingId || !technicianId) {
       clog(`[handed_to_lab] GUARD FAILED — dropped. bookingId falsy=${!bookingId}  technicianId falsy=${!technicianId}`);
+      socket.emit('handed_to_lab_ack', {
+        bookingId: bookingId ?? null,
+        success: false,
+        message: !bookingId ? 'Missing booking — please retry.' : 'Session expired — please log in again.',
+      });
       return;
     }
     log('🏥', 'HANDED_TO_LAB', bookingId, `tech_id=${technicianId}`);
 
+    // Primary status write — awaited (not the fire-and-forget dbRun used
+    // elsewhere in this handler) specifically so its real success/failure
+    // can be acknowledged back to the submitting technician before anything
+    // else runs. Technician submission only ever reaches
+    // 'handed_to_lab_pending' — only an admin verifying the submitted
+    // handover details (via updateAdminStatus, action 'submitted_to_lab')
+    // advances this to the final 'handed_to_lab'.
+    let primaryResult;
+    try {
+      [primaryResult] = await db.execute(
+        `UPDATE ip_technician_collection
+         SET collection_status = 'handed_to_lab_pending', completed_at = NOW(), updated_at = NOW()
+         WHERE booking_id = ?`,
+        [bookingId]
+      );
+    } catch (e) {
+      console.error(`❌ [handed_to_lab] primary status UPDATE failed: ${e.message}`);
+      clog(`[handed_to_lab] primary status UPDATE ERROR — booking_id=${bookingId} error="${e.message}"`);
+      socket.emit('handed_to_lab_ack', { bookingId, success: false, message: 'Server error — please retry.' });
+      return;
+    }
+
+    if (primaryResult.affectedRows === 0) {
+      clog(`[handed_to_lab] WARNING — 0 rows affected, no ip_technician_collection row for booking_id=${bookingId}`);
+      socket.emit('handed_to_lab_ack', { bookingId, success: false, message: 'Booking not found — please retry.' });
+      return;
+    }
+
+    // Primary write confirmed — acknowledge success now. Everything below
+    // (secondary tables, sibling cascade, notifications, cleanup) proceeds
+    // exactly as before; none of it blocks the technician's confirmation.
+    socket.emit('handed_to_lab_ack', { bookingId, success: true, status: 'handed_to_lab_pending' });
+
     _freeTechnician(technicianId, bookingId);
 
-    dbRun(
-      `UPDATE ip_technician_collection
-       SET collection_status = 'handed_to_lab', completed_at = NOW(), updated_at = NOW()
-       WHERE booking_id = ?`,
-      [bookingId]
-    );
+    // ip_bookings.status stays 'collected' regardless of pending/verified —
+    // that coarse status doesn't distinguish the two.
     dbRun(
       `UPDATE ip_bookings
        SET status = 'collected', updated_at = NOW()
@@ -2187,7 +2229,7 @@ module.exports = function bookingSocket(io, socket) {
       [bookingId]
     );
     dbRun(
-      `UPDATE ip_patient_bookings SET collection_status = 'handed_to_lab' WHERE booking_id = ?`,
+      `UPDATE ip_patient_bookings SET collection_status = 'handed_to_lab_pending' WHERE booking_id = ?`,
       [bookingId]
     );
 
@@ -2221,7 +2263,7 @@ module.exports = function bookingSocket(io, socket) {
           dbRun(
             `UPDATE ip_technician_collection tc
              JOIN ip_bookings b ON b.booking_id = tc.booking_id
-             SET tc.collection_status = 'handed_to_lab', tc.completed_at = NOW(), tc.updated_at = NOW(),
+             SET tc.collection_status = 'handed_to_lab_pending', tc.completed_at = NOW(), tc.updated_at = NOW(),
                  tc.submitted_to_branch_id = ?, tc.submitted_at = NOW(), tc.received_by_name = ?
              WHERE b.visit_group_id = ? AND b.booking_id != ?`,
             [resolvedBranchId, receivedByName, vgId, bookingId]
@@ -2235,7 +2277,7 @@ module.exports = function bookingSocket(io, socket) {
           dbRun(
             `UPDATE ip_patient_bookings pb
              JOIN ip_bookings b ON b.booking_id = pb.booking_id
-             SET pb.collection_status = 'handed_to_lab'
+             SET pb.collection_status = 'handed_to_lab_pending'
              WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
             [vgId, bookingId]
           );
@@ -2260,8 +2302,8 @@ module.exports = function bookingSocket(io, socket) {
     _notifyPatient(io, bookingId, 'handed_to_lab', { bookingId });
     sendToBookingOwner(
       bookingId,
-      'Sample Reached Lab 🧪',
-      'Your sample has been received at the lab and is being processed.',
+      'Sample Submitted 📦',
+      'Your sample has been handed over by the technician and is awaiting confirmation at the branch.',
       { type: 'sample_received_at_lab', booking_id: String(bookingId) }
     );
     bookingRooms.delete(bookingId);

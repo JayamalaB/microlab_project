@@ -119,7 +119,7 @@ exports.getHistory = async (req, res) => {
          WHERE tc.technician_id = ?
            AND tc.collection_status IN (
              'completed','all_collected','collected',
-             'handed_to_lab','sample_collected','collection_started',
+             'handed_to_lab','handed_to_lab_pending','sample_collected','collection_started',
              'cancelled'
            )
       )
