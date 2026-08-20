@@ -2302,8 +2302,8 @@ module.exports = function bookingSocket(io, socket) {
     _notifyPatient(io, bookingId, 'handed_to_lab', { bookingId });
     sendToBookingOwner(
       bookingId,
-      'Sample Submitted 📦',
-      'Your sample has been handed over by the technician and is awaiting confirmation at the branch.',
+      'Sample Reached Lab 🧪',
+      'Your sample has been received at the lab.',
       { type: 'sample_received_at_lab', booking_id: String(bookingId) }
     );
     bookingRooms.delete(bookingId);
@@ -2323,12 +2323,6 @@ module.exports = function bookingSocket(io, socket) {
     );
     _notifyPatient(io, bookingId, 'sample_received_at_lab', { bookingId });
     log('🧪', 'SAMPLE_RECEIVED', bookingId);
-    sendToBookingOwner(
-      bookingId,
-      'Sample Reached Lab 🧪',
-      'Your sample has been received at the lab and is being processed.',
-      { type: 'sample_received_at_lab', booking_id: String(bookingId) }
-    );
   });
 
   socket.on('test_in_progress', (data = {}) => {

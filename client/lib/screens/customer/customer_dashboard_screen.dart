@@ -2996,17 +2996,23 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
 
   Color _statusColor(String s) {
     switch (s) {
-      case 'reviewed':  return AppColors.brandGreen;
-      case 'converted': return const Color(0xFF1565C0);
-      default:          return const Color(0xFFE65100); // pending
+      case 'called':           return const Color(0xFF6A1B9A);
+      case 'booking_pending':  return const Color(0xFFF57F17);
+      case 'reviewed':         return AppColors.brandGreen;
+      case 'converted':        return const Color(0xFF1565C0);
+      case 'not_interested':   return const Color(0xFF757575);
+      default:                 return const Color(0xFFE65100);
     }
   }
 
   String _statusLabel(String s) {
     switch (s) {
-      case 'reviewed':  return 'Reviewed';
-      case 'converted': return 'Booking Created';
-      default:          return 'Pending Review';
+      case 'called':           return 'Called';
+      case 'booking_pending':  return 'Booking Pending';
+      case 'reviewed':         return 'Reviewed';
+      case 'converted':        return 'Booking Created';
+      case 'not_interested':   return 'Not Interested';
+      default:                 return 'Pending Review';
     }
   }
 

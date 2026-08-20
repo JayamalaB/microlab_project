@@ -90,10 +90,11 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       case 'scheduled':  return 'Scheduled';
       case 'confirmed':  return 'Confirmed';
       case 'assigned':   return 'Technician Allocated';
-      case 'arrived':    return 'Technician Arrived';
-      case 'collected':  return 'Sample Collected';
-      case 'submitted':  return 'Handed to Lab';
-      case 'completed':  return 'Completed';
+      case 'arrived':              return 'Technician Arrived';
+      case 'collected':            return 'Sample Collected';
+      case 'submitted':            return 'Handed to Lab';
+      case 'handed_to_lab_pending': return 'Handed to Lab';
+      case 'completed':            return 'Completed';
       case 'cancelled':  return 'Cancelled';
       default:           return raw.isNotEmpty
           ? raw[0].toUpperCase() + raw.substring(1)
@@ -505,7 +506,7 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabCtrl;
   late List<BookingModel> _bookings;
-  bool _reloading = false;
+  bool _initialLoading = true;
 
   StreamSubscription<BookingAcceptedEvent>? _acceptedSub;
   StreamSubscription<int>? _enRouteSub;
@@ -564,19 +565,18 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
   }
 
   Future<void> _reload() async {
-    setState(() => _reloading = true);
     try {
       final raw = await ApiService.getMyBookings();
       final all = raw.map((r) => _MyBookingsScreenState._fromApi(r)).toList();
       if (mounted) {
         setState(() {
           _bookings = all.where((b) => b.member.id == widget.member.id).toList();
-          _reloading = false;
+          _initialLoading = false;
         });
         _startPollIfNeeded();
       }
     } catch (_) {
-      if (mounted) setState(() => _reloading = false);
+      if (mounted) setState(() => _initialLoading = false);
     }
   }
 
@@ -677,7 +677,7 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
           tabs: _tabs.map((t) => Tab(text: t)).toList(),
         ),
       ),
-      body: _reloading
+      body: _initialLoading
           ? const Center(child: CircularProgressIndicator(color: AppColors.brandGreen))
           : TabBarView(
               controller: _tabCtrl,
@@ -1033,11 +1033,33 @@ class _BookingCard extends StatelessWidget {
     return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
   }
 
+  bool _slotHasPassed(BookingModel b) {
+    final now = DateTime.now();
+    final bookingDay = DateTime(b.date.year, b.date.month, b.date.day);
+    final today      = DateTime(now.year, now.month, now.day);
+    if (bookingDay != today) return false; // past dates already blocked by date check
+    if (b.timeSlot == 'Not specified') return false;
+    try {
+      final parts     = b.timeSlot.trim().split(' ');
+      final timeParts = parts[0].split(':');
+      int hour        = int.parse(timeParts[0]);
+      final minute    = int.parse(timeParts[1]);
+      final isPm      = parts[1].toUpperCase() == 'PM';
+      if (isPm && hour != 12) hour += 12;
+      if (!isPm && hour == 12) hour = 0;
+      final slotDt = DateTime(b.date.year, b.date.month, b.date.day, hour, minute);
+      return now.isAfter(slotDt);
+    } catch (_) {
+      return false;
+    }
+  }
+
   Color _statusColor(String s) {
     switch (s) {
       case 'Completed':             return AppColors.brandGreen;
       case 'Sample Collected':      return const Color(0xFF2E7D32);
       case 'Handed to Lab':         return const Color(0xFF2E7D32);
+      case 'Handed to Lab Pending': return const Color(0xFF2E7D32);
       case 'Technician Arrived':    return const Color(0xFF2E7D32);
       case 'Confirmed':             return const Color(0xFF1565C0);
       case 'Technician Allocated':  return const Color(0xFF1565C0);
@@ -1053,6 +1075,7 @@ class _BookingCard extends StatelessWidget {
       case 'Completed':             return Icons.check_circle_outline;
       case 'Sample Collected':      return Icons.science_outlined;
       case 'Handed to Lab':         return Icons.local_shipping_outlined;
+      case 'Handed to Lab Pending': return Icons.local_shipping_outlined;
       case 'Technician Arrived':    return Icons.door_front_door_outlined;
       case 'Confirmed':             return Icons.event_available_outlined;
       case 'Technician Allocated':  return Icons.assignment_ind_outlined;
@@ -1218,7 +1241,7 @@ class _BookingCard extends StatelessWidget {
                     ),
 
                     // Feedback button for completed or sample-collected bookings
-                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'collected') && booking.rating == null) ...[
+                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'Handed to Lab Pending' || booking.status == 'collected') && booking.rating == null) ...[
                       const SizedBox(height: 10),
                       GestureDetector(
                         onTap: () => _showFeedback(context, booking, onRefresh: onFeedbackSubmitted),
@@ -1243,7 +1266,7 @@ class _BookingCard extends StatelessWidget {
                     ],
 
                     // Show existing rating
-                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'collected') && booking.rating != null) ...[
+                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'Handed to Lab Pending' || booking.status == 'collected') && booking.rating != null) ...[
                       const SizedBox(height: 10),
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1270,8 +1293,9 @@ class _BookingCard extends StatelessWidget {
 
                     // Reschedule button
                     if (booking.canReschedule &&
-                        (booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
+                        (booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated') &&
                         !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
+                        !_slotHasPassed(booking) &&
                         (booking.collectionStatus == null || booking.collectionStatus == 'assigned')) ...[
                       const SizedBox(height: 10),
                       GestureDetector(
@@ -1296,10 +1320,11 @@ class _BookingCard extends StatelessWidget {
                       ),
                     ],
 
-                    // Cancel button — only for pending/scheduled/confirmed, future dates,
-                    // and before technician starts collection
-                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed') &&
+                    // Cancel button — only for pending/scheduled/confirmed/assigned, future dates,
+                    // slot time not yet passed, and before technician starts collection
+                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated') &&
                         !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
+                        !_slotHasPassed(booking) &&
                         !const {'collection_started', 'otp_verified', 'sample_collected',
                                  'handed_to_lab', 'handed_to_lab_pending', 'collected', 'completed',
                                  'all_collected', 'cancelled'}
