@@ -1,6 +1,7 @@
 const db   = require('../config/db');
 const fs   = require('fs');
 const path = require('path');
+const { syncBookingToClient } = require('../services/clientSync');
 
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'prescriptions.log');
 function writeLog(msg) {
@@ -45,6 +46,20 @@ exports.savePrescription = async (req, res) => {
     }
 
     writeLog(`[savePrescription] done — booking=${bookingId} images=${imageUrls.length} doc_ids=${insertedIds.join(',')}`);
+
+    // Sync to client server — this endpoint is called from both the
+    // customer app and the technician app (see the uploadedBy resolution
+    // above), so the sync initiator must match whichever actually uploaded
+    // it, not be hardcoded either way. Action name not yet confirmed by
+    // Jayamala; the block log will surface a status:"failure" response
+    // immediately if it's rejected.
+    const isTechnicianUpload = req.user.userId != null;
+    syncBookingToClient(Number(bookingId), {
+      mobile: req.user.mobile,
+      type:   isTechnicianUpload ? 'technician' : 'patient_user',
+      action: 'prescription_uploaded',
+    }).catch(err => console.error(`[clientSync] savePrescription sync failed booking_id=${bookingId}:`, err.message));
+
     res.status(201).json({ success: true, docIds: insertedIds });
   } catch (err) {
     writeLog(`[savePrescription] ERROR — ${err.message} | code=${err.code} | sql=${err.sql}`);

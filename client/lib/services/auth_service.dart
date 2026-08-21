@@ -73,8 +73,18 @@ class AuthService {
     }
   }
 
+  // Local-only — clears this device's session state. Does NOT call the
+  // server; callers that need the server-side session actually released
+  // (so the single-active-session lock frees up for another device) must
+  // call ApiService.logout(token) themselves first, using getToken() below,
+  // same as the technician dashboard's dedicated logout flow does.
   static Future<void> logout() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.clear();
+  }
+
+  static Future<String?> getToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('auth_token');
   }
 }

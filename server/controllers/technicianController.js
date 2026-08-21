@@ -9,6 +9,7 @@ const fs   = require('fs');
 const path = require('path');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
+const { syncBookingToClient } = require('../services/clientSync');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -709,6 +710,16 @@ exports.collectPayment = async (req, res) => {
     );
 
     console.log(`✅ collectPayment — booking_id=${bookingId} method=${paymentMethod} +₹${amount} → paid=₹${newAmountPaid} due=₹${newAmountDue} status=${newPaymentStatus} by technician_id=${technicianId}`);
+
+    // Sync to client server — payment_update is the same, already-confirmed
+    // action the customer-side payment flow uses; only the initiator
+    // (technician, not the account-holder) differs here.
+    syncBookingToClient(Number(bookingId), {
+      mobile: req.user.mobile,
+      type:   'technician',
+      action: 'payment_update',
+    }).catch(err => console.error(`[clientSync] collectPayment sync failed booking_id=${bookingId}:`, err.message));
+
     res.json({ success: true, amountPaid: newAmountPaid, amountDue: newAmountDue, paymentStatus: newPaymentStatus });
   } catch (err) {
     console.error('❌ collectPayment FAILED:', err.message);
@@ -1106,6 +1117,23 @@ exports.addVisitMember = async (req, res) => {
     await conn.commit();
     const totalVisitAmount = results.reduce((s, r) => s + r.totalAmount, 0);
     console.log(`✅ addVisitMember — ${results.length} member(s) added parent=${parentBookingId} visit_group=${visitGroupId}`);
+
+    // Sync each new member's booking to the client server — technician is
+    // the initiator here (not the account-holder patient), per explicit
+    // requirement: technician's own mobile + user_type: 'technician'.
+    // Uses the family_member_added action's own minimal payload shape
+    // (technician_details + visit_group_id), not the generic new_booking one.
+    // Fire-and-forget, same non-blocking pattern used by every other
+    // syncBookingToClient call site in the codebase.
+    for (const r of results) {
+      syncBookingToClient(r.newBookingId, {
+        mobile:       req.user.mobile,
+        type:         'technician',
+        action:       'family_member_added',
+        technicianId: technicianId,
+        visitGroupId: visitGroupId,
+      }).catch(err => console.error(`[clientSync] addVisitMember sync failed booking_id=${r.newBookingId}:`, err.message));
+    }
     res.status(201).json({
       success: true,
       members: results,

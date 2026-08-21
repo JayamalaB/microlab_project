@@ -26,6 +26,11 @@ io.on('connection', (socket) => {
 // Start scheduled dispatch cron (fires every minute)
 require('./scheduler/dispatchScheduler')(io);
 
+// Marks technicians offline if no heartbeat has landed within the
+// configured timeout — backstop for abrupt disconnects (see file for why
+// this is separate from the 45s dispatch grace period).
+require('./scheduler/technicianOfflineSweep')();
+
 app.use(cors());
 app.use(express.json());
 

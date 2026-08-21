@@ -109,6 +109,22 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
 
   Future<void> _logout() async {
     SocketService.instance.disconnect();
+
+    // Release the server-side session so the single-active-session lock
+    // frees up for another device — AuthService.logout() below only clears
+    // this device's local state, it never talks to the server. Best-effort:
+    // navigation must never get stuck waiting on the network, and if this
+    // fails the number stays locked until the token's natural 30-day expiry
+    // rather than trapping the user on this screen.
+    final token = await AuthService.getToken();
+    if (token != null && token.isNotEmpty) {
+      try {
+        await ApiService.logout(token);
+      } catch (e) {
+        debugPrint('[_logout] server logout failed: $e');
+      }
+    }
+
     await AuthService.logout();
     if (mounted) {
       Navigator.of(context).pushAndRemoveUntil(

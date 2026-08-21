@@ -1069,6 +1069,17 @@ exports.saveCollectionProofPhoto = async (req, res) => {
        VALUES (?, NULL, ?, ?, ?, 'collection_proof', ?, 'pending_review', NOW())`,
       [bookingId, booking.patient_id, imageUrl, fileName, uploadedBy]
     );
+
+    // Sync to client server — this action uses its own minimal payload shape
+    // (technician_details + proof_photo), built inside syncBookingToClient.
+    syncBookingToClient(Number(bookingId), {
+      mobile:        req.user.mobile,
+      type:          'technician',
+      action:        'collection_photo_added',
+      technicianId:  req.user.id,
+      proofPhoto:    imageUrl,
+    }).catch(err => console.error(`[clientSync] saveCollectionProofPhoto sync failed booking_id=${bookingId}:`, err.message));
+
     res.status(201).json({ success: true, docId: result.insertId });
   } catch (err) {
     console.error('❌ saveCollectionProofPhoto FAILED:', err.message);
@@ -1110,7 +1121,7 @@ exports.addItem = async (req, res) => {
   try {
     // Get product details
     const [[product]] = await db.execute(
-      `SELECT product_id, product_name, product_category, product_price
+      `SELECT product_id, product_name, product_category, product_price, document_required
        FROM ip_products WHERE product_id = ? AND product_active = 1 LIMIT 1`,
       [productId]
     );
@@ -1132,6 +1143,45 @@ exports.addItem = async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, NOW())`,
       [bookingId, product.product_id, product.product_name, booking.patient_id, price, price]
     );
+    // Keep the booking's stored total in sync — otherwise it stays frozen at
+    // whatever it was before this item was added, and everything downstream
+    // that reads total_amount (payment due calc, Jayamala sync payload) goes
+    // stale against the real sum of ip_booking_items.
+    await db.execute(
+      `UPDATE ip_bookings
+       SET total_amount = total_amount + ?, amount_due = amount_due + ?, updated_at = NOW()
+       WHERE booking_id = ?`,
+      [price, price, bookingId]
+    );
+    // A generic (booking-level, not item-specific) prescription may already
+    // exist for this booking — see the same booking_item_id-OR-NULL join
+    // used for blood_test_list in clientSync.js. A brand-new item can never
+    // have its OWN prescription yet, but it can inherit that generic one.
+    const [[existingDoc]] = await db.execute(
+      `SELECT file_path FROM ip_booking_documents
+       WHERE booking_id = ? AND booking_item_id IS NULL AND file_description = 'prescription'
+       ORDER BY created_at DESC LIMIT 1`,
+      [bookingId]
+    );
+    const rawDocReq = product.document_required;
+    const docRequired = rawDocReq === 1 || rawDocReq === '1' || rawDocReq === 'yes';
+
+    // Sync to client server — this action uses its own minimal payload shape
+    // (added_test), built inside syncBookingToClient. Each add (even after a
+    // prior item was removed) is its own independent package_added event.
+    syncBookingToClient(Number(bookingId), {
+      mobile: req.user.mobile,
+      type:   'technician',
+      action: 'package_added',
+      addedTest: {
+        id:               product.product_id,
+        name:             product.product_name,
+        price,
+        documentRequired: docRequired,
+        documentUrl:      existingDoc?.file_path ?? null,
+      },
+    }).catch(err => console.error(`[clientSync] addItem sync failed booking_id=${bookingId}:`, err.message));
+
     res.status(201).json({
       success: true,
       item: {
@@ -1152,6 +1202,19 @@ exports.addItem = async (req, res) => {
 exports.removeItem = async (req, res) => {
   const { bookingId, bookingItemId } = req.params;
   try {
+    // Fetch before deleting — need product_id/name/price for the Jayamala
+    // sync below, and price to roll back the booking's stored total.
+    const [[item]] = await db.execute(
+      `SELECT bi.product_id, COALESCE(bi.product_name_snapshot, p.product_name) AS name, bi.final_price AS price
+       FROM ip_booking_items bi
+       LEFT JOIN ip_products p ON p.product_id = bi.product_id
+       WHERE bi.booking_item_id = ? AND bi.booking_id = ?`,
+      [bookingItemId, bookingId]
+    );
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
     const [result] = await db.execute(
       `DELETE FROM ip_booking_items
        WHERE booking_item_id = ? AND booking_id = ?`,
@@ -1160,6 +1223,33 @@ exports.removeItem = async (req, res) => {
     if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: 'Item not found' });
     }
+
+    // Mirror of addItem's total_amount/amount_due fix — removing an item must
+    // roll the booking's stored total back down too, or it stays stale high.
+    const price = parseFloat(item.price ?? 0) || 0;
+    await db.execute(
+      `UPDATE ip_bookings
+       SET total_amount = GREATEST(0, total_amount - ?),
+           amount_due    = GREATEST(0, amount_due - ?),
+           updated_at    = NOW()
+       WHERE booking_id = ?`,
+      [price, price, bookingId]
+    );
+
+    // Sync to client server — package_removed is a proposed action, not yet
+    // confirmed by Jayamala; the block log will surface a status:"failure"
+    // response immediately if it's rejected.
+    syncBookingToClient(Number(bookingId), {
+      mobile: req.user.mobile,
+      type:   'technician',
+      action: 'package_removed',
+      removedTest: {
+        id:    item.product_id,
+        name:  item.name,
+        price,
+      },
+    }).catch(err => console.error(`[clientSync] removeItem sync failed booking_id=${bookingId}:`, err.message));
+
     res.json({ success: true });
   } catch (err) {
     console.error('❌ removeItem FAILED:', err.message);
@@ -1301,7 +1391,7 @@ exports.updateAdminStatus = async (req, res) => {
     en_route:              null,
     arrived:               null,
     sample_collected:      null,
-    submitted_to_lab:      null,
+    submitted_to_lab:      'handed_to_lab',  // admin verifies the technician's handover submission
     processing:            null,
     partial:               null,
     results_ready:        'completed',
