@@ -6,6 +6,7 @@ import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/models/technician_booking.dart';
+import 'package:microlab/models.dart' show BranchModel;
 import 'technician_active_job_screen.dart';
 
 // Popped by TechnicianBookingDetailScreen (see _exitScreen) when the
@@ -159,9 +160,24 @@ class _TechnicianBookingDetailScreenState
   bool _showAddTest = false;
   String _searchQuery = '';
 
+  // Hand Over to Lab — branch list for the "received branch/lab" picker,
+  // fetched lazily (only when that dialog is actually about to open, not on
+  // screen load) since it's only needed at the very end of the journey.
+  List<BranchModel> _labBranches = [];
+
   // Document — multi-image upload
   final List<_TechPresDoc> _docUploads = [];
   bool _docIsPicking = false;
+  // Which patient's photo is currently being captured/uploaded, if any —
+  // only one camera capture can be in flight at a time.
+  int? _capturingCollectionProofForPatientId;
+  // Sample-collection proof photo — one per patient on this visit (primary +
+  // family members), keyed by patient_id. Each family member has their own
+  // booking_id server-side (see ip_booking_documents), so this must never be
+  // a single shared value — otherwise the last patient photographed
+  // overwrites every other patient's display.
+  final Map<int, String?> _patientCollectionProofUrl = {};
+  bool _collectionProofLoading = true;
   bool _docVerified  = false;
   bool _docsLoading  = true;
   // Whether the PRIMARY patient's selected test/package requires a prescription.
@@ -180,6 +196,7 @@ class _TechnicianBookingDetailScreenState
 
   // Payment — live values fetched from server in initState, overriding immutable widget.booking fields
   bool _isProcessingPayment = false;
+  bool _isReloading = false;
   double _sessionPaymentCollected = 0.0;
   late String _livePaymentStatus;  // refreshed from server; starts from widget value
   late double _liveAmountPaid;     // refreshed from server; starts from widget value
@@ -189,6 +206,11 @@ class _TechnicianBookingDetailScreenState
 
   // Visit members linked to this booking (refreshed after each add)
   List<Map<String, dynamic>> _linkedPatients = [];
+  // Each family member's own tests/packages + collection checklist state,
+  // keyed by their own booking_id (never this screen's own booking_id) —
+  // same Map<String,String> row shape as _selectedTests, populated by
+  // _loadFamilyDocRequirements alongside its existing doc-required check.
+  final Map<int, List<Map<String, String>>> _familyItems = {};
 
   // OTP
   final List<TextEditingController> _otpControllers =
@@ -278,6 +300,13 @@ class _TechnicianBookingDetailScreenState
   // Visit is finalized after OTP Verified — no more edits allowed from this point.
   bool get _isFinalized => _currentStatus == 'OTP Verified' || _currentStatus == 'Handed to Lab';
   bool get _canAdvance  => !_isCompleted;
+  // Collection checklist becomes visible once the journey has reached
+  // "Collection Started" — purely a display gate, does not affect whether
+  // "Sample Collected" can be tapped (that stays independent of checklist state).
+  bool get _showCollectionChecklist {
+    final started = _journeySteps.indexWhere((s) => s.status == 'Collection Started');
+    return started != -1 && _currentStepIndex >= started;
+  }
 
   String? get _nextStatus {
     final idx = _currentStepIndex;
@@ -297,6 +326,7 @@ class _TechnicianBookingDetailScreenState
     }
     _loadItems();
     _loadDocs();
+    _loadCollectionProof();
     _loadLinkedPatients();
     _refreshPaymentInfo();
   }
@@ -317,6 +347,35 @@ class _TechnicianBookingDetailScreenState
     } catch (e) {
       debugPrint('[_refreshPaymentInfo] $e');
     }
+  }
+
+  // Manual "Reload" — re-pulls payment status (this booking + any family
+  // members added this visit) from the server so a payment the patient just
+  // made on their own phone shows up without leaving/reopening the screen.
+  // Deliberately does NOT touch _currentStatus/docs/session-collected-amount —
+  // only the server-sourced payment fields that _paymentInitiated/
+  // _hasUnsettledSiblings read, so the technician's in-progress journey state
+  // is never reset by a reload.
+  Future<void> _reloadBookingData() async {
+    if (_isReloading) return;
+    setState(() => _isReloading = true);
+    try {
+      await Future.wait([
+        _refreshPaymentInfo(),
+        _loadLinkedPatients(),
+        _loadItems(),
+      ]);
+    } finally {
+      if (mounted) setState(() => _isReloading = false);
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: const Text('Booking details refreshed'),
+      backgroundColor: AppColors.brandGreen,
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 2),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    ));
   }
 
   Future<void> _loadDocs() async {
@@ -352,6 +411,47 @@ class _TechnicianBookingDetailScreenState
     }
   }
 
+  Future<void> _loadCollectionProof() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) {
+      if (mounted) setState(() => _collectionProofLoading = false);
+      return;
+    }
+    try {
+      final doc = await ApiService.getCollectionProofPhoto(bookingId);
+      if (!mounted) return;
+      setState(() {
+        if (widget.booking.patientId != null) {
+          _patientCollectionProofUrl[widget.booking.patientId!] = doc?['file_path'] as String?;
+        }
+        _collectionProofLoading = false;
+      });
+    } catch (e) {
+      debugPrint('[_loadCollectionProof] ERROR: $e');
+      if (mounted) setState(() => _collectionProofLoading = false);
+    }
+  }
+
+  // Each family member has their own booking_id, so their collection-proof
+  // photo (see _loadCollectionProof for the primary) must be fetched and
+  // keyed separately — otherwise every patient would show whichever photo
+  // happened to load last.
+  Future<void> _loadFamilyCollectionProofs(List<Map<String, dynamic>> patients) async {
+    for (final p in patients) {
+      final pid = (p['patient_id'] as num?)?.toInt();
+      final bid = (p['booking_id'] as num?)?.toInt();
+      if (pid == null || bid == null) continue;
+      try {
+        final doc = await ApiService.getCollectionProofPhoto(bid);
+        if (mounted) {
+          setState(() => _patientCollectionProofUrl[pid] = doc?['file_path'] as String?);
+        }
+      } catch (e) {
+        debugPrint('[_loadFamilyCollectionProofs] patient=$pid ERROR: $e');
+      }
+    }
+  }
+
   Future<void> _loadItems() async {
     final bookingId = int.tryParse(widget.booking.id) ?? 0;
     if (bookingId == 0) {
@@ -375,6 +475,10 @@ class _TechnicianBookingDetailScreenState
           'category':      i['category']?.toString() ?? 'General',
           // MySQL DECIMAL comes back as a String from mysql2 — parse it safely
           'price':         double.tryParse(i['price']?.toString() ?? '0')?.toStringAsFixed(0) ?? '0',
+          // Per-item collection checklist state — reuses the pre-existing,
+          // admin-owned item_status column, so its lowercase vocabulary
+          // ('completed'/'pending') is used as-is, no true/false translation.
+          'collected':     i['item_status']?.toString() ?? 'pending',
         }).toList();
         _originalItemIds = items.map((i) => i['product_id']?.toString() ?? '').toSet();
         _catalogueItems  = catalogue;
@@ -405,6 +509,7 @@ class _TechnicianBookingDetailScreenState
       final patients = await ApiService.getLinkedPatients(bookingId);
       if (mounted) setState(() => _linkedPatients = patients);
       _loadFamilyDocRequirements(patients);
+      _loadFamilyCollectionProofs(patients);
     } catch (e) {
       debugPrint('[_loadLinkedPatients] ERROR: $e');
     }
@@ -425,7 +530,20 @@ class _TechnicianBookingDetailScreenState
           final v = i['doc_required'];
           return v == 1 || v == true || v == '1' || v == 'yes';
         });
-        if (mounted) setState(() => _patientDocRequired[pid] = needsDoc);
+        final rows = items.map((i) => {
+          'bookingItemId': i['booking_item_id']?.toString() ?? '',
+          'id':            i['product_id']?.toString() ?? '',
+          'name':          i['name']?.toString()     ?? '',
+          'category':      i['category']?.toString() ?? 'General',
+          'price':         double.tryParse(i['price']?.toString() ?? '0')?.toStringAsFixed(0) ?? '0',
+          'collected':     i['item_status']?.toString() ?? 'pending',
+        }).toList();
+        if (mounted) {
+          setState(() {
+            _patientDocRequired[pid] = needsDoc;
+            _familyItems[bid] = rows;
+          });
+        }
       } catch (e) {
         debugPrint('[_loadFamilyDocRequirements] patient=$pid ERROR: $e');
       }
@@ -533,37 +651,7 @@ void _advanceStatus() {
       _showCompleteSheet();
       return;
     }
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Hand Over to Lab?',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-        content: const Text(
-          'This will complete the visit and cannot be undone.',
-          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              final bookingId = int.tryParse(widget.booking.id) ?? 0;
-              SocketService.instance.emitHandedToLab(bookingId: bookingId);
-              setState(() => _currentStatus = 'Handed to Lab');
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.brandGreen, elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ),
-            child: const Text('Confirm', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
+    _showHandOverToLabDialog();
     return;
   }
 
@@ -681,6 +769,225 @@ void _handleStatusTransition(String next) {
       setState(() => _currentStatus = next);
   }
 }
+
+// ── Hand Over to Lab dialog ────────────────────────────────
+// Requires both a selected branch/lab and a "received by" name before the
+// technician can confirm — final step of the visit, matching the
+// handover_branch_id/received_by_name columns added to
+// ip_technician_collection for this purpose.
+Future<void> _showHandOverToLabDialog() async {
+  if (_labBranches.isEmpty) {
+    try {
+      _labBranches = await ApiService.getBranches();
+    } catch (e) {
+      debugPrint('[_showHandOverToLabDialog] branch fetch ERROR: $e');
+    }
+  }
+  if (!mounted) return;
+
+  final receivedByCtrl = TextEditingController();
+  final branchSearchCtrl = TextEditingController();
+  BranchModel? selectedBranch;
+  bool showBranchSearch = false;
+  // Submission state — the dialog now stays open and shows real progress
+  // instead of closing immediately and assuming success (see
+  // SocketService.emitHandedToLab: it now awaits a real server
+  // acknowledgement instead of firing-and-forgetting).
+  bool isSubmitting = false;
+  String? submitError;
+
+  showDialog(
+    context: context,
+    builder: (_) => StatefulBuilder(
+      builder: (dialogCtx, setDialogState) {
+        final query = branchSearchCtrl.text.trim().toLowerCase();
+        final filteredBranches = query.isEmpty
+            ? _labBranches
+            : _labBranches.where((b) => b.name.toLowerCase().contains(query)).toList();
+        final canConfirm = selectedBranch != null &&
+            receivedByCtrl.text.trim().isNotEmpty &&
+            !isSubmitting;
+
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Hand Over to Lab?',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'This will complete the visit and cannot be undone.',
+                  style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                ),
+                const SizedBox(height: 14),
+
+                // ── Received Branch/Lab ──────────────────────────
+                const Text('Received Branch/Lab *',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+                const SizedBox(height: 6),
+                GestureDetector(
+                  onTap: () => setDialogState(() => showBranchSearch = !showBranchSearch),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: AppColors.background,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: selectedBranch != null ? AppColors.brandGreen : AppColors.divider,
+                      ),
+                    ),
+                    child: Row(children: [
+                      Icon(Icons.local_hospital_outlined, size: 16,
+                          color: selectedBranch != null ? AppColors.brandGreen : AppColors.textHint),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          selectedBranch?.name ?? 'Select branch/lab',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: selectedBranch != null ? AppColors.textPrimary : AppColors.textHint,
+                          ),
+                        ),
+                      ),
+                      Icon(showBranchSearch ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                          size: 18, color: AppColors.textHint),
+                    ]),
+                  ),
+                ),
+
+                if (showBranchSearch) ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: branchSearchCtrl,
+                    autofocus: true,
+                    onChanged: (_) => setDialogState(() {}),
+                    style: const TextStyle(fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: 'Search branch name…',
+                      hintStyle: const TextStyle(fontSize: 12, color: AppColors.textHint),
+                      prefixIcon: const Icon(Icons.search_rounded, size: 16, color: AppColors.textHint),
+                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: AppColors.divider)),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: AppColors.divider)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                          borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  // Plain mapped Column, not ListView — a ListView (sliver-
+                  // based) inside AlertDialog content crashes on web/desktop
+                  // because AlertDialog sizes itself via IntrinsicWidth, and
+                  // slivers don't support intrinsic-width computation. Same
+                  // pattern already used safely elsewhere in this file for
+                  // the "Add Test / Package" search list.
+                  if (filteredBranches.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text('No branches found', style: TextStyle(fontSize: 12, color: AppColors.textHint)),
+                    )
+                  else
+                    ...filteredBranches.take(6).map((b) => GestureDetector(
+                          onTap: () => setDialogState(() {
+                            selectedBranch     = b;
+                            showBranchSearch   = false;
+                            branchSearchCtrl.clear();
+                          }),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Text(b.name, style: const TextStyle(fontSize: 13)),
+                          ),
+                        )),
+                ],
+
+                const SizedBox(height: 14),
+
+                // ── Received By ───────────────────────────────────
+                const Text('Received By *',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: receivedByCtrl,
+                  onChanged: (_) => setDialogState(() {}),
+                  style: const TextStyle(fontSize: 14),
+                  decoration: InputDecoration(
+                    hintText: 'Name of person receiving the samples',
+                    hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: AppColors.divider)),
+                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: AppColors.divider)),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                  ),
+                ),
+
+                if (submitError != null) ...[
+                  const SizedBox(height: 12),
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Icon(Icons.error_outline_rounded, size: 15, color: Color(0xFFD32F2F)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(submitError!,
+                          style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F))),
+                    ),
+                  ]),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: isSubmitting ? null : () => Navigator.pop(dialogCtx),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
+            ),
+            ElevatedButton(
+              onPressed: !canConfirm ? null : () async {
+                setDialogState(() {
+                  isSubmitting = true;
+                  submitError  = null;
+                });
+
+                final bookingId = int.tryParse(widget.booking.id) ?? 0;
+                final result = await SocketService.instance.emitHandedToLab(
+                  bookingId:        bookingId,
+                  receivedByName:   receivedByCtrl.text.trim(),
+                  handoverBranchId: int.tryParse(selectedBranch!.id),
+                );
+
+                if (result['success'] == true) {
+                  if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+                  if (mounted) setState(() => _currentStatus = 'Handed to Lab');
+                } else if (dialogCtx.mounted) {
+                  setDialogState(() {
+                    isSubmitting = false;
+                    submitError  = result['message'] as String? ?? 'Failed to submit — please try again.';
+                  });
+                }
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.brandGreen, elevation: 0,
+                disabledBackgroundColor: AppColors.divider,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              child: isSubmitting
+                  ? const SizedBox(
+                      width: 18, height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    )
+                  : const Text('Confirm', style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
 // ── Resume Journey ───────────────────────────────────────
 
 void _resumeJourney() {
@@ -1047,6 +1354,48 @@ void _resumeJourney() {
     }
   }
 
+  // Collection checklist toggle — purely a per-item tracking flag, does not
+  // touch _currentStatus, collection_status, or the sample_collected flow.
+  // targetBookingId defaults to this screen's own (primary) booking; pass a
+  // family member's own booking_id to toggle one of their items instead —
+  // each family member's tests live on their own booking_id (see
+  // _loadFamilyDocRequirements), so the update must target the right one.
+  Future<void> _toggleItemCollected(String testId, bool newValue, {int? targetBookingId}) async {
+    final bookingId = targetBookingId ?? int.tryParse(widget.booking.id) ?? 0;
+    final isFamily   = targetBookingId != null;
+    final list       = isFamily ? _familyItems[bookingId] : _selectedTests;
+    if (list == null) return;
+
+    final bookingItemId = int.tryParse(
+      list.firstWhere((t) => t['id'] == testId, orElse: () => {})['bookingItemId'] ?? '',
+    );
+    if (bookingItemId == null || bookingItemId <= 0) return;
+
+    // Optimistic local update.
+    setState(() {
+      final idx = list.indexWhere((t) => t['id'] == testId);
+      if (idx != -1) list[idx]['collected'] = newValue ? 'completed' : 'pending';
+    });
+    final ok = await ApiService.setBookingItemCollected(
+      bookingId: bookingId,
+      bookingItemId: bookingItemId,
+      collected: newValue,
+    );
+    if (!mounted) return;
+    if (!ok) {
+      // Revert on failure.
+      setState(() {
+        final idx = list.indexWhere((t) => t['id'] == testId);
+        if (idx != -1) list[idx]['collected'] = newValue ? 'pending' : 'completed';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Failed to update checklist — please retry'),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
+  }
+
   List<Map<String, String>> get _filteredCatalogue {
     final already = _selectedTests.map((t) => t['id']).toSet();
     return _catalogueItems.where((t) {
@@ -1055,6 +1404,71 @@ void _resumeJourney() {
       return (t['name']?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false) ||
           (t['category']?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false);
     }).toList();
+  }
+
+  // ── Sample-collection proof photo (optional) ─────────────────
+  // Camera-only (ImageSource.camera — no gallery option offered, so a
+  // technician cannot substitute an old photo). Available any time from
+  // "Collection Started" onward via its own section in the UI (see the
+  // "Sample Collection Photo" _SectionCard below) — not tied to the moment
+  // "Sample Collected" is tapped, so a technician who skips it initially
+  // still has a clear way to add (or retake) it later. Optional: cancelling
+  // the camera or any upload failure just leaves the previous state as-is,
+  // it never blocks anything. Reuses the same two-step upload pipeline as
+  // prescription documents: raw bytes → /api/upload → URL, then the URL is
+  // linked to this booking_id via saveCollectionProofPhoto. A retake simply
+  // calls this again — the server keeps the newest photo as current.
+  // patientId/bookingId identify WHICH patient this photo belongs to — the
+  // primary patient's own booking, or one family member's own booking_id.
+  // Never assume widget.booking.id here, or every family member's photo
+  // would overwrite the primary's (or each other's).
+  Future<void> _captureAndUploadCollectionProof({
+    required int patientId,
+    required int bookingId,
+  }) async {
+    if (_capturingCollectionProofForPatientId != null) return;
+    if (bookingId <= 0) return;
+
+    setState(() => _capturingCollectionProofForPatientId = patientId);
+    try {
+      final image = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
+      if (image == null) return; // technician cancelled — fine, it's optional
+
+      final bytes = await image.readAsBytes();
+      final url = await ApiService.uploadFile(bytes.toList(), image.name);
+      if (url == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Could not upload photo — please try again'),
+            backgroundColor: Colors.red,
+          ));
+        }
+        return;
+      }
+
+      final saved = await ApiService.saveCollectionProofPhoto(bookingId: bookingId, imageUrl: url);
+      if (!saved) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Could not save photo — please try again'),
+            backgroundColor: Colors.red,
+          ));
+        }
+        return;
+      }
+
+      if (mounted) setState(() => _patientCollectionProofUrl[patientId] = url);
+    } catch (e) {
+      debugPrint('Error capturing collection proof photo: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Could not capture proof photo — continuing without it'),
+          backgroundColor: Colors.orange,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _capturingCollectionProofForPatientId = null);
+    }
   }
 
   // ── Document ──────────────────────────────────────────────
@@ -1184,6 +1598,18 @@ void _resumeJourney() {
     if (index == -1) return;
     Navigator.push(context, MaterialPageRoute(
         builder: (_) => _DocImageViewerPage(images: _docUploads, initialIndex: index)));
+  }
+
+  // Reuses the same full-screen viewer as prescription docs — wraps the
+  // single collection-proof URL in a _TechPresDoc since that's what the
+  // viewer expects, there's just one image and no delete action here.
+  void _viewCollectionProofImage(String? url) {
+    if (url == null) return;
+    Navigator.push(context, MaterialPageRoute(
+        builder: (_) => _DocImageViewerPage(
+              images: [_TechPresDoc(url: url, fileName: 'collection_proof.jpg', uploadedAt: DateTime.now())],
+              initialIndex: 0,
+            )));
   }
 
   Future<void> _deleteDocImage(_TechPresDoc doc) async {
@@ -2001,6 +2427,16 @@ void _resumeJourney() {
         ),
         actions: [
           IconButton(
+            icon: _isReloading
+                ? const SizedBox(
+                    width: 18, height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  )
+                : const Icon(Icons.refresh_rounded, color: Colors.white),
+            tooltip: 'Reload booking details',
+            onPressed: _isReloading ? null : _reloadBookingData,
+          ),
+          IconButton(
             icon: const Icon(Icons.phone_outlined, color: Colors.white),
             onPressed: () {
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -2132,7 +2568,9 @@ void _resumeJourney() {
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
-          '${_journeySteps[i + 1].label} ▸',
+          _journeySteps[i + 1].label == 'OTP Verified'
+              ? 'Enter OTP ▸'
+              : '${_journeySteps[i + 1].label} ▸',
           style: const TextStyle(
             fontSize: 11,
             fontWeight: FontWeight.w700,
@@ -2212,34 +2650,63 @@ void _resumeJourney() {
                     borderRadius: BorderRadius.circular(10),
                     border: Border.all(color: AppColors.divider),
                   ),
-                  child: Row(children: [
-                    Container(
-                      width: 8, height: 8,
-                      decoration: BoxDecoration(
-                        color: t['category'] == 'Package'
-                            ? AppColors.brandGreen : const Color(0xFF1565C0),
-                        shape: BoxShape.circle,
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      Container(
+                        width: 8, height: 8,
+                        decoration: BoxDecoration(
+                          color: t['category'] == 'Package'
+                              ? AppColors.brandGreen : const Color(0xFF1565C0),
+                          shape: BoxShape.circle,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(t['name'] ?? '',
-                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                        Text(t['category'] ?? '',
-                            style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                      ]),
-                    ),
-                    Text('₹${t['price'] ?? '0'}',
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                    // Hide the remove control entirely once the visit is finalized (OTP Verified or Handed to Lab).
-                    if (!_isFinalized) ...[
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(t['name'] ?? '',
+                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                          Text(t['category'] ?? '',
+                              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                        ]),
+                      ),
+                      Text('₹${t['price'] ?? '0'}',
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                      // Hide the remove control entirely once the visit is finalized (OTP Verified or Handed to Lab).
+                      if (!_isFinalized) ...[
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: () { _removeTest(t['id'] ?? ''); },
+                          child: _isTestLocked(t['id'] ?? '')
+                              ? const Icon(Icons.lock_outline_rounded, size: 16, color: AppColors.textHint)
+                              : const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                        ),
+                      ],
+                    ]),
+                    // Collection checklist — visible from "Collection Started"
+                    // onward. Purely a per-item tracking toggle: does not gate
+                    // or affect the "Sample Collected" step in any way.
+                    if (_showCollectionChecklist) ...[
+                      const SizedBox(height: 8),
                       GestureDetector(
-                        onTap: () { _removeTest(t['id'] ?? ''); },
-                        child: _isTestLocked(t['id'] ?? '')
-                            ? const Icon(Icons.lock_outline_rounded, size: 16, color: AppColors.textHint)
-                            : const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                        onTap: () => _toggleItemCollected(t['id'] ?? '', t['collected'] != 'completed'),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(
+                            t['collected'] == 'completed'
+                                ? Icons.check_circle_rounded
+                                : Icons.radio_button_unchecked_rounded,
+                            size: 16,
+                            color: t['collected'] == 'completed' ? AppColors.brandGreen : AppColors.textHint,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            t['collected'] == 'completed' ? 'Collected' : 'Pending',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: t['collected'] == 'completed' ? AppColors.brandGreen : AppColors.textHint,
+                            ),
+                          ),
+                        ]),
                       ),
                     ],
                   ]),
@@ -2336,6 +2803,149 @@ void _resumeJourney() {
                 ],
               ],
             ),
+          ),
+
+          const SizedBox(height: 14),
+
+          // ── Sample Collection Photo ──────────────────────────
+          // Optional real-time proof photo. Visible from "Collection Started"
+          // onward (same gate as the checklist, _showCollectionChecklist) so
+          // it stays available for the whole collection window — a
+          // technician who skips it at first still has a clear "Take Photo"
+          // entry point later, and can retake it any time before completing
+          // the flow. Does not gate or otherwise affect Sample Collected,
+          // the checklist, or any booking status transition.
+          if (_showCollectionChecklist) _SectionCard(
+            title: 'Sample Collection Photo',
+            icon: Icons.camera_alt_outlined,
+            child: _collectionProofLoading
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 20),
+                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                  )
+                // One block per patient in this visit (primary + any family
+                // members) — each keyed to their own patient_id/booking_id
+                // via _patientCollectionProofUrl, so one patient's photo
+                // never overwrites or is shown for another patient.
+                : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    for (final patient in _visitPatients) ...[
+                      Builder(builder: (context) {
+                        final pid           = patient['id'] as int?;
+                        final patientBookingId = patient['bookingId'] as int?;
+                        final pname         = patient['name'] as String;
+                        final proofUrl      = pid != null ? _patientCollectionProofUrl[pid] : null;
+                        final isCapturing   = _capturingCollectionProofForPatientId == pid;
+                        final canCapture    = pid != null && patientBookingId != null;
+                        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Row(children: [
+                            Text(pname,
+                                style: const TextStyle(
+                                    fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: proofUrl != null
+                                    ? AppColors.brandGreenSurface
+                                    : const Color(0xFFFFF3E0),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                proofUrl != null ? 'ADDED' : 'NOT ADDED',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.5,
+                                  color: proofUrl != null
+                                      ? AppColors.brandGreen
+                                      : const Color(0xFFE65100),
+                                ),
+                              ),
+                            ),
+                          ]),
+                          const SizedBox(height: 10),
+                          if (proofUrl == null)
+                            GestureDetector(
+                              onTap: (!canCapture || isCapturing) ? null : () =>
+                                  _captureAndUploadCollectionProof(patientId: pid, bookingId: patientBookingId),
+                              child: Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(vertical: 22),
+                                decoration: BoxDecoration(
+                                  color: AppColors.background,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: AppColors.divider, width: 1.5),
+                                ),
+                                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                  isCapturing
+                                      ? const SizedBox(
+                                          width: 22, height: 22,
+                                          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+                                        )
+                                      : const Icon(Icons.camera_alt_outlined, size: 22, color: AppColors.textHint),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    isCapturing ? 'Opening camera…' : 'Take Collection Photo',
+                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
+                                  ),
+                                ]),
+                              ),
+                            )
+                          else
+                            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              GestureDetector(
+                                onTap: () => _viewCollectionProofImage(proofUrl),
+                                child: Container(
+                                  width: 88,
+                                  height: 88,
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: AppColors.divider),
+                                  ),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: Image.network(
+                                      proofUrl,
+                                      fit: BoxFit.cover,
+                                      loadingBuilder: (_, child, progress) => progress == null
+                                          ? child
+                                          : const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                                      errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: AppColors.textHint),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                  const Text('Proof photo captured',
+                                      style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                                  const SizedBox(height: 8),
+                                  TextButton.icon(
+                                    onPressed: (!canCapture || isCapturing) ? null : () =>
+                                        _captureAndUploadCollectionProof(patientId: pid, bookingId: patientBookingId),
+                                    icon: isCapturing
+                                        ? const SizedBox(
+                                            width: 14, height: 14,
+                                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+                                          )
+                                        : const Icon(Icons.refresh_rounded, size: 16),
+                                    label: Text(isCapturing ? 'Retaking…' : 'Retake Photo'),
+                                    style: TextButton.styleFrom(
+                                      foregroundColor: AppColors.brandGreen,
+                                      padding: EdgeInsets.zero,
+                                      minimumSize: const Size(0, 0),
+                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                  ),
+                                ]),
+                              ),
+                            ]),
+                        ]);
+                      }),
+                      if (patient != _visitPatients.last) const SizedBox(height: 14),
+                    ],
+                  ]),
           ),
 
           const SizedBox(height: 14),
@@ -2811,6 +3421,8 @@ void _resumeJourney() {
                     final totalAmount = double.tryParse(c['total_amount']?.toString() ?? '0') ?? 0.0;
                     final isPaid      = c['payment_status'] == 'paid' || amountDue <= 0;
                     final hasPayment  = (c['booking_id'] as num?) != null && totalAmount > 0;
+                    final memberBookingId = (c['booking_id'] as num?)?.toInt();
+                    final memberItems     = memberBookingId != null ? _familyItems[memberBookingId] : null;
                     return Container(
                       margin: const EdgeInsets.only(bottom: 8),
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -2819,41 +3431,81 @@ void _resumeJourney() {
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(color: AppColors.brandGreenLight),
                       ),
-                      child: Row(children: [
-                        const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
-                        const SizedBox(width: 8),
-                        Expanded(child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
-                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                            ),
-                            if ((c['booking_ref'] as String?) != null)
-                              Text(c['booking_ref'] as String,
-                                  style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                          ],
-                        )),
-                        if (hasPayment)
-                          isPaid
-                            ? Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: AppColors.brandGreen.withValues(alpha: 0.12),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: const Text('Paid ✓',
-                                    style: TextStyle(fontSize: 11, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-                              )
-                            : Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFE3F2FD),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Text('₹${amountDue.toInt()} due',
-                                    style: const TextStyle(fontSize: 11, color: Color(0xFF1565C0), fontWeight: FontWeight.w600)),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [
+                          const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
+                          const SizedBox(width: 8),
+                          Expanded(child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
+                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                               ),
+                              if ((c['booking_ref'] as String?) != null)
+                                Text(c['booking_ref'] as String,
+                                    style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                            ],
+                          )),
+                          if (hasPayment)
+                            isPaid
+                              ? Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.brandGreen.withValues(alpha: 0.12),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: const Text('Paid ✓',
+                                      style: TextStyle(fontSize: 11, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
+                                )
+                              : Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFE3F2FD),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text('₹${amountDue.toInt()} due',
+                                      style: const TextStyle(fontSize: 11, color: Color(0xFF1565C0), fontWeight: FontWeight.w600)),
+                                ),
+                        ]),
+                        // This family member's own tests/packages checklist —
+                        // scoped to their own booking_id (_familyItems), same
+                        // visibility rule and toggle mechanism as the primary
+                        // patient's checklist above.
+                        if (_showCollectionChecklist && memberBookingId != null && memberItems != null && memberItems.isNotEmpty) ...[
+                          const Divider(height: 16),
+                          ...memberItems.map((t) => Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: GestureDetector(
+                              onTap: () => _toggleItemCollected(
+                                t['id'] ?? '', t['collected'] != 'completed',
+                                targetBookingId: memberBookingId,
+                              ),
+                              child: Row(children: [
+                                Icon(
+                                  t['collected'] == 'completed'
+                                      ? Icons.check_circle_rounded
+                                      : Icons.radio_button_unchecked_rounded,
+                                  size: 15,
+                                  color: t['collected'] == 'completed' ? AppColors.brandGreen : AppColors.textHint,
+                                ),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(t['name'] ?? '',
+                                      style: const TextStyle(fontSize: 12)),
+                                ),
+                                Text(
+                                  t['collected'] == 'completed' ? 'Collected' : 'Pending',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                    color: t['collected'] == 'completed' ? AppColors.brandGreen : AppColors.textHint,
+                                  ),
+                                ),
+                              ]),
+                            ),
+                          )),
+                        ],
                       ]),
                     );
                   }),

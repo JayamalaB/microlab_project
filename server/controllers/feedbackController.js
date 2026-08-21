@@ -30,8 +30,8 @@ exports.submitFeedback = async (req, res) => {
     if (!booking) {
       return res.status(404).json({ success: false, message: 'Booking not found' });
     }
-    if (booking.status !== 'completed') {
-      return res.status(400).json({ success: false, message: 'Feedback can only be submitted for completed bookings' });
+    if (booking.status !== 'completed' && booking.status !== 'collected') {
+      return res.status(400).json({ success: false, message: 'Feedback can only be submitted once the sample has been collected' });
     }
 
     // Check for duplicate feedback

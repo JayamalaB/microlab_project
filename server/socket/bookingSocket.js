@@ -22,6 +22,11 @@
 const db              = require('../config/db');
 const { messaging }   = require('../config/firebase');
 const { sendToBookingOwner } = require('../services/customerPush');
+const {
+  findEligibleBranches,
+  technicianActiveSlots,
+  _hasSlotConflict,
+} = require('../services/branchEligibility');
 const fs              = require('fs');
 const path            = require('path');
 
@@ -74,6 +79,7 @@ async function sendFcmPush(fcmToken, bookingData) {
         patientLng:     String(bookingData.patientLng     ?? ''),
         hospital:       String(bookingData.hospital       ?? ''),
         bookingType:    String(bookingData.bookingType    ?? 'lab'),
+        docRequired:    String(bookingData.docRequired    ?? false),
         branchId:       String(bookingData.branchId       ?? ''),
         branchName:     String(bookingData.branchName     ?? ''),
         slotId:          String(bookingData.slotId          ?? ''),
@@ -137,13 +143,10 @@ const fcmOnlineTechnicians = new Map(); // technicianId → { fcmToken, lat, lng
 const technicianActiveBookings = new Map(); // technicianId → bookingId
 const driverActiveBookings     = new Map(); // driverId     → bookingId
 
-// ── Appointment-based slot tracking (Phase 0 — declared; Phase 1 will populate) ─
-// technicianId → Map<bookingId, { slotDate, startMinutes, endMinutes, slotId }>
-// Each inner entry represents one committed appointment window.  When Phase 1
-// populates this on booking_accepted, dispatch can check overlaps instead of
-// relying on the global isAvailable flag for appointment-time bookings.
-// Rebuilt from DB on server start by initDispatchState().
-const technicianActiveSlots = new Map();
+// technicianActiveSlots is imported from ../services/branchEligibility —
+// moved there so branch-eligibility checks can share the exact same
+// committed-window data dispatch uses, instead of a second copy. See that
+// file for the full comment/lifecycle notes.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  LOGGING
@@ -255,6 +258,36 @@ function _forceTechnicianOffline(technicianId) {
   log('🔴', 'TECH_OFFLINE', '-', `id=${technicianId}`);
 }
 
+// Lightweight variant used ONLY by the heartbeat staleness sweep
+// (scheduler/technicianOfflineSweep.js). Unlike _forceTechnicianOffline,
+// this deliberately leaves booking_id/task_status untouched — a technician
+// who's gone quiet for the sweep's timeout may still be legitimately mid-job
+// (e.g. no signal inside a building), so their active-job tracking must
+// survive this, unlike an explicit logout/technician_offline signal which
+// really does mean "I'm done." Still removes them from the in-memory
+// dispatch pools and clears any pending grace timer, so dispatch eligibility
+// and the DB online flag stay consistent.
+function _markTechnicianOfflineStale(technicianId) {
+  if (!technicianId) return;
+
+  onlineTechnicians.delete(technicianId);
+  fcmOnlineTechnicians.delete(technicianId);
+
+  const pendingGrace = graceTimers.get(technicianId);
+  if (pendingGrace) { clearTimeout(pendingGrace); graceTimers.delete(technicianId); }
+
+  dbRun(
+    `UPDATE ip_technician_live_location
+     SET online_status = 'offline',
+         socket_id     = NULL,
+         updated_at    = NOW()
+     WHERE technician_id = ?`,
+    [technicianId]
+  );
+
+  log('🔴', 'TECH_OFFLINE_STALE', '-', `id=${technicianId} — no heartbeat within timeout`);
+}
+
 // Cascade a technician-collection status to all sibling bookings sharing the
 // same visit_group_id. No-op when visit_group_id IS NULL (normal bookings).
 async function _cascadeTcStatus(bookingId, status, timestampCol) {
@@ -269,6 +302,16 @@ async function _cascadeTcStatus(bookingId, status, timestampCol) {
       `UPDATE ip_technician_collection tc
        JOIN ip_bookings b ON b.booking_id = tc.booking_id
        SET tc.collection_status = ?, tc.${timestampCol} = NOW(), tc.updated_at = NOW()
+       WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+      [status, vgId, bookingId]
+    );
+    // Mirror the same status into ip_patient_bookings for sibling bookings —
+    // keeps the patient-link table's collection_status consistent with
+    // ip_technician_collection for every booking sharing this visit group.
+    dbRun(
+      `UPDATE ip_patient_bookings pb
+       JOIN ip_bookings b ON b.booking_id = pb.booking_id
+       SET pb.collection_status = ?
        WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
       [status, vgId, bookingId]
     );
@@ -349,21 +392,8 @@ function buildFcmQueue(patientLat, patientLng, branchId = null) {
   return entries;
 }
 
-// ── Phase 2 — Appointment slot overlap check ───────────────────────────────────
-// Returns true if the given technician already has a committed appointment window
-// on bookingDate that covers requestedStart (minutes since midnight).
-// Techs with no entry in technicianActiveSlots (old model) always return false —
-// their availability is governed by the global isAvailable flag instead.
-function _hasSlotConflict(techId, bookingDate, requestedStart) {
-  const activeSlots = technicianActiveSlots.get(techId);
-  if (!activeSlots || activeSlots.size === 0) return false;
-  for (const [, win] of activeSlots) {
-    if (win.slotDate !== bookingDate) continue;
-    // Conflict: new appointment starts inside an existing committed window
-    if (requestedStart >= win.startMinutes && requestedStart < win.endMinutes) return true;
-  }
-  return false;
-}
+// _hasSlotConflict is imported from ../services/branchEligibility — see
+// that file for the implementation (moved verbatim, unchanged).
 
 // Temporarily register Lane 2 techs into onlineTechnicians so dispatchAttempt can
 // find and track them.  Their real entry replaces this when they reconnect.
@@ -547,6 +577,65 @@ async function dispatchAttempt(io, bookingId) {
               ),
             ]);
             continue; // restart loop: dispatch next available tech
+          }
+        }
+
+        // ── Cross-branch fallback ──────────────────────────────────────────
+        // This branch's technicians are now genuinely exhausted — same-branch
+        // expansion, the FCM lane, and the slot-constraint-lift lane above all
+        // came up empty. Before giving up on the whole booking, check whether
+        // another eligible branch (same rules used at branch-selection time:
+        // an online technician + an available slot for this date) still has
+        // capacity. If so, switch this dispatch cycle to that branch and let
+        // it run through the exact same exhaustion sequence again — this is
+        // pure state mutation (queue reset to empty, branch swapped), not a
+        // second dispatch implementation: `continue` re-enters this same
+        // while-loop, which re-does lane 1/2/2.5 above, now scoped to the new
+        // branch. Only when every eligible branch has been tried does this
+        // fall through to the unchanged ALL_EXHAUSTED/booking_timeout below.
+        //
+        // Defensive design, not an assumption that every dispatch-state
+        // object was created with these fields: `triedBranchIds` lazily
+        // initializes if missing (e.g. a dispatch cycle started via the Lane
+        // 3 slot-based path, which doesn't set it), and `originalSlotTechIds`
+        // being absent just means this particular dispatch cycle skips
+        // resetting the slot constraint on branch-switch rather than
+        // crashing. A missing/absent field here must never break dispatch.
+        if (bookingType !== 'transport'
+            && bookingData.patientLat != null && bookingData.patientLng != null) {
+          if (!dispatch.triedBranchIds) {
+            dispatch.triedBranchIds = new Set(bookingData.branchId != null ? [bookingData.branchId] : []);
+          }
+          if (dispatch.branchCandidates === null || dispatch.branchCandidates === undefined) {
+            const fallbackDate = dispatch.bookingDate
+              || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+            dispatch.branchCandidates = await findEligibleBranches(
+              bookingData.patientLat, bookingData.patientLng, fallbackDate,
+              apptCtxD?.requestedStart ?? null
+            );
+            dlog(bookingId, 'BRANCH_CANDIDATES',
+              dispatch.branchCandidates.length > 0
+                ? `${dispatch.branchCandidates.length} eligible branch(es): ` +
+                  dispatch.branchCandidates.map(c => `${c.name}(${c.branchId},${c.distKm.toFixed(1)}km)`).join(', ')
+                : 'no eligible branches found');
+          }
+
+          const nextBranch = dispatch.branchCandidates.find(c => !dispatch.triedBranchIds.has(c.branchId));
+          if (nextBranch) {
+            dlog(bookingId, 'BRANCH_EXHAUSTED',
+              `branch=${bookingData.branchId ?? 'none'} ${bookingData.branchName ?? ''} exhausted -> trying next branch`);
+            dispatch.triedBranchIds.add(nextBranch.branchId);
+            bookingData.branchId   = nextBranch.branchId;
+            bookingData.branchName = nextBranch.name;
+            dispatch.queue         = [];
+            dispatch.techIdx       = 0;
+            dispatch.attemptNum    = 1;
+            if (dispatch.originalSlotTechIds !== undefined) {
+              dispatch.slotTechIds = dispatch.originalSlotTechIds ? new Set(dispatch.originalSlotTechIds) : null;
+            }
+            dlog(bookingId, 'NEXT_BRANCH',
+              `branch=${nextBranch.branchId} ${nextBranch.name} (${nextBranch.distKm.toFixed(2)}km)`);
+            continue; // restart loop: re-enters lane 1/2/2.5 above, scoped to the new branch
           }
         }
 
@@ -1037,12 +1126,26 @@ async function _handleBookingRequest(io, socket, data = {}) {
     );
   }
 
+  // Whether any item on this booking needs a prescription — the technician
+  // app seeds its local booking object from this payload (see SocketBooking),
+  // so a stale/missing value here means the Manage Booking screen never finds
+  // out the requirement until it independently re-fetches items.
+  const [[docReqRow]] = await db.execute(
+    `SELECT EXISTS(
+       SELECT 1 FROM ip_booking_items bi
+       JOIN ip_products pr ON pr.product_id = bi.product_id
+       WHERE bi.booking_id = ? AND pr.document_required IN (1, '1', 'yes')
+     ) AS doc_required`,
+    [bookingId]
+  );
+  const docRequired = !!docReqRow?.doc_required;
+
   // Build the full booking payload now — needed by both normal dispatch
   // and the slot-based fallback (which sends the complete data to the tech).
   const bookingData = {
     bookingId, patientId, patientName, patientMobile,
     patientAddress, patientLat, patientLng, hospital, bookingType,
-    branchId, branchName,
+    branchId, branchName, docRequired,
     ...(slotId          != null && { slotId }),
     ...(slotLabel       != null && { slotLabel }),
     ...(appointmentTime != null && { appointmentTime }),
@@ -1284,8 +1387,26 @@ async function _handleBookingRequest(io, socket, data = {}) {
     bookingType,
     slotId:          slotId ?? null,
     slotTechIds:     slotTechIds,
-    bookingDate:     bookingDate,
+    // slotTechIds gets mutated in place (set to null) by the Lane 2.5
+    // constraint-lift below. Keep an untouched copy so that if cross-branch
+    // fallback switches to a different branch, that branch gets its own full
+    // slot -> FCM -> lift sequence, instead of inheriting a constraint that
+    // was already lifted for the PREVIOUS branch.
+    originalSlotTechIds: slotTechIds ? new Set(slotTechIds) : null,
+    // bookingDate stays null when this booking has no slotId (see `let
+    // bookingDate = null` above) — but the cross-branch fallback below needs
+    // a real date to check candidate branches' slot availability, so fall
+    // back to earlyBookingDate (already resolved to a real date earlier in
+    // this function) rather than leaving it null.
+    bookingDate:     bookingDate ?? earlyBookingDate,
     appointmentTime: appointmentTime ?? null,
+    // Cross-branch dispatch fallback state (see the exhaustion block in
+    // dispatchAttempt). triedBranchIds seeds with the originally-requested
+    // branch so that branch is never re-tried; branchCandidates is computed
+    // lazily on first exhaustion, not here, to avoid an extra DB round-trip
+    // on the common case where the first technician just accepts.
+    triedBranchIds:  new Set(branchId != null ? [branchId] : []),
+    branchCandidates: null,
   });
 
   dispatchAttempt(io, bookingId);
@@ -1631,6 +1752,12 @@ module.exports = function bookingSocket(io, socket) {
       ).then(([r]) => {
         log('💾', 'TCB_CREATED', bookingId,
           `tech=${actorName} rows=${r.affectedRows}`);
+        // Mirror the technician-side status into ip_patient_bookings for
+        // this booking (see plan: technician collection_status sync).
+        dbRun(
+          `UPDATE ip_patient_bookings SET collection_status = 'assigned' WHERE booking_id = ?`,
+          [bookingId]
+        );
         // Cascade assignment to sibling bookings in the same visit group
         ;(async () => {
           try {
@@ -1666,6 +1793,13 @@ module.exports = function bookingSocket(io, socket) {
                WHERE visit_group_id = ? AND booking_id != ? AND deleted_at IS NULL`,
               [actorId, actorName || null, vgId, bookingId]
             );
+            dbRun(
+              `UPDATE ip_patient_bookings pb
+               JOIN ip_bookings b ON b.booking_id = pb.booking_id
+               SET pb.collection_status = 'assigned'
+               WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+              [vgId, bookingId]
+            );
             log('💾', 'TCB_SIBLING_CASCADE', bookingId,
               `visit_group=${vgId} tech=${actorName}`);
           } catch (e) {
@@ -1678,11 +1812,24 @@ module.exports = function bookingSocket(io, socket) {
         );
       });
 
+      // branch_id is written here (not left as whatever it was at booking
+      // creation) because cross-branch dispatch fallback may have switched
+      // bd.branchId to a different branch than the one originally requested,
+      // if the original branch's technicians were all exhausted first — this
+      // makes the final DB record reflect the branch whose technician
+      // actually accepted, not the one the patient was first shown.
+      // COALESCE guards against bd.branchId ever being null/undefined here
+      // (e.g. dispatch state missing at accept time) silently wiping out an
+      // already-correct branch_id — same safety pattern already used
+      // elsewhere in this codebase (authController.js's ip_technicians
+      // refresh) for exactly this "don't let a missing value blank out
+      // existing data" reason.
       dbRun(
         `UPDATE ip_bookings
-         SET status = 'assigned', technician_id = ?, technician_name = ?, updated_at = NOW()
+         SET status = 'assigned', technician_id = ?, technician_name = ?,
+             branch_id = COALESCE(?, branch_id), updated_at = NOW()
          WHERE booking_id = ?`,
-        [actorId, actorName || null, bookingId]
+        [actorId, actorName || null, bd.branchId ?? null, bookingId]
       );
 
       dbRun(
@@ -1858,6 +2005,10 @@ module.exports = function bookingSocket(io, socket) {
        WHERE booking_id = ?`,
       [bookingId]
     );
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'en_route' WHERE booking_id = ?`,
+      [bookingId]
+    );
     _cascadeTcStatus(bookingId, 'en_route', 'en_route_at');
     dbRun(
       `UPDATE ip_technician_live_location
@@ -1882,6 +2033,10 @@ module.exports = function bookingSocket(io, socket) {
       `UPDATE ip_technician_collection
        SET collection_status = 'arrived', arrived_at = NOW(), updated_at = NOW()
        WHERE booking_id = ?`,
+      [bookingId]
+    );
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'arrived' WHERE booking_id = ?`,
       [bookingId]
     );
     _cascadeTcStatus(bookingId, 'arrived', 'arrived_at');
@@ -1912,6 +2067,10 @@ module.exports = function bookingSocket(io, socket) {
       `UPDATE ip_technician_collection
        SET collection_status = 'all_collected', collected_at = NOW(), updated_at = NOW()
        WHERE booking_id = ?`,
+      [bookingId]
+    );
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'all_collected' WHERE booking_id = ?`,
       [bookingId]
     );
     _cascadeTcStatus(bookingId, 'all_collected', 'collected_at');
@@ -1965,6 +2124,10 @@ module.exports = function bookingSocket(io, socket) {
     .catch(e => {
       clog(`[collection_started] DB ERROR — booking_id=${bookingId}  error="${e.message}"  code=${e.code}`);
     });
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'collection_started' WHERE booking_id = ?`,
+      [bookingId]
+    );
     _cascadeTcStatus(bookingId, 'collection_started', 'collection_started_at');
     _notifyPatient(io, bookingId, 'collection_started', { bookingId });
   });
@@ -1994,29 +2157,18 @@ module.exports = function bookingSocket(io, socket) {
     .catch(e => {
       clog(`[sample_collected] DB ERROR — booking_id=${bookingId}  error="${e.message}"  code=${e.code}`);
     });
-    _cascadeTcStatus(bookingId, 'sample_collected', 'collected_at');
-    _notifyPatient(io, bookingId, 'sample_collected', { bookingId });
-  });
-
-  // Final technician step — stores completed_at timestamp, frees the technician
-  socket.on('handed_to_lab', (data = {}) => {
-    clog(`[handed_to_lab] RAW event received | data=${JSON.stringify(data)}`);
-    const { bookingId, technicianId } = data;
-    clog(`[handed_to_lab] parsed bookingId=${bookingId}  technicianId=${technicianId}`);
-    if (!bookingId || !technicianId) {
-      clog(`[handed_to_lab] GUARD FAILED — dropped. bookingId falsy=${!bookingId}  technicianId falsy=${!technicianId}`);
-      return;
-    }
-    log('🏥', 'HANDED_TO_LAB', bookingId, `tech_id=${technicianId}`);
-
-    _freeTechnician(technicianId, bookingId);
 
     dbRun(
-      `UPDATE ip_technician_collection
-       SET collection_status = 'handed_to_lab', completed_at = NOW(), updated_at = NOW()
-       WHERE booking_id = ?`,
+      `UPDATE ip_patient_bookings SET collection_status = 'sample_collected' WHERE booking_id = ?`,
       [bookingId]
     );
+
+    // Mirrors the ip_bookings.status='collected' write already done in the
+    // handed_to_lab handler below — just triggered one step earlier in the
+    // same journey, so the main booking status reflects "sample collected"
+    // immediately instead of only once the technician later hands off to the
+    // lab. handed_to_lab still runs its own identical UPDATE afterward; since
+    // the value is the same ('collected'), that is a harmless no-op re-write.
     dbRun(
       `UPDATE ip_bookings
        SET status = 'collected', updated_at = NOW()
@@ -2024,7 +2176,10 @@ module.exports = function bookingSocket(io, socket) {
       [bookingId]
     );
 
-    // Cascade to sibling bookings in the same visit group (technician-added members)
+    // Cascade to sibling bookings in the same visit group — same pattern as
+    // handed_to_lab's sibling cascade. Only ip_bookings.status needs handling
+    // here; siblings' ip_technician_collection.collection_status is already
+    // cascaded by the existing _cascadeTcStatus() call below.
     ;(async () => {
       try {
         const [[parentRow]] = await db.execute(
@@ -2034,22 +2189,151 @@ module.exports = function bookingSocket(io, socket) {
         if (parentRow?.visit_group_id) {
           const vgId = parentRow.visit_group_id;
           dbRun(
-            `UPDATE ip_technician_collection tc
-             JOIN ip_bookings b ON b.booking_id = tc.booking_id
-             SET tc.collection_status = 'handed_to_lab', tc.completed_at = NOW(), tc.updated_at = NOW()
-             WHERE b.visit_group_id = ? AND b.booking_id != ?`,
-            [vgId, bookingId]
-          );
-          dbRun(
             `UPDATE ip_bookings
              SET status = 'collected', updated_at = NOW()
              WHERE visit_group_id = ? AND booking_id != ?`,
             [vgId, bookingId]
           );
+          clog(`[sample_collected] sibling cascade — visit_group=${vgId} booking=${bookingId}`);
+        }
+      } catch (e) {
+        console.error(`[sample_collected] sibling cascade error: ${e.message}`);
+      }
+    })();
+
+    _cascadeTcStatus(bookingId, 'sample_collected', 'collected_at');
+    _notifyPatient(io, bookingId, 'sample_collected', { bookingId });
+  });
+
+  // Final technician step — stores completed_at timestamp, frees the technician
+  socket.on('handed_to_lab', async (data = {}) => {
+    clog(`[handed_to_lab] RAW event received | data=${JSON.stringify(data)}`);
+    const { bookingId, technicianId, receivedByName = null, handoverBranchId = null } = data;
+    clog(`[handed_to_lab] parsed bookingId=${bookingId}  technicianId=${technicianId}` +
+         `  receivedByName=${receivedByName ?? '—'}  handoverBranchId=${handoverBranchId ?? '—'}`);
+
+    // Acknowledgement — previously this handler was fire-and-forget from the
+    // client's perspective (plain socket.emit with no reply), so a dropped
+    // guard, a disconnected socket, or a DB error all looked identical to
+    // "succeeded" on the technician's screen: the UI flipped to "Handed to
+    // Lab" locally regardless of whether anything was actually persisted.
+    // Every exit path below now replies with 'handed_to_lab_ack' so the
+    // client only shows success once the primary DB write is confirmed.
+    if (!bookingId || !technicianId) {
+      clog(`[handed_to_lab] GUARD FAILED — dropped. bookingId falsy=${!bookingId}  technicianId falsy=${!technicianId}`);
+      socket.emit('handed_to_lab_ack', {
+        bookingId: bookingId ?? null,
+        success: false,
+        message: !bookingId ? 'Missing booking — please retry.' : 'Session expired — please log in again.',
+      });
+      return;
+    }
+    log('🏥', 'HANDED_TO_LAB', bookingId, `tech_id=${technicianId}`);
+
+    // Primary status write — awaited (not the fire-and-forget dbRun used
+    // elsewhere in this handler) specifically so its real success/failure
+    // can be acknowledged back to the submitting technician before anything
+    // else runs. Technician submission only ever reaches
+    // 'handed_to_lab_pending' — only an admin verifying the submitted
+    // handover details (via updateAdminStatus, action 'submitted_to_lab')
+    // advances this to the final 'handed_to_lab'.
+    let primaryResult;
+    try {
+      [primaryResult] = await db.execute(
+        `UPDATE ip_technician_collection
+         SET collection_status = 'handed_to_lab_pending', completed_at = NOW(), updated_at = NOW()
+         WHERE booking_id = ?`,
+        [bookingId]
+      );
+    } catch (e) {
+      console.error(`❌ [handed_to_lab] primary status UPDATE failed: ${e.message}`);
+      clog(`[handed_to_lab] primary status UPDATE ERROR — booking_id=${bookingId} error="${e.message}"`);
+      socket.emit('handed_to_lab_ack', { bookingId, success: false, message: 'Server error — please retry.' });
+      return;
+    }
+
+    if (primaryResult.affectedRows === 0) {
+      clog(`[handed_to_lab] WARNING — 0 rows affected, no ip_technician_collection row for booking_id=${bookingId}`);
+      socket.emit('handed_to_lab_ack', { bookingId, success: false, message: 'Booking not found — please retry.' });
+      return;
+    }
+
+    // Primary write confirmed — acknowledge success now. Everything below
+    // (secondary tables, sibling cascade, notifications, cleanup) proceeds
+    // exactly as before; none of it blocks the technician's confirmation.
+    socket.emit('handed_to_lab_ack', { bookingId, success: true, status: 'handed_to_lab_pending' });
+
+    _freeTechnician(technicianId, bookingId);
+
+    // ip_bookings.status now mirrors the pending/verified distinction too —
+    // the admin dropdown (external panel) reads this column directly and
+    // needs it to be granular enough to show "Handed to Lab - Pending"
+    // rather than staying at 'collected'. Only an admin verifying via
+    // updateAdminStatus (action 'submitted_to_lab') advances this further
+    // to 'handed_to_lab'.
+    dbRun(
+      `UPDATE ip_bookings
+       SET status = 'handed_to_lab_pending', updated_at = NOW()
+       WHERE booking_id = ?`,
+      [bookingId]
+    );
+    dbRun(
+      `UPDATE ip_patient_bookings SET collection_status = 'handed_to_lab_pending' WHERE booking_id = ?`,
+      [bookingId]
+    );
+
+    // Handover tracking + sibling cascade in one pass — fetches the
+    // booking's own branch_id (used as the handover branch unless the
+    // client explicitly overrides it) and visit_group_id together, since
+    // both are needed here and neither was fetched above.
+    // submitted_to_branch_id/submitted_at are pre-existing columns on this
+    // table (never previously wired to any code) that already mean exactly
+    // "which branch this was submitted to, and when" — reused here instead
+    // of adding new columns. No separate handover-status column needed
+    // either: collection_status='handed_to_lab' (set above) already is
+    // that signal.
+    ;(async () => {
+      try {
+        const [[parentRow]] = await db.execute(
+          'SELECT branch_id, visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
+          [bookingId]
+        );
+        const resolvedBranchId = handoverBranchId ?? parentRow?.branch_id ?? null;
+
+        dbRun(
+          `UPDATE ip_technician_collection
+           SET submitted_to_branch_id = ?, submitted_at = NOW(), received_by_name = ?
+           WHERE booking_id = ?`,
+          [resolvedBranchId, receivedByName, bookingId]
+        );
+
+        if (parentRow?.visit_group_id) {
+          const vgId = parentRow.visit_group_id;
+          dbRun(
+            `UPDATE ip_technician_collection tc
+             JOIN ip_bookings b ON b.booking_id = tc.booking_id
+             SET tc.collection_status = 'handed_to_lab_pending', tc.completed_at = NOW(), tc.updated_at = NOW(),
+                 tc.submitted_to_branch_id = ?, tc.submitted_at = NOW(), tc.received_by_name = ?
+             WHERE b.visit_group_id = ? AND b.booking_id != ?`,
+            [resolvedBranchId, receivedByName, vgId, bookingId]
+          );
+          dbRun(
+            `UPDATE ip_bookings
+             SET status = 'handed_to_lab_pending', updated_at = NOW()
+             WHERE visit_group_id = ? AND booking_id != ?`,
+            [vgId, bookingId]
+          );
+          dbRun(
+            `UPDATE ip_patient_bookings pb
+             JOIN ip_bookings b ON b.booking_id = pb.booking_id
+             SET pb.collection_status = 'handed_to_lab_pending'
+             WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+            [vgId, bookingId]
+          );
           clog(`[handed_to_lab] sibling cascade — visit_group=${vgId} booking=${bookingId}`);
         }
       } catch (e) {
-        console.error(`[handed_to_lab] sibling cascade error: ${e.message}`);
+        console.error(`[handed_to_lab] sibling cascade / handover-tracking error: ${e.message}`);
       }
     })();
 
@@ -2068,7 +2352,7 @@ module.exports = function bookingSocket(io, socket) {
     sendToBookingOwner(
       bookingId,
       'Sample Reached Lab 🧪',
-      'Your sample has been received at the lab and is being processed.',
+      'Your sample has been received at the lab.',
       { type: 'sample_received_at_lab', booking_id: String(bookingId) }
     );
     bookingRooms.delete(bookingId);
@@ -2088,12 +2372,6 @@ module.exports = function bookingSocket(io, socket) {
     );
     _notifyPatient(io, bookingId, 'sample_received_at_lab', { bookingId });
     log('🧪', 'SAMPLE_RECEIVED', bookingId);
-    sendToBookingOwner(
-      bookingId,
-      'Sample Reached Lab 🧪',
-      'Your sample has been received at the lab and is being processed.',
-      { type: 'sample_received_at_lab', booking_id: String(bookingId) }
-    );
   });
 
   socket.on('test_in_progress', (data = {}) => {
@@ -2549,6 +2827,7 @@ module.exports = function bookingSocket(io, socket) {
 // window until an unrelated event (disconnect, next status change) clears it.
 module.exports.freeTechnician = _freeTechnician;
 module.exports.forceTechnicianOffline = _forceTechnicianOffline;
+module.exports.markTechnicianOfflineStale = _markTechnicianOfflineStale;
 
 // ── Scheduled dispatch entry point (called by dispatchScheduler cron) ─────────
 // Creates a virtual socket that routes patient-facing events to the booking room

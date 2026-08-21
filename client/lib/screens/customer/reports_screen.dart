@@ -321,15 +321,19 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
         children: [
           Container(
             color: AppColors.brandGreen,
-            padding: EdgeInsets.fromLTRB(
-                16, MediaQuery.of(context).padding.top + 14, 16, 14),
+            width: double.infinity,
+            height: MediaQuery.of(context).padding.top + 56,
+            padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
             child: const Align(
               alignment: Alignment.centerLeft,
-              child: Text('Reports & Results',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600)),
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Text('Reports & Results',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700)),
+              ),
             ),
           ),
           Expanded(

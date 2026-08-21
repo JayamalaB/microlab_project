@@ -158,17 +158,24 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // ── Branch auto-detection ─────────────────────────────────
   // Called silently whenever a 6-digit pincode becomes available.
   // Patient never sees this — branch is stored and forwarded to CheckoutScreen.
-  Future<void> _autoDetectBranch(String pincode, {String? place}) async {
+  Future<void> _autoDetectBranch(String pincode, {String? place, bool isGps = false}) async {
     if (!mounted) return;
     final effectivePlace = place ?? _city;
     debugPrint('\n🏥 [BRANCH AUTO-DETECT] ─────────────────────────────');
     debugPrint('   pincode     : $pincode');
     debugPrint('   place/city  : ${effectivePlace ?? '— (no fallback)'}');
     debugPrint('   mode        : $_mode');
+    debugPrint('   source      : ${isGps ? 'gps' : 'manual'}');
     setState(() { _branchDetecting = true; _selectedBranch = null; });
 
     try {
       final params = <String, String>{'pincode': pincode};
+      // Tells the server this came from Current Live Location, not manual
+      // pincode entry — even though a pincode is also sent (derived from
+      // reverse-geocoding the GPS address), so it runs the GPS eligibility
+      // walk (online tech + slots) instead of taking the pincode-exact
+      // shortcut straight past that check.
+      if (isGps) params['source'] = 'gps';
       if (effectivePlace != null && effectivePlace.isNotEmpty) {
         params['place'] = effectivePlace;
       }
@@ -194,6 +201,23 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           setState(() { _selectedBranch = branch; _branchDetecting = false; });
           debugPrint('   ✅ branch    : ${branch.name} (id=${branch.id})');
           debugPrint('   📍 address   : ${branch.address}');
+          // GPS-only: server picked a fallback branch (nearest had no online
+          // tech / no available slots) — let the patient know why they're
+          // not seeing the true-nearest branch, same idea as Uber surfacing
+          // "matched with a nearby driver" instead of silently substituting.
+          if (branch.isFallback && body['message'] is String && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Row(children: [
+                const Icon(Icons.info_outline_rounded, color: Colors.white, size: 16),
+                const SizedBox(width: 8),
+                Expanded(child: Text(body['message'] as String)),
+              ]),
+              backgroundColor: AppColors.brandGreen,
+              behavior: SnackBarBehavior.floating,
+              duration: const Duration(seconds: 5),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ));
+          }
         } else {
           setState(() => _branchDetecting = false);
           debugPrint('   ⚠️  no branch : ${body['message']}');
@@ -201,6 +225,29 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       } else {
         setState(() => _branchDetecting = false);
         debugPrint('   ❌ HTTP ${res.statusCode} — branch detection skipped');
+        // GPS-only: surface "no nearby branch has availability" to the
+        // patient instead of failing silently. Manual pincode/place 404s are
+        // deliberately left as-is (silent), per the existing behavior there.
+        if (isGps && res.statusCode == 404 && mounted) {
+          try {
+            final body = jsonDecode(res.body) as Map<String, dynamic>;
+            if (body['message'] is String) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Row(children: [
+                  const Icon(Icons.error_outline_rounded, color: Colors.white, size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(body['message'] as String)),
+                ]),
+                backgroundColor: const Color(0xFFD32F2F),
+                behavior: SnackBarBehavior.floating,
+                duration: const Duration(seconds: 5),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ));
+            }
+          } catch (_) {
+            // non-JSON error body — nothing to show, stay silent as before
+          }
+        }
       }
     } catch (e) {
       if (mounted) setState(() => _branchDetecting = false);
@@ -231,7 +278,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       } else {
         setState(() => _pincode = pin);
       }
-      _autoDetectBranch(pin, place: cityToUse);
+      _autoDetectBranch(pin, place: cityToUse, isGps: true);
     } else {
       debugPrint('   ⚠️  no 6-digit pincode found in address — branch not auto-detected');
     }
@@ -1339,14 +1386,37 @@ class _LocationSheetState extends State<_LocationSheet> {
   }
 
   void _apply() {
+    debugPrint('\n📌 [APPLY CHANGES] ─────────────────────────────────');
+    debugPrint('   mode        : $_mode');
+    if (_mode == 'Home Collection') {
+      debugPrint('   input method: ${_gpsSelected ? 'Current Live Location' : _manualSelected ? 'Manual Address/Pincode' : '⚠️ none selected'}');
+      if (_gpsSelected) {
+        debugPrint('   gps lat/lng : $_gpsLat, $_gpsLng');
+        debugPrint('   gps address : ${_gpsAddress ?? '—'}');
+      } else if (_manualSelected) {
+        debugPrint('   pincode     : ${_pincodeCtrl.text.trim()}');
+        debugPrint('   address     : ${_addressCtrl.text.trim().isNotEmpty ? _addressCtrl.text.trim() : (_manualAddress ?? '—')}');
+        debugPrint('   city        : ${_cityCtrl.text.trim().isNotEmpty ? _cityCtrl.text.trim() : '—'}');
+        debugPrint('   manual lat/lng: $_manualLat, $_manualLng');
+      }
+    }
+    debugPrint('──────────────────────────────────────────────────\n');
     if (_mode == 'Home Collection') {
       if (_gpsSelected && _gpsLat != null && _gpsLng != null) {
-        // Use GPS location
-        widget.onAddressChanged(_gpsAddress);
+        // Use GPS location.
+        // lat/lng MUST fire before address — onAddressChanged synchronously
+        // triggers _tryExtractPincodeFromAddress -> _autoDetectBranch, which
+        // reads _lat/_lng to build the branch-lookup request. Firing address
+        // first sent that request with lat/lng still null, so the GPS
+        // eligibility walk (online tech + slots) never ran for real
+        // Current-Live-Location taps — it silently fell through to the
+        // city/name text-match steps instead. Same ordering hazard as the
+        // manual branch below, just previously unhandled here.
         widget.onLatLngChanged?.call(_gpsLat, _gpsLng);
+        widget.onAddressChanged(_gpsAddress);
         widget.onPincodeChanged(null);
         widget.onCityChanged(null);
-      } 
+      }
       else if (_manualSelected && _manualLat != null && _manualLng != null) {
         // Use manual pincode-based location.
         // city MUST fire before pincode so _city is ready when auto-detect triggers.
@@ -2926,17 +2996,23 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
 
   Color _statusColor(String s) {
     switch (s) {
-      case 'reviewed':  return AppColors.brandGreen;
-      case 'converted': return const Color(0xFF1565C0);
-      default:          return const Color(0xFFE65100); // pending
+      case 'called':           return const Color(0xFF6A1B9A);
+      case 'booking_pending':  return const Color(0xFFF57F17);
+      case 'reviewed':         return AppColors.brandGreen;
+      case 'converted':        return const Color(0xFF1565C0);
+      case 'not_interested':   return const Color(0xFF757575);
+      default:                 return const Color(0xFFE65100);
     }
   }
 
   String _statusLabel(String s) {
     switch (s) {
-      case 'reviewed':  return 'Reviewed';
-      case 'converted': return 'Booking Created';
-      default:          return 'Pending Review';
+      case 'called':           return 'Called';
+      case 'booking_pending':  return 'Booking Pending';
+      case 'reviewed':         return 'Reviewed';
+      case 'converted':        return 'Booking Created';
+      case 'not_interested':   return 'Not Interested';
+      default:                 return 'Pending Review';
     }
   }
 

@@ -2,6 +2,15 @@ const db   = require('../config/db');
 const fs   = require('fs');
 const path = require('path');
 
+function formatTimeTo12h(timeStr) {
+  const parts = String(timeStr).split(':');
+  let h = parseInt(parts[0], 10);
+  const m = (parts[1] || '00').padStart(2, '0');
+  const period = h < 12 ? 'AM' : 'PM';
+  h = h % 12 || 12;
+  return `${h}:${m} ${period}`;
+}
+
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'slots.log');
 function writeLog(msg) {
   const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
@@ -104,7 +113,71 @@ exports.getSlots = async (req, res) => {
     }
 
     writeLog(`[getSlots] found ${rows.length} slot(s) — ${JSON.stringify(rows.map(r => ({ id: r.time_slot_id, label: r.label, remaining: r.remaining })))}`);
-    res.json({ success: true, slots: rows });
+
+    let fallback = null;
+
+    if (rows.length === 0 && branch_id) {
+      const isToday = date === todayIST;
+
+      // Check working hours for the selected date
+      const [wh] = await db.execute(
+        `SELECT start_time, end_time FROM ip_branch_working_hours
+         WHERE branch_id = ? AND slot_type = ? AND work_date = ? AND is_active = 1
+         LIMIT 1`,
+        [branch_id, slot_type, date]
+      );
+
+      if (wh.length > 0) {
+        const startStr = String(wh[0].start_time);
+        const endStr   = String(wh[0].end_time);
+
+        if (isToday) {
+          // Fallback start = now + 1 hour
+          const [nh, nm] = cutoffTime.split(':').map(Number);
+          const fbStartMins = nh * 60 + nm + 60;
+          const [endH, endM] = endStr.split(':').map(Number);
+          const endMins = endH * 60 + endM;
+
+          const rawH = Math.floor(fbStartMins / 60);
+          const rawM = fbStartMins % 60;
+          // Round: >= 30 min → next hour, < 30 min → current hour
+          const roundedH = rawM >= 30 ? rawH + 1 : rawH;
+          const roundedMins = roundedH * 60;
+
+          if (roundedMins < endMins) {
+            const fbStartFmt = `${String(roundedH).padStart(2, '0')}:00`;
+            fallback = { date, label: `${formatTimeTo12h(fbStartFmt)} – ${formatTimeTo12h(endStr)}` };
+          }
+        } else {
+          // Future date — full working hours window
+          fallback = { date, label: `${formatTimeTo12h(startStr)} – ${formatTimeTo12h(endStr)}` };
+        }
+      }
+
+      if (!fallback) {
+        // Find next active working day after selected date
+        const [next] = await db.execute(
+          `SELECT work_date, start_time, end_time FROM ip_branch_working_hours
+           WHERE branch_id = ? AND slot_type = ? AND work_date > ? AND is_active = 1
+           ORDER BY work_date ASC LIMIT 1`,
+          [branch_id, slot_type, date]
+        );
+
+        if (next.length > 0) {
+          const nr       = next[0];
+          const startStr = String(nr.start_time);
+          const endStr   = String(nr.end_time);
+          const workDate = nr.work_date instanceof Date
+            ? nr.work_date.toISOString().slice(0, 10)
+            : String(nr.work_date).slice(0, 10);
+          fallback = { date: workDate, label: `${formatTimeTo12h(startStr)} – ${formatTimeTo12h(endStr)}` };
+        }
+      }
+
+      writeLog(`[getSlots] fallback=${JSON.stringify(fallback)}`);
+    }
+
+    res.json({ success: true, slots: rows, fallback });
   } catch (err) {
     writeLog(`[getSlots] ERROR — ${err.message} | code=${err.code} | sql=${err.sql}`);
     console.error('getSlots error:', err.message);

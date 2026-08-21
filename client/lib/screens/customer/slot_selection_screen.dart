@@ -69,8 +69,9 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
   DateTime?       _selectedDate;
   _SlotItem?      _selectedSlot;
   List<_SlotItem> _slots        = [];
-  bool            _loadingSlots = false;
-  String          _slotError    = '';
+  bool            _loadingSlots        = false;
+  String          _slotError           = '';
+  bool            _fallbackDateChanged = false;
 
   // ── Date helpers ───────────────────────────────────────────────────────────
 
@@ -120,10 +121,11 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
 
     if (picked != null && picked != _selectedDate) {
       setState(() {
-        _selectedDate = picked;
-        _selectedSlot = null;
-        _slots        = [];
-        _slotError    = '';
+        _selectedDate        = picked;
+        _selectedSlot        = null;
+        _slots               = [];
+        _slotError           = '';
+        _fallbackDateChanged = false;
       });
       _loadSlots(picked);
     }
@@ -155,13 +157,36 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
         final list = (body['slots'] as List)
             .map((s) => _SlotItem.fromJson(s as Map<String, dynamic>))
             .toList();
-        setState(() {
-          _slots        = list;
-          _loadingSlots = false;
-          _slotError    = list.isEmpty
-              ? 'No slots available for this date. Try another date.'
-              : '';
-        });
+        if (list.isEmpty) {
+          final fbData = body['fallback'] as Map<String, dynamic>?;
+          if (fbData != null) {
+            final fb = _SlotItem(
+              timeSlotId: -1,
+              label:      fbData['label'] as String,
+              time:       '',
+              remaining:  0,
+            );
+            final fbDateStr = fbData['date'] as String?;
+            final fbDate    = fbDateStr != null ? DateTime.tryParse(fbDateStr) : null;
+            setState(() {
+              _slots               = [fb];
+              _loadingSlots        = false;
+              _slotError           = '';
+              if (fbDate != null && fbDate != _selectedDate) {
+                _fallbackDateChanged = true;
+                _selectedDate        = fbDate;
+              }
+            });
+          } else {
+            setState(() { _slots = []; _loadingSlots = false; _slotError = 'No upcoming slots available. Please contact us.'; });
+          }
+        } else {
+          setState(() {
+            _slots        = list;
+            _loadingSlots = false;
+            _slotError    = '';
+          });
+        }
       } else {
         setState(() {
           _loadingSlots = false;
@@ -199,7 +224,7 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
           // New branch booking fields forwarded to POST /api/bookings
           branchId:           int.parse(widget.branch.id),
           collectionDate:     _toApiDate(_selectedDate!),
-          timeSlotId:         _selectedSlot!.timeSlotId,
+          timeSlotId:         _selectedSlot!.timeSlotId == -1 ? null : _selectedSlot!.timeSlotId,
         ),
       ),
     );
@@ -441,55 +466,64 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
       );
     }
 
-    return Wrap(
-      spacing: 10,
-      runSpacing: 10,
-      children: _slots.map((slot) {
-        final isSelected = _selectedSlot?.timeSlotId == slot.timeSlotId;
-        return GestureDetector(
-          onTap: () => setState(() => _selectedSlot = slot),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            padding: const EdgeInsets.symmetric(
-                horizontal: 16, vertical: 10),
-            decoration: BoxDecoration(
-              color: isSelected
-                  ? AppColors.brandGreen
-                  : Colors.white,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: isSelected
-                    ? AppColors.brandGreen
-                    : AppColors.divider,
-                width: isSelected ? 1.5 : 1,
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  slot.label,
-                  style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: isSelected
-                          ? Colors.white
-                          : AppColors.textPrimary),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '${slot.remaining} left',
-                  style: TextStyle(
-                      fontSize: 10,
-                      color: isSelected
-                          ? Colors.white70
-                          : AppColors.textHint),
-                ),
-              ],
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (_fallbackDateChanged) ...[
+          const _InfoChip(
+            icon:  Icons.info_outline_rounded,
+            color: AppColors.amber,
+            bg:    AppColors.amberSurface,
+            text:  'No slots on your selected date. Appointment date updated to the next available day.',
           ),
-        );
-      }).toList(),
+          const SizedBox(height: 10),
+        ],
+        Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: _slots.map((slot) {
+            final isSelected   = _selectedSlot?.timeSlotId == slot.timeSlotId;
+            final isFallback   = slot.timeSlotId == -1;
+            final activeColor  = isFallback ? AppColors.amber : AppColors.brandGreen;
+            return GestureDetector(
+              onTap: () => setState(() => _selectedSlot = slot),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                decoration: BoxDecoration(
+                  color: isSelected ? activeColor : Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isSelected ? activeColor : (isFallback ? AppColors.amber : AppColors.divider),
+                    width: isSelected ? 1.5 : 1,
+                  ),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      slot.label,
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: isSelected
+                              ? Colors.white
+                              : (isFallback ? AppColors.amber : AppColors.textPrimary)),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      isFallback ? 'Est. time' : '${slot.remaining} left',
+                      style: TextStyle(
+                          fontSize: 10,
+                          color: isSelected ? Colors.white70 : AppColors.textHint),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
     );
   }
 }

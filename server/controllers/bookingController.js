@@ -310,8 +310,8 @@ exports.getMyBookings = async (req, res) => {
          TIME_FORMAT(av.slot_time, '%h:%i %p') AS slot_time_formatted,
          COALESCE(bpt.payment_status,
            IF(bpt.transaction_status='completed','paid','pending')) AS payment_status,
-         bpt.amount_paid,
-         bpt.amount_due,
+         b.amount_paid,
+         b.amount_due,
          (SELECT bd.doc_status
           FROM ip_booking_documents bd
           WHERE bd.booking_id = b.booking_id AND bd.file_description = 'prescription'
@@ -325,7 +325,8 @@ exports.getMyBookings = async (req, res) => {
              IFNULL(bi.product_id, '0'),                                          ':::',
              IFNULL(bi.product_name_snapshot, IFNULL(pkg.product_name, 'Test')), ':::',
              IFNULL(bi.final_price, '0'),                                         ':::',
-             'test'
+             'test',                                                               ':::',
+             IFNULL(pkg.pre_instructions, '')
            ) END
            ORDER BY bi.booking_item_id SEPARATOR '|||'
          ) AS test_items,
@@ -519,13 +520,52 @@ exports.cancelBooking = async (req, res) => {
     }
 
     // Calculate refund
-    const amountPaid          = parseFloat(booking.amount_paid) || 0;
-    const techHasArrived      = isHomeCollection && tc && chargeStatuses.includes(tc.collection_status);
-    // Use the actual service charge on this booking (total - tests).
-    // For family bookings the service charge sits only on one member's booking;
-    // if this booking has no service charge component, nothing is deducted.
+    const amountPaid           = parseFloat(booking.amount_paid) || 0;
+    const techHasArrived       = isHomeCollection && tc && chargeStatuses.includes(tc.collection_status);
     const bookingServiceCharge = Math.max(0, parseFloat(booking.total_amount) - parseFloat(booking.items_total));
-    const chargeApplied        = techHasArrived && bookingServiceCharge > 0 ? bookingServiceCharge : 0;
+
+    // For family bookings: if this booking carries the service charge and a sibling
+    // is still active, retain the charge and transfer it to the sibling's total —
+    // the technician is still visiting for them. Last member to cancel gets a full refund.
+    logRefund(`[transfer-check] booking_id=${bookingId} visit_group_id=${booking.visit_group_id ?? 'NULL'} bookingServiceCharge=₹${bookingServiceCharge}`);
+    let siblingToTransfer = null;
+    let inheritedChargeOriginalPayer = null;
+    if (booking.visit_group_id && bookingServiceCharge > 0) {
+      const [siblings] = await db.execute(
+        `SELECT booking_id, booking_ref FROM ip_bookings
+         WHERE visit_group_id = ? AND booking_id != ? AND status NOT IN ('cancelled') AND deleted_at IS NULL
+         ORDER BY booking_id ASC LIMIT 1`,
+        [booking.visit_group_id, bookingId]
+      );
+      siblingToTransfer = siblings[0] ?? null;
+      logRefund(`[transfer-check] sibling_query ran — found=${siblingToTransfer ? `booking_id=${siblingToTransfer.booking_id} ref=${siblingToTransfer.booking_ref}` : 'NONE'}`);
+
+      if (!siblingToTransfer) {
+        // Last sibling cancelling — find the cancelled booking that originally paid the
+        // service charge so we can refund the retained ₹79 back to their Razorpay payment.
+        const [[originalPayer]] = await db.execute(
+          `SELECT b.booking_id, b.booking_ref, b.patient_id, pt.gateway_transaction_id
+           FROM ip_bookings b
+           LEFT JOIN ip_payment_transactions pt
+             ON pt.booking_id = b.booking_id AND (pt.is_refund = 0 OR pt.is_refund IS NULL)
+           WHERE b.visit_group_id = ?
+             AND b.booking_id != ?
+             AND b.status = 'cancelled'
+             AND b.deleted_at IS NULL
+             AND pt.gateway_transaction_id IS NOT NULL
+           ORDER BY b.booking_id ASC LIMIT 1`,
+          [booking.visit_group_id, bookingId]
+        );
+        inheritedChargeOriginalPayer = originalPayer ?? null;
+        logRefund(`[inherited-charge] last sibling — original payer=${inheritedChargeOriginalPayer ? `booking_id=${inheritedChargeOriginalPayer.booking_id} gateway=${inheritedChargeOriginalPayer.gateway_transaction_id}` : 'NOT FOUND'}`);
+      }
+    } else {
+      logRefund(`[transfer-check] skipped — ${!booking.visit_group_id ? 'visit_group_id is NULL' : 'bookingServiceCharge is 0'}`);
+    }
+
+    const chargeApplied = (techHasArrived || siblingToTransfer) && bookingServiceCharge > 0
+      ? bookingServiceCharge
+      : 0;
     const refundAmount         = Math.max(0, amountPaid - chargeApplied);
     const refundStatus         = amountPaid > 0 ? 'pending' : 'none';
 
@@ -540,6 +580,15 @@ exports.cancelBooking = async (req, res) => {
        WHERE booking_id = ?`,
       [reason ?? null, refundAmount, refundStatus, bookingId]
     );
+
+    // Transfer service charge to the next active sibling so they carry it going forward
+    if (siblingToTransfer && bookingServiceCharge > 0) {
+      await db.execute(
+        `UPDATE ip_bookings SET total_amount = total_amount + ? WHERE booking_id = ?`,
+        [bookingServiceCharge, siblingToTransfer.booking_id]
+      );
+      logRefund(`[transfer] ₹${bookingServiceCharge} added to booking_id=${siblingToTransfer.booking_id} ref=${siblingToTransfer.booking_ref}`);
+    }
 
     // Cascade to ip_technician_collection so the technician's dashboard list
     // (which filters on collection_status) stops showing this booking as an
@@ -615,6 +664,56 @@ exports.cancelBooking = async (req, res) => {
       }
     }
 
+    // Last sibling cancelled — refund the retained service charge from the original payer's payment
+    if (inheritedChargeOriginalPayer && bookingServiceCharge > 0) {
+      try {
+        const rzpKeyId     = process.env.RAZORPAY_KEY_ID;
+        const rzpKeySecret = process.env.RAZORPAY_KEY_SECRET;
+        const authHeader   = 'Basic ' + Buffer.from(`${rzpKeyId}:${rzpKeySecret}`).toString('base64');
+        const rzpRes = await fetch(
+          `https://api.razorpay.com/v1/payments/${inheritedChargeOriginalPayer.gateway_transaction_id}/refund`,
+          {
+            method:  'POST',
+            headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ amount: Math.round(bookingServiceCharge * 100) }),
+          }
+        );
+        const rzpBody = await rzpRes.json();
+        if (rzpRes.ok && rzpBody.id) {
+          const scRefundRef = `RFN${Date.now()}SC`;
+          await db.execute(
+            `INSERT INTO ip_payment_transactions
+               (transaction_ref, booking_id, patient_id, payment_type,
+                gross_amount, net_amount, amount_paid, amount_due,
+                currency, payment_status, transaction_status, is_refund,
+                gateway_transaction_id, gateway_status, paid_at)
+             VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'refunded', NOW())`,
+            [scRefundRef, inheritedChargeOriginalPayer.booking_id, inheritedChargeOriginalPayer.patient_id ?? null,
+             bookingServiceCharge, bookingServiceCharge, bookingServiceCharge, rzpBody.id]
+          );
+          await db.execute(
+            `UPDATE ip_bookings SET refund_amount = refund_amount + ?, refund_status = 'processed' WHERE booking_id = ?`,
+            [bookingServiceCharge, inheritedChargeOriginalPayer.booking_id]
+          );
+          logRefund(`✅ SC-REFUND SUCCESS — original_booking_id=${inheritedChargeOriginalPayer.booking_id} refund_id=${rzpBody.id} amount=₹${bookingServiceCharge}`);
+        } else {
+          // Razorpay failed — still update DB so UI shows the correct total refund amount.
+          // The pending ₹ will be processed manually or retried later.
+          await db.execute(
+            `UPDATE ip_bookings SET refund_amount = refund_amount + ? WHERE booking_id = ?`,
+            [bookingServiceCharge, inheritedChargeOriginalPayer.booking_id]
+          );
+          logRefund(`❌ SC-REFUND FAILED — original_booking_id=${inheritedChargeOriginalPayer.booking_id} amount=₹${bookingServiceCharge} response=${JSON.stringify(rzpBody)}`);
+        }
+      } catch (scErr) {
+        await db.execute(
+          `UPDATE ip_bookings SET refund_amount = refund_amount + ? WHERE booking_id = ?`,
+          [bookingServiceCharge, inheritedChargeOriginalPayer.booking_id]
+        );
+        logRefund(`❌ SC-REFUND ERROR — original_booking_id=${inheritedChargeOriginalPayer.booking_id} error=${scErr.message}`);
+      }
+    }
+
     syncBookingToClient(bookingId, {
       mobile: req.user.mobile,
       type:   req.user.user_type ?? 'customer',
@@ -664,8 +763,8 @@ exports.cancelBooking = async (req, res) => {
       logNotify(`[cancel] booking_id=${bookingId} no technician assigned — FCM skipped`);
     }
 
-    logRefund(`[cancel] booking_id=${bookingId} refund=₹${refundAmount} status=${finalRefundStatus} charge=₹${chargeApplied}`);
-    res.json({ success: true, refund_amount: refundAmount, refund_status: finalRefundStatus, service_charge_applied: chargeApplied });
+    logRefund(`[cancel] booking_id=${bookingId} refund=₹${refundAmount} status=${finalRefundStatus} charge=₹${chargeApplied} transferred_to=${siblingToTransfer?.booking_id ?? 'none'}`);
+    res.json({ success: true, refund_amount: refundAmount, refund_status: finalRefundStatus, service_charge_applied: chargeApplied, service_charge_transferred: !!siblingToTransfer });
   } catch (err) {
     console.error('❌ cancelBooking FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
@@ -687,7 +786,7 @@ exports.payBooking = async (req, res) => {
     await conn.beginTransaction();
 
     const [[booking]] = await conn.execute(
-      `SELECT booking_id, patient_id, total_amount
+      `SELECT booking_id, patient_id, total_amount, status
        FROM ip_bookings
        WHERE booking_id = ? AND client_id = ? AND deleted_at IS NULL`,
       [bookingId, clientId]
@@ -697,25 +796,27 @@ exports.payBooking = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Booking not found' });
     }
 
+    const txnRef = `TXN${Date.now()}`;
     await conn.execute(
-      `UPDATE ip_payment_transactions
-       SET payment_type = 'RAZORPAY',
-           payment_status = 'paid', transaction_status = 'completed',
-           amount_paid = ?, amount_due = 0,
-           gateway_transaction_id = ?, gateway_order_id = ?,
-           gateway_status = 'success', paid_at = NOW(), updated_at = NOW()
-       WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
-      [amount, razorpayPaymentId, razorpayOrderId ?? null, bookingId]
+      `INSERT INTO ip_payment_transactions
+         (transaction_ref, booking_id, patient_id, payment_type, payment_mode,
+          gross_amount, net_amount, amount_paid, amount_due,
+          currency, payment_status, transaction_status, is_refund, is_partial,
+          gateway_transaction_id, gateway_order_id, gateway_status, paid_at)
+       VALUES (?, ?, ?, 'RAZORPAY', 'RAZORPAY', ?, ?, ?, 0, 'INR', 'paid', 'completed', 0, 0, ?, ?, 'success', NOW())`,
+      [txnRef, bookingId, booking.patient_id, amount, amount, amount, razorpayPaymentId, razorpayOrderId ?? null]
     );
 
+    // Only advance status to 'confirmed' if still pending — never overwrite a field status
+    const advanceStatus = booking.status === 'pending';
     await conn.execute(
       `UPDATE ip_bookings
-       SET status = 'confirmed', payment_status = 'paid',
-           amount_paid = ?, amount_due = 0, updated_at = NOW()
+       SET ${advanceStatus ? "status = 'confirmed'," : ''} payment_status = 'paid',
+           amount_paid = amount_paid + ?, amount_due = 0, updated_at = NOW()
        WHERE booking_id = ?`,
       [amount, bookingId]
     );
-
+    
     await conn.commit();
     console.log(`✅ payBooking → booking_id=${bookingId} paid ₹${amount}`);
 
@@ -884,7 +985,9 @@ exports.getItems = async (req, res) => {
               COALESCE(bi.product_name_snapshot, p.product_name) AS name,
               COALESCE(p.product_category, 'General')            AS category,
               bi.final_price                                      AS price,
-              CASE WHEN p.document_required IN (1, '1', 'yes') THEN 1 ELSE 0 END AS doc_required
+              CASE WHEN p.document_required IN (1, '1', 'yes') THEN 1 ELSE 0 END AS doc_required,
+              bi.item_status,
+              bi.collected_at                                     AS collected_at
        FROM ip_booking_items bi
        LEFT JOIN ip_products p ON p.product_id = bi.product_id
        WHERE bi.booking_id = ?
@@ -894,6 +997,116 @@ exports.getItems = async (req, res) => {
     res.json({ success: true, items: rows });
   } catch (err) {
     console.error('❌ getItems FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── PATCH /api/bookings/:bookingId/items/:bookingItemId/collected ─────────────
+// Technician checklist toggle: marks (or unmarks) one test/package as
+// physically collected. Purely a per-item tracking flag — does not read or
+// write ip_bookings.status, ip_technician_collection.collection_status, or
+// anything else in the existing booking/collection status flow.
+//
+// Reuses the pre-existing item_status column (already has ~1,256 rows from
+// admin/reporting use, values 'pending'/'completed') rather than a separate
+// checklist-specific column — so this MUST write the exact same lowercase
+// vocabulary already in use ('pending'/'completed'), not a
+// technician-specific wording, or admin queries filtering on these exact
+// strings would silently stop matching items the technician has touched.
+exports.setItemCollected = async (req, res) => {
+  const { bookingId, bookingItemId } = req.params;
+  const { status } = req.body;
+  if (status !== 'completed' && status !== 'pending') {
+    return res.status(400).json({ success: false, message: "status must be 'completed' or 'pending'" });
+  }
+  try {
+    const [result] = await db.execute(
+      `UPDATE ip_booking_items
+       SET item_status = ?, collected_at = ${status === 'completed' ? 'NOW()' : 'NULL'}
+       WHERE booking_item_id = ? AND booking_id = ?`,
+      [status, bookingItemId, bookingId]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Booking item not found' });
+    }
+    res.json({ success: true, bookingItemId: Number(bookingItemId), status });
+  } catch (err) {
+    console.error('❌ setItemCollected FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── POST /api/bookings/:bookingId/collection-photo ────────────────────────────
+// Sample-collection proof photo. Reuses the existing generic /api/upload
+// pipeline (client uploads the camera image there first and gets a URL back)
+// and the existing ip_booking_documents table (already booking_id-scoped),
+// the same way prescriptions are stored — but tagged with
+// file_description='collection_proof' instead of 'prescription' so it is a
+// distinct record type in the same table, not mixed into prescription data.
+// getByBooking (prescriptionController.js) is filtered to file_description=
+// 'prescription' so these rows never leak into the existing prescription
+// list UI — that filter is the only other change this feature required.
+exports.saveCollectionProofPhoto = async (req, res) => {
+  const { bookingId } = req.params;
+  const { imageUrl } = req.body;
+  if (!imageUrl) {
+    return res.status(400).json({ success: false, message: 'imageUrl is required' });
+  }
+  try {
+    const [[booking]] = await db.execute(
+      `SELECT patient_id FROM ip_bookings WHERE booking_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [bookingId]
+    );
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    const uploadedBy = req.user.user_id ?? req.user.userId ?? null;
+    const fileName = imageUrl.split('/').pop().split('?')[0] || 'collection_proof.jpg';
+    const [result] = await db.execute(
+      `INSERT INTO ip_booking_documents
+         (booking_id, booking_item_id, patient_id, file_path, file_name,
+          file_description, uploaded_by, doc_status, created_at)
+       VALUES (?, NULL, ?, ?, ?, 'collection_proof', ?, 'pending_review', NOW())`,
+      [bookingId, booking.patient_id, imageUrl, fileName, uploadedBy]
+    );
+
+    // Sync to client server — this action uses its own minimal payload shape
+    // (technician_details + proof_photo), built inside syncBookingToClient.
+    syncBookingToClient(Number(bookingId), {
+      mobile:        req.user.mobile,
+      type:          'technician',
+      action:        'collection_photo_added',
+      technicianId:  req.user.id,
+      proofPhoto:    imageUrl,
+    }).catch(err => console.error(`[clientSync] saveCollectionProofPhoto sync failed booking_id=${bookingId}:`, err.message));
+
+    res.status(201).json({ success: true, docId: result.insertId });
+  } catch (err) {
+    console.error('❌ saveCollectionProofPhoto FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── GET /api/bookings/:bookingId/collection-photo ─────────────────────────────
+// Returns the current sample-collection proof photo for this booking, if any
+// — lets the Manage Booking screen show "Added"/"Not Added" and the thumbnail
+// on load, and after a retake (a retake simply inserts a new row via the POST
+// above; this always returns the most recent one, so old retaken photos are
+// kept in ip_booking_documents as history rather than deleted).
+exports.getCollectionProofPhoto = async (req, res) => {
+  const { bookingId } = req.params;
+  try {
+    const [[doc]] = await db.execute(
+      `SELECT doc_id, file_path, file_name, created_at
+       FROM ip_booking_documents
+       WHERE booking_id = ? AND file_description = 'collection_proof'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [bookingId]
+    );
+    res.json({ success: true, doc: doc ?? null });
+  } catch (err) {
+    console.error('❌ getCollectionProofPhoto FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
@@ -908,7 +1121,7 @@ exports.addItem = async (req, res) => {
   try {
     // Get product details
     const [[product]] = await db.execute(
-      `SELECT product_id, product_name, product_category, product_price
+      `SELECT product_id, product_name, product_category, product_price, document_required
        FROM ip_products WHERE product_id = ? AND product_active = 1 LIMIT 1`,
       [productId]
     );
@@ -930,6 +1143,45 @@ exports.addItem = async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, NOW())`,
       [bookingId, product.product_id, product.product_name, booking.patient_id, price, price]
     );
+    // Keep the booking's stored total in sync — otherwise it stays frozen at
+    // whatever it was before this item was added, and everything downstream
+    // that reads total_amount (payment due calc, Jayamala sync payload) goes
+    // stale against the real sum of ip_booking_items.
+    await db.execute(
+      `UPDATE ip_bookings
+       SET total_amount = total_amount + ?, amount_due = amount_due + ?, updated_at = NOW()
+       WHERE booking_id = ?`,
+      [price, price, bookingId]
+    );
+    // A generic (booking-level, not item-specific) prescription may already
+    // exist for this booking — see the same booking_item_id-OR-NULL join
+    // used for blood_test_list in clientSync.js. A brand-new item can never
+    // have its OWN prescription yet, but it can inherit that generic one.
+    const [[existingDoc]] = await db.execute(
+      `SELECT file_path FROM ip_booking_documents
+       WHERE booking_id = ? AND booking_item_id IS NULL AND file_description = 'prescription'
+       ORDER BY created_at DESC LIMIT 1`,
+      [bookingId]
+    );
+    const rawDocReq = product.document_required;
+    const docRequired = rawDocReq === 1 || rawDocReq === '1' || rawDocReq === 'yes';
+
+    // Sync to client server — this action uses its own minimal payload shape
+    // (added_test), built inside syncBookingToClient. Each add (even after a
+    // prior item was removed) is its own independent package_added event.
+    syncBookingToClient(Number(bookingId), {
+      mobile: req.user.mobile,
+      type:   'technician',
+      action: 'package_added',
+      addedTest: {
+        id:               product.product_id,
+        name:             product.product_name,
+        price,
+        documentRequired: docRequired,
+        documentUrl:      existingDoc?.file_path ?? null,
+      },
+    }).catch(err => console.error(`[clientSync] addItem sync failed booking_id=${bookingId}:`, err.message));
+
     res.status(201).json({
       success: true,
       item: {
@@ -950,6 +1202,19 @@ exports.addItem = async (req, res) => {
 exports.removeItem = async (req, res) => {
   const { bookingId, bookingItemId } = req.params;
   try {
+    // Fetch before deleting — need product_id/name/price for the Jayamala
+    // sync below, and price to roll back the booking's stored total.
+    const [[item]] = await db.execute(
+      `SELECT bi.product_id, COALESCE(bi.product_name_snapshot, p.product_name) AS name, bi.final_price AS price
+       FROM ip_booking_items bi
+       LEFT JOIN ip_products p ON p.product_id = bi.product_id
+       WHERE bi.booking_item_id = ? AND bi.booking_id = ?`,
+      [bookingItemId, bookingId]
+    );
+    if (!item) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
+
     const [result] = await db.execute(
       `DELETE FROM ip_booking_items
        WHERE booking_item_id = ? AND booking_id = ?`,
@@ -958,6 +1223,33 @@ exports.removeItem = async (req, res) => {
     if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: 'Item not found' });
     }
+
+    // Mirror of addItem's total_amount/amount_due fix — removing an item must
+    // roll the booking's stored total back down too, or it stays stale high.
+    const price = parseFloat(item.price ?? 0) || 0;
+    await db.execute(
+      `UPDATE ip_bookings
+       SET total_amount = GREATEST(0, total_amount - ?),
+           amount_due    = GREATEST(0, amount_due - ?),
+           updated_at    = NOW()
+       WHERE booking_id = ?`,
+      [price, price, bookingId]
+    );
+
+    // Sync to client server — package_removed is a proposed action, not yet
+    // confirmed by Jayamala; the block log will surface a status:"failure"
+    // response immediately if it's rejected.
+    syncBookingToClient(Number(bookingId), {
+      mobile: req.user.mobile,
+      type:   'technician',
+      action: 'package_removed',
+      removedTest: {
+        id:    item.product_id,
+        name:  item.name,
+        price,
+      },
+    }).catch(err => console.error(`[clientSync] removeItem sync failed booking_id=${bookingId}:`, err.message));
+
     res.json({ success: true });
   } catch (err) {
     console.error('❌ removeItem FAILED:', err.message);
@@ -1054,11 +1346,6 @@ exports.updateLabStatus = async (req, res) => {
   }
 };
 exports.releaseResult = async (req, res) => {
-  const secret = process.env.ADMIN_WEBHOOK_SECRET;
-  if (!secret || req.headers['x-admin-secret'] !== secret) {
-    return res.status(401).json({ success: false, message: 'Unauthorized' });
-  }
-
   const { bookingId, resultId } = req.params;
   try {
     const [[result]] = await db.execute(
@@ -1100,11 +1387,11 @@ exports.updateAdminStatus = async (req, res) => {
   const BOOKING_STATUS_MAP = {
     pending:              'pending',
     confirmed:            'confirmed',
-    technician_assigned:  'confirmed',   // tech assigned → booking is confirmed
+    technician_assigned:  'assigned',    // matches socket flow → UI shows "Technician Allocated"
     en_route:              null,
     arrived:               null,
     sample_collected:      null,
-    submitted_to_lab:      null,
+    submitted_to_lab:      'handed_to_lab',  // admin verifies the technician's handover submission
     processing:            null,
     partial:               null,
     results_ready:        'completed',

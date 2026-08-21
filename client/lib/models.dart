@@ -176,6 +176,7 @@ class BranchModel {
   final String? email;
   final double? lat;
   final double? lng;
+  final bool    isFallback; // true when GPS lookup stepped down from the true nearest branch
 
   BranchModel({
     required this.id,
@@ -188,6 +189,7 @@ class BranchModel {
     this.email,
     this.lat,
     this.lng,
+    this.isFallback = false,
   });
 
   factory BranchModel.fromJson(Map<String, dynamic> j) => BranchModel(
@@ -201,6 +203,7 @@ class BranchModel {
         email:       j['email']       as String?,
         lat:         (j['latitude']  as num?)?.toDouble(),
         lng:         (j['longitude'] as num?)?.toDouble(),
+        isFallback:  j['isFallback']  as bool? ?? false,
       );
 }
 

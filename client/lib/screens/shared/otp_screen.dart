@@ -297,15 +297,14 @@ class _OtpScreenState extends State<OtpScreen> {
                 // Logo
                 Row(
                   children: [
-                    Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: AppColors.brandGreen,
-                        borderRadius: BorderRadius.circular(10),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: Image.asset(
+                        'assets/icon/app_icon.png',
+                        width: 36,
+                        height: 36,
+                        fit: BoxFit.cover,
                       ),
-                      child: const Icon(Icons.water_drop_outlined,
-                          color: Colors.white, size: 18),
                     ),
                     const SizedBox(width: 10),
                     const Text(

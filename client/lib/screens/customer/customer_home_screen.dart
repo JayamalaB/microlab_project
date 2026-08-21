@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/auth_service.dart';
 import 'package:microlab/services/api_service.dart';
@@ -108,6 +109,22 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
 
   Future<void> _logout() async {
     SocketService.instance.disconnect();
+
+    // Release the server-side session so the single-active-session lock
+    // frees up for another device — AuthService.logout() below only clears
+    // this device's local state, it never talks to the server. Best-effort:
+    // navigation must never get stuck waiting on the network, and if this
+    // fails the number stays locked until the token's natural 30-day expiry
+    // rather than trapping the user on this screen.
+    final token = await AuthService.getToken();
+    if (token != null && token.isNotEmpty) {
+      try {
+        await ApiService.logout(token);
+      } catch (e) {
+        debugPrint('[_logout] server logout failed: $e');
+      }
+    }
+
     await AuthService.logout();
     if (mounted) {
       Navigator.of(context).pushAndRemoveUntil(
@@ -234,15 +251,14 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
               automaticallyImplyLeading: false,
               title: Row(
                 children: [
-                  Container(
-                    width: 28,
-                    height: 28,
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreen,
-                      borderRadius: BorderRadius.circular(8),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.asset(
+                      'assets/icon/app_icon.png',
+                      width: 28,
+                      height: 28,
+                      fit: BoxFit.cover,
                     ),
-                    child: const Icon(Icons.water_drop_outlined,
-                        color: Colors.white, size: 14),
                   ),
                   const SizedBox(width: 8),
                   const Text(
@@ -255,6 +271,15 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                 ],
               ),
               actions: [
+                IconButton(
+                  icon: const Icon(Icons.phone_outlined,
+                      color: AppColors.brandGreen, size: 22),
+                  tooltip: 'Call us',
+                  onPressed: () async {
+                    final uri = Uri(scheme: 'tel', path: '7339535472');
+                    if (await canLaunchUrl(uri)) launchUrl(uri);
+                  },
+                ),
                 IconButton(
                   icon: const Icon(Icons.notifications_outlined,
                       color: AppColors.textSecondary, size: 22),

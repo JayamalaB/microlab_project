@@ -16,8 +16,8 @@ import 'package:microlab/theme/app_theme.dart';
 import 'yt_web_stub.dart' if (dart.library.html) 'yt_web_impl.dart';
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
-const _kChatApiBase  = 'https://ai.neuralarc.com';
-const _kVoiceApiBase = 'https://ai.neuralarc.com'; // STT + TTS (Node.js server)
+const _kChatApiBase  = 'https://chat.neuralarc.com';
+const _kVoiceApiBase = 'https://chat.neuralarc.com'; // STT + TTS (Node.js server)
 
 // ── Promo config (mirrors index.html PROMO_CONFIG) ───────────────────────────
 // Flip to true to bring the YouTube promo card back — banner carousel is unaffected.

@@ -20,6 +20,7 @@ class SocketBooking {
   final double? patientLng;
   final String hospital;
   final String bookingType;
+  final bool docRequired;
   final DateTime createdAt;
   final int?    branchId;
   final String? branchName;
@@ -37,6 +38,7 @@ class SocketBooking {
     this.patientLng,
     required this.hospital,
     this.bookingType = 'lab',
+    this.docRequired = false,
     required this.createdAt,
     this.branchId,
     this.branchName,
@@ -55,6 +57,7 @@ class SocketBooking {
         patientLng:     _toDouble(j['patientLng']),
         hospital:       j['hospital']       as String? ?? '',
         bookingType:    j['bookingType']    as String? ?? 'lab',
+        docRequired:    _toBool(j['docRequired']),
         createdAt: DateTime.tryParse(j['createdAt'] as String? ?? '') ??
             DateTime.now(),
         branchId:        j['branchId']        != null ? _toInt(j['branchId'])  : null,
@@ -72,6 +75,12 @@ class SocketBooking {
     if (v == null) return null;
     if (v is num) return v.toDouble();
     return double.tryParse(v.toString());
+  }
+
+  // Handles bool (from Socket.IO) and String 'true'/'false' (from FCM data payload).
+  static bool _toBool(dynamic v) {
+    if (v is bool) return v;
+    return v?.toString().toLowerCase() == 'true';
   }
 }
 
@@ -897,24 +906,39 @@ class SocketService {
     });
   }
 
-  void disconnect() {
+  Future<void> disconnect() async {
     if (_socket == null) return;
 
     if (_isBusy) {
       _log('DISCONNECT', 'WARNING — active booking=$_activeBookingId at logout');
     }
-    // Best-effort only — unlike goOffline(), there's no point queuing this for
-    // reconnect: the socket is disposed a few lines below regardless. The
-    // technician dashboard's logout flow separately calls
+    // The technician dashboard's logout flow separately calls (and retries)
     // POST /api/technicians/:id/logout, whose handler (logoutTechnician)
     // independently forces the technician offline via
-    // forceTechnicianOffline(), so correctness doesn't depend on this emit
-    // landing.
-    if (userRole == 'technician' && _isAvailable && isConnected) {
+    // forceTechnicianOffline(), so correctness doesn't strictly depend on
+    // this emit landing — but we still attempt it unconditionally (not
+    // gated on _isAvailable) since a technician can be logged in without
+    // having toggled "online" this session, and disconnect() always means
+    // they're leaving, unlike goOffline()'s idempotent manual toggle.
+    //
+    // A queued .emit() has no guaranteed delivery before the socket is torn
+    // down on the next line — historically this method disconnected/disposed
+    // immediately after emitting, giving the frame no reliable chance to
+    // actually leave the client. The short delay below is what closes that
+    // race: it's the difference between "usually reaches the server" and
+    // "reliably reaches the server" for the socket-side half of logout (the
+    // REST call remains the authoritative backstop either way).
+    var emittedOffline = false;
+    if (userRole == 'technician' && isConnected) {
       _emitTechnicianOffline();
+      emittedOffline = true;
     } else if (userRole == 'driver' && _isDriverOnline && isConnected) {
       _socket?.emit('driver_offline', {'driverId': userId});
       _log('OFFLINE', 'emitted driver_offline on disconnect');
+      emittedOffline = true;
+    }
+    if (emittedOffline) {
+      await Future.delayed(const Duration(milliseconds: 250));
     }
 
     _persistOnlineState(false);
@@ -1182,22 +1206,79 @@ class SocketService {
   }
 
   /// Final technician step.  Stores [completed_at] in DB, frees the technician.
-  void emitHandedToLab({required int bookingId}) {
-    _isBusy          = false;
-    _activeBookingId = null;
-    _appointmentBookingIds.remove(bookingId);
-    _log('HANDED_TO_LAB', 'id=$bookingId — marked AVAILABLE');
+  /// receivedByName: who the technician handed the samples to at the lab —
+  /// self-reported, optional. handoverBranchId: override for which
+  /// branch/lab received it; omit to let the server default to the
+  /// booking's own branch.
+  ///
+  /// Returns the server's actual acknowledgement rather than assuming
+  /// success — the previous fire-and-forget emit() gave the caller no way
+  /// to know whether the DB update actually happened (a dropped server-side
+  /// guard or a disconnected socket looked identical to success). Resolves
+  /// {'success': true, ...} only once the server confirms the DB write, or
+  /// {'success': false, 'message': ...} on a reported failure or a 15s
+  /// timeout with no reply. Local "technician available again" state is
+  /// only updated on confirmed success — on failure the technician is still
+  /// mid-job and shouldn't be marked free for new dispatch.
+  Future<Map<String, dynamic>> emitHandedToLab({
+    required int bookingId,
+    String? receivedByName,
+    int? handoverBranchId,
+  }) async {
+    if (_socket == null || !isConnected) {
+      _log('HANDED_TO_LAB', 'FAILED — socket not connected  id=$bookingId');
+      return {
+        'success': false,
+        'message': 'Not connected — check your internet connection and try again.',
+      };
+    }
+
+    final completer = Completer<Map<String, dynamic>>();
+    void Function(dynamic)? ackHandler;
+    ackHandler = (data) {
+      final map = data as Map;
+      if ((map['bookingId'] as num?)?.toInt() != bookingId) return; // not this submission
+      if (ackHandler != null) _socket?.off('handed_to_lab_ack', ackHandler);
+      if (!completer.isCompleted) completer.complete(Map<String, dynamic>.from(map));
+    };
+    _socket?.on('handed_to_lab_ack', ackHandler);
 
     _socket?.emit('handed_to_lab', {
-      'bookingId':    bookingId,
-      'technicianId': userId,
+      'bookingId':        bookingId,
+      'technicianId':     userId,
+      'receivedByName':   receivedByName,
+      'handoverBranchId': handoverBranchId,
     });
+    _log('HANDED_TO_LAB', 'emitted, awaiting ack — id=$bookingId');
 
-    if (_isAvailable && isConnected && _lastLat != null) {
-      _emitTechnicianOnline();
-      _log('HANDED_TO_LAB', 're-emitted technician_online');
+    final result = await completer.future.timeout(
+      const Duration(seconds: 15),
+      onTimeout: () {
+        if (ackHandler != null) _socket?.off('handed_to_lab_ack', ackHandler);
+        _log('HANDED_TO_LAB', 'TIMEOUT waiting for ack — id=$bookingId');
+        return {
+          'success': false,
+          'message': 'Request timed out — check your connection and try again.',
+        };
+      },
+    );
+
+    if (result['success'] == true) {
+      _isBusy          = false;
+      _activeBookingId = null;
+      _appointmentBookingIds.remove(bookingId);
+      _log('HANDED_TO_LAB', 'ack success — id=$bookingId — marked AVAILABLE');
+
+      if (_isAvailable && isConnected && _lastLat != null) {
+        _emitTechnicianOnline();
+        _log('HANDED_TO_LAB', 're-emitted technician_online');
+      }
+      _availabilityCtrl.add(_isAvailable);
+    } else {
+      _log('HANDED_TO_LAB', 'ack failure — id=$bookingId — ${result['message']}');
     }
-    _availabilityCtrl.add(_isAvailable);
+
+    return result;
   }
 
   /// Location relay during active tracking (technician → patient).

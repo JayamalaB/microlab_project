@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const bookingController = require('../controllers/bookingController');
-const auth      = require('../middleware/auth');
-const adminAuth = require('../middleware/adminAuth');
+const auth        = require('../middleware/auth');
+const adminAuth   = require('../middleware/adminAuth');
+const adminSecret = require('../middleware/adminSecret');
 
 // POST /api/bookings — create booking (returns bookingId)
 router.post('/', auth, bookingController.createBooking);
@@ -26,7 +27,7 @@ router.get('/:bookingId/results', auth, bookingController.getBookingResults);
 router.get('/:bookingId/results/:resultId/proxy', auth, bookingController.proxyReport);
 
 // POST /api/bookings/:bookingId/results/:resultId/released — admin notifies result released (fires FCM push)
-router.post('/:bookingId/results/:resultId/released', bookingController.releaseResult);
+router.post('/:bookingId/results/:resultId/released', adminSecret, bookingController.releaseResult);
 
 // GET  /api/bookings/:bookingId/items   — list booking test items
 router.get('/:bookingId/items',                    auth, bookingController.getItems);
@@ -36,6 +37,12 @@ router.get('/:bookingId/linked-patients',          auth, bookingController.getLi
 router.post('/:bookingId/items',                   auth, bookingController.addItem);
 // DELETE /api/bookings/:bookingId/items/:id — remove a test from a booking
 router.delete('/:bookingId/items/:bookingItemId',  auth, bookingController.removeItem);
+// PATCH /api/bookings/:bookingId/items/:bookingItemId/collected — technician checklist toggle
+router.patch('/:bookingId/items/:bookingItemId/collected', auth, bookingController.setItemCollected);
+// POST /api/bookings/:bookingId/collection-photo — technician's sample-collection proof photo
+router.post('/:bookingId/collection-photo', auth, bookingController.saveCollectionProofPhoto);
+// GET  /api/bookings/:bookingId/collection-photo — current proof photo (if any)
+router.get('/:bookingId/collection-photo', auth, bookingController.getCollectionProofPhoto);
 
 // POST /api/bookings/:bookingId/cancel — customer cancels a booking
 router.post('/:bookingId/cancel', auth, bookingController.cancelBooking);
@@ -50,12 +57,12 @@ router.post('/:bookingId/pay', auth, bookingController.payBooking);
 router.put('/:bookingId/items', auth, bookingController.updateBookingItems);
 
 // PUT /api/bookings/:bookingId/lab-status — update lab pipeline stage (lab-side only)
-router.put('/:bookingId/lab-status',    bookingController.updateLabStatus);
+router.put('/:bookingId/lab-status',    adminSecret, bookingController.updateLabStatus);
 
 // PUT /api/bookings/:bookingId/admin-status — full admin status override
 // Updates ip_bookings + ip_technician_collection + ip_booking_requests in sync
-// No auth middleware — called from admin panel which does not send a JWT
-router.put('/:bookingId/admin-status',  bookingController.updateAdminStatus);
+// Secured by X-Admin-Secret header (value = ADMIN_WEBHOOK_SECRET in .env)
+router.put('/:bookingId/admin-status',  adminSecret, bookingController.updateAdminStatus);
 
 // POST /api/bookings/admin — create booking from admin portal + auto-dispatch same-day
 // Secured by HMAC-SHA256 shared secret (adminAuth middleware), not JWT

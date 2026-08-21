@@ -160,10 +160,13 @@ class _SplashScreenState extends State<SplashScreen>
                               width: 1,
                             ),
                           ),
-                          child: Center(
-                            child: CustomPaint(
-                              size: const Size(48, 48),
-                              painter: _DropIconPainter(),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(24),
+                            child: Image.asset(
+                              'assets/icon/app_icon.png',
+                              width: 88,
+                              height: 88,
+                              fit: BoxFit.cover,
                             ),
                           ),
                         ),
@@ -234,45 +237,6 @@ class _SplashScreenState extends State<SplashScreen>
       ),
     );
   }
-}
-
-// Blood drop with cross icon
-class _DropIconPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white.withOpacity(0.9)
-      ..style = PaintingStyle.fill;
-
-    final cx = size.width / 2;
-    final cy = size.height / 2;
-
-    final path = Path();
-    path.moveTo(cx, cy - 18);
-    path.cubicTo(cx + 12, cy - 6, cx + 14, cy + 2, cx + 14, cy + 6);
-    path.arcToPoint(
-      Offset(cx - 14, cy + 6),
-      radius: const Radius.circular(14),
-      clockwise: false,
-    );
-    path.cubicTo(cx - 14, cy + 2, cx - 12, cy - 6, cx, cy - 18);
-    path.close();
-
-    canvas.drawPath(path, paint);
-
-    // Cross symbol
-    final crossPaint = Paint()
-      ..color = AppColors.brandGreen
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5
-      ..strokeCap = StrokeCap.round;
-
-    canvas.drawLine(Offset(cx, cy - 4), Offset(cx, cy + 6), crossPaint);
-    canvas.drawLine(Offset(cx - 5, cy + 1), Offset(cx + 5, cy + 1), crossPaint);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter old) => false;
 }
 
 // Subtle circular pattern background

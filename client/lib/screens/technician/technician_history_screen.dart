@@ -68,7 +68,7 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
             final rawStatus = map['collection_status'] as String? ?? '';
             const completedStatuses = {
               'completed', 'all_collected', 'collected',
-              'handed_to_lab', 'sample_collected', 'collection_started',
+              'handed_to_lab', 'handed_to_lab_pending', 'sample_collected', 'collection_started',
             };
             final status = completedStatuses.contains(rawStatus)
                 ? 'Completed'
@@ -304,18 +304,29 @@ class _TechHistoryDetailSheet extends StatefulWidget {
 class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
   List<Map<String, dynamic>> _items = [];
   bool _itemsLoading = true;
+  // Sample-collection proof photo — same source (ip_booking_documents,
+  // file_description='collection_proof') and API call as the live Manage
+  // Booking screen's "Sample Collection Photo" section; this just displays
+  // it read-only here for a past booking.
+  String? _collectionProofUrl;
+  bool _collectionProofLoading = true;
 
   TechnicianBooking get b => widget.booking;
+
+  int get _bookingId {
+    final rawId = b.id.startsWith('BK') ? b.id.substring(2) : b.id;
+    return int.tryParse(rawId) ?? 0;
+  }
 
   @override
   void initState() {
     super.initState();
     _fetchItems();
+    _fetchCollectionProof();
   }
 
   Future<void> _fetchItems() async {
-    final rawId = b.id.startsWith('BK') ? b.id.substring(2) : b.id;
-    final bookingId = int.tryParse(rawId) ?? 0;
+    final bookingId = _bookingId;
     if (bookingId == 0) {
       if (mounted) setState(() => _itemsLoading = false);
       return;
@@ -326,6 +337,51 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
     } catch (_) {
       if (mounted) setState(() => _itemsLoading = false);
     }
+  }
+
+  Future<void> _fetchCollectionProof() async {
+    final bookingId = _bookingId;
+    if (bookingId == 0) {
+      if (mounted) setState(() => _collectionProofLoading = false);
+      return;
+    }
+    try {
+      final doc = await ApiService.getCollectionProofPhoto(bookingId);
+      if (mounted) {
+        setState(() {
+          _collectionProofUrl     = doc?['file_path'] as String?;
+          _collectionProofLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _collectionProofLoading = false);
+    }
+  }
+
+  void _viewCollectionProof() {
+    final url = _collectionProofUrl;
+    if (url == null) return;
+    Navigator.push(context, MaterialPageRoute(builder: (_) => Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        iconTheme: const IconThemeData(color: Colors.white),
+        title: const Text('Collection Photo', style: TextStyle(color: Colors.white, fontSize: 15)),
+      ),
+      body: Center(
+        child: InteractiveViewer(
+          maxScale: 5.0,
+          child: Image.network(
+            url,
+            fit: BoxFit.contain,
+            loadingBuilder: (_, child, progress) =>
+                progress == null ? child : const CircularProgressIndicator(color: Colors.white),
+            errorBuilder: (_, __, ___) =>
+                const Icon(Icons.broken_image, color: Colors.white54, size: 48),
+          ),
+        ),
+      ),
+    )));
   }
 
   String _fmt(DateTime d) {
@@ -460,6 +516,68 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
                                     ),
                                   ]),
                                 )).toList(),
+                              ),
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  // Collection Photo — read-only view of the proof photo
+                  // captured (if any) during sample collection for this
+                  // booking. Same data source as the live Manage Booking
+                  // screen's "Sample Collection Photo" section.
+                  const Text(
+                    'Collection Photo',
+                    style: TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w600,
+                        color: AppColors.textSecondary, letterSpacing: 0.3),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.background,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.divider),
+                    ),
+                    child: _collectionProofLoading
+                        ? const Center(
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(vertical: 12),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation(AppColors.brandGreen)),
+                            ),
+                          )
+                        : _collectionProofUrl == null
+                            ? const Text('No collection photo captured',
+                                style: TextStyle(fontSize: 12, color: AppColors.textHint))
+                            : GestureDetector(
+                                onTap: _viewCollectionProof,
+                                child: Row(children: [
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: Image.network(
+                                      _collectionProofUrl!,
+                                      width: 56, height: 56, fit: BoxFit.cover,
+                                      loadingBuilder: (_, child, progress) => progress == null
+                                          ? child
+                                          : const SizedBox(
+                                              width: 56, height: 56,
+                                              child: Center(child: CircularProgressIndicator(
+                                                  strokeWidth: 2, color: AppColors.brandGreen)),
+                                            ),
+                                      errorBuilder: (_, __, ___) => const SizedBox(
+                                          width: 56, height: 56,
+                                          child: Icon(Icons.broken_image, color: AppColors.textHint)),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  const Expanded(
+                                    child: Text('Proof photo captured — tap to view',
+                                        style: TextStyle(fontSize: 12, color: AppColors.textPrimary)),
+                                  ),
+                                  const Icon(Icons.chevron_right_rounded, size: 18, color: AppColors.textHint),
+                                ]),
                               ),
                   ),
 

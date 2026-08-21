@@ -9,6 +9,7 @@ const fs   = require('fs');
 const path = require('path');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
+const { syncBookingToClient } = require('../services/clientSync');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -119,7 +120,7 @@ exports.getHistory = async (req, res) => {
          WHERE tc.technician_id = ?
            AND tc.collection_status IN (
              'completed','all_collected','collected',
-             'handed_to_lab','sample_collected','collection_started',
+             'handed_to_lab','handed_to_lab_pending','sample_collected','collection_started',
              'cancelled'
            )
       )
@@ -656,7 +657,7 @@ exports.collectPayment = async (req, res) => {
     // ip_technician_collection) or as a sibling of a booking they own (same
     // visit_group_id) — and read the current totals in the same query.
     const [[booking]] = await db.execute(
-      `SELECT b.booking_id, b.total_amount, b.amount_paid
+      `SELECT b.booking_id, b.patient_id, b.total_amount, b.amount_paid
        FROM ip_bookings b
        WHERE b.booking_id = ?
          AND (
@@ -688,26 +689,37 @@ exports.collectPayment = async (req, res) => {
       [newPaymentStatus, newAmountPaid, newAmountDue, bookingId]
     );
 
-    // Update payment transaction record (best-effort — works for both parent and sibling bookings)
+    const txnRef = `TXN${Date.now()}TC`;
+    const isPartial = newAmountDue > 0 ? 1 : 0;
     await db.execute(
-      `UPDATE ip_payment_transactions
-       SET payment_status = ?, transaction_status = ?,
-           payment_type = ?, payment_mode = ?,
-           amount_paid = ?, amount_due = ?, is_partial = ?,
-           gateway_transaction_id = ?, gateway_status = ?,
-           collected_by = ?, paid_at = NOW(), updated_at = NOW()
-       WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
+      `INSERT INTO ip_payment_transactions
+         (transaction_ref, booking_id, patient_id, payment_type, payment_mode,
+          gross_amount, net_amount, amount_paid, amount_due,
+          currency, payment_status, transaction_status, is_refund, is_partial,
+          gateway_transaction_id, gateway_status, collected_by, paid_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'INR', ?, ?, 0, ?, ?, ?, ?, NOW())`,
       [
+        txnRef, bookingId, booking.patient_id, paymentMethod, paymentMethod,
+        amount, amount, amount, newAmountDue,
         newPaymentStatus, newPaymentStatus === 'paid' ? 'completed' : 'partial',
-        paymentMethod, paymentMethod,
-        newAmountPaid, newAmountDue, newPaymentStatus === 'paid' ? 0 : 1,
+        isPartial,
         paymentMethod === 'RAZORPAY' ? razorpayPaymentId : null,
         paymentMethod === 'RAZORPAY' ? 'captured' : 'cash_collected',
-        technicianId, bookingId,
+        technicianId,
       ]
     );
 
     console.log(`✅ collectPayment — booking_id=${bookingId} method=${paymentMethod} +₹${amount} → paid=₹${newAmountPaid} due=₹${newAmountDue} status=${newPaymentStatus} by technician_id=${technicianId}`);
+
+    // Sync to client server — payment_update is the same, already-confirmed
+    // action the customer-side payment flow uses; only the initiator
+    // (technician, not the account-holder) differs here.
+    syncBookingToClient(Number(bookingId), {
+      mobile: req.user.mobile,
+      type:   'technician',
+      action: 'payment_update',
+    }).catch(err => console.error(`[clientSync] collectPayment sync failed booking_id=${bookingId}:`, err.message));
+
     res.json({ success: true, amountPaid: newAmountPaid, amountDue: newAmountDue, paymentStatus: newPaymentStatus });
   } catch (err) {
     console.error('❌ collectPayment FAILED:', err.message);
@@ -1090,6 +1102,13 @@ exports.addVisitMember = async (req, res) => {
          parent.collection_address, parent.collection_latitude, parent.collection_longitude,
          patientId || null, parent.slot_id ?? null]
       );
+      // Mirror into ip_patient_bookings — its row for this new booking was
+      // just inserted above (patient → booking link), so it's guaranteed
+      // to exist here.
+      await conn.execute(
+        `UPDATE ip_patient_bookings SET collection_status = 'arrived' WHERE booking_id = ?`,
+        [newBookingId]
+      );
 
       results.push({ newBookingId, bookingRef, patientId, totalAmount });
       console.log(`   ✅ addVisitMember — booking_id=${newBookingId} ref=${bookingRef}`);
@@ -1098,6 +1117,23 @@ exports.addVisitMember = async (req, res) => {
     await conn.commit();
     const totalVisitAmount = results.reduce((s, r) => s + r.totalAmount, 0);
     console.log(`✅ addVisitMember — ${results.length} member(s) added parent=${parentBookingId} visit_group=${visitGroupId}`);
+
+    // Sync each new member's booking to the client server — technician is
+    // the initiator here (not the account-holder patient), per explicit
+    // requirement: technician's own mobile + user_type: 'technician'.
+    // Uses the family_member_added action's own minimal payload shape
+    // (technician_details + visit_group_id), not the generic new_booking one.
+    // Fire-and-forget, same non-blocking pattern used by every other
+    // syncBookingToClient call site in the codebase.
+    for (const r of results) {
+      syncBookingToClient(r.newBookingId, {
+        mobile:       req.user.mobile,
+        type:         'technician',
+        action:       'family_member_added',
+        technicianId: technicianId,
+        visitGroupId: visitGroupId,
+      }).catch(err => console.error(`[clientSync] addVisitMember sync failed booking_id=${r.newBookingId}:`, err.message));
+    }
     res.status(201).json({
       success: true,
       members: results,
@@ -1320,6 +1356,18 @@ exports.verifyBookingOtp = async (req, res) => {
       [bookingId, technicianId]
     );
 
+    // Mirror into ip_patient_bookings — wrapped defensively so a failure
+    // here never turns an already-successful OTP verification into an
+    // error response.
+    try {
+      await db.execute(
+        `UPDATE ip_patient_bookings SET collection_status = 'otp_verified' WHERE booking_id = ?`,
+        [bookingId]
+      );
+    } catch (e) {
+      console.error(`❌ [verifyBookingOtp] ip_patient_bookings mirror failed booking=${bookingId}: ${e.message}`);
+    }
+
     // Cascade otp_verified to sibling bookings in the same visit group
     try {
       const [[vgRow]] = await db.execute(
@@ -1333,6 +1381,13 @@ exports.verifyBookingOtp = async (req, res) => {
            SET tc.collection_status = 'otp_verified',
                tc.otp_verified_at   = NOW(),
                tc.updated_at        = NOW()
+           WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+          [vgRow.visit_group_id, bookingId]
+        );
+        await db.execute(
+          `UPDATE ip_patient_bookings pb
+           JOIN ip_bookings b ON b.booking_id = pb.booking_id
+           SET pb.collection_status = 'otp_verified'
            WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
           [vgRow.visit_group_id, bookingId]
         );
