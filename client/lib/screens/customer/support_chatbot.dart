@@ -1022,6 +1022,11 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           final src     = body['data']?['context_used']?['source'] as String? ?? _layer.apiKey;
           final intent  = body['data']?['context_used']?['intent'] as String?;
           final errCode = body['data']?['context_used']?['error'] as String?;
+          // Server-provided chips (e.g. the branch state picker) — shown as-is,
+          // bypassing the static follow-up suggestion pools below.
+          final serverChips = (body['data']?['context_used']?['chips'] as List?)
+              ?.map((e) => e.toString())
+              .toList();
 
           // Server says this needs a verified patient (profile/account/booking/technician)
           // but we sent none — show the login form instead of a dead-end text reply.
@@ -1072,11 +1077,12 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               .take(3)
               .toList();
 
-          final fus = isNoMatch
-              ? <String>[]
-              : _layer != _Layer.all
-                  ? _filterChips(List<String>.from(_kFollowUps[_layer] ?? []))
-                  : _filterChips(List<String>.from(_kIntentFollowUps[intent] ?? []));
+          final fus = serverChips ??
+              (isNoMatch
+                  ? <String>[]
+                  : _layer != _Layer.all
+                      ? _filterChips(List<String>.from(_kFollowUps[_layer] ?? []))
+                      : _filterChips(List<String>.from(_kIntentFollowUps[intent] ?? [])));
 
           final newMsgIdx = _msgs.length;
 

@@ -9,7 +9,9 @@ const SESSION_TTL_MS  = 30 * 60 * 1000;
 
 // Only these tables and their allowed columns are ever queried.
 const TEST_COLS    = 'product_name, product_description, product_price, pre_instructions';
-const BRANCH_COLS  = 'branch_name, branch_address, branch_city, branch_state, branch_pincode, branch_mobile, branch_email';
+// Only what the chatbot actually shows: name, mobile, working hours. branch_city/
+// branch_name stay filterable via WHERE even though they're not selected.
+const BRANCH_COLS  = 'branch_name, branch_mobile, start_time, end_time';
 // ip_patients / ip_clients — always scoped to the authenticated patient's own client_id (see
 // buildPatientProfileQuery / buildClientAccountQuery). Never selected without a patientId.
 const PATIENT_COLS = [
@@ -107,6 +109,14 @@ class LLMRetriever {
                 // question so a bare-name follow-up reply ("yuvan") can re-run it
                 // instead of being classified as a brand-new, unrelated question.
                 pendingClarification: null,
+                // Set by _answerBranchStatePicker when a branch question had no
+                // city/name filter — the next bare-name reply ("Singapore") is
+                // treated directly as the state to filter branches by.
+                pendingBranchStateSelection: false,
+                // Set by _answerBranchDistrictPicker (Tamil Nadu only) — holds the
+                // state text so the next bare-name reply ("Salem") is treated as
+                // the district to filter that state's branches by.
+                pendingBranchDistrictSelection: null,
             });
             console.log(`🆕 New session: ${sessionId}`);
         }
@@ -163,6 +173,26 @@ class LLMRetriever {
         const skipKnowledge = opts.skipKnowledge === true;
         const patientId     = opts.patientId || null;
         const session       = this._getSession(sessionId);
+
+        // Resuming a pending "which district?" branch picker (Tamil Nadu only) —
+        // a short bare-name reply ("Salem") answers it directly.
+        if (session.pendingBranchDistrictSelection && this._looksLikeNameReply(question)) {
+            const state = session.pendingBranchDistrictSelection;
+            session.pendingBranchDistrictSelection = null;
+            session.pendingBranchStateSelection = false;
+            session.pendingClarification = null;
+            return await this._answerBranchesInState(state, sessionId, question.trim());
+        }
+        session.pendingBranchDistrictSelection = null;
+
+        // Resuming a pending "which state?" branch picker — a short bare-name
+        // reply ("Singapore") answers it directly, no re-classification needed.
+        if (session.pendingBranchStateSelection && this._looksLikeNameReply(question)) {
+            session.pendingBranchStateSelection = false;
+            session.pendingClarification = null;
+            return await this._answerBranchesForState(question.trim(), sessionId);
+        }
+        session.pendingBranchStateSelection = false;
 
         // Resuming a pending "which family member?" disambiguation — a short
         // bare-name reply ("yuvan") doesn't itself contain any booking/technician
@@ -316,19 +346,48 @@ class LLMRetriever {
             };
         }
 
+        // Branch locations — a city/name filter runs the direct query as before; a
+        // fully generic question ("where are your branches") shows a state picker
+        // instead of dumping every branch (see _answerBranchStatePicker).
+        if (intent === 'branch_query') {
+            let result;
+            if (entities.city || entities.branch_name) {
+                const sql = this.buildBranchQuery(entities);
+                let data = [], error = null;
+                try {
+                    console.log(`🔍 SQL: ${sql}`);
+                    const [rows] = await db.pool.execute(sql);
+                    data = rows;
+                } catch (err) {
+                    error = err.message;
+                    console.error('Branch query error:', err);
+                }
+                result = {
+                    answer: this.formatBranchInfo(data, error),
+                    context_used: {
+                        intent, entities, data_found: data.length,
+                        used_llm: false, is_general: false, from_cache: false, session_id: sessionId
+                    }
+                };
+            } else {
+                result = await this._answerBranchStatePicker(sessionId);
+            }
+            this._updateSession(sessionId, intent, entities);
+            llmService.saveToMemory(sessionId, question, result.answer);
+            return { question, ...result };
+        }
+
         // "my profile" / "my blood group" → the logged-in patient's own row only.
         // "family members" / "my mother's ..." → join across client_id to include
         // everyone registered under the same account.
         const isFamilyScope = intent === 'patient_profile_query' &&
             (FAMILY_SCOPE_PATTERN.test(question) || !!entities.relation || !!entities.person_name);
 
-        const sql = intent === 'branch_query'
-            ? this.buildBranchQuery(entities)
-            : intent === 'patient_profile_query'
-                ? this.buildPatientProfileQuery(entities, patientId, isFamilyScope)
-                : intent === 'client_account_query'
-                    ? this.buildClientAccountQuery(patientId)
-                    : this.buildTestQuery(entities);
+        const sql = intent === 'patient_profile_query'
+            ? this.buildPatientProfileQuery(entities, patientId, isFamilyScope)
+            : intent === 'client_account_query'
+                ? this.buildClientAccountQuery(patientId)
+                : this.buildTestQuery(entities);
         const queryType = intent;
 
         let data  = [];
@@ -346,8 +405,9 @@ class LLMRetriever {
             }
         }
 
-        // Personal-data intents get dedicated formatters — no LLM needed, keeps PII out of
-        // the general-purpose prompt and avoids noisy/inconsistent formatting.
+        // Personal-data intents get dedicated formatters — no LLM needed, keeps PII
+        // out of the general-purpose prompt and avoids noisy/inconsistent formatting.
+        // (branch_query has its own dedicated block above and never reaches here.)
         const formattedResponse = (intent === 'patient_profile_query')
             ? this.formatPatientProfile(data, error, isFamilyScope)
             : (intent === 'client_account_query')
@@ -752,6 +812,16 @@ class LLMRetriever {
         return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
     }
 
+    // "09:00:00" → "9:00 AM" — same convention as branchController.js's _fmtTimeLabel.
+    _fmtTimeLabel(timeStr) {
+        if (!timeStr) return null;
+        const [h, m] = String(timeStr).split(':').map(Number);
+        if (Number.isNaN(h) || Number.isNaN(m)) return null;
+        const period = h < 12 ? 'AM' : 'PM';
+        const h12 = h % 12 || 12;
+        return `${h12}:${String(m).padStart(2, '0')} ${period}`;
+    }
+
     formatPatientProfile(data, error, familyScope) {
         if (error) return `⚠️ Could not fetch patient information. Please try again or call 0422 4354242.`;
         if (!data || data.length === 0) {
@@ -776,6 +846,172 @@ class LLMRetriever {
 
         const heading = familyScope ? '👨‍👩‍👧‍👦 Patients on your account:' : '👤 Your profile:';
         return `${heading}\n\n${lines.join('\n\n')}`;
+    }
+
+    formatBranchInfo(data, error) {
+        if (error) return `⚠️ Could not fetch branch information. Please try again or call 0422 4354242.`;
+        if (!data || data.length === 0) {
+            return `🔍 No branch found matching that. Please contact us at 0422 4354242.`;
+        }
+
+        const lines = data.map((row) => {
+            const hours = (row.start_time && row.end_time)
+                ? `${this._fmtTimeLabel(row.start_time)} - ${this._fmtTimeLabel(row.end_time)}`
+                : 'N/A';
+            return `🏥 ${row.branch_name || 'N/A'}\n` +
+                   `   • Mobile: ${row.branch_mobile || 'N/A'}\n` +
+                   `   • Working Hours: ${hours}`;
+        });
+
+        return lines.join('\n\n');
+    }
+
+    // A generic "where are your branches" / "branch locations" question with no
+    // city/name filter — instead of dumping every branch, ask which state first.
+    // Sets pendingBranchStateSelection so the next bare-name reply resolves via
+    // _answerBranchesForState instead of going through full re-classification.
+    async _answerBranchStatePicker(sessionId) {
+        let states = [];
+        try {
+            const [rows] = await db.pool.execute(
+                `SELECT DISTINCT branch_state FROM ip_branches ` +
+                `WHERE branch_active = 1 AND branch_state IS NOT NULL AND branch_state <> '' ` +
+                `ORDER BY branch_state`
+            );
+            states = rows.map(r => r.branch_state).filter(Boolean);
+        } catch (err) {
+            console.error('Branch state list query error:', err);
+            return {
+                answer: `⚠️ Could not fetch branch locations. Please try again or call 0422 4354242.`,
+                context_used: { intent: 'branch_query', data_found: 0, used_llm: false, is_general: false, from_cache: false, session_id: sessionId }
+            };
+        }
+
+        if (states.length === 0) {
+            return {
+                answer: `🔍 No branch locations available right now. Please contact us at 0422 4354242.`,
+                context_used: { intent: 'branch_query', data_found: 0, used_llm: false, is_general: false, from_cache: false, session_id: sessionId }
+            };
+        }
+
+        this._getSession(sessionId).pendingBranchStateSelection = true;
+        return {
+            answer: '📍 Which state would you like branches for?',
+            context_used: {
+                intent: 'branch_query', data_found: 0, used_llm: false, is_general: false,
+                from_cache: false, session_id: sessionId, chips: states,
+            }
+        };
+    }
+
+    // Reached after a state is picked (chip tap or typed reply). Tamil Nadu gets
+    // an extra district picker step; every other state lists its branches directly.
+    async _answerBranchesForState(stateText, sessionId) {
+        if (/^tamil\s*nadu$/i.test(stateText.trim())) {
+            return await this._answerBranchDistrictPicker(stateText, sessionId);
+        }
+        return await this._answerBranchesInState(stateText, sessionId);
+    }
+
+    // Tamil Nadu only — asks which district/city before listing branches, since
+    // that state has enough branches for a flat list to be unwieldy. Skips
+    // straight to the branch list if there's only one district on record.
+    async _answerBranchDistrictPicker(stateText, sessionId) {
+        const s = stateText.toLowerCase().replace(/'/g, "''");
+        let districts = [];
+        try {
+            const [rows] = await db.pool.execute(
+                `SELECT DISTINCT branch_city FROM ip_branches ` +
+                `WHERE branch_active = 1 AND LOWER(branch_state) LIKE '%${s}%' ` +
+                `AND branch_city IS NOT NULL AND branch_city <> ''`
+            );
+            // branch_city sometimes stores "Area, District" (e.g. "Peelamedu, Coimbatore")
+            // and sometimes just the district ("coimbatore") — take the district alone
+            // (the last comma-separated segment) and dedupe case-insensitively so every
+            // area within the same district collapses into one chip. The branch list
+            // filter (LIKE '%district%') already matches both forms once the chip text
+            // is just the district name.
+            const seen = new Map(); // lowercase district -> display-cased district
+            for (const row of rows) {
+                const raw = (row.branch_city || '').trim();
+                if (!raw) continue;
+                const parts = raw.split(',');
+                const district = parts[parts.length - 1].trim();
+                if (!district) continue;
+                const key = district.toLowerCase();
+                if (!seen.has(key)) {
+                    seen.set(key, district.replace(/\b\w/g, (c) => c.toUpperCase()));
+                }
+            }
+            districts = [...seen.values()].sort();
+        } catch (err) {
+            console.error('Branch district list query error:', err);
+            return {
+                answer: `⚠️ Could not fetch branch locations. Please try again or call 0422 4354242.`,
+                context_used: { intent: 'branch_query', data_found: 0, used_llm: false, is_general: false, from_cache: false, session_id: sessionId }
+            };
+        }
+
+        if (districts.length === 0) {
+            return {
+                answer: `🔍 No branches found in ${stateText}. Please contact us at 0422 4354242.`,
+                context_used: { intent: 'branch_query', data_found: 0, used_llm: false, is_general: false, from_cache: false, session_id: sessionId }
+            };
+        }
+        if (districts.length === 1) {
+            return await this._answerBranchesInState(stateText, sessionId, districts[0]);
+        }
+
+        this._getSession(sessionId).pendingBranchDistrictSelection = stateText;
+        return {
+            answer: `📍 Which district in ${stateText} would you like branches for?`,
+            context_used: {
+                intent: 'branch_query', data_found: 0, used_llm: false, is_general: false,
+                from_cache: false, session_id: sessionId, chips: districts,
+            }
+        };
+    }
+
+    // Branches filtered to one state, optionally narrowed to a district/city
+    // within it (Tamil Nadu's picker). Reached by tapping a state/district chip
+    // or typing the name as a reply while the matching pending-selection flag is set.
+    async _answerBranchesInState(stateText, sessionId, cityText) {
+        const s = stateText.toLowerCase().replace(/'/g, "''");
+        const conditions = [`LOWER(branch_state) LIKE '%${s}%'`, 'branch_active = 1'];
+        if (cityText) {
+            const c = cityText.toLowerCase().replace(/'/g, "''");
+            conditions.push(`LOWER(branch_city) LIKE '%${c}%'`);
+        }
+        const sql = `SELECT ${BRANCH_COLS} FROM ip_branches WHERE ${conditions.join(' AND ')} ORDER BY branch_name`;
+
+        let data = [], error = null;
+        try {
+            console.log(`🔍 SQL: ${sql}`);
+            const [rows] = await db.pool.execute(sql);
+            data = rows;
+        } catch (err) {
+            error = err.message;
+            console.error('Branch state query error:', err);
+        }
+
+        const label = cityText ? `${cityText}, ${stateText}` : stateText;
+        const answer = (data.length === 0 && !error)
+            ? `🔍 No branches found in "${label}". Please contact us at 0422 4354242.`
+            : this.formatBranchInfo(data, error);
+
+        const replyText = cityText || stateText;
+        this._updateSession(sessionId, 'branch_query', {});
+        llmService.saveToMemory(sessionId, replyText, answer);
+
+        return {
+            question: replyText,
+            answer,
+            context_used: {
+                intent: 'branch_query', entities: { state: stateText, city: cityText || null },
+                data_found: data.length, used_llm: false, is_general: false,
+                from_cache: false, session_id: sessionId
+            }
+        };
     }
 
     formatClientAccount(data, error) {
