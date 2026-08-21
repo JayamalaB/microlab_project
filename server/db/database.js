@@ -48,11 +48,11 @@ async function saveConversation(question, answer, contextUsed) {
     }
 }
 
-async function saveTestBooking(name, age, phone, documentUrl) {
+async function saveTestBooking(name, age, phone, pkg) {
     try {
         const [result] = await promisePool.execute(
-            'INSERT INTO test_bookings (name, age, phone, document_url) VALUES (?, ?, ?, ?)',
-            [name, Number(age), phone, documentUrl]
+            'INSERT INTO test_bookings (name, age, phone, package) VALUES (?, ?, ?, ?)',
+            [name, Number(age), phone, pkg]
         );
         return { success: true, id: result.insertId };
     } catch (error) {

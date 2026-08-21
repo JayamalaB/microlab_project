@@ -12,7 +12,6 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'yt_web_stub.dart' if (dart.library.html) 'yt_web_impl.dart';
 
@@ -387,6 +386,21 @@ const _kIntentFollowUps = <String, List<String>>{
   'website_live':  ["What are MicroLab's accreditations?", 'Tell me about home collection', 'Contact support'],
   'general':       ['General Info', 'Show all branch locations', 'Book Test'],
 };
+
+const _kTestPackages = [
+  'Complete Blood Count (CBC)',
+  'Lipid Profil e',
+  'Liver Function Test (LFT)',
+  'Kidney Function Test (KFT)',
+  'Thyroid Profile (T3 / T4 / TSH)',
+  'HbA1c (Glycated Hemoglobin)',
+  'Blood Glucose – Fasting & PP',
+  'Vitamin D (25-OH)',
+  'Vitamin B12',
+  'Urine Routine & Microscopy',
+  'Molecular Biology Panel',
+  'Serology Panel',
+];
 
 // ── Message model ─────────────────────────────────────────────────────────────
 enum _MsgKind { normal, divider, bookingForm, patientLoginForm, layerSuggestion, promo }
@@ -2557,13 +2571,36 @@ class _BookingFormState extends State<_BookingForm> {
   final _name  = TextEditingController();
   final _age   = TextEditingController();
   final _phone = TextEditingController();
+  String? _pkg;
   bool    _loading = false;
   bool    _success = false;
   String? _error;
+  List<String> _packages = [];
+  bool _packagesLoading = true;
 
-  // Optional — a booking can be submitted with no document attached at all.
-  PlatformFile? _pickedFile;
-  bool _picking = false;
+  @override
+  void initState() {
+    super.initState();
+    _loadPackages();
+  }
+
+  Future<void> _loadPackages() async {
+    try {
+      final res = await http.get(
+        Uri.parse('${widget.apiBase}/api/chat/products'),
+      ).timeout(const Duration(seconds: 10));
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        final list = (body['data'] as List).cast<String>().toSet().toList();
+        setState(() { _packages = list; _packagesLoading = false; });
+      } else {
+        setState(() { _packages = _kTestPackages; _packagesLoading = false; });
+      }
+    } catch (_) {
+      if (mounted) setState(() { _packages = _kTestPackages; _packagesLoading = false; });
+    }
+  }
 
   @override
   void dispose() {
@@ -2571,31 +2608,12 @@ class _BookingFormState extends State<_BookingForm> {
     super.dispose();
   }
 
-  Future<void> _pickFile() async {
-    if (_picking) return;
-    setState(() => _picking = true);
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['jpg', 'jpeg', 'png', 'pdf'],
-        withData: true, // ensures .bytes is populated on every platform, incl. web
-      );
-      if (result != null && result.files.isNotEmpty && mounted) {
-        setState(() => _pickedFile = result.files.single);
-      }
-    } catch (_) {
-      if (mounted) setState(() => _error = 'Could not open file picker. Please try again.');
-    } finally {
-      if (mounted) setState(() => _picking = false);
-    }
-  }
-
   Future<void> _submit() async {
     final name  = _name.text.trim();
     final age   = _age.text.trim();
     final phone = _phone.text.trim();
 
-    if (name.isEmpty || age.isEmpty || phone.isEmpty) {
+    if (name.isEmpty || age.isEmpty || phone.isEmpty || _pkg == null) {
       setState(() => _error = 'Please fill in all fields.');
       return;
     }
@@ -2605,22 +2623,11 @@ class _BookingFormState extends State<_BookingForm> {
     }
     setState(() { _loading = true; _error = null; });
     try {
-      final req = http.MultipartRequest(
-          'POST', Uri.parse('${widget.apiBase}/api/chat/book-test'))
-        ..fields['name']  = name
-        ..fields['age']   = age
-        ..fields['phone'] = phone;
-
-      final file = _pickedFile;
-      if (file != null && file.bytes != null) {
-        req.files.add(http.MultipartFile.fromBytes(
-          'document', file.bytes!,
-          filename: file.name,
-        ));
-      }
-
-      final streamedRes = await req.send().timeout(const Duration(seconds: 20));
-      final res = await http.Response.fromStream(streamedRes);
+      final res = await http.post(
+        Uri.parse('${widget.apiBase}/api/chat/book-test'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'name': name, 'age': age, 'phone': phone, 'package': _pkg}),
+      ).timeout(const Duration(seconds: 20));
       if (!mounted) return;
       if (res.statusCode >= 200 && res.statusCode < 300) {
         setState(() => _success = true);
@@ -2655,7 +2662,7 @@ class _BookingFormState extends State<_BookingForm> {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                'Booking confirmed for ${_name.text.trim()}.\nOur team will reach you shortly.',
+                'Booking confirmed for ${_name.text.trim()} — $_pkg.\nOur team will reach you shortly.',
                 style: const TextStyle(fontSize: 12.5, color: AppColors.brandGreen,
                     fontWeight: FontWeight.w600, height: 1.5),
               ),
@@ -2677,48 +2684,39 @@ class _BookingFormState extends State<_BookingForm> {
         const SizedBox(height: 10),
         _field('Phone Number',  _phone, TextInputType.phone, 'e.g. 9876543210'),
         const SizedBox(height: 10),
-        const Text('Upload Document (optional)',
+        const Text('Test Package',
             style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
         const SizedBox(height: 4),
-        _pickedFile == null
-            ? OutlinedButton.icon(
-                onPressed: _picking ? null : _pickFile,
-                icon: _picking
-                    ? const SizedBox(width: 14, height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
-                    : const Icon(Icons.attach_file_rounded, size: 16, color: AppColors.brandGreen),
-                label: const Text('Attach image or PDF',
-                    style: TextStyle(fontSize: 12.5, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: AppColors.divider, width: 1.5),
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
-                  minimumSize: const Size(double.infinity, 0),
-                  alignment: Alignment.centerLeft,
-                ),
+        _packagesLoading
+            ? const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Row(children: [
+                  SizedBox(width: 14, height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2,
+                          color: AppColors.brandGreen)),
+                  SizedBox(width: 10),
+                  Text('Loading packages…',
+                      style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ]),
               )
-            : Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                decoration: BoxDecoration(
-                  color: AppColors.background,
-                  borderRadius: BorderRadius.circular(9),
-                  border: Border.all(color: AppColors.divider, width: 1.5),
+            : DropdownButtonFormField<String>(
+                value: _pkg,
+                hint: const Text('— Select a package —',
+                    style: TextStyle(fontSize: 12.5, color: AppColors.textHint)),
+                isExpanded: true,
+                menuMaxHeight: 240, // shows ~5 items; remaining scroll inside menu
+                decoration: InputDecoration(
+                  filled: true, fillColor: AppColors.background,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
+                      borderSide: const BorderSide(color: AppColors.divider, width: 1.5)),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9),
+                      borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(9)),
                 ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.insert_drive_file_rounded, size: 16, color: AppColors.brandGreen),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(_pickedFile!.name,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12.5, color: AppColors.textPrimary)),
-                    ),
-                    InkWell(
-                      onTap: () => setState(() => _pickedFile = null),
-                      child: const Icon(Icons.close_rounded, size: 16, color: AppColors.textSecondary),
-                    ),
-                  ],
-                ),
+                items: _packages.map((p) =>
+                    DropdownMenuItem(value: p, child: Text(p, style: const TextStyle(fontSize: 12.5)))).toList(),
+                onChanged: (v) => setState(() => _pkg = v),
               ),
         if (_error != null) ...[
           const SizedBox(height: 10),

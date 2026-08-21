@@ -1,7 +1,4 @@
 const express = require('express');
-const multer  = require('multer');
-const path    = require('path');
-const fs      = require('fs');
 const router = express.Router();
 const llmRetriever = require('../rag/llmRetriever');
 const db = require('../db/database');
@@ -10,33 +7,6 @@ const { getLiveContent } = require('../rag/websiteReader');
 const OpenAI = require('openai');
 
 const VALID_LAYERS = new Set(['all', 'static', 'db', 'web']);
-
-// /book-test's optional document attachment (image or PDF) — a plain, unauthenticated
-// upload since the Book Test flow itself doesn't require login. Separate directory
-// from server/uploads/ (patient photos) to keep the two kinds of upload apart.
-const TEST_BOOKING_UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'test-bookings');
-if (!fs.existsSync(TEST_BOOKING_UPLOAD_DIR)) fs.mkdirSync(TEST_BOOKING_UPLOAD_DIR, { recursive: true });
-
-const testBookingUpload = multer({
-    storage: multer.diskStorage({
-        destination: (_req, _file, cb) => cb(null, TEST_BOOKING_UPLOAD_DIR),
-        filename: (_req, file, cb) => {
-            const ext  = path.extname(file.originalname) || '';
-            const name = `booking_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
-            cb(null, name);
-        },
-    }),
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
-    fileFilter: (_req, file, cb) => {
-        // Checked by extension, not the client-supplied MIME type — Dart's
-        // http.MultipartFile.fromBytes sends application/octet-stream when no
-        // content type is set explicitly, which would fail a strict MIME check
-        // even for a genuine PNG/PDF.
-        const ext = path.extname(file.originalname).toLowerCase();
-        const ok  = ['.jpg', '.jpeg', '.png', '.pdf'].includes(ext);
-        cb(ok ? null : new Error('Only JPG, PNG, or PDF files are allowed'), ok);
-    },
-});
 
 /**
  * POST /api/chat/ask
@@ -195,36 +165,25 @@ router.get('/products', async (req, res) => {
     }
 });
 
-router.post('/book-test', (req, res) => {
-    testBookingUpload.single('document')(req, res, async (uploadErr) => {
-        if (uploadErr) {
-            return res.status(422).json({ success: false, error: uploadErr.message || 'Upload failed' });
+router.post('/book-test', async (req, res) => {
+    try {
+        const { name, age, phone, package: pkg } = req.body;
+
+        if (!name || !age || !phone || !pkg) {
+            return res.status(400).json({ success: false, error: 'All fields are required' });
         }
 
-        try {
-            const { name, age, phone } = req.body;
+        const result = await db.saveTestBooking(name, age, phone, pkg);
 
-            if (!name || !age || !phone) {
-                return res.status(400).json({ success: false, error: 'Name, age, and phone are required' });
-            }
-
-            // Document is optional — a booking can be submitted with nothing attached.
-            const documentUrl = req.file
-                ? `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}/uploads/test-bookings/${req.file.filename}`
-                : null;
-
-            const result = await db.saveTestBooking(name, age, phone, documentUrl);
-
-            if (result.success) {
-                res.json({ success: true, data: { id: result.id, message: 'Booking confirmed' } });
-            } else {
-                res.status(500).json({ success: false, error: result.error || 'Booking failed' });
-            }
-        } catch (error) {
-            console.error('Book test error:', error);
-            res.status(500).json({ success: false, error: error.message });
+        if (result.success) {
+            res.json({ success: true, data: { id: result.id, message: 'Booking confirmed' } });
+        } else {
+            res.status(500).json({ success: false, error: result.error || 'Booking failed' });
         }
-    });
+    } catch (error) {
+        console.error('Book test error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 router.get('/history', async (req, res) => {
