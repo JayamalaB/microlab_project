@@ -293,7 +293,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
             mode: 'Home Collection',
             status: 'Confirmed',
             isVip: false,
-            docRequired: false,
+            docRequired: booking.docRequired,
             docVerified: false,
             serviceChargePaid: 0,
             testsTotal: 0,
@@ -506,8 +506,11 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
       if (_isOnline) {
         _stopLocationStream();
         SocketService.instance.goOffline();
-        // Stop the foreground service — Android can now manage the process normally.
-        await ForegroundService.instance.stop();
+        // Stop the foreground service — Android can now manage the process
+        // normally. No web implementation exists for this plugin.
+        if (!kIsWeb) {
+          await ForegroundService.instance.stop();
+        }
         if (mounted) setState(() => _isOnline = false);
       } else {
         // ── PERMISSION ORDER IS CRITICAL ─────────────────────────────────
@@ -760,32 +763,56 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
 
   Future<void> _handleLogout() async {
     // 1. Stop location, disconnect socket (emits technician_offline internally),
-    //    and stop foreground service.
+    //    and stop foreground service. flutter_foreground_task has no web
+    //    implementation — calling it there throws MissingPluginException,
+    //    which (unguarded) used to abort this whole function before the
+    //    REST logout call below ever ran.
     _stopLocationStream();
-    SocketService.instance.disconnect();
-    await ForegroundService.instance.stop();
+    await SocketService.instance.disconnect();
+    if (!kIsWeb) {
+      await ForegroundService.instance.stop();
+    }
 
     // 2. Read IDs before clearing prefs
     final prefs  = await SharedPreferences.getInstance();
     final techId = prefs.getInt('user_id')      ?? 0;
     final token  = prefs.getString('auth_token') ?? '';
 
-    // 3. Call logout API — closes session + clears DB token
+    // 3. Call logout API — closes session + clears DB token. This is the
+    // authoritative path for marking the technician offline server-side
+    // (the socket emit above is best-effort and can race with the socket
+    // teardown) — so a silent failure here would leave online_status stuck
+    // at 'online'. Retry once before giving up, and log so a persistent
+    // failure is at least diagnosable instead of invisible.
     if (techId > 0) {
-      try {
-        // ✅ FIXED: Ensure no double slash in URL
-        final baseUrl = AppConstants.serverUrl.endsWith('/') 
-            ? AppConstants.serverUrl.substring(0, AppConstants.serverUrl.length - 1)
-            : AppConstants.serverUrl;
-        
-        await http.post(
-          Uri.parse('$baseUrl/api/technicians/$techId/logout'),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
-        ).timeout(const Duration(seconds: 5));
-      } catch (_) {}
+      // ✅ FIXED: Ensure no double slash in URL
+      final baseUrl = AppConstants.serverUrl.endsWith('/')
+          ? AppConstants.serverUrl.substring(0, AppConstants.serverUrl.length - 1)
+          : AppConstants.serverUrl;
+      final logoutUri = Uri.parse('$baseUrl/api/technicians/$techId/logout');
+      final logoutHeaders = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      };
+
+      var loggedOutServerSide = false;
+      for (var attempt = 1; attempt <= 2 && !loggedOutServerSide; attempt++) {
+        try {
+          final res = await http
+              .post(logoutUri, headers: logoutHeaders)
+              .timeout(const Duration(seconds: 8));
+          if (res.statusCode == 200) {
+            loggedOutServerSide = true;
+          } else {
+            debugPrint('[_handleLogout] attempt $attempt failed — status=${res.statusCode} body=${res.body}');
+          }
+        } catch (e) {
+          debugPrint('[_handleLogout] attempt $attempt ERROR: $e');
+        }
+      }
+      if (!loggedOutServerSide) {
+        debugPrint('[_handleLogout] giving up after 2 attempts — technician_id=$techId may remain online server-side until the staleness sweep catches it');
+      }
     }
 
     // 4. Clear SharedPreferences
@@ -923,7 +950,10 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
       // notification would linger with no code behind it.
       // dispose() cannot be async so we fire-and-forget — acceptable because
       // if the process is also dying the service goes with it anyway.
-      ForegroundService.instance.stop();
+      // No web implementation exists for this plugin.
+      if (!kIsWeb) {
+        ForegroundService.instance.stop();
+      }
     }
     super.dispose();
   }

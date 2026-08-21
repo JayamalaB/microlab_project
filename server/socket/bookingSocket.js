@@ -79,6 +79,7 @@ async function sendFcmPush(fcmToken, bookingData) {
         patientLng:     String(bookingData.patientLng     ?? ''),
         hospital:       String(bookingData.hospital       ?? ''),
         bookingType:    String(bookingData.bookingType    ?? 'lab'),
+        docRequired:    String(bookingData.docRequired    ?? false),
         branchId:       String(bookingData.branchId       ?? ''),
         branchName:     String(bookingData.branchName     ?? ''),
         slotId:          String(bookingData.slotId          ?? ''),
@@ -255,6 +256,36 @@ function _forceTechnicianOffline(technicianId) {
   );
 
   log('🔴', 'TECH_OFFLINE', '-', `id=${technicianId}`);
+}
+
+// Lightweight variant used ONLY by the heartbeat staleness sweep
+// (scheduler/technicianOfflineSweep.js). Unlike _forceTechnicianOffline,
+// this deliberately leaves booking_id/task_status untouched — a technician
+// who's gone quiet for the sweep's timeout may still be legitimately mid-job
+// (e.g. no signal inside a building), so their active-job tracking must
+// survive this, unlike an explicit logout/technician_offline signal which
+// really does mean "I'm done." Still removes them from the in-memory
+// dispatch pools and clears any pending grace timer, so dispatch eligibility
+// and the DB online flag stay consistent.
+function _markTechnicianOfflineStale(technicianId) {
+  if (!technicianId) return;
+
+  onlineTechnicians.delete(technicianId);
+  fcmOnlineTechnicians.delete(technicianId);
+
+  const pendingGrace = graceTimers.get(technicianId);
+  if (pendingGrace) { clearTimeout(pendingGrace); graceTimers.delete(technicianId); }
+
+  dbRun(
+    `UPDATE ip_technician_live_location
+     SET online_status = 'offline',
+         socket_id     = NULL,
+         updated_at    = NOW()
+     WHERE technician_id = ?`,
+    [technicianId]
+  );
+
+  log('🔴', 'TECH_OFFLINE_STALE', '-', `id=${technicianId} — no heartbeat within timeout`);
 }
 
 // Cascade a technician-collection status to all sibling bookings sharing the
@@ -1095,12 +1126,26 @@ async function _handleBookingRequest(io, socket, data = {}) {
     );
   }
 
+  // Whether any item on this booking needs a prescription — the technician
+  // app seeds its local booking object from this payload (see SocketBooking),
+  // so a stale/missing value here means the Manage Booking screen never finds
+  // out the requirement until it independently re-fetches items.
+  const [[docReqRow]] = await db.execute(
+    `SELECT EXISTS(
+       SELECT 1 FROM ip_booking_items bi
+       JOIN ip_products pr ON pr.product_id = bi.product_id
+       WHERE bi.booking_id = ? AND pr.document_required IN (1, '1', 'yes')
+     ) AS doc_required`,
+    [bookingId]
+  );
+  const docRequired = !!docReqRow?.doc_required;
+
   // Build the full booking payload now — needed by both normal dispatch
   // and the slot-based fallback (which sends the complete data to the tech).
   const bookingData = {
     bookingId, patientId, patientName, patientMobile,
     patientAddress, patientLat, patientLng, hospital, bookingType,
-    branchId, branchName,
+    branchId, branchName, docRequired,
     ...(slotId          != null && { slotId }),
     ...(slotLabel       != null && { slotLabel }),
     ...(appointmentTime != null && { appointmentTime }),
@@ -2220,11 +2265,15 @@ module.exports = function bookingSocket(io, socket) {
 
     _freeTechnician(technicianId, bookingId);
 
-    // ip_bookings.status stays 'collected' regardless of pending/verified —
-    // that coarse status doesn't distinguish the two.
+    // ip_bookings.status now mirrors the pending/verified distinction too —
+    // the admin dropdown (external panel) reads this column directly and
+    // needs it to be granular enough to show "Handed to Lab - Pending"
+    // rather than staying at 'collected'. Only an admin verifying via
+    // updateAdminStatus (action 'submitted_to_lab') advances this further
+    // to 'handed_to_lab'.
     dbRun(
       `UPDATE ip_bookings
-       SET status = 'collected', updated_at = NOW()
+       SET status = 'handed_to_lab_pending', updated_at = NOW()
        WHERE booking_id = ?`,
       [bookingId]
     );
@@ -2270,7 +2319,7 @@ module.exports = function bookingSocket(io, socket) {
           );
           dbRun(
             `UPDATE ip_bookings
-             SET status = 'collected', updated_at = NOW()
+             SET status = 'handed_to_lab_pending', updated_at = NOW()
              WHERE visit_group_id = ? AND booking_id != ?`,
             [vgId, bookingId]
           );
@@ -2784,6 +2833,7 @@ module.exports = function bookingSocket(io, socket) {
 // window until an unrelated event (disconnect, next status change) clears it.
 module.exports.freeTechnician = _freeTechnician;
 module.exports.forceTechnicianOffline = _forceTechnicianOffline;
+module.exports.markTechnicianOfflineStale = _markTechnicianOfflineStale;
 
 // ── Scheduled dispatch entry point (called by dispatchScheduler cron) ─────────
 // Creates a virtual socket that routes patient-facing events to the booking room

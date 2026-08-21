@@ -82,7 +82,7 @@ exports.sendOtp = async (req, res) => {
     step = 'select_user';
     writeLog(`[sendOtp] SELECT ip_users — ${elapsed()}`);
     const [existing] = await db.query(
-      'SELECT user_id, client_id, user_microlab_type FROM ip_users WHERE user_mobile_no = ?',
+      'SELECT user_id, client_id, user_microlab_type, user_auth_token, user_token_expiry FROM ip_users WHERE user_mobile_no = ?',
       [mobile]
     );
     writeLog(`[sendOtp] select done — found=${existing.length} — ${elapsed()}`);
@@ -94,6 +94,23 @@ exports.sendOtp = async (req, res) => {
         success: false,
         message: 'This number is registered as a technician account. Please use another number to login as customer.',
       });
+    }
+
+    // Single-active-session check — up front, before an OTP is ever generated
+    // or sent, so a device that's already logged in elsewhere doesn't even
+    // reach the OTP screen. This is a fast-fail UX check only; it is NOT
+    // the actual enforcement point (a plain SELECT here can race two
+    // concurrent requests) — the atomic claim in verifyOtp remains the real,
+    // race-safe guard that actually grants or denies the session.
+    if (existing.length > 0) {
+      const u = existing[0];
+      if (u.user_auth_token && u.user_token_expiry && new Date(u.user_token_expiry) > new Date()) {
+        writeLog(`[sendOtp] rejected — mobile=${mobile} already has an active session on another device`);
+        return res.status(409).json({
+          success: false,
+          message: 'This number is already logged in on another device. Please log out from that device and try again.',
+        });
+      }
     }
 
     if (existing.length === 0) {
@@ -228,10 +245,12 @@ exports.verifyOtp = async (req, res) => {
     const dbUser = rows[0];
     const tokenExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    // Clear OTP after use
+    // Clear OTP after use. is_logged_in is deliberately NOT set here — it's
+    // only set true once the single-active-session claim below actually
+    // succeeds, so it never reports true for a login that got rejected.
     await db.query(
       `UPDATE ip_users SET user_otp = NULL, user_otp_expiry = NULL,
-       is_logged_in = 1, user_last_active_at = NOW(), user_date_modified = NOW()
+       user_last_active_at = NOW(), user_date_modified = NOW()
        WHERE user_id = ?`,
       [dbUser.user_id]
     );
@@ -358,10 +377,23 @@ exports.verifyOtp = async (req, res) => {
         { expiresIn: '30d' }
       );
 
-      await db.query(
-        `UPDATE ip_users SET user_auth_token = ?, user_token_expiry = ? WHERE user_id = ?`,
+      // Single-active-session claim — atomic so two simultaneous logins for
+      // the same mobile can't both succeed (see verifyOtp's customer path
+      // for the identical pattern). The WHERE guard only lets this land when
+      // no other device currently holds an unexpired session.
+      const [claimResult] = await db.query(
+        `UPDATE ip_users
+         SET user_auth_token = ?, user_token_expiry = ?, is_logged_in = 1, user_date_modified = NOW()
+         WHERE user_id = ?
+           AND (user_auth_token IS NULL OR user_token_expiry <= NOW())`,
         [token, tokenExpiry, dbUser.user_id]
       );
+      if (claimResult.affectedRows === 0) {
+        return res.status(409).json({
+          success: false,
+          message: 'This number is already logged in on another device. Please log out from that device and try again.',
+        });
+      }
 
       // Create session + live_location rows
       let sessionId = null;
@@ -492,10 +524,23 @@ exports.verifyOtp = async (req, res) => {
       { expiresIn: '30d' }
     );
 
-    await db.query(
-      `UPDATE ip_users SET user_auth_token = ?, user_token_expiry = ? WHERE user_id = ?`,
+    // Single-active-session claim — atomic so two simultaneous logins for
+    // the same mobile can't both succeed (see the technician branch above
+    // for the identical pattern). The WHERE guard only lets this land when
+    // no other device currently holds an unexpired session.
+    const [claimResult] = await db.query(
+      `UPDATE ip_users
+       SET user_auth_token = ?, user_token_expiry = ?, is_logged_in = 1, user_date_modified = NOW()
+       WHERE user_id = ?
+         AND (user_auth_token IS NULL OR user_token_expiry <= NOW())`,
       [token, tokenExpiry, dbUser.user_id]
     );
+    if (claimResult.affectedRows === 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'This number is already logged in on another device. Please log out from that device and try again.',
+      });
+    }
 
     return res.json({
       success: true,

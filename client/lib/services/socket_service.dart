@@ -20,6 +20,7 @@ class SocketBooking {
   final double? patientLng;
   final String hospital;
   final String bookingType;
+  final bool docRequired;
   final DateTime createdAt;
   final int?    branchId;
   final String? branchName;
@@ -37,6 +38,7 @@ class SocketBooking {
     this.patientLng,
     required this.hospital,
     this.bookingType = 'lab',
+    this.docRequired = false,
     required this.createdAt,
     this.branchId,
     this.branchName,
@@ -55,6 +57,7 @@ class SocketBooking {
         patientLng:     _toDouble(j['patientLng']),
         hospital:       j['hospital']       as String? ?? '',
         bookingType:    j['bookingType']    as String? ?? 'lab',
+        docRequired:    _toBool(j['docRequired']),
         createdAt: DateTime.tryParse(j['createdAt'] as String? ?? '') ??
             DateTime.now(),
         branchId:        j['branchId']        != null ? _toInt(j['branchId'])  : null,
@@ -72,6 +75,12 @@ class SocketBooking {
     if (v == null) return null;
     if (v is num) return v.toDouble();
     return double.tryParse(v.toString());
+  }
+
+  // Handles bool (from Socket.IO) and String 'true'/'false' (from FCM data payload).
+  static bool _toBool(dynamic v) {
+    if (v is bool) return v;
+    return v?.toString().toLowerCase() == 'true';
   }
 }
 
@@ -897,24 +906,39 @@ class SocketService {
     });
   }
 
-  void disconnect() {
+  Future<void> disconnect() async {
     if (_socket == null) return;
 
     if (_isBusy) {
       _log('DISCONNECT', 'WARNING — active booking=$_activeBookingId at logout');
     }
-    // Best-effort only — unlike goOffline(), there's no point queuing this for
-    // reconnect: the socket is disposed a few lines below regardless. The
-    // technician dashboard's logout flow separately calls
+    // The technician dashboard's logout flow separately calls (and retries)
     // POST /api/technicians/:id/logout, whose handler (logoutTechnician)
     // independently forces the technician offline via
-    // forceTechnicianOffline(), so correctness doesn't depend on this emit
-    // landing.
-    if (userRole == 'technician' && _isAvailable && isConnected) {
+    // forceTechnicianOffline(), so correctness doesn't strictly depend on
+    // this emit landing — but we still attempt it unconditionally (not
+    // gated on _isAvailable) since a technician can be logged in without
+    // having toggled "online" this session, and disconnect() always means
+    // they're leaving, unlike goOffline()'s idempotent manual toggle.
+    //
+    // A queued .emit() has no guaranteed delivery before the socket is torn
+    // down on the next line — historically this method disconnected/disposed
+    // immediately after emitting, giving the frame no reliable chance to
+    // actually leave the client. The short delay below is what closes that
+    // race: it's the difference between "usually reaches the server" and
+    // "reliably reaches the server" for the socket-side half of logout (the
+    // REST call remains the authoritative backstop either way).
+    var emittedOffline = false;
+    if (userRole == 'technician' && isConnected) {
       _emitTechnicianOffline();
+      emittedOffline = true;
     } else if (userRole == 'driver' && _isDriverOnline && isConnected) {
       _socket?.emit('driver_offline', {'driverId': userId});
       _log('OFFLINE', 'emitted driver_offline on disconnect');
+      emittedOffline = true;
+    }
+    if (emittedOffline) {
+      await Future.delayed(const Duration(milliseconds: 250));
     }
 
     _persistOnlineState(false);

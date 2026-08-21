@@ -168,10 +168,15 @@ class _TechnicianBookingDetailScreenState
   // Document — multi-image upload
   final List<_TechPresDoc> _docUploads = [];
   bool _docIsPicking = false;
-  bool _capturingCollectionProof = false;
-  // Sample-collection proof photo — url is null until one has been taken;
-  // loading is true only during the initial fetch on screen open.
-  String? _collectionProofUrl;
+  // Which patient's photo is currently being captured/uploaded, if any —
+  // only one camera capture can be in flight at a time.
+  int? _capturingCollectionProofForPatientId;
+  // Sample-collection proof photo — one per patient on this visit (primary +
+  // family members), keyed by patient_id. Each family member has their own
+  // booking_id server-side (see ip_booking_documents), so this must never be
+  // a single shared value — otherwise the last patient photographed
+  // overwrites every other patient's display.
+  final Map<int, String?> _patientCollectionProofUrl = {};
   bool _collectionProofLoading = true;
   bool _docVerified  = false;
   bool _docsLoading  = true;
@@ -358,6 +363,7 @@ class _TechnicianBookingDetailScreenState
       await Future.wait([
         _refreshPaymentInfo(),
         _loadLinkedPatients(),
+        _loadItems(),
       ]);
     } finally {
       if (mounted) setState(() => _isReloading = false);
@@ -415,12 +421,34 @@ class _TechnicianBookingDetailScreenState
       final doc = await ApiService.getCollectionProofPhoto(bookingId);
       if (!mounted) return;
       setState(() {
-        _collectionProofUrl     = doc?['file_path'] as String?;
+        if (widget.booking.patientId != null) {
+          _patientCollectionProofUrl[widget.booking.patientId!] = doc?['file_path'] as String?;
+        }
         _collectionProofLoading = false;
       });
     } catch (e) {
       debugPrint('[_loadCollectionProof] ERROR: $e');
       if (mounted) setState(() => _collectionProofLoading = false);
+    }
+  }
+
+  // Each family member has their own booking_id, so their collection-proof
+  // photo (see _loadCollectionProof for the primary) must be fetched and
+  // keyed separately — otherwise every patient would show whichever photo
+  // happened to load last.
+  Future<void> _loadFamilyCollectionProofs(List<Map<String, dynamic>> patients) async {
+    for (final p in patients) {
+      final pid = (p['patient_id'] as num?)?.toInt();
+      final bid = (p['booking_id'] as num?)?.toInt();
+      if (pid == null || bid == null) continue;
+      try {
+        final doc = await ApiService.getCollectionProofPhoto(bid);
+        if (mounted) {
+          setState(() => _patientCollectionProofUrl[pid] = doc?['file_path'] as String?);
+        }
+      } catch (e) {
+        debugPrint('[_loadFamilyCollectionProofs] patient=$pid ERROR: $e');
+      }
     }
   }
 
@@ -481,6 +509,7 @@ class _TechnicianBookingDetailScreenState
       final patients = await ApiService.getLinkedPatients(bookingId);
       if (mounted) setState(() => _linkedPatients = patients);
       _loadFamilyDocRequirements(patients);
+      _loadFamilyCollectionProofs(patients);
     } catch (e) {
       debugPrint('[_loadLinkedPatients] ERROR: $e');
     }
@@ -1389,12 +1418,18 @@ void _resumeJourney() {
   // prescription documents: raw bytes → /api/upload → URL, then the URL is
   // linked to this booking_id via saveCollectionProofPhoto. A retake simply
   // calls this again — the server keeps the newest photo as current.
-  Future<void> _captureAndUploadCollectionProof() async {
-    if (_capturingCollectionProof) return;
-    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+  // patientId/bookingId identify WHICH patient this photo belongs to — the
+  // primary patient's own booking, or one family member's own booking_id.
+  // Never assume widget.booking.id here, or every family member's photo
+  // would overwrite the primary's (or each other's).
+  Future<void> _captureAndUploadCollectionProof({
+    required int patientId,
+    required int bookingId,
+  }) async {
+    if (_capturingCollectionProofForPatientId != null) return;
     if (bookingId <= 0) return;
 
-    setState(() => _capturingCollectionProof = true);
+    setState(() => _capturingCollectionProofForPatientId = patientId);
     try {
       final image = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
       if (image == null) return; // technician cancelled — fine, it's optional
@@ -1422,7 +1457,7 @@ void _resumeJourney() {
         return;
       }
 
-      if (mounted) setState(() => _collectionProofUrl = url);
+      if (mounted) setState(() => _patientCollectionProofUrl[patientId] = url);
     } catch (e) {
       debugPrint('Error capturing collection proof photo: $e');
       if (mounted) {
@@ -1432,7 +1467,7 @@ void _resumeJourney() {
         ));
       }
     } finally {
-      if (mounted) setState(() => _capturingCollectionProof = false);
+      if (mounted) setState(() => _capturingCollectionProofForPatientId = null);
     }
   }
 
@@ -1568,8 +1603,7 @@ void _resumeJourney() {
   // Reuses the same full-screen viewer as prescription docs — wraps the
   // single collection-proof URL in a _TechPresDoc since that's what the
   // viewer expects, there's just one image and no delete action here.
-  void _viewCollectionProofImage() {
-    final url = _collectionProofUrl;
+  void _viewCollectionProofImage(String? url) {
     if (url == null) return;
     Navigator.push(context, MaterialPageRoute(
         builder: (_) => _DocImageViewerPage(
@@ -2534,7 +2568,9 @@ void _resumeJourney() {
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
-          '${_journeySteps[i + 1].label} ▸',
+          _journeySteps[i + 1].label == 'OTP Verified'
+              ? 'Enter OTP ▸'
+              : '${_journeySteps[i + 1].label} ▸',
           style: const TextStyle(
             fontSize: 11,
             fontWeight: FontWeight.w700,
@@ -2787,103 +2823,128 @@ void _resumeJourney() {
                     padding: EdgeInsets.symmetric(vertical: 20),
                     child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
                   )
+                // One block per patient in this visit (primary + any family
+                // members) — each keyed to their own patient_id/booking_id
+                // via _patientCollectionProofUrl, so one patient's photo
+                // never overwrites or is shown for another patient.
                 : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: _collectionProofUrl != null
-                            ? AppColors.brandGreenSurface
-                            : const Color(0xFFFFF3E0),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        _collectionProofUrl != null ? 'ADDED' : 'NOT ADDED',
-                        style: TextStyle(
-                          fontSize: 9,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.5,
-                          color: _collectionProofUrl != null
-                              ? AppColors.brandGreen
-                              : const Color(0xFFE65100),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 10),
-                    if (_collectionProofUrl == null)
-                      GestureDetector(
-                        onTap: _capturingCollectionProof ? null : _captureAndUploadCollectionProof,
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(vertical: 22),
-                          decoration: BoxDecoration(
-                            color: AppColors.background,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: AppColors.divider, width: 1.5),
-                          ),
-                          child: Column(mainAxisSize: MainAxisSize.min, children: [
-                            _capturingCollectionProof
-                                ? const SizedBox(
-                                    width: 22, height: 22,
-                                    child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
-                                  )
-                                : const Icon(Icons.camera_alt_outlined, size: 22, color: AppColors.textHint),
-                            const SizedBox(height: 6),
-                            Text(
-                              _capturingCollectionProof ? 'Opening camera…' : 'Take Collection Photo',
-                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
-                            ),
-                          ]),
-                        ),
-                      )
-                    else
-                      Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        GestureDetector(
-                          onTap: _viewCollectionProofImage,
-                          child: Container(
-                            width: 88,
-                            height: 88,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: AppColors.divider),
-                            ),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(10),
-                              child: Image.network(
-                                _collectionProofUrl!,
-                                fit: BoxFit.cover,
-                                loadingBuilder: (_, child, progress) => progress == null
-                                    ? child
-                                    : const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
-                                errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: AppColors.textHint),
+                    for (final patient in _visitPatients) ...[
+                      Builder(builder: (context) {
+                        final pid           = patient['id'] as int?;
+                        final patientBookingId = patient['bookingId'] as int?;
+                        final pname         = patient['name'] as String;
+                        final proofUrl      = pid != null ? _patientCollectionProofUrl[pid] : null;
+                        final isCapturing   = _capturingCollectionProofForPatientId == pid;
+                        final canCapture    = pid != null && patientBookingId != null;
+                        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Row(children: [
+                            Text(pname,
+                                style: const TextStyle(
+                                    fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: proofUrl != null
+                                    ? AppColors.brandGreenSurface
+                                    : const Color(0xFFFFF3E0),
+                                borderRadius: BorderRadius.circular(6),
                               ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            const Text('Proof photo captured',
-                                style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                            const SizedBox(height: 8),
-                            TextButton.icon(
-                              onPressed: _capturingCollectionProof ? null : _captureAndUploadCollectionProof,
-                              icon: _capturingCollectionProof
-                                  ? const SizedBox(
-                                      width: 14, height: 14,
-                                      child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
-                                    )
-                                  : const Icon(Icons.refresh_rounded, size: 16),
-                              label: Text(_capturingCollectionProof ? 'Retaking…' : 'Retake Photo'),
-                              style: TextButton.styleFrom(
-                                foregroundColor: AppColors.brandGreen,
-                                padding: EdgeInsets.zero,
-                                minimumSize: const Size(0, 0),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              child: Text(
+                                proofUrl != null ? 'ADDED' : 'NOT ADDED',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w700,
+                                  letterSpacing: 0.5,
+                                  color: proofUrl != null
+                                      ? AppColors.brandGreen
+                                      : const Color(0xFFE65100),
+                                ),
                               ),
                             ),
                           ]),
-                        ),
-                      ]),
+                          const SizedBox(height: 10),
+                          if (proofUrl == null)
+                            GestureDetector(
+                              onTap: (!canCapture || isCapturing) ? null : () =>
+                                  _captureAndUploadCollectionProof(patientId: pid, bookingId: patientBookingId),
+                              child: Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(vertical: 22),
+                                decoration: BoxDecoration(
+                                  color: AppColors.background,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: AppColors.divider, width: 1.5),
+                                ),
+                                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                  isCapturing
+                                      ? const SizedBox(
+                                          width: 22, height: 22,
+                                          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+                                        )
+                                      : const Icon(Icons.camera_alt_outlined, size: 22, color: AppColors.textHint),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    isCapturing ? 'Opening camera…' : 'Take Collection Photo',
+                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
+                                  ),
+                                ]),
+                              ),
+                            )
+                          else
+                            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              GestureDetector(
+                                onTap: () => _viewCollectionProofImage(proofUrl),
+                                child: Container(
+                                  width: 88,
+                                  height: 88,
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: AppColors.divider),
+                                  ),
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: Image.network(
+                                      proofUrl,
+                                      fit: BoxFit.cover,
+                                      loadingBuilder: (_, child, progress) => progress == null
+                                          ? child
+                                          : const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                                      errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: AppColors.textHint),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                  const Text('Proof photo captured',
+                                      style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                                  const SizedBox(height: 8),
+                                  TextButton.icon(
+                                    onPressed: (!canCapture || isCapturing) ? null : () =>
+                                        _captureAndUploadCollectionProof(patientId: pid, bookingId: patientBookingId),
+                                    icon: isCapturing
+                                        ? const SizedBox(
+                                            width: 14, height: 14,
+                                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+                                          )
+                                        : const Icon(Icons.refresh_rounded, size: 16),
+                                    label: Text(isCapturing ? 'Retaking…' : 'Retake Photo'),
+                                    style: TextButton.styleFrom(
+                                      foregroundColor: AppColors.brandGreen,
+                                      padding: EdgeInsets.zero,
+                                      minimumSize: const Size(0, 0),
+                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                  ),
+                                ]),
+                              ),
+                            ]),
+                        ]);
+                      }),
+                      if (patient != _visitPatients.last) const SizedBox(height: 14),
+                    ],
                   ]),
           ),
 
