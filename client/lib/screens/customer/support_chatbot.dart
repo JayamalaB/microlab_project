@@ -20,6 +20,8 @@ const _kChatApiBase  = 'https://ai.neuralarc.com';
 const _kVoiceApiBase = 'https://ai.neuralarc.com'; // STT + TTS (Node.js server)
 
 // ── Promo config (mirrors index.html PROMO_CONFIG) ───────────────────────────
+// Flip to true to bring the YouTube promo card back — banner carousel is unaffected.
+const _kShowYoutubePromo = false;
 const _kYoutubeId      = 'gmUHEvrpYoU';
 const _kYoutubeTitle   = 'NeuralArc – IoT & AI Solutions';
 const _kYoutubeSub     = 'See how we build end-to-end smart systems for industry.';
@@ -1447,13 +1449,15 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
 
   // ── Promo block: YouTube card + banner carousel ───────────────────────────
   Widget _buildPromoBlock() {
-    return const Padding(
-      padding: EdgeInsets.only(bottom: 16),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
       child: Column(
         children: [
-          _YoutubeCard(),
-          SizedBox(height: 10),
-          _BannerCarousel(imageUrls: _kBannerUrls),
+          if (_kShowYoutubePromo) ...const [
+            _YoutubeCard(),
+            SizedBox(height: 10),
+          ],
+          const _BannerCarousel(imageUrls: _kBannerUrls),
         ],
       ),
     );
