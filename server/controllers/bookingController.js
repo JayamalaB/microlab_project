@@ -1070,15 +1070,12 @@ exports.saveCollectionProofPhoto = async (req, res) => {
       [bookingId, booking.patient_id, imageUrl, fileName, uploadedBy]
     );
 
-    // Sync to client server — this action uses its own minimal payload shape
-    // (technician_details + proof_photo), built inside syncBookingToClient.
-    syncBookingToClient(Number(bookingId), {
-      mobile:        req.user.mobile,
-      type:          'technician',
-      action:        'collection_photo_added',
-      technicianId:  req.user.id,
-      proofPhoto:    imageUrl,
-    }).catch(err => console.error(`[clientSync] saveCollectionProofPhoto sync failed booking_id=${bookingId}:`, err.message));
+    // No individual Jayamala sync here — the collection photo now reaches
+    // the client server only once, in the consolidated visit_completed
+    // request fired from verifyBookingOtp, which reads the most recent
+    // collection_proof row for each booking directly from the DB. This
+    // photo is still saved to ip_booking_documents above exactly as before;
+    // only the immediate per-action sync was removed.
 
     res.status(201).json({ success: true, docId: result.insertId });
   } catch (err) {
@@ -1153,34 +1150,11 @@ exports.addItem = async (req, res) => {
        WHERE booking_id = ?`,
       [price, price, bookingId]
     );
-    // A generic (booking-level, not item-specific) prescription may already
-    // exist for this booking — see the same booking_item_id-OR-NULL join
-    // used for blood_test_list in clientSync.js. A brand-new item can never
-    // have its OWN prescription yet, but it can inherit that generic one.
-    const [[existingDoc]] = await db.execute(
-      `SELECT file_path FROM ip_booking_documents
-       WHERE booking_id = ? AND booking_item_id IS NULL AND file_description = 'prescription'
-       ORDER BY created_at DESC LIMIT 1`,
-      [bookingId]
-    );
-    const rawDocReq = product.document_required;
-    const docRequired = rawDocReq === 1 || rawDocReq === '1' || rawDocReq === 'yes';
-
-    // Sync to client server — this action uses its own minimal payload shape
-    // (added_test), built inside syncBookingToClient. Each add (even after a
-    // prior item was removed) is its own independent package_added event.
-    syncBookingToClient(Number(bookingId), {
-      mobile: req.user.mobile,
-      type:   'technician',
-      action: 'package_added',
-      addedTest: {
-        id:               product.product_id,
-        name:             product.product_name,
-        price,
-        documentRequired: docRequired,
-        documentUrl:      existingDoc?.file_path ?? null,
-      },
-    }).catch(err => console.error(`[clientSync] addItem sync failed booking_id=${bookingId}:`, err.message));
+    // No individual Jayamala sync here — a newly added package now reaches
+    // the client server only once, in the consolidated visit_completed
+    // request fired from verifyBookingOtp. This item is still saved to
+    // ip_booking_items/ip_bookings above exactly as before; only the
+    // immediate per-action sync was removed.
 
     res.status(201).json({
       success: true,

@@ -9,7 +9,7 @@ const fs   = require('fs');
 const path = require('path');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
-const { syncBookingToClient } = require('../services/clientSync');
+const { syncVisitCompletionToClient } = require('../services/clientSync');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -711,14 +711,11 @@ exports.collectPayment = async (req, res) => {
 
     console.log(`✅ collectPayment — booking_id=${bookingId} method=${paymentMethod} +₹${amount} → paid=₹${newAmountPaid} due=₹${newAmountDue} status=${newPaymentStatus} by technician_id=${technicianId}`);
 
-    // Sync to client server — payment_update is the same, already-confirmed
-    // action the customer-side payment flow uses; only the initiator
-    // (technician, not the account-holder) differs here.
-    syncBookingToClient(Number(bookingId), {
-      mobile: req.user.mobile,
-      type:   'technician',
-      action: 'payment_update',
-    }).catch(err => console.error(`[clientSync] collectPayment sync failed booking_id=${bookingId}:`, err.message));
+    // No individual Jayamala sync here — payment for a technician-run visit
+    // now reaches the client server only once, in the consolidated
+    // visit_completed request fired from verifyBookingOtp. This value is
+    // still saved to ip_payment_transactions/ip_bookings above exactly as
+    // before; only the immediate per-action sync was removed.
 
     res.json({ success: true, amountPaid: newAmountPaid, amountDue: newAmountDue, paymentStatus: newPaymentStatus });
   } catch (err) {
@@ -1118,22 +1115,13 @@ exports.addVisitMember = async (req, res) => {
     const totalVisitAmount = results.reduce((s, r) => s + r.totalAmount, 0);
     console.log(`✅ addVisitMember — ${results.length} member(s) added parent=${parentBookingId} visit_group=${visitGroupId}`);
 
-    // Sync each new member's booking to the client server — technician is
-    // the initiator here (not the account-holder patient), per explicit
-    // requirement: technician's own mobile + user_type: 'technician'.
-    // Uses the family_member_added action's own minimal payload shape
-    // (technician_details + visit_group_id), not the generic new_booking one.
-    // Fire-and-forget, same non-blocking pattern used by every other
-    // syncBookingToClient call site in the codebase.
-    for (const r of results) {
-      syncBookingToClient(r.newBookingId, {
-        mobile:       req.user.mobile,
-        type:         'technician',
-        action:       'family_member_added',
-        technicianId: technicianId,
-        visitGroupId: visitGroupId,
-      }).catch(err => console.error(`[clientSync] addVisitMember sync failed booking_id=${r.newBookingId}:`, err.message));
-    }
+    // No individual Jayamala sync here — a newly added family member now
+    // reaches the client server only once, in the consolidated
+    // visit_completed request fired from verifyBookingOtp, which resolves
+    // every booking sharing this visit_group_id (including these new ones)
+    // at that time. These bookings are still saved to ip_bookings/
+    // ip_booking_items above exactly as before; only the immediate
+    // per-action sync was removed.
     res.status(201).json({
       success: true,
       members: results,
@@ -1395,6 +1383,19 @@ exports.verifyBookingOtp = async (req, res) => {
     } catch (e) {
       console.error(`❌ [verifyBookingOtp] sibling cascade failed booking=${bookingId}: ${e.message}`);
     }
+
+    // Sync the whole visit to the client server in one consolidated request
+    // — primary booking + every sibling in the same visit_group_id, each
+    // with their own tests/payment/photo. This is now the only Jayamala
+    // sync point for a technician-run visit; the individual package_added /
+    // payment_update / family_member_added / collection_photo_added syncs
+    // were removed from their respective actions. Fire-and-forget — must
+    // never affect the OTP-verification response already being sent below.
+    syncVisitCompletionToClient(Number(bookingId), {
+      mobile:       req.user.mobile,
+      type:         'technician',
+      technicianId: technicianId,
+    }).catch(err => console.error(`[clientSync] verifyBookingOtp visit_completed sync failed booking_id=${bookingId}:`, err.message));
 
     console.log(`✅ verifyBookingOtp — booking_id=${bookingId} OTP verified by technician_id=${technicianId}`);
     res.json({ success: true });
