@@ -175,7 +175,7 @@ Rules:
 3. Focus ONLY on what was asked
 4. Be direct — no fluff or extra explanations
 5. Include prices/dates only if relevant to the question
-6. ALWAYS use the ₹ symbol (Indian Rupee) for all prices — never use $ or USD
+6. All prices are in Indian Rupees — always format them with ₹, never $ or USD
 
 Response:`;
 
