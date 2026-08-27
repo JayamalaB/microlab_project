@@ -7,6 +7,7 @@ const llmRetriever = require('../rag/llmRetriever');
 const db = require('../db/database');
 const { resolveKnowledge, matchDefaultQA, matchDefaultQASemantic, isDBQuestion } = require('../services/knowledgeService');
 const { getLiveContent } = require('../rag/websiteReader');
+const { translateText } = require('./voice');
 const OpenAI = require('openai');
 
 const VALID_LAYERS = new Set(['all', 'static', 'db', 'web']);
@@ -40,22 +41,35 @@ const testBookingUpload = multer({
 
 /**
  * POST /api/chat/ask
- * Body: { question, session_id?, layer? }
+ * Body: { question, session_id?, layer?, language? }
  * layer: 'all' (default) | 'static' | 'db' | 'web'
+ * language: set to 'ta-IN' by voice input when Sarvam STT detected Tamil —
+ * translates the question to English before the pipeline runs, and the
+ * answer back to Tamil before responding. Typed messages never set this.
  */
 router.post('/ask', async (req, res) => {
     try {
-        const { question, session_id, layer = 'all', patient_id } = req.body;
+        const { question: rawQuestion, session_id, layer = 'all', patient_id, language } = req.body;
 
-        if (!question) {
+        if (!rawQuestion) {
             return res.status(400).json({ error: 'Question is required' });
         }
 
         const sessionId   = session_id || req.ip || 'default';
         const searchLayer = VALID_LAYERS.has(layer) ? layer : 'all';
         const patientId   = patient_id || null;
+        const isTamil     = language === 'ta-IN';
 
-        console.log(`🤖 [${sessionId}] Layer: "${searchLayer}" | Patient: ${patientId || 'guest'} | Q: "${question}"`);
+        // Translate at the boundary only — llmRetriever.js/llmService.js and
+        // the static QA/website layers below all stay English-only internally.
+        let question = rawQuestion;
+        if (isTamil) {
+            const translated = await translateText(rawQuestion, 'ta-IN', 'en-IN');
+            if (translated.text) question = translated.text;
+            else console.error('[Tamil] translate-in failed, using raw transcript:', translated.error);
+        }
+
+        console.log(`🤖 [${sessionId}] Layer: "${searchLayer}" | Patient: ${patientId || 'guest'} | Q: "${question}"${isTamil ? ' (translated from Tamil)' : ''}`);
 
         let result;
 
@@ -80,6 +94,12 @@ router.post('/ask', async (req, res) => {
 
         } else {
             result = await llmRetriever.answerWithLLM(question, sessionId, { patientId });
+        }
+
+        if (isTamil && result?.answer) {
+            const translatedBack = await translateText(result.answer, 'en-IN', 'ta-IN');
+            if (translatedBack.text) result.answer = translatedBack.text;
+            else console.error('[Tamil] translate-out failed, replying in English:', translatedBack.error);
         }
 
         res.json({ success: true, data: result, layer: searchLayer });

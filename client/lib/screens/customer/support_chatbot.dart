@@ -859,8 +859,14 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
 
       if (data['success'] == true) {
         final transcript = (data['transcript'] as String?)?.trim() ?? '';
+        // Sarvam STT auto-detects the spoken language ('language_code' in the
+        // response) — only Tamil gets threaded through as voiceLanguage, so
+        // the server knows to translate at the /ask boundary.
+        final detectedLang = data['language_code'] as String?;
         if (transcript.isNotEmpty) {
-          await _send(transcript, voiceTranscript: transcript);
+          await _send(transcript,
+              voiceTranscript: transcript,
+              voiceLanguage: detectedLang == 'ta-IN' ? detectedLang : null);
         } else {
           _addVoiceError("I couldn't hear you clearly. Please tap the mic and try speaking again.");
         }
@@ -916,7 +922,10 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
     _scrollBottom();
   }
 
-  Future<void> _send(String text, {String? voiceTranscript}) async {
+  // voiceLanguage is set only for voice input Sarvam detected as Tamil
+  // ('ta-IN') — typed messages and English voice input never set it, so the
+  // server's translate-at-boundary step (chat.js) only runs for Tamil speech.
+  Future<void> _send(String text, {String? voiceTranscript, String? voiceLanguage}) async {
     if (text.trim().isEmpty) return;
     _stopTts();
     setState(() => _msgs.add(_Msg(
@@ -995,6 +1004,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               'session_id': _sid,
               'layer': _layer.apiKey,
               if (_verifiedPatientId != null) 'patient_id': _verifiedPatientId,
+              if (voiceLanguage != null) 'language': voiceLanguage,
             }),
           )
           .timeout(const Duration(seconds: 20));
