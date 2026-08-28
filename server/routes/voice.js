@@ -194,19 +194,23 @@ function _sttSarvamCall(buffer, languageCode) {
   });
 }
 
-// Public entry point: auto-detects the spoken language, but only trusts that
-// first pass to answer "was this English or not" — Sarvam's full 23-language
-// auto-detect ('unknown') was observed mis-decoding Tamil speech as an
-// unrelated language (e.g. Gujarati script), not just mislabelling it, so
-// the garbled transcript can't be corrected after the fact by inspecting the
-// text. Whenever the first pass isn't en-IN, this app only ever means
-// Tamil, so it re-runs STT on the same audio with ta-IN forced explicitly
-// and uses that transcript instead. Returns { transcript, languageCode } or
+// Public entry point: auto-detects the spoken language first. Trusts that
+// transcript outright when it's en-IN or ta-IN — those are the only two
+// languages this app supports, and re-decoding audio the model already
+// transcribed correctly (via a second, language-forced call) was found to
+// make results *worse*, not better: a forced language_code makes Saaras
+// commit to that language's phonetics/vocabulary even when unsure, and it
+// tends to fall back to a short generic guess (e.g. "சரி") rather than the
+// actual words spoken. The retry is reserved for the one real failure case
+// observed — full auto-detect mis-decoding Tamil speech as some unrelated
+// third language entirely (e.g. Gujarati script, not just a wrong label) —
+// so it only re-runs (forcing ta-IN) when the detected language is neither
+// of the two this app understands. Returns { transcript, languageCode } or
 // { error }.
 async function sttSarvam(buffer) {
   const auto = await _sttSarvamCall(buffer, 'unknown');
   if (auto.error) return auto;
-  if (auto.languageCode === 'en-IN') return auto;
+  if (auto.languageCode === 'en-IN' || auto.languageCode === 'ta-IN') return auto;
 
   const forced = await _sttSarvamCall(buffer, 'ta-IN');
   if (forced.error) return forced;
