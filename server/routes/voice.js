@@ -63,6 +63,14 @@ function cleanText(text) {
     .replace(/₹/g, 'rupees ')
     .replace(/[—–]/g, ', ')
     .replace(/@/g, ' at ')
+    // Tamil TTS auto-narrates a raw "H:MM" digit pattern as "<number>
+    // மணிக்கு" on its own — with the written "மணி" that already follows it
+    // (e.g. "9:00 மணி") also being read, the result is "9 மணிக்கு மணி".
+    // Times in this app are always on the hour, so dropping the ":00"
+    // leaves no colon-time pattern for that auto-narration to trigger on —
+    // just a plain "9" followed by the already-correct written "மணி",
+    // read once as "ஒன்பது மணி".
+    .replace(/(\d{1,2}):00(?=\s*மணி)/g, '$1')
     .replace(/^\s*[.:;]\s+/gm, '')      // remove stray leading punctuation
     .replace(/\s{2,}/g, ' ')
     .trim();
@@ -279,6 +287,19 @@ function translateText(text, sourceLanguageCode, targetLanguageCode) {
   });
 }
 
+// Static, pre-verified Tamil labels for known "Label: Value" bullet lines.
+// Translating a short label word in isolation is unreliable — Sarvam has
+// been observed picking an unrelated meaning depending on what follows it
+// (e.g. "Mobile: N/A" → "ஊடறுதல்: இல்லை" instead of "கைபேசி", with the
+// SAME word translating correctly elsewhere in the same response as soon
+// as a real number follows it). Extend this map as new mistranslated
+// labels turn up; anything not listed here still falls through to the
+// normal per-line API translation below.
+const TAMIL_LABELS = {
+  'mobile':         'கைபேசி',
+  'working hours':  'வேலை நேரம்',
+};
+
 // Sarvam's Translate API only accepts one string per call and doesn't
 // preserve line breaks/bullet layout when given a multi-line blob (it
 // reflows everything into a single paragraph — observed on translated
@@ -295,7 +316,7 @@ async function translateMultiline(text, sourceLanguageCode, targetLanguageCode) 
   const lines = text.split('\n');
   const results = await Promise.all(
     lines.map((line) => line.trim()
-      ? translateText(line, sourceLanguageCode, targetLanguageCode)
+      ? _translateLine(line, sourceLanguageCode, targetLanguageCode)
       : Promise.resolve({ text: '' }))
   );
 
@@ -303,6 +324,45 @@ async function translateMultiline(text, sourceLanguageCode, targetLanguageCode) 
   if (failed) return { error: failed.error };
 
   return { text: results.map(r => r.text).join('\n') };
+}
+
+// One "   • Label: Value" bullet line — uses the static TAMIL_LABELS
+// dictionary for the label when known (skipping the API for it entirely),
+// and skips translating values that don't need it (phone numbers, "N/A").
+// Falls back to translating the whole line via the API when the label
+// isn't recognized, or the target language isn't Tamil.
+async function _translateLine(line, sourceLanguageCode, targetLanguageCode) {
+  // Branch/place names are proper nouns — never translate them. Sarvam has
+  // been observed translating the brand name "MicroLab" literally into
+  // "சிறிய ஆய்வகம்" ("small laboratory") instead of preserving it.
+  // formatBranchInfo() always marks a name line with a leading 🏥.
+  if (targetLanguageCode === 'ta-IN' && line.trim().startsWith('🏥')) {
+    return { text: line };
+  }
+
+  const match = targetLanguageCode === 'ta-IN'
+    ? line.match(/^(\s*(?:•\s*)?)([A-Za-z][A-Za-z ]*?):\s*(.*)$/)
+    : null;
+  const knownLabel = match ? TAMIL_LABELS[match[2].trim().toLowerCase()] : null;
+
+  if (match && knownLabel) {
+    const [, prefix, , rawValue] = match;
+    const value = rawValue.trim();
+
+    if (!value || value.toUpperCase() === 'N/A') {
+      return { text: `${prefix}${knownLabel}: இல்லை` };
+    }
+    if (/^[\d\s+\-()]+$/.test(value)) {
+      // Phone numbers etc. — nothing to translate, and translating digits
+      // risks the model "reading" them into words.
+      return { text: `${prefix}${knownLabel}: ${value}` };
+    }
+    const translatedValue = await translateText(value, sourceLanguageCode, targetLanguageCode);
+    if (translatedValue.error) return translatedValue;
+    return { text: `${prefix}${knownLabel}: ${translatedValue.text}` };
+  }
+
+  return translateText(line, sourceLanguageCode, targetLanguageCode);
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
