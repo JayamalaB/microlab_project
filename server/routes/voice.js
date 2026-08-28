@@ -134,8 +134,10 @@ function ttsSarvam(text) {
   });
 }
 
-// POST audio buffer to Sarvam STT; returns { transcript } or { error } on failure
-function sttSarvam(buffer) {
+// POST audio buffer to Sarvam STT with an explicit language_code (or
+// 'unknown' for full auto-detect). Returns { transcript, languageCode } or
+// { error } on failure.
+function _sttSarvamCall(buffer, languageCode) {
   const apiKey = process.env.SARVAM_API_KEY;
   if (!apiKey) {
     console.error('[Sarvam STT] SARVAM_API_KEY is not set in environment');
@@ -144,10 +146,7 @@ function sttSarvam(buffer) {
 
   const form = new FormData();
   form.append('file',          buffer, { filename: 'audio.wav', contentType: 'audio/wav' });
-  // 'unknown' asks Saaras to auto-detect the spoken language instead of
-  // assuming English — the response's own language_code field then tells us
-  // what was actually detected (see below), driving Tamil translation.
-  form.append('language_code', 'unknown');
+  form.append('language_code', languageCode);
   form.append('model',         'saaras:v3');
 
   return new Promise((resolve) => {
@@ -193,6 +192,25 @@ function sttSarvam(buffer) {
     });
     form.pipe(request);
   });
+}
+
+// Public entry point: auto-detects the spoken language, but only trusts that
+// first pass to answer "was this English or not" — Sarvam's full 23-language
+// auto-detect ('unknown') was observed mis-decoding Tamil speech as an
+// unrelated language (e.g. Gujarati script), not just mislabelling it, so
+// the garbled transcript can't be corrected after the fact by inspecting the
+// text. Whenever the first pass isn't en-IN, this app only ever means
+// Tamil, so it re-runs STT on the same audio with ta-IN forced explicitly
+// and uses that transcript instead. Returns { transcript, languageCode } or
+// { error }.
+async function sttSarvam(buffer) {
+  const auto = await _sttSarvamCall(buffer, 'unknown');
+  if (auto.error) return auto;
+  if (auto.languageCode === 'en-IN') return auto;
+
+  const forced = await _sttSarvamCall(buffer, 'ta-IN');
+  if (forced.error) return forced;
+  return { transcript: forced.transcript, languageCode: 'ta-IN' };
 }
 
 // POST to Sarvam Translate; returns { text: translatedString } or { error } on failure.
