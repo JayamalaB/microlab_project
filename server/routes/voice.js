@@ -9,14 +9,16 @@ const SARVAM_TTS_PATH = '/text-to-speech';
 const SARVAM_STT_PATH = '/speech-to-text';
 const SARVAM_TRANSLATE_PATH = '/translate';
 
-const TTS_SPEAKER      = 'anushka';
-const TTS_MODEL        = 'bulbul:v2';
+// bulbul:v2 was deprecated by Sarvam (400 invalid_request_err) — v3 also
+// renames some request fields and drops pitch/loudness entirely (tone now
+// comes from speaker choice instead). 'anushka' doesn't exist as a v3
+// speaker; 'shubh' is v3's documented default.
+const TTS_SPEAKER      = 'shubh';
+const TTS_MODEL        = 'bulbul:v3';
 const TTS_DEFAULT_LANG = 'en-IN';
 const TTS_TAMIL_LANG   = 'ta-IN';
 const TTS_SAMPLE_RATE  = 22050;
 const TTS_PACE         = 0.92;
-const TTS_PITCH        = 0;
-const TTS_LOUDNESS     = 1.1;
 
 const TAMIL_RE = /[஀-௿]/;
 
@@ -76,14 +78,11 @@ function ttsSarvam(text) {
 
   const lang = detectLang(text);
   const body = JSON.stringify({
-    inputs:               [text],
-    target_language_code: lang,
+    text:                 text,
+    language_code:        lang,
     speaker:              TTS_SPEAKER,
-    pitch:                TTS_PITCH,
     pace:                 TTS_PACE,
-    loudness:             TTS_LOUDNESS,
     speech_sample_rate:   TTS_SAMPLE_RATE,
-    enable_preprocessing: true,
     model:                TTS_MODEL,
   });
 
