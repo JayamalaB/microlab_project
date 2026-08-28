@@ -7,7 +7,7 @@ const llmRetriever = require('../rag/llmRetriever');
 const db = require('../db/database');
 const { resolveKnowledge, matchDefaultQA, matchDefaultQASemantic, isDBQuestion } = require('../services/knowledgeService');
 const { getLiveContent } = require('../rag/websiteReader');
-const { translateText } = require('./voice');
+const { translateText, translateMultiline } = require('./voice');
 const OpenAI = require('openai');
 
 const VALID_LAYERS = new Set(['all', 'static', 'db', 'web']);
@@ -97,7 +97,11 @@ router.post('/ask', async (req, res) => {
         }
 
         if (isTamil && result?.answer) {
-            const translatedBack = await translateText(result.answer, 'en-IN', 'ta-IN');
+            // Multi-line, not single-shot — preserves the bulleted/line-broken
+            // layout formatBranchInfo()/formatBookingDetails()/etc. build,
+            // which a single whole-blob translate call would otherwise reflow
+            // into one dense paragraph.
+            const translatedBack = await translateMultiline(result.answer, 'en-IN', 'ta-IN');
             if (translatedBack.text) result.answer = translatedBack.text;
             else console.error('[Tamil] translate-out failed, replying in English:', translatedBack.error);
         }

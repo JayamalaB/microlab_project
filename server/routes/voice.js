@@ -279,6 +279,32 @@ function translateText(text, sourceLanguageCode, targetLanguageCode) {
   });
 }
 
+// Sarvam's Translate API only accepts one string per call and doesn't
+// preserve line breaks/bullet layout when given a multi-line blob (it
+// reflows everything into a single paragraph — observed on translated
+// branch/booking listings, which formatBranchInfo()/formatBookingDetails()
+// etc. build with \n and "   • " bullets). Splitting here and rejoining
+// with the ORIGINAL line breaks afterward keeps that structure intact,
+// since the API is only ever asked to translate one line at a time and
+// never has a chance to reflow anything. Blank lines are preserved as-is
+// (not sent to the API) — the visual paragraph spacing survives untouched.
+// Calls run in parallel so wall-clock latency stays close to a single call.
+async function translateMultiline(text, sourceLanguageCode, targetLanguageCode) {
+  if (!text || !text.trim()) return { text: '' };
+
+  const lines = text.split('\n');
+  const results = await Promise.all(
+    lines.map((line) => line.trim()
+      ? translateText(line, sourceLanguageCode, targetLanguageCode)
+      : Promise.resolve({ text: '' }))
+  );
+
+  const failed = results.find(r => r.error);
+  if (failed) return { error: failed.error };
+
+  return { text: results.map(r => r.text).join('\n') };
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 // POST /transcribe  — Sarvam Saaras v3 STT
@@ -364,3 +390,4 @@ router.post('/speak', async (req, res) => {
 
 module.exports = router;
 module.exports.translateText = translateText;
+module.exports.translateMultiline = translateMultiline;
