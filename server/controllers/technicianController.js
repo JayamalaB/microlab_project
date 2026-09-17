@@ -676,9 +676,26 @@ exports.collectPayment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
     }
 
-    const totalAmount      = parseFloat(booking.total_amount) || 0;
-    const currentPaid      = parseFloat(booking.amount_paid) || 0;
-    const newAmountPaid    = currentPaid + Number(amount);
+    const totalAmount   = parseFloat(booking.total_amount) || 0;
+    const currentPaid   = parseFloat(booking.amount_paid) || 0;
+    const incomingAmount = Number(amount);
+    const amountDueBefore = Math.max(0, Math.round((totalAmount - currentPaid) * 100) / 100);
+
+    // Reject anything that would push amount_paid past total_amount — covers
+    // both a booking that's already fully paid (amountDueBefore = 0, so any
+    // positive amount is rejected) and a single payment larger than what's
+    // left owed. 0.01 tolerance absorbs float rounding on the subtraction
+    // above, not a real allowance to overpay.
+    if (incomingAmount > amountDueBefore + 0.01) {
+      console.warn(`⚠️  collectPayment — booking_id=${bookingId} rejected: amount=₹${incomingAmount} exceeds amount due=₹${amountDueBefore} by technician_id=${technicianId}`);
+      return res.status(400).json({
+        success: false,
+        message: `Payment amount ₹${incomingAmount} exceeds the amount due ₹${amountDueBefore}`,
+        amountDue: amountDueBefore,
+      });
+    }
+
+    const newAmountPaid    = currentPaid + incomingAmount;
     const newAmountDue     = Math.max(0, totalAmount - newAmountPaid);
     const newPaymentStatus = newAmountDue <= 0 ? 'paid' : 'partial';
 
