@@ -7,13 +7,27 @@ class AuthService {
   static const _base = AppConstants.serverUrl;
 
   // POST /api/auth/send-otp
-  static Future<Map<String, dynamic>> sendOtp(String mobile, String role) async {
+  // forceLogout: set only when the user has explicitly confirmed, after
+  // seeing "already logged in on another device", that they want to log
+  // that other device out and continue (see login_screen.dart's own
+  // handling of that specific error). Passing it here alone isn't enough —
+  // verifyOtp below must ALSO receive it for the same login attempt, since
+  // the real enforcement (not just this fast-fail check) lives there.
+  static Future<Map<String, dynamic>> sendOtp(
+    String mobile,
+    String role, {
+    bool forceLogout = false,
+  }) async {
     try {
       final res = await http
           .post(
             Uri.parse('$_base/api/auth/send-otp'),
             headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'mobile': mobile, 'role': role}),
+            body: jsonEncode({
+              'mobile': mobile,
+              'role': role,
+              if (forceLogout) 'forceLogout': true,
+            }),
           )
           .timeout(const Duration(seconds: 10));
 
@@ -25,14 +39,26 @@ class AuthService {
   }
 
   // POST /api/auth/verify-otp  →  saves token + user to SharedPreferences
+  // forceLogout: see sendOtp's own comment above — this is the call that
+  // actually performs the override, atomically, once the correct OTP has
+  // proven this caller really owns the number.
   static Future<Map<String, dynamic>> verifyOtp(
-      String mobile, String otp, String role) async {
+    String mobile,
+    String otp,
+    String role, {
+    bool forceLogout = false,
+  }) async {
     try {
       final res = await http
           .post(
             Uri.parse('$_base/api/auth/verify-otp'),
             headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'mobile': mobile, 'otp': otp, 'role': role}),
+            body: jsonEncode({
+              'mobile': mobile,
+              'otp': otp,
+              'role': role,
+              if (forceLogout) 'forceLogout': true,
+            }),
           )
           .timeout(const Duration(seconds: 10));
 

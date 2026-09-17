@@ -36,7 +36,12 @@ class _LoginScreenState extends State<LoginScreen> {
     });
   }
 
-  Future<void> _sendOtp() async {
+  // Matches authController.js's sendOtp/verifyOtp exactly — both endpoints
+  // return this identical message for the single-active-session guard, so
+  // one substring check here covers either one being what actually failed.
+  static const _alreadyLoggedInElsewhere = 'already logged in on another device';
+
+  Future<void> _sendOtp({bool forceLogout = false}) async {
     if (!_isValid) return;
     setState(() => _isLoading = true);
     FocusScope.of(context).unfocus();
@@ -45,6 +50,7 @@ class _LoginScreenState extends State<LoginScreen> {
       final result = await ApiService.sendOtp(
         _mobileController.text.trim(),
         _selectedRole,
+        forceLogout: forceLogout,
       );
       if (!mounted) return;
       if (result['success'] == true) {
@@ -54,11 +60,24 @@ class _LoginScreenState extends State<LoginScreen> {
             builder: (_) => OtpScreen(
               mobile:   _mobileController.text.trim(),
               userRole: _selectedRole,
+              // Carries the same confirmation forward — verify-otp is where
+              // the session claim is actually, atomically made, so it needs
+              // this flag too, not just the send-otp call above.
+              forceLogout: forceLogout,
             ),
           ),
         );
       } else {
-        _showError(result['message'] ?? 'Failed to send OTP');
+        final message = (result['message'] as String?) ?? 'Failed to send OTP';
+        _showError(
+          message,
+          // Only offer this when it's genuinely that specific error, and
+          // only if we haven't already tried forcing it (avoids offering
+          // the same "fix" again if forcing it somehow still fails).
+          onForceLogout: (!forceLogout && message.contains(_alreadyLoggedInElsewhere))
+              ? () => _sendOtp(forceLogout: true)
+              : null,
+        );
       }
     } catch (_) {
       if (!mounted) return;
@@ -68,7 +87,7 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  void _showError(String message) {
+  void _showError(String message, {VoidCallback? onForceLogout}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Row(
@@ -81,7 +100,14 @@ class _LoginScreenState extends State<LoginScreen> {
         backgroundColor: const Color(0xFFD32F2F),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        duration: const Duration(seconds: 3),
+        duration: Duration(seconds: onForceLogout != null ? 8 : 3),
+        action: onForceLogout == null
+            ? null
+            : SnackBarAction(
+                label: 'LOG OUT & CONTINUE',
+                textColor: Colors.white,
+                onPressed: onForceLogout,
+              ),
       ),
     );
   }
