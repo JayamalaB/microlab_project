@@ -84,10 +84,25 @@ exports.sendOtp = async (req, res) => {
     step = 'select_user';
     writeLog(`[sendOtp] SELECT ip_users — ${elapsed()}`);
     const [existing] = await db.query(
-      'SELECT user_id, client_id, user_microlab_type, user_auth_token, user_token_expiry FROM ip_users WHERE user_mobile_no = ?',
+      'SELECT user_id, client_id, user_microlab_type, user_auth_token, user_token_expiry, deleted_at FROM ip_users WHERE user_mobile_no = ?',
       [mobile]
     );
     writeLog(`[sendOtp] select done — found=${existing.length} — ${elapsed()}`);
+
+    // Soft-deleted account — reject immediately, before any of the
+    // existing/new-user branching below. Deliberately NOT filtered out of
+    // the SELECT above (e.g. "AND deleted_at IS NULL") — doing that would
+    // make this row invisible to the query entirely, and the code below
+    // would then treat this mobile number as brand new and create a second,
+    // duplicate account for it. Checking it explicitly here, first, is what
+    // actually blocks the number instead of silently working around it.
+    if (existing.length > 0 && existing[0].deleted_at) {
+      writeLog(`[sendOtp] rejected — mobile=${mobile} account is soft-deleted (deleted_at=${existing[0].deleted_at})`);
+      return res.status(403).json({
+        success: false,
+        message: 'This account has been deleted. Please contact support.',
+      });
+    }
 
     // Block technician numbers from logging in as customer
     if (role !== 'technician' && existing.length > 0 && existing[0].user_microlab_type === 'technician') {
@@ -98,22 +113,16 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    // Single-active-session check — up front, before an OTP is ever generated
-    // or sent, so a device that's already logged in elsewhere doesn't even
-    // reach the OTP screen. This is a fast-fail UX check only; it is NOT
-    // the actual enforcement point (a plain SELECT here can race two
-    // concurrent requests) — the atomic claim in verifyOtp remains the real,
-    // race-safe guard that actually grants or denies the session.
-    if (existing.length > 0) {
-      const u = existing[0];
-      if (u.user_auth_token && u.user_token_expiry && new Date(u.user_token_expiry) > new Date()) {
-        writeLog(`[sendOtp] rejected — mobile=${mobile} already has an active session on another device`);
-        return res.status(409).json({
-          success: false,
-          message: 'This number is already logged in on another device. Please log out from that device and try again.',
-        });
-      }
-    }
+    // An existing account with an active session no longer blocks a new OTP
+    // here — a device that's uninstalled (or just switched) has no way to
+    // log itself out first, so blocking at this step permanently locked
+    // that real, common case out of its own account. The single-active-
+    // session GUARANTEE is not weakened by removing this: it now lives
+    // entirely in verifyOtp, at the one point that's actually safe to make
+    // it — after a real OTP has proven who's asking (see verifyOtp's own
+    // comment on the atomic claim for exactly how). This was always only a
+    // fast-fail UX shortcut anyway (see the removed comment this replaces),
+    // never the real enforcement.
 
     if (existing.length === 0) {
       step = 'insert_user';
@@ -244,43 +253,48 @@ exports.verifyOtp = async (req, res) => {
     const isDemo = process.env.DEMO_MOBILE && process.env.DEMO_OTP &&
                    mobile === process.env.DEMO_MOBILE && otp === process.env.DEMO_OTP;
 
-    let rows;
+    let dbUser;
     if (isDemo) {
-      // Look up by mobile only — skip OTP and expiry check
-      [rows] = await db.query(
+      // Look up by mobile only — skip OTP and expiry check, don't consume the OTP
+      // so the fixed code remains reusable across Play Store review sessions.
+      const [[demoUser]] = await db.query(
         `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
-         FROM ip_users WHERE user_mobile_no = ? AND user_active = 1`,
+         FROM ip_users WHERE user_mobile_no = ? AND user_active = 1 AND deleted_at IS NULL LIMIT 1`,
         [mobile]
       );
+      if (!demoUser) {
+        return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
+      }
+      dbUser = demoUser;
       writeLog(`[verifyOtp] demo account login — mobile=${mobile}`);
     } else {
-      // DB-based OTP verification
-      [rows] = await db.query(
-        `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
-         FROM ip_users
-         WHERE user_mobile_no = ? AND user_otp = ? AND user_otp_expiry > NOW() AND user_active = 1`,
+      // Atomic claim-and-consume: fold the validity check into the UPDATE's WHERE clause so
+      // MySQL serializes concurrent requests to the same row — only one request can ever
+      // clear a given OTP, closing the SELECT-then-UPDATE race that allowed double sessions.
+      const [claim] = await db.query(
+        `UPDATE ip_users
+         SET user_otp = NULL, user_otp_expiry = NULL,
+             user_last_active_at = NOW(), user_date_modified = NOW()
+         WHERE user_mobile_no = ? AND user_otp = ? AND user_otp_expiry > NOW()
+           AND user_active = 1 AND deleted_at IS NULL`,
         [mobile, otp]
       );
-    }
 
-    if (rows.length === 0) {
-      return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
-    }
+      if (claim.affectedRows === 0) {
+        return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
+      }
 
-    const dbUser = rows[0];
-    const tokenExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-
-    // Clear OTP after use — skipped for demo account so the fixed OTP remains reusable.
-    // is_logged_in is deliberately NOT set here — it's only set true once the
-    // single-active-session claim below actually succeeds.
-    if (!isDemo) {
-      await db.query(
-        `UPDATE ip_users SET user_otp = NULL, user_otp_expiry = NULL,
-         user_last_active_at = NOW(), user_date_modified = NOW()
-         WHERE user_id = ?`,
-        [dbUser.user_id]
+      // Safe to fetch by mobile alone — the UPDATE above proved this request exclusively
+      // consumed a valid OTP for this number.
+      const [[fetchedUser]] = await db.query(
+        `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
+         FROM ip_users WHERE user_mobile_no = ? AND deleted_at IS NULL LIMIT 1`,
+        [mobile]
       );
+      dbUser = fetchedUser;
     }
+
+    const tokenExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     // ── Technician path ───────────────────────────────────────────────────────
     if (role === 'technician') {
@@ -404,23 +418,25 @@ exports.verifyOtp = async (req, res) => {
         { expiresIn: '30d' }
       );
 
-      // Single-active-session claim — atomic so two simultaneous logins for
-      // the same mobile can't both succeed (see verifyOtp's customer path
-      // for the identical pattern). The WHERE guard only lets this land when
-      // no other device currently holds an unexpired session.
-      const [claimResult] = await db.query(
+      // Session claim — unconditional. Whatever was previously in
+      // user_auth_token belonged to an old session (a different device, or
+      // this same device's earlier login); a real OTP has already proven
+      // this request owns the number (the atomic claim above this
+      // function's OTP check made sure of that), so it always wins,
+      // silently invalidating that old token. That old token still LOOKS
+      // well-formed to jwt.verify elsewhere in the app, but every
+      // authenticated route re-checks it against this exact column
+      // (grep authMiddleware.js) — once overwritten here, the old token no
+      // longer matches what's on file and every request using it is
+      // rejected from that point on. That is the actual revocation; there
+      // is no separate "blocklist" to maintain.
+      await db.query(
         `UPDATE ip_users
          SET user_auth_token = ?, user_token_expiry = ?, is_logged_in = 1, user_date_modified = NOW()
-         WHERE user_id = ?
-           AND (user_auth_token IS NULL OR user_token_expiry <= NOW())`,
+         WHERE user_id = ?`,
         [token, tokenExpiry, dbUser.user_id]
       );
-      if (claimResult.affectedRows === 0) {
-        return res.status(409).json({
-          success: false,
-          message: 'This number is already logged in on another device. Please log out from that device and try again.',
-        });
-      }
+      writeLog(`[verifyOtp] technician_id=${dbTechnicianId} — new session claimed for mobile=${mobile}, any previous session on this number is now invalid`);
 
       // Create session + live_location rows
       let sessionId = null;
@@ -589,23 +605,20 @@ exports.verifyOtp = async (req, res) => {
       { expiresIn: '30d' }
     );
 
-    // Single-active-session claim — atomic so two simultaneous logins for
-    // the same mobile can't both succeed (see the technician branch above
-    // for the identical pattern). The WHERE guard only lets this land when
-    // no other device currently holds an unexpired session.
-    const [claimResult] = await db.query(
+    // Session claim — unconditional. See the identical technician-branch
+    // claim above for the full reasoning: a real OTP already proved this
+    // request owns the number, so it always wins, and authMiddleware's own
+    // live comparison against this column (not just JWT signature
+    // validity) is what makes that overwrite the actual revocation of
+    // whatever token was here before — old device, or this device's own
+    // earlier login.
+    await db.query(
       `UPDATE ip_users
        SET user_auth_token = ?, user_token_expiry = ?, is_logged_in = 1, user_date_modified = NOW()
-       WHERE user_id = ?
-         AND (user_auth_token IS NULL OR user_token_expiry <= NOW())`,
+       WHERE user_id = ?`,
       [token, tokenExpiry, dbUser.user_id]
     );
-    if (claimResult.affectedRows === 0) {
-      return res.status(409).json({
-        success: false,
-        message: 'This number is already logged in on another device. Please log out from that device and try again.',
-      });
-    }
+    writeLog(`[verifyOtp] client_id=${dbUser.client_id} — new session claimed for mobile=${mobile}, any previous session on this number is now invalid`);
 
     return res.json({
       success: true,

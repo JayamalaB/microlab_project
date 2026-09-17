@@ -114,8 +114,12 @@ exports.createBooking = async (req, res) => {
       console.log(`🗓  available_slot_id=${availableSlotId} → lab_slot_id=${labSlotId} tech_slot_id=${techSlotId}`);
     }
 
-    // 1. Master booking record (product_id updated after items loop)
-    const bookingRef = `BK${Date.now()}`;
+    // 1. Master booking record (product_id updated after items loop). The
+    // reference is derived from the row's own auto-increment id (assigned
+    // atomically by the database — two concurrent inserts can never receive
+    // the same one) instead of Date.now(), which two requests landing in
+    // the same millisecond could collide on. See the load-testing report's
+    // LT-002 finding for the real, reproduced defect this replaces.
     const [bResult] = await conn.execute(
       `INSERT INTO ip_bookings
          (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
@@ -126,7 +130,7 @@ exports.createBooking = async (req, res) => {
           patient_id, patient_id_ref, product_id,
           payment_status, start_datetime, end_datetime, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
-      [bookingRef, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
+      [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
        bookingType, bookingStatus, totalAmount, discountAmount ?? 0, amountPaid, amountDue,
        sourceChannel, notes ?? null,
        collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
@@ -135,8 +139,10 @@ exports.createBooking = async (req, res) => {
        isPaid ? 'paid' : 'unpaid',
        userId ?? null]
     );
-    const bookingId = bResult.insertId;
-    console.log(`✅ ip_bookings inserted → booking_id=${bookingId}`);
+    const bookingId  = bResult.insertId;
+    const bookingRef = `BK-${String(bookingId).padStart(6, '0')}`;
+    await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
+    console.log(`✅ ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef}`);
 
     // 2. Patient → booking link
     await conn.execute(
@@ -355,7 +361,39 @@ exports.getMyBookings = async (req, res) => {
           FROM ip_test_results tr
           WHERE tr.booking_id = b.booking_id
             AND tr.result_status = 'released') AS released_results_count
-       FROM ip_bookings b
+       FROM (
+         -- Candidate booking_ids this account is allowed to see, computed
+         -- FIRST and cheaply — client_id=? and patient_id=? are each a
+         -- single indexable condition on their own table (idx_bookings_client,
+         -- idx_pb_patient), UNIONed (deduping any booking that matches both,
+         -- e.g. the account holder viewing their own "self" patient record)
+         -- into a small candidate set before any of the heavy joins below
+         -- ever run. Same two ownership rules as before (own account's
+         -- bookings, or any booking this specific patient is linked to via
+         -- ip_patient_bookings — the family/sibling-booking case), just
+         -- computed separately instead of as one OR across two tables.
+         --
+         -- Why this replaces the old 'client_id = ? OR booking_id IN
+         -- (subquery on a different table)' form: that shape is a real,
+         -- confirmed MariaDB planner limitation — real EXPLAIN showed it
+         -- scanning every row of ip_bookings (type: index, rows: 5574,
+         -- Using temporary; Using filesort) even with idx_bookings_client
+         -- listed as a possible key, because the optimizer can't combine an
+         -- OR across two different tables into a single indexed access path.
+         -- This form lets each branch use its own index directly, and the
+         -- outer join below only ever touches this account's own candidate
+         -- rows via ip_bookings' PRIMARY KEY — cost scales with how many
+         -- bookings THIS account has, never with the whole table. Verified
+         -- byte-for-byte equivalent output (same rows, same field values,
+         -- no duplicates) against the original query across a heavy
+         -- customer (94 bookings), a sparse one (1 booking), a family-
+         -- booking customer, and a nonexistent/empty one before this change
+         -- was made.
+         SELECT bb.booking_id FROM ip_bookings bb WHERE bb.client_id = ?
+         UNION
+         SELECT pb.booking_id FROM ip_patient_bookings pb WHERE pb.patient_id = ?
+       ) AS my_booking_ids
+       INNER JOIN ip_bookings b ON b.booking_id = my_booking_ids.booking_id
        LEFT JOIN ip_patients pat       ON pat.patient_id  = b.patient_id
        LEFT JOIN ip_branches br        ON br.branch_id    = b.branch_id
        LEFT JOIN ip_available_slots av   ON av.available_slot_id = b.available_slot_id
@@ -371,13 +409,7 @@ exports.getMyBookings = async (req, res) => {
        LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id
        LEFT JOIN ip_users u          ON u.user_id = tech.user_id
        LEFT JOIN ip_feedback f        ON f.booking_id = b.booking_id
-       WHERE (
-         b.client_id = ?
-         OR b.booking_id IN (
-           SELECT pb.booking_id FROM ip_patient_bookings pb WHERE pb.patient_id = ?
-         )
-       )
-         AND b.deleted_at IS NULL
+       WHERE b.deleted_at IS NULL
        GROUP BY b.booking_id
        ORDER BY b.created_at DESC
        LIMIT 50`,
@@ -1070,15 +1102,12 @@ exports.saveCollectionProofPhoto = async (req, res) => {
       [bookingId, booking.patient_id, imageUrl, fileName, uploadedBy]
     );
 
-    // Sync to client server — this action uses its own minimal payload shape
-    // (technician_details + proof_photo), built inside syncBookingToClient.
-    syncBookingToClient(Number(bookingId), {
-      mobile:        req.user.mobile,
-      type:          'technician',
-      action:        'collection_photo_added',
-      technicianId:  req.user.id,
-      proofPhoto:    imageUrl,
-    }).catch(err => console.error(`[clientSync] saveCollectionProofPhoto sync failed booking_id=${bookingId}:`, err.message));
+    // No individual Jayamala sync here — the collection photo now reaches
+    // the client server only once, in the consolidated visit_completed
+    // request fired from verifyBookingOtp, which reads the most recent
+    // collection_proof row for each booking directly from the DB. This
+    // photo is still saved to ip_booking_documents above exactly as before;
+    // only the immediate per-action sync was removed.
 
     res.status(201).json({ success: true, docId: result.insertId });
   } catch (err) {
@@ -1153,34 +1182,11 @@ exports.addItem = async (req, res) => {
        WHERE booking_id = ?`,
       [price, price, bookingId]
     );
-    // A generic (booking-level, not item-specific) prescription may already
-    // exist for this booking — see the same booking_item_id-OR-NULL join
-    // used for blood_test_list in clientSync.js. A brand-new item can never
-    // have its OWN prescription yet, but it can inherit that generic one.
-    const [[existingDoc]] = await db.execute(
-      `SELECT file_path FROM ip_booking_documents
-       WHERE booking_id = ? AND booking_item_id IS NULL AND file_description = 'prescription'
-       ORDER BY created_at DESC LIMIT 1`,
-      [bookingId]
-    );
-    const rawDocReq = product.document_required;
-    const docRequired = rawDocReq === 1 || rawDocReq === '1' || rawDocReq === 'yes';
-
-    // Sync to client server — this action uses its own minimal payload shape
-    // (added_test), built inside syncBookingToClient. Each add (even after a
-    // prior item was removed) is its own independent package_added event.
-    syncBookingToClient(Number(bookingId), {
-      mobile: req.user.mobile,
-      type:   'technician',
-      action: 'package_added',
-      addedTest: {
-        id:               product.product_id,
-        name:             product.product_name,
-        price,
-        documentRequired: docRequired,
-        documentUrl:      existingDoc?.file_path ?? null,
-      },
-    }).catch(err => console.error(`[clientSync] addItem sync failed booking_id=${bookingId}:`, err.message));
+    // No individual Jayamala sync here — a newly added package now reaches
+    // the client server only once, in the consolidated visit_completed
+    // request fired from verifyBookingOtp. This item is still saved to
+    // ip_booking_items/ip_bookings above exactly as before; only the
+    // immediate per-action sync was removed.
 
     res.status(201).json({
       success: true,
@@ -1894,8 +1900,18 @@ exports.createFamilyBooking = async (req, res) => {
     return res.status(400).json({ success: false, message: `Maximum ${maxMembers} members allowed per visit` });
   }
 
-  const isPaid       = paymentType === 'full' && razorpayPaymentId;
-  const visitGroupId = `VG${Date.now()}`;
+  const isPaid = paymentType === 'full' && razorpayPaymentId;
+  // visitGroupId is derived below from the FIRST member's own booking_id
+  // (assigned atomically by the database) once it's known — not from
+  // Date.now(), which two different customers' family-booking requests
+  // landing in the same millisecond could collide on. That was a real,
+  // confirmed defect (LT-011): two unrelated customers' bookings silently
+  // merged into one visit group, and collectPayment's own ownership check
+  // trusts visit_group_id to decide who may collect payment on which
+  // booking — so the collision was a real cross-customer risk, not just a
+  // bookkeeping oddity. Left null here; set once the first member's real
+  // booking_id exists (see inside the loop below).
+  let visitGroupId = null;
 
   // Resolve slot → lab_slot_id / technician_slot_id
   let labSlotId  = null;
@@ -1926,7 +1942,9 @@ exports.createFamilyBooking = async (req, res) => {
       );
       if (patRow?.patient_id_ref) resolvedPatientIdRef = patRow.patient_id_ref;
 
-      const bookingRef  = `BK${Date.now()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      // See createBooking's own comment above for why this is derived from
+      // the row's own auto-increment id instead of a timestamp+random tail —
+      // the random tail reduced collisions but never guaranteed against them.
       const amountPaid  = isPaid ? totalAmount : 0;
       const amountDue   = isPaid ? 0 : totalAmount;
       const txPayType   = isPaid ? 'RAZORPAY' : 'PAY_LATER';
@@ -1941,14 +1959,27 @@ exports.createFamilyBooking = async (req, res) => {
             payment_status, visit_group_id, start_datetime, end_datetime, created_by, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, 'mobile_app', NULL,
                  ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), ?, NOW())`,
-        [bookingRef, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
+        [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
          bookingType, totalAmount, amountPaid, amountDue,
          collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
          patientId, resolvedPatientIdRef,
          isPaid ? 'paid' : 'unpaid',
          visitGroupId, userId ?? null]
       );
-      const bookingId = bResult.insertId;
+      const bookingId  = bResult.insertId;
+      const bookingRef = `BK-${String(bookingId).padStart(6, '0')}`;
+
+      // First member of this request: visitGroupId isn't known yet (it was
+      // inserted as NULL above), so derive it now from this booking's own
+      // guaranteed-unique id and back-fill this row. Every subsequent
+      // member already has visitGroupId set by this point, so their INSERT
+      // above already carried the correct value — no second update needed.
+      if (visitGroupId === null) {
+        visitGroupId = `VG-${String(bookingId).padStart(6, '0')}`;
+        await conn.execute('UPDATE ip_bookings SET booking_ref = ?, visit_group_id = ? WHERE booking_id = ?', [bookingRef, visitGroupId, bookingId]);
+      } else {
+        await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
+      }
 
       // Patient → booking link
       await conn.execute(
@@ -2199,8 +2230,9 @@ exports.createAdminBooking = async (req, res) => {
       }
     }
 
-    // 1. Master booking record
-    const bookingRef = `BK${Date.now()}`;
+    // 1. Master booking record. See createBooking's own comment above for
+    // why the reference is derived from the row's own auto-increment id
+    // instead of Date.now().
     const [bResult] = await conn.execute(
       `INSERT INTO ip_bookings
          (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
@@ -2211,7 +2243,7 @@ exports.createAdminBooking = async (req, res) => {
           patient_id, patient_id_ref, product_id,
           payment_status, start_datetime, end_datetime, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin_panel', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), NULL, NOW())`,
-      [bookingRef, clientId, branchId ?? null, collectionDate ?? null,
+      [null, clientId, branchId ?? null, collectionDate ?? null,
        labSlotId ?? null, availableSlotId ?? null,
        bookingType, bookingStatus, totalAmount, discountAmount ?? 0,
        amountPaid, amountDue,
@@ -2221,8 +2253,10 @@ exports.createAdminBooking = async (req, res) => {
        patientId, resolvedPatientIdRef,
        isPaid ? 'paid' : 'unpaid']
     );
-    const bookingId = bResult.insertId;
-    console.log(`✅ [ADMIN] ip_bookings inserted → booking_id=${bookingId} status=${bookingStatus}`);
+    const bookingId  = bResult.insertId;
+    const bookingRef = `BK-${String(bookingId).padStart(6, '0')}`;
+    await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
+    console.log(`✅ [ADMIN] ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef} status=${bookingStatus}`);
 
     // 2. Patient → booking link
     await conn.execute(

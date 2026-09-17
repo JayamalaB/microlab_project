@@ -49,16 +49,21 @@ exports.savePrescription = async (req, res) => {
 
     // Sync to client server — this endpoint is called from both the
     // customer app and the technician app (see the uploadedBy resolution
-    // above), so the sync initiator must match whichever actually uploaded
-    // it, not be hardcoded either way. Action name not yet confirmed by
-    // Jayamala; the block log will surface a status:"failure" response
-    // immediately if it's rejected.
+    // above). Customer uploads still sync immediately here, same as
+    // always — customer bookings never go through the technician OTP flow,
+    // so this is their only route to reach the client server. Technician
+    // uploads are deliberately NOT synced here: that data now reaches the
+    // client server only once, in the consolidated visit_completed request
+    // fired from verifyBookingOtp, which reads the most recent prescription
+    // per test directly from the DB at that time.
     const isTechnicianUpload = req.user.userId != null;
-    syncBookingToClient(Number(bookingId), {
-      mobile: req.user.mobile,
-      type:   isTechnicianUpload ? 'technician' : 'patient_user',
-      action: 'prescription_uploaded',
-    }).catch(err => console.error(`[clientSync] savePrescription sync failed booking_id=${bookingId}:`, err.message));
+    if (!isTechnicianUpload) {
+      syncBookingToClient(Number(bookingId), {
+        mobile: req.user.mobile,
+        type:   'patient_user',
+        action: 'prescription_uploaded',
+      }).catch(err => console.error(`[clientSync] savePrescription sync failed booking_id=${bookingId}:`, err.message));
+    }
 
     res.status(201).json({ success: true, docIds: insertedIds });
   } catch (err) {

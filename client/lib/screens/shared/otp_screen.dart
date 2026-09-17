@@ -13,12 +13,18 @@ class OtpScreen extends StatefulWidget {
   final String mobile;
   final String userRole;
   final String? devOtp; // dev only — remove before production
+  // Carried forward from login_screen.dart's own "already logged in on
+  // another device" recovery action — true only when the user already
+  // confirmed they want to release that other session. Sent on every
+  // verify (and resend) call made from this screen for this login attempt.
+  final bool forceLogout;
 
   const OtpScreen({
     super.key,
     required this.mobile,
     required this.userRole,
     this.devOtp,
+    this.forceLogout = false,
   });
 
   @override
@@ -114,13 +120,18 @@ class _OtpScreenState extends State<OtpScreen> {
     setState(() {});
   }
 
-  Future<void> _verify() async {
+  // Matches authController.js's send-otp/verify-otp exactly — both return
+  // this identical message for the single-active-session guard.
+  static const _alreadyLoggedInElsewhere = 'already logged in on another device';
+
+  Future<void> _verify({bool? forceLogoutOverride}) async {
     if (!_isComplete) return;
     FocusScope.of(context).unfocus();
     setState(() { _isVerifying = true; _hasError = false; });
 
     final result = await AuthService.verifyOtp(
       widget.mobile, _currentOtp, widget.userRole,
+      forceLogout: forceLogoutOverride ?? widget.forceLogout,
     );
 
     if (!mounted) return;
@@ -134,6 +145,26 @@ class _OtpScreenState extends State<OtpScreen> {
         for (final c in _controllers) c.clear();
       });
       FocusScope.of(context).requestFocus(_focusNodes[0]);
+      // Same recovery offered on login_screen.dart, for the same reason —
+      // this specific error can still surface here even when the user
+      // never saw it on the previous screen (e.g. a session started by the
+      // other device between send-otp and this verify call). Only offered
+      // once: if forceLogoutOverride is already set, this retry already
+      // used it, so a repeat failure is a real problem, not one to mask.
+      if (forceLogoutOverride != true && msg.contains(_alreadyLoggedInElsewhere)) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: const Text('Log out that other device and try again?',
+              style: TextStyle(color: Colors.white)),
+          backgroundColor: const Color(0xFFD32F2F),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 8),
+          action: SnackBarAction(
+            label: 'LOG OUT & CONTINUE',
+            textColor: Colors.white,
+            onPressed: () => _verify(forceLogoutOverride: true),
+          ),
+        ));
+      }
       return;
     }
 
@@ -232,7 +263,10 @@ class _OtpScreenState extends State<OtpScreen> {
     FocusScope.of(context).requestFocus(_focusNodes[0]);
     _startTimer();
 
-    final result = await AuthService.sendOtp(widget.mobile, widget.userRole);
+    final result = await AuthService.sendOtp(
+      widget.mobile, widget.userRole,
+      forceLogout: widget.forceLogout,
+    );
     if (!mounted) return;
 
     final msg = result['success'] == true

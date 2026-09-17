@@ -9,12 +9,26 @@ import 'package:microlab/constants/app_constants.dart';
 class ApiService {
   static const String baseUrl = AppConstants.serverUrl;
 
-  static Future<Map<String, dynamic>> sendOtp(String mobile, String role) async {
+  // forceLogout: set only after the user has explicitly confirmed, in
+  // response to "already logged in on another device", that they want to
+  // release that other session and continue. Must also be passed to
+  // whichever verify-otp call completes this same login attempt (see
+  // AuthService.verifyOtp, which is what OtpScreen actually calls) — this
+  // flag alone only gets the OTP sent, the real session claim happens there.
+  static Future<Map<String, dynamic>> sendOtp(
+    String mobile,
+    String role, {
+    bool forceLogout = false,
+  }) async {
     final res = await http
         .post(
           Uri.parse('$baseUrl/api/auth/send-otp'),
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'mobile': mobile, 'role': role}),
+          body: jsonEncode({
+            'mobile': mobile,
+            'role': role,
+            if (forceLogout) 'forceLogout': true,
+          }),
         )
         .timeout(const Duration(seconds: 15));
     return jsonDecode(res.body) as Map<String, dynamic>;

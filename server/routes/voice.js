@@ -7,6 +7,7 @@ const FormData = require('form-data');
 const SARVAM_STT_URL  = 'api.sarvam.ai';
 const SARVAM_TTS_PATH = '/text-to-speech';
 const SARVAM_STT_PATH = '/speech-to-text';
+const SARVAM_TRANSLATE_PATH = '/translate';
 
 const TTS_SPEAKER      = 'anushka';
 const TTS_MODEL        = 'bulbul:v2';
@@ -144,7 +145,10 @@ function sttSarvam(buffer) {
 
   const form = new FormData();
   form.append('file',          buffer, { filename: 'audio.wav', contentType: 'audio/wav' });
-  form.append('language_code', 'en-IN');
+  // 'unknown' asks Saaras to auto-detect the spoken language instead of
+  // assuming English — the response's own language_code field then tells us
+  // what was actually detected (see below), driving Tamil translation.
+  form.append('language_code', 'unknown');
   form.append('model',         'saaras:v3');
 
   return new Promise((resolve) => {
@@ -165,9 +169,11 @@ function sttSarvam(buffer) {
           const raw = Buffer.concat(parts).toString('utf8');
           if (response.statusCode === 200) {
             try {
-              const t = (JSON.parse(raw).transcript || '').trim();
-              console.log(`[Sarvam STT] transcript: ${JSON.stringify(t)}`);
-              return resolve({ transcript: t });
+              const parsed = JSON.parse(raw);
+              const t = (parsed.transcript || '').trim();
+              const detectedLang = parsed.language_code || 'en-IN';
+              console.log(`[Sarvam STT] transcript (${detectedLang}): ${JSON.stringify(t)}`);
+              return resolve({ transcript: t, languageCode: detectedLang });
             } catch (e) {
               console.error('[Sarvam STT] JSON parse error:', e.message);
             }
@@ -190,6 +196,68 @@ function sttSarvam(buffer) {
   });
 }
 
+// POST to Sarvam Translate; returns { text: translatedString } or { error } on failure.
+// Used only at the /api/chat/ask boundary (chat.js) to bridge a Tamil voice
+// question into the English-only intent/DB pipeline and back — llmRetriever.js
+// and llmService.js never see or produce anything but English.
+function translateText(text, sourceLanguageCode, targetLanguageCode) {
+  const apiKey = process.env.SARVAM_API_KEY;
+  if (!apiKey) {
+    console.error('[Sarvam Translate] SARVAM_API_KEY is not set in environment');
+    return Promise.resolve({ error: 'SARVAM_API_KEY not configured on server' });
+  }
+  if (!text || !text.trim()) return Promise.resolve({ text: '' });
+
+  const body = JSON.stringify({
+    input:                 text,
+    source_language_code:  sourceLanguageCode,
+    target_language_code:  targetLanguageCode,
+  });
+
+  return new Promise((resolve) => {
+    const request = https.request(
+      {
+        hostname: 'api.sarvam.ai',
+        path:     SARVAM_TRANSLATE_PATH,
+        method:   'POST',
+        headers: {
+          'api-subscription-key': apiKey,
+          'Content-Type':         'application/json',
+          'Content-Length':       Buffer.byteLength(body),
+        },
+      },
+      (response) => {
+        const parts = [];
+        response.on('data', c => parts.push(c));
+        response.on('end', () => {
+          const raw = Buffer.concat(parts).toString('utf8');
+          if (response.statusCode === 200) {
+            try {
+              const translated = JSON.parse(raw).translated_text || '';
+              return resolve({ text: translated });
+            } catch (e) {
+              console.error('[Sarvam Translate] JSON parse error:', e.message);
+            }
+          } else {
+            console.error(`[Sarvam Translate] ${response.statusCode}: ${raw.slice(0, 300)}`);
+          }
+          resolve({ error: `Sarvam Translate ${response.statusCode}: ${raw.slice(0, 120)}` });
+        });
+      }
+    );
+    request.on('error', (e) => {
+      console.error('[Sarvam Translate] request error:', e.message);
+      resolve({ error: e.message });
+    });
+    request.setTimeout(15000, () => {
+      request.destroy();
+      resolve({ error: 'Sarvam Translate request timed out' });
+    });
+    request.write(body);
+    request.end();
+  });
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 // POST /transcribe  — Sarvam Saaras v3 STT
@@ -208,7 +276,7 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
         error: 'No speech detected. Please try again.',
       });
     }
-    res.json({ success: true, transcript: result.transcript });
+    res.json({ success: true, transcript: result.transcript, language_code: result.languageCode });
   } catch (e) {
     console.error('[STT]', e.message);
     res.status(500).json({ success: false, error: e.message });
@@ -274,3 +342,4 @@ router.post('/speak', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.translateText = translateText;

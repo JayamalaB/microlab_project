@@ -1,31 +1,75 @@
 const express = require('express');
+const multer  = require('multer');
+const path    = require('path');
+const fs      = require('fs');
 const router = express.Router();
 const llmRetriever = require('../rag/llmRetriever');
 const db = require('../db/database');
 const { resolveKnowledge, matchDefaultQA, matchDefaultQASemantic, isDBQuestion } = require('../services/knowledgeService');
 const { getLiveContent } = require('../rag/websiteReader');
+const { translateText } = require('./voice');
 const OpenAI = require('openai');
 
 const VALID_LAYERS = new Set(['all', 'static', 'db', 'web']);
 
+// /book-test's optional document attachment (image or PDF) — a plain, unauthenticated
+// upload since the Book Test flow itself doesn't require login. Separate directory
+// from server/uploads/ (patient photos) to keep the two kinds of upload apart.
+const TEST_BOOKING_UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'test-bookings');
+if (!fs.existsSync(TEST_BOOKING_UPLOAD_DIR)) fs.mkdirSync(TEST_BOOKING_UPLOAD_DIR, { recursive: true });
+
+const testBookingUpload = multer({
+    storage: multer.diskStorage({
+        destination: (_req, _file, cb) => cb(null, TEST_BOOKING_UPLOAD_DIR),
+        filename: (_req, file, cb) => {
+            const ext  = path.extname(file.originalname) || '';
+            const name = `booking_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+            cb(null, name);
+        },
+    }),
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+    fileFilter: (_req, file, cb) => {
+        // Checked by extension, not the client-supplied MIME type — Dart's
+        // http.MultipartFile.fromBytes sends application/octet-stream when no
+        // content type is set explicitly, which would fail a strict MIME check
+        // even for a genuine PNG/PDF.
+        const ext = path.extname(file.originalname).toLowerCase();
+        const ok  = ['.jpg', '.jpeg', '.png', '.pdf'].includes(ext);
+        cb(ok ? null : new Error('Only JPG, PNG, or PDF files are allowed'), ok);
+    },
+});
+
 /**
  * POST /api/chat/ask
- * Body: { question, session_id?, layer? }
+ * Body: { question, session_id?, layer?, language? }
  * layer: 'all' (default) | 'static' | 'db' | 'web'
+ * language: set to 'ta-IN' by voice input when Sarvam STT detected Tamil —
+ * translates the question to English before the pipeline runs, and the
+ * answer back to Tamil before responding. Typed messages never set this.
  */
 router.post('/ask', async (req, res) => {
     try {
-        const { question, session_id, layer = 'all', patient_id } = req.body;
+        const { question: rawQuestion, session_id, layer = 'all', patient_id, language } = req.body;
 
-        if (!question) {
+        if (!rawQuestion) {
             return res.status(400).json({ error: 'Question is required' });
         }
 
         const sessionId   = session_id || req.ip || 'default';
         const searchLayer = VALID_LAYERS.has(layer) ? layer : 'all';
         const patientId   = patient_id || null;
+        const isTamil     = language === 'ta-IN';
 
-        console.log(`🤖 [${sessionId}] Layer: "${searchLayer}" | Patient: ${patientId || 'guest'} | Q: "${question}"`);
+        // Translate at the boundary only — llmRetriever.js/llmService.js and
+        // the static QA/website layers below all stay English-only internally.
+        let question = rawQuestion;
+        if (isTamil) {
+            const translated = await translateText(rawQuestion, 'ta-IN', 'en-IN');
+            if (translated.text) question = translated.text;
+            else console.error('[Tamil] translate-in failed, using raw transcript:', translated.error);
+        }
+
+        console.log(`🤖 [${sessionId}] Layer: "${searchLayer}" | Patient: ${patientId || 'guest'} | Q: "${question}"${isTamil ? ' (translated from Tamil)' : ''}`);
 
         let result;
 
@@ -50,6 +94,12 @@ router.post('/ask', async (req, res) => {
 
         } else {
             result = await llmRetriever.answerWithLLM(question, sessionId, { patientId });
+        }
+
+        if (isTamil && result?.answer) {
+            const translatedBack = await translateText(result.answer, 'en-IN', 'ta-IN');
+            if (translatedBack.text) result.answer = translatedBack.text;
+            else console.error('[Tamil] translate-out failed, replying in English:', translatedBack.error);
         }
 
         res.json({ success: true, data: result, layer: searchLayer });
@@ -165,25 +215,36 @@ router.get('/products', async (req, res) => {
     }
 });
 
-router.post('/book-test', async (req, res) => {
-    try {
-        const { name, age, phone, package: pkg } = req.body;
-
-        if (!name || !age || !phone || !pkg) {
-            return res.status(400).json({ success: false, error: 'All fields are required' });
+router.post('/book-test', (req, res) => {
+    testBookingUpload.single('document')(req, res, async (uploadErr) => {
+        if (uploadErr) {
+            return res.status(422).json({ success: false, error: uploadErr.message || 'Upload failed' });
         }
 
-        const result = await db.saveTestBooking(name, age, phone, pkg);
+        try {
+            const { name, age, phone } = req.body;
 
-        if (result.success) {
-            res.json({ success: true, data: { id: result.id, message: 'Booking confirmed' } });
-        } else {
-            res.status(500).json({ success: false, error: result.error || 'Booking failed' });
+            if (!name || !age || !phone) {
+                return res.status(400).json({ success: false, error: 'Name, age, and phone are required' });
+            }
+
+            // Document is optional — a booking can be submitted with nothing attached.
+            const documentUrl = req.file
+                ? `${process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`}/uploads/test-bookings/${req.file.filename}`
+                : null;
+
+            const result = await db.saveTestBooking(name, age, phone, documentUrl);
+
+            if (result.success) {
+                res.json({ success: true, data: { id: result.id, message: 'Booking confirmed' } });
+            } else {
+                res.status(500).json({ success: false, error: result.error || 'Booking failed' });
+            }
+        } catch (error) {
+            console.error('Book test error:', error);
+            res.status(500).json({ success: false, error: error.message });
         }
-    } catch (error) {
-        console.error('Book test error:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
+    });
 });
 
 router.get('/history', async (req, res) => {
