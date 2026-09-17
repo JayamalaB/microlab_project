@@ -1431,7 +1431,27 @@ void _resumeJourney() {
 
     setState(() => _capturingCollectionProofForPatientId = patientId);
     try {
-      final image = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
+      // maxWidth/maxHeight cap the resolution the camera hands back, not just
+      // the JPEG quality — on modern high-megapixel phones a full-resolution
+      // photo can exceed the server's 5MB upload cap (routes/upload.js) even
+      // at imageQuality: 80, and a large file is also far more likely to blow
+      // past ApiService.uploadFile's 30s timeout on weak mobile upload speeds.
+      // 1600px on the long edge is comfortably legible for a proof photo and
+      // keeps the JPEG in the low hundreds of KB to ~1MB range.
+      // On some real devices the native camera intent occasionally never
+      // hands a result back to Flutter (low memory, OEM camera quirks,
+      // activity recreation) — without a timeout that leaves this await
+      // pending forever, so neither the success path nor the catch/finally
+      // ever runs and the button is stuck showing "Opening camera…"
+      // permanently, with no exception to recover from. Timing out and
+      // treating it as a cancel (same as the user backing out of the camera)
+      // guarantees the busy state always eventually clears.
+      final image = await _picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 80,
+        maxWidth: 1600,
+        maxHeight: 1600,
+      ).timeout(const Duration(seconds: 90), onTimeout: () => null);
       if (image == null) return; // technician cancelled — fine, it's optional
 
       final bytes = await image.readAsBytes();
@@ -1467,7 +1487,16 @@ void _resumeJourney() {
         ));
       }
     } finally {
-      if (mounted) setState(() => _capturingCollectionProofForPatientId = null);
+      // Always clear the busy flag itself, even if the widget has since
+      // unmounted (e.g. tab-based keep-alive navigation away mid-capture) —
+      // only the setState() *call* needs the mounted guard to avoid a
+      // Flutter error on a disposed widget. Gating the flag reset itself on
+      // mounted left it permanently stuck non-null when the awaits above
+      // (camera/upload/save) outlived the widget's mounted lifetime, which
+      // both froze the button in its spinner state forever and made every
+      // future tap silently no-op via the early-return guard above.
+      _capturingCollectionProofForPatientId = null;
+      if (mounted) setState(() {});
     }
   }
 
@@ -1509,7 +1538,10 @@ void _resumeJourney() {
     setState(() => _docIsPicking = true);
     try {
       if (source == ImageSource.gallery) {
-        final images = await _picker.pickMultiImage(imageQuality: 80);
+        // Same 5MB-upload-cap / slow-mobile-upload reasoning as the
+        // collection-proof camera capture above — a gallery photo can be
+        // just as large as a fresh camera shot.
+        final images = await _picker.pickMultiImage(imageQuality: 80, maxWidth: 1600, maxHeight: 1600);
         if (images.isNotEmpty) {
           final toAdd = images.take(_docMaxFiles - _docUploads.length);
           for (final f in toAdd) {
@@ -1524,7 +1556,12 @@ void _resumeJourney() {
           }
         }
       } else {
-        final image = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
+        final image = await _picker.pickImage(
+          source: ImageSource.camera,
+          imageQuality: 80,
+          maxWidth: 1600,
+          maxHeight: 1600,
+        ).timeout(const Duration(seconds: 90), onTimeout: () => null);
         if (image != null) {
           final bytes = await image.readAsBytes();
           final placeholder = _TechPresDoc(
