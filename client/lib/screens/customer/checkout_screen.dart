@@ -83,7 +83,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Config ────────────────────────────────────────────────
   // Distance-based service charge estimated at booking time (backend calculates from pincode → lab km)
   // TODO: replace with GET /api/service-charge?pincode=&city=
-  static const double _estimatedServiceCharge = 79.0;
 
   // ── Date ─────────────────────────────────────────────────
   DateTime? _selectedDate;
@@ -156,7 +155,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Computed ──────────────────────────────────────────────
   double get _testsTotal => widget.cart.fold(0, (s, t) => s + t.finalPrice);
   double get _familyTotal => _familyMembers.fold(0.0, (s, m) => s + m.testsTotal);
-  double get _serviceCharge => widget.mode == 'Lab Test' ? 0 : _estimatedServiceCharge;
+  // Service charge is collected at collection for Home Collection — not charged upfront.
+  double get _serviceCharge => 0;
   double get _grandTotal => _testsTotal + _familyTotal + _serviceCharge;
 
   bool get _primaryNeedsPrescription => widget.cart.any((t) => t.docRequired);
@@ -1356,7 +1356,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            'Service charge of ₹${_serviceCharge.toInt()} is estimated based on travel distance. Final amount is confirmed when the technician starts the journey.',
+                            'Home collection service charge is calculated based on distance and collected at the time of sample collection.',
                             style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
                           ),
                         ),
@@ -1492,8 +1492,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               children: [
                 _BillRow('${widget.member.name} (Tests)', '₹${_testsTotal.toInt()}'),
                 ..._familyMembers.map((m) => _BillRow('${m.patient.name}', '₹${m.testsTotal.toInt()}')),
-                if (_serviceCharge > 0)
-                  _BillRow('Service Charge (est.)', '+ ₹${_serviceCharge.toInt()}', sub: true),
+                if (widget.mode != 'Lab Test')
+                  _BillRow('Service Charge', 'At collection', sub: true),
                 const Divider(height: 20),
                 _BillRow('Grand Total', '₹${_grandTotal.toInt()}', bold: true),
                 const SizedBox(height: 8),

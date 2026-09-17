@@ -170,7 +170,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
 
     final member = MemberModel(
       id: b['patient_id']?.toString() ?? '0',
-      name: b['patient_name'] as String? ?? 'Patient',
+      name: toTitleCase(b['patient_name'] as String? ?? 'Patient'),
       mobile: b['patient_mobile'] as String? ?? '',
       gender: '',
       location: '',
@@ -1322,7 +1322,7 @@ class _BookingCard extends StatelessWidget {
 
                     // Cancel button — only for pending/scheduled/confirmed/assigned, future dates,
                     // slot time not yet passed, and before technician starts collection
-                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated') &&
+                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated' || booking.status == 'Technician Arrived') &&
                         !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
                         !_slotHasPassed(booking) &&
                         !const {'collection_started', 'otp_verified', 'sample_collected',
@@ -1683,13 +1683,13 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
   BookingModel get b => widget.booking;
 
   bool get _canEditTests {
-    if (b.paymentStatus == 'paid') return false;
     const blocked = {
       'en_route', 'arrived', 'collection_started', 'sample_collected',
       'handed_to_lab', 'handed_to_lab_pending',
     };
     if (b.collectionStatus != null && blocked.contains(b.collectionStatus)) return false;
-    return b.status == 'Pending' || b.status == 'Confirmed' || b.status == 'Scheduled';
+    return b.status == 'Pending' || b.status == 'Confirmed' || b.status == 'Scheduled' ||
+        b.status == 'Technician Allocated';
   }
 
   String _formatDate(DateTime d) {
@@ -1699,6 +1699,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
   }
 
   bool get _paymentPending => b.status != 'Cancelled' && b.paymentStatus != 'paid' && b.grandTotal > 0;
+  bool get _hasDueOnPaidBooking => b.status != 'Cancelled' && b.paymentStatus == 'paid' && b.amountDue > 0.5;
   bool get _prescriptionBlocking =>
       b.prescriptionImages.isNotEmpty && b.prescriptionStatus != 'verified';
 
@@ -1966,7 +1967,10 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                     rows: [
                       _DetailRow(Icons.receipt_outlined, 'Tests Total', '₹${b.testsTotal.toInt()}'),
                       if (b.serviceCharge > 0)
-                        _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${b.serviceCharge.toInt()}'),
+                        _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${b.serviceCharge.toInt()}')
+                      else if (b.mode == 'Home Collection')
+                        _DetailRow(Icons.add_circle_outline, 'Service Charge', 'At collection',
+                            valueColor: AppColors.textSecondary),
                       _DetailRow(Icons.calculate_outlined, 'Grand Total', '₹${b.grandTotal.toInt()}', valueBold: true),
                       _DetailRow(Icons.check_circle_outline, 'Paid',
                           '₹${b.paidAmount.toInt()}', valueColor: AppColors.brandGreen),
@@ -2110,6 +2114,37 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                                 const SizedBox(width: 8),
                                 Text(
                                   'Pay ₹${(b.amountDue > 0 ? b.amountDue : b.grandTotal).toInt()} via Razorpay',
+                                  style: const TextStyle(fontSize: 14,
+                                      fontWeight: FontWeight.w600, color: Colors.white),
+                                ),
+                              ]),
+                      ),
+                    ),
+                  ],
+
+                  // Pay Due button — shown when booking is paid but has an outstanding due amount
+                  // (e.g. user added tests and chose "Pay Later")
+                  if (_hasDueOnPaidBooking) ...[
+                    const SizedBox(height: 20),
+                    GestureDetector(
+                      onTap: _isProcessing ? null : _triggerPayment,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        decoration: BoxDecoration(
+                          color: _isProcessing
+                              ? AppColors.brandGreen.withValues(alpha: 0.5)
+                              : const Color(0xFF1565C0),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: _isProcessing
+                            ? const Center(child: SizedBox(width: 20, height: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white))))
+                            : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                const Icon(Icons.payment_outlined, size: 18, color: Colors.white),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Pay Due ₹${b.amountDue.toInt()} via Razorpay',
                                   style: const TextStyle(fontSize: 14,
                                       fontWeight: FontWeight.w600, color: Colors.white),
                                 ),
@@ -2808,6 +2843,7 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
   @override
   void dispose() {
     _searchCtrl.dispose();
+    clearRazorpay();
     super.dispose();
   }
 
@@ -2937,42 +2973,163 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
     ));
   }
 
+  double get _diffAmount {
+    final newItemsTotal = _allTests
+        .where((t) => _selectedIds.contains(t.id))
+        .fold(0.0, (s, t) => s + t.finalPrice);
+    return newItemsTotal - (widget.booking.testsTotal > 0 ? widget.booking.testsTotal : _itemsTotal);
+  }
+
+  bool get _isPaid => widget.booking.paymentStatus == 'paid';
+
+  // When paying now on a paid booking, charge enough to clear ALL outstanding (including
+  // any prior amount_due), not just the delta in items. This prevents a leftover due after payment.
+  double get _topUpAmount {
+    if (!_isPaid || _diffAmount <= 0.5) return _diffAmount;
+    final newTotal = widget.booking.grandTotal + _diffAmount;
+    return (newTotal - widget.booking.paidAmount).clamp(0.0, double.infinity);
+  }
+
+  // True only when removing tests causes an actual overpayment (mirrors server logic).
+  // If amount_due > 0, the removed test was unpaid — just reduces due, no refund.
+  bool get _removalCausesRefund =>
+      _diffAmount < -0.5 &&
+      _isPaid &&
+      widget.booking.paidAmount > (widget.booking.grandTotal + _diffAmount);
+
+  // Actual refund = overpayment only, capped at what was paid.
+  // e.g. paid=168, newTotal=124 → refund=44 (not the full 799 diff).
+  double get _refundAmount {
+    final newTotal = widget.booking.grandTotal + _diffAmount;
+    return (widget.booking.paidAmount - newTotal).clamp(0.0, widget.booking.paidAmount);
+  }
+
   Future<void> _save() async {
     if (_selectedIds.isEmpty || _saving || widget.booking.bookingIdNum == null) return;
+
+    final selectedTests = _allTests.where((t) => _selectedIds.contains(t.id)).toList();
+    final items = selectedTests.map((t) => {
+      'packageId':  int.tryParse(t.id) ?? 0,
+      'finalPrice': t.finalPrice,
+    }).toList();
+
+    // Additions on paid booking → let user choose pay now or pay later
+    if (_diffAmount > 0.5 && _isPaid) {
+      // _topUpAmount clears ALL outstanding (prior due + new additions), not just the delta.
+      final topUp = _topUpAmount;
+      final topUpStr = topUp.toStringAsFixed(0);
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (_) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Additional Amount', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          content: Text(
+            'Your updated tests require ₹$topUpStr more. How would you like to pay?',
+            style: const TextStyle(fontSize: 14, height: 1.5),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, null),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'later'),
+              child: const Text('Pay Later', style: TextStyle(color: AppColors.textSecondary)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'now'),
+              child: Text('Pay ₹$topUpStr Now',
+                  style: const TextStyle(color: AppColors.brandGreen, fontWeight: FontWeight.w700)),
+            ),
+          ],
+        ),
+      );
+      if (choice == null || !mounted) return;
+      if (choice == 'now') {
+        setState(() => _saving = true);
+        openRazorpay(
+          options: {
+            'key':         'rzp_test_SonqjjPurqlLci',
+            'amount':      (topUp * 100).round(),
+            'name':        'MicroLab',
+            'description': 'Top-up for added tests',
+            'prefill':     {'contact': widget.booking.member.mobile},
+            'theme':       {'color': '#0A5C4A'},
+          },
+          onSuccess: (paymentId) => _doSelfEdit(items, razorpayPaymentId: paymentId, topUpAmount: topUp),
+          onError: (msg) {
+            if (mounted) setState(() => _saving = false);
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Payment failed: $msg'),
+              backgroundColor: Colors.red[700],
+              behavior: SnackBarBehavior.floating,
+            ));
+          },
+        );
+        return;
+      }
+      // choice == 'later': pay at collection
+      await _doSelfEdit(items, payDiffLater: true);
+      return;
+    }
+
+    // Removals on paid booking → confirm refund dialog only if actually overpaid
+    if (_removalCausesRefund) {
+      final refundAmt = _refundAmount.toInt();
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Confirm Changes',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          content: Text(
+            'Tests will be updated and ₹$refundAmt will be refunded to your original payment method within 5–7 business days.',
+            style: const TextStyle(fontSize: 14, height: 1.5),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false),
+                child: const Text('Back', style: TextStyle(color: AppColors.textSecondary))),
+            TextButton(onPressed: () => Navigator.pop(context, true),
+                child: const Text('Confirm',
+                    style: TextStyle(color: AppColors.brandGreen, fontWeight: FontWeight.w700))),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
+
+    await _doSelfEdit(items);
+  }
+
+  Future<void> _doSelfEdit(List<Map<String, dynamic>> items,
+      {String? razorpayPaymentId, bool payDiffLater = false, double? topUpAmount}) async {
+    if (!mounted) return;
     setState(() => _saving = true);
     try {
-      final selectedTests = _allTests.where((t) => _selectedIds.contains(t.id)).toList();
-      final items = selectedTests.map((t) => {
-        'packageId':     t.id,
-        'originalPrice': t.originalPrice,
-        'finalPrice':    t.finalPrice,
-      }).toList();
-      final result = await ApiService.updateBookingItems(
-        bookingId:     widget.booking.bookingIdNum!,
-        items:         items,
-        serviceCharge: _serviceCharge,
+      final result = await ApiService.selfEditBookingItems(
+        widget.booking.bookingIdNum!,
+        items: items,
+        razorpayPaymentId: razorpayPaymentId,
+        payDiffLater: payDiffLater,
+        topUpAmount: topUpAmount,
       );
       if (!mounted) return;
-      if (result != null && result['success'] == true) {
-        // Upload any collected prescriptions (non-fatal if it fails)
+      if (result['success'] == true) {
+        // Upload any collected prescriptions (non-fatal)
         if (_prescriptions.isNotEmpty) {
           try {
-            final rawIds = result['docRequiredItemIds'];
-            final bookingItemId = (rawIds is List && rawIds.isNotEmpty)
-                ? rawIds[0] as int?
-                : null;
             final urls = <String>[];
             for (final bytes in _prescriptions) {
               final url = await ApiService.uploadFile(
                   bytes, 'pres_${DateTime.now().millisecondsSinceEpoch}.jpg');
               if (url != null) urls.add(url);
             }
-            if (urls.isNotEmpty) {
+            if (urls.isNotEmpty && mounted) {
               await ApiService.savePrescription(
-                bookingId:     widget.booking.bookingIdNum!,
-                patientId:     int.tryParse(widget.booking.member.id) ?? 0,
-                bookingItemId: bookingItemId,
-                imageUrls:     urls,
+                bookingId:    widget.booking.bookingIdNum!,
+                patientId:    int.tryParse(widget.booking.member.id) ?? 0,
+                bookingItemId: null,
+                imageUrls:    urls,
               );
             }
           } catch (_) {}
@@ -2980,10 +3137,16 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
         if (!mounted) return;
         Navigator.pop(context);
         widget.onSaved();
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(result['message'] as String? ?? 'Tests updated'),
+          backgroundColor: AppColors.brandGreen,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
       } else {
         setState(() => _saving = false);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(result?['message'] as String? ?? 'Failed to update booking'),
+          content: Text(result['message'] as String? ?? 'Failed to update booking'),
           backgroundColor: Colors.red[700],
           behavior: SnackBarBehavior.floating,
         ));
@@ -3259,7 +3422,9 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                     (_needsPrescription && _prescriptions.isEmpty)
                     ? null : _save,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.brandGreen,
+                  backgroundColor: _diffAmount > 0.5
+                      ? const Color(0xFF1565C0)
+                      : AppColors.brandGreen,
                   disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
                   elevation: 0,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -3275,7 +3440,11 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                             ? 'Select at least one test'
                             : (_needsPrescription && _prescriptions.isEmpty)
                                 ? 'Upload prescription to continue'
-                                : 'Update Booking · ₹${_total.toInt()}',
+                                : _diffAmount > 0.5 && _isPaid
+                                    ? 'Pay ₹${_topUpAmount.toInt()} & Confirm'
+                                    : _removalCausesRefund
+                                        ? 'Confirm & Get ₹${_refundAmount.toInt()} Refund'
+                                        : 'Update Booking · ₹${_total.toInt()}',
                         style: const TextStyle(
                             color: Colors.white,
                             fontSize: 15,

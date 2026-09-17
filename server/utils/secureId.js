@@ -20,7 +20,7 @@ function checkClientUser(mobile_no, user_type) {
 
   const timestamp = Math.floor(Date.now() / 1000);
   const secure_id = buildSecureId(mobile_no, user_type, timestamp);
-  const payload   = JSON.stringify({ mobile_no, user_type, timestamp, secure_id });
+  const payload   = new URLSearchParams({ mobile_no, user_type, timestamp: String(timestamp), secure_id }).toString();
 
   return new Promise((resolve) => {
     try {
@@ -32,7 +32,7 @@ function checkClientUser(mobile_no, user_type) {
         path    : parsedUrl.pathname + parsedUrl.search,
         method  : 'POST',
         headers : {
-          'Content-Type'  : 'application/json',
+          'Content-Type'  : 'application/x-www-form-urlencoded',
           'Content-Length': Buffer.byteLength(payload),
         },
       };
@@ -42,11 +42,13 @@ function checkClientUser(mobile_no, user_type) {
         res.on('data', (chunk) => (body += chunk));
         res.on('end', () => {
           try {
-            const parsed = JSON.parse(body);
+            // ASMX HTTP POST wraps return value in XML: <string xmlns="...">JSON</string>
+            const xmlMatch = /<string[^>]*>([\s\S]*?)<\/string>/.exec(body);
+            const parsed = JSON.parse(xmlMatch ? xmlMatch[1] : body);
             console.log(`[clientServer] status ${res.statusCode} | response: ${body}`);
             resolve(parsed);
           } catch {
-            console.error('[clientServer] invalid JSON response:', body);
+            console.error('[clientServer] invalid response:', body);
             resolve(null);
           }
         });
@@ -82,7 +84,7 @@ function fetchPatientData(mobile_no, user_type) {
 
   const timestamp = Math.floor(Date.now() / 1000);
   const secure_id = buildSecureId(mobile_no, user_type, timestamp);
-  const payload   = JSON.stringify({ mobile_no, user_type, timestamp, secure_id });
+  const payload   = new URLSearchParams({ mobile_no, user_type, timestamp: String(timestamp), secure_id }).toString();
 
   return new Promise((resolve) => {
     try {
@@ -94,7 +96,7 @@ function fetchPatientData(mobile_no, user_type) {
         path    : parsedUrl.pathname + parsedUrl.search,
         method  : 'POST',
         headers : {
-          'Content-Type'  : 'application/json',
+          'Content-Type'  : 'application/x-www-form-urlencoded',
           'Content-Length': Buffer.byteLength(payload),
         },
       };
@@ -104,9 +106,11 @@ function fetchPatientData(mobile_no, user_type) {
         res.on('data', (chunk) => (body += chunk));
         res.on('end', () => {
           try {
-            resolve(JSON.parse(body));
+            // ASMX HTTP POST wraps return value in XML: <string xmlns="...">JSON</string>
+            const xmlMatch = /<string[^>]*>([\s\S]*?)<\/string>/.exec(body);
+            resolve(JSON.parse(xmlMatch ? xmlMatch[1] : body));
           } catch {
-            console.error('[patientServer] invalid JSON:', body);
+            console.error('[patientServer] invalid response:', body);
             resolve(null);
           }
         });

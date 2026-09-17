@@ -452,7 +452,7 @@ exports.cancelBooking = async (req, res) => {
   const { reason } = req.body;
 
   try {
-    const allowedBookingStatuses    = settings.getList('cancel_allowed_booking_statuses',    ['pending', 'scheduled', 'confirmed', 'assigned']);
+    const allowedBookingStatuses    = settings.getList('cancel_allowed_booking_statuses',    ['pending', 'scheduled', 'confirmed', 'assigned', 'arrived']);
     const allowedCollectionStatuses = settings.getList('cancel_allowed_collection_statuses', ['assigned', 'en_route', 'arrived']);
     const chargeStatuses            = settings.getList('cancel_charge_trigger_statuses',     ['arrived']);
     const serviceCharge             = parseFloat(settings.get('cancel_service_charge_amount', '0')) || 0;
@@ -1662,6 +1662,195 @@ exports.updateBookingItems = async (req, res) => {
     await conn.rollback();
     console.error('❌ updateBookingItems FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error', detail: err.message });
+  } finally {
+    conn.release();
+  }
+};
+
+// ── POST /api/bookings/:bookingId/self-edit ────────────────────────────────────
+// Customer-initiated test edit after booking is paid.
+// Additions  → requires razorpayPaymentId for the diff; returns needsTopUp:true if missing.
+// Removals   → server auto-refunds the diff via Razorpay; no client payment needed.
+// Pay-later  → just swaps items with no payment action.
+exports.selfEditItems = async (req, res) => {
+  const { bookingId } = req.params;
+  const { items = [], razorpayPaymentId, payDiffLater = false, topUpAmount } = req.body;
+  const clientId = req.user.client_id;
+
+  if (!items.length) {
+    return res.status(400).json({ success: false, message: 'At least one test is required' });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [[booking]] = await conn.execute(
+      `SELECT b.booking_id, b.patient_id, b.status, b.total_amount, b.amount_paid,
+              b.payment_status, b.amount_due,
+              tc.collection_status
+       FROM ip_bookings b
+       LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       WHERE b.booking_id = ? AND b.client_id = ? AND b.deleted_at IS NULL`,
+      [bookingId, clientId]
+    );
+    if (!booking) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    const blockedCollectionStatuses = ['en_route', 'arrived', 'collection_started', 'sample_collected', 'handed_to_lab'];
+    const blockedBookingStatuses    = ['collected', 'submitted', 'completed', 'cancelled'];
+    if (blockedCollectionStatuses.includes(booking.collection_status)) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: 'Cannot edit — technician is already on the way' });
+    }
+    if (blockedBookingStatuses.includes(booking.status)) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: 'Cannot edit booking in its current status' });
+    }
+
+    // Get current items total to preserve service charge component
+    const [[curRow]] = await conn.execute(
+      'SELECT COALESCE(SUM(final_price), 0) AS items_total FROM ip_booking_items WHERE booking_id = ?',
+      [bookingId]
+    );
+    const oldItemsTotal = Number(curRow.items_total) || 0;
+    const oldTotal      = Number(booking.total_amount) || 0;
+    const serviceCharge = Math.max(0, oldTotal - oldItemsTotal);
+
+    // Calculate new totals from submitted items
+    let newItemsTotal = 0;
+    for (const item of items) newItemsTotal += Number(item.finalPrice) || 0;
+    const newTotal    = newItemsTotal + serviceCharge;
+    const diffAmount  = Math.round((newTotal - oldTotal) * 100) / 100; // positive = owes more
+
+    const amountPaid = Number(booking.amount_paid) || 0;
+    const isPaid     = booking.payment_status === 'paid';
+
+    // Additions on a paid booking — client must either pay now or defer to collection
+    if (diffAmount > 0.5 && isPaid && !razorpayPaymentId && !payDiffLater) {
+      await conn.rollback();
+      return res.json({
+        success: false, needsTopUp: true, diffAmount,
+        message: `Pay ₹${Math.round(diffAmount)} to add the selected tests`,
+      });
+    }
+
+    // Record top-up payment when provided.
+    // topUpAmount (from Flutter) = newTotal - amountPaid (clears all outstanding).
+    // Fall back to diffAmount if topUpAmount not sent (older clients).
+    const actualTopUp = topUpAmount ? Number(topUpAmount) : diffAmount;
+    if (diffAmount > 0.5 && isPaid && razorpayPaymentId) {
+      await conn.execute(
+        `INSERT INTO ip_payment_transactions
+           (transaction_ref, booking_id, patient_id, payment_type,
+            gross_amount, net_amount, amount_paid, amount_due,
+            currency, payment_status, transaction_status, is_refund,
+            gateway_transaction_id, gateway_status, paid_at)
+         VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'paid', 'completed', 0, ?, 'success', NOW())`,
+        [`TUP${Date.now()}`, bookingId, booking.patient_id,
+         actualTopUp, actualTopUp, actualTopUp, razorpayPaymentId]
+      );
+    }
+
+    // Auto-refund removals only when the customer has actually overpaid relative to the new total.
+    // If amount_due > 0 (e.g. Pay Later additions), removing a test just reduces the due — no refund.
+    let refundIssued = false;
+    if (diffAmount < -0.5 && isPaid && amountPaid > newTotal) {
+      // Refund only what was actually overpaid — never more than amount_paid.
+      const refundAmount = Math.min(amountPaid - newTotal, amountPaid);
+
+      // Always insert the refund record so the DB stays accurate.
+      // Attempt the Razorpay API call to get a real refund ID; fall back to a
+      // local reference if it fails (test-mode payments, network error, etc.).
+      let rzpRefundId = null;
+      const [[txn]] = await conn.execute(
+        `SELECT gateway_transaction_id FROM ip_payment_transactions
+         WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)
+           AND gateway_transaction_id IS NOT NULL AND payment_status = 'paid'
+         ORDER BY created_at DESC LIMIT 1`,
+        [bookingId]
+      );
+      if (txn?.gateway_transaction_id) {
+        try {
+          const auth   = 'Basic ' + Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64');
+          const rzpRes = await fetch(
+            `https://api.razorpay.com/v1/payments/${txn.gateway_transaction_id}/refund`,
+            { method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ amount: Math.round(refundAmount * 100) }) }
+          );
+          const rzpBody = await rzpRes.json();
+          if (rzpRes.ok && rzpBody.id) rzpRefundId = rzpBody.id;
+          else console.warn(`[selfEditItems] Razorpay refund skipped:`, rzpBody);
+        } catch (err) {
+          console.error(`[selfEditItems] Razorpay refund error booking_id=${bookingId}:`, err.message);
+        }
+      }
+
+      const refundRef = rzpRefundId ?? `RFN_MANUAL_${Date.now()}`;
+      await conn.execute(
+        `INSERT INTO ip_payment_transactions
+           (transaction_ref, booking_id, patient_id, payment_type,
+            gross_amount, net_amount, amount_paid, amount_due,
+            currency, payment_status, transaction_status, is_refund,
+            gateway_transaction_id, gateway_status, paid_at)
+         VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, ?, NOW())`,
+        [`RFN${Date.now()}`, bookingId, booking.patient_id,
+         refundAmount, refundAmount, refundAmount,
+         refundRef, rzpRefundId ? 'refunded' : 'pending']
+      );
+      refundIssued = true;
+    }
+
+    // Swap booking items
+    await conn.execute('DELETE FROM ip_booking_items WHERE booking_id = ?', [bookingId]);
+    for (const item of items) {
+      const rawId = item.packageId ? Number(item.packageId) : null;
+      let productId = 0, productName = null;
+      if (rawId) {
+        const [rows] = await conn.execute(
+          'SELECT product_id, product_name FROM ip_products WHERE product_id = ? LIMIT 1', [rawId]);
+        if (rows.length) { productId = rawId; productName = rows[0].product_name ?? null; }
+      }
+      const price = Number(item.finalPrice) || 0;
+      await conn.execute(
+        `INSERT INTO ip_booking_items
+           (booking_id, product_id, product_name_snapshot, patient_id, unit_price, final_price, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [bookingId, productId, productName, booking.patient_id, price, price]
+      );
+    }
+
+    // Update booking totals
+    // - Top-up paid now: increase amount_paid by actualTopUp (clears prior due too)
+    // - Refund issued:   decrease amount_paid by refund amount (diffAmount is negative)
+    // - Pay later:       amount_paid unchanged; diff surfaces in amount_due
+    const newAmountPaid = isPaid && diffAmount > 0.5 && razorpayPaymentId
+      ? amountPaid + actualTopUp
+      : refundIssued
+        ? newTotal   // refund covered the overpayment; customer now paid exactly the new total
+        : amountPaid;
+    const newAmountDue  = Math.max(0, newTotal - newAmountPaid);
+    await conn.execute(
+      `UPDATE ip_bookings SET total_amount = ?, amount_paid = ?, amount_due = ?, updated_at = NOW() WHERE booking_id = ?`,
+      [newTotal, newAmountPaid, newAmountDue, bookingId]
+    );
+
+    await conn.commit();
+    console.log(`✅ selfEditItems booking_id=${bookingId} diff=₹${diffAmount} refund=${refundIssued}`);
+    res.json({
+      success: true, newTotal, diffAmount,
+      refundIssued,
+      refundAmount: diffAmount < -0.5 && isPaid ? Math.abs(diffAmount) : 0,
+      message: refundIssued
+        ? `Tests updated. ₹${Math.round(Math.abs(diffAmount))} refund in 5–7 days.`
+        : 'Tests updated successfully.',
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('❌ selfEditItems FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     conn.release();
   }

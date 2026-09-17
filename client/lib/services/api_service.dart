@@ -1112,6 +1112,27 @@ class ApiService {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  static Future<Map<String, dynamic>> selfEditBookingItems(
+    int bookingIdNum, {
+    required List<Map<String, dynamic>> items,
+    String? razorpayPaymentId,
+    bool payDiffLater = false,
+    double? topUpAmount,
+  }) async {
+    final token = await getToken();
+    if (token == null) throw Exception('Not authenticated');
+    final body = <String, dynamic>{'items': items};
+    if (razorpayPaymentId != null) body['razorpayPaymentId'] = razorpayPaymentId;
+    if (payDiffLater) body['payDiffLater'] = true;
+    if (topUpAmount != null) body['topUpAmount'] = topUpAmount;
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/bookings/$bookingIdNum/self-edit'),
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode(body),
+    ).timeout(const Duration(seconds: 20));
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   static Future<Map<String, dynamic>> submitFeedback(
       int bookingIdNum, int rating, String comment) async {
     final token = await getToken();
