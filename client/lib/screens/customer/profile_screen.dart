@@ -402,7 +402,7 @@ class _Avatar extends StatelessWidget {
       );
     }
     final initials = member?.name.isNotEmpty == true
-        ? member!.name.trim().split(' ').take(2).map((w) => w[0]).join()
+        ? member!.name.trim().split(' ').where((w) => w.isNotEmpty).take(2).map((w) => w[0]).join()
         : '?';
     return Container(
       width: 60,

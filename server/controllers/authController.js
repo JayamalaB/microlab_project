@@ -76,8 +76,10 @@ exports.sendOtp = async (req, res) => {
       }
     }
 
-    const otp = generateOtp();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    // Demo account for Play Store review — fixed OTP, never expires, no SMS
+    const isDemo = process.env.DEMO_MOBILE && mobile === process.env.DEMO_MOBILE;
+    const otp       = isDemo ? process.env.DEMO_OTP : generateOtp();
+    const expiresAt = isDemo ? new Date('2099-12-31T23:59:59Z') : new Date(Date.now() + 10 * 60 * 1000);
 
     step = 'select_user';
     writeLog(`[sendOtp] SELECT ip_users — ${elapsed()}`);
@@ -165,18 +167,22 @@ exports.sendOtp = async (req, res) => {
 
     step = 'sms';
     writeLog(`[sendOtp] OTP stored — value=${otp} expires=${expiresAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
-    writeLog(`[sendOtp] SMS env — api_key=${process.env.PING4SMS_API_KEY ? 'SET' : 'MISSING'} sender=${process.env.PING4SMS_SENDER_ID ?? 'MISSING'} template=${process.env.PING4SMS_LOGIN_TEMPLATE_ID ?? 'MISSING'}`);
-    try {
-      writeLog(`[sendOtp] calling SMS gateway — target=91${mobile} — ${elapsed()}`);
-      const smsResponse = await sms.sendLoginOtp(mobile, otp);
-      const raw = String(smsResponse ?? '').trim();
-      const isSuccess = /^\d+$/.test(raw);
-      const meaning = isSuccess
-        ? `✅ delivered — message_id=${raw}`
-        : `❌ gateway error — ${raw}`;
-      writeLog(`[sendOtp] SMS response — ${elapsed()} | raw="${raw}" | ${meaning}`);
-    } catch (smsErr) {
-      writeLog(`[sendOtp] SMS failed (non-fatal) — ${elapsed()} | ${smsErr.message}`);
+    if (isDemo) {
+      writeLog(`[sendOtp] demo account — SMS skipped`);
+    } else {
+      writeLog(`[sendOtp] SMS env — api_key=${process.env.PING4SMS_API_KEY ? 'SET' : 'MISSING'} sender=${process.env.PING4SMS_SENDER_ID ?? 'MISSING'} template=${process.env.PING4SMS_LOGIN_TEMPLATE_ID ?? 'MISSING'}`);
+      try {
+        writeLog(`[sendOtp] calling SMS gateway — target=91${mobile} — ${elapsed()}`);
+        const smsResponse = await sms.sendLoginOtp(mobile, otp);
+        const raw = String(smsResponse ?? '').trim();
+        const isSuccess = /^\d+$/.test(raw);
+        const meaning = isSuccess
+          ? `✅ delivered — message_id=${raw}`
+          : `❌ gateway error — ${raw}`;
+        writeLog(`[sendOtp] SMS response — ${elapsed()} | raw="${raw}" | ${meaning}`);
+      } catch (smsErr) {
+        writeLog(`[sendOtp] SMS failed (non-fatal) — ${elapsed()} | ${smsErr.message}`);
+      }
     }
 
     writeLog(`[sendOtp] done — total ${elapsed()}`);
@@ -206,12 +212,16 @@ function buildSecureId(mobileNo, userType, timestamp) {
 async function fetchFromRegistry(url, mobileNo, userType) {
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const secure_id = buildSecureId(mobileNo, userType, timestamp);
+  const params = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id });
   const res = await fetch(url, {
     method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id }),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body:    params.toString(),
   });
-  const body = await res.json();
+  const text = await res.text();
+  // ASMX HTTP POST wraps the return string in XML: <string xmlns="...">JSON</string>
+  const xmlMatch = /<string[^>]*>([\s\S]*?)<\/string>/.exec(text);
+  const body = JSON.parse(xmlMatch ? xmlMatch[1] : text);
   return { httpStatus: res.status, body };
 }
 
@@ -239,43 +249,50 @@ exports.verifyOtp = async (req, res) => {
       return res.status(422).json({ success: false, message: 'Mobile and OTP required' });
     }
 
-    // Atomic claim-and-consume: the SELECT-then-UPDATE this replaces had a
-    // real gap between "checked the OTP is valid" and "cleared it", wide
-    // enough for two concurrent verify-otp requests (e.g. a retried tap, or
-    // literally two devices that both somehow got the same code) to both
-    // pass the SELECT before either cleared it — both would then think
-    // they'd won and each hand out a real session, exactly the double-
-    // session outcome single-active-session exists to prevent. Folding the
-    // validity check into the UPDATE's own WHERE clause closes that gap:
-    // MySQL serializes concurrent UPDATEs to the same row, so only ONE
-    // concurrent request can ever actually clear a given OTP.
-    // affectedRows === 0 covers every rejection reason this WHERE encodes —
-    // wrong/already-used/expired OTP, inactive account, soft-deleted
-    // account (deleted_at IS NULL) — collapsed into one accurate message:
-    // whoever didn't win this race genuinely does not have a currently-
-    // valid OTP anymore, whether because it was always wrong or because
-    // the other request just consumed it first.
-    const [claim] = await db.query(
-      `UPDATE ip_users
-       SET user_otp = NULL, user_otp_expiry = NULL,
-           user_last_active_at = NOW(), user_date_modified = NOW()
-       WHERE user_mobile_no = ? AND user_otp = ? AND user_otp_expiry > NOW()
-         AND user_active = 1 AND deleted_at IS NULL`,
-      [mobile, otp]
-    );
+    // Demo account bypass — fixed OTP for Play Store review, never expires
+    const isDemo = process.env.DEMO_MOBILE && process.env.DEMO_OTP &&
+                   mobile === process.env.DEMO_MOBILE && otp === process.env.DEMO_OTP;
 
-    if (claim.affectedRows === 0) {
-      return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
+    let dbUser;
+    if (isDemo) {
+      // Look up by mobile only — skip OTP and expiry check, don't consume the OTP
+      // so the fixed code remains reusable across Play Store review sessions.
+      const [[demoUser]] = await db.query(
+        `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
+         FROM ip_users WHERE user_mobile_no = ? AND user_active = 1 AND deleted_at IS NULL LIMIT 1`,
+        [mobile]
+      );
+      if (!demoUser) {
+        return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
+      }
+      dbUser = demoUser;
+      writeLog(`[verifyOtp] demo account login — mobile=${mobile}`);
+    } else {
+      // Atomic claim-and-consume: fold the validity check into the UPDATE's WHERE clause so
+      // MySQL serializes concurrent requests to the same row — only one request can ever
+      // clear a given OTP, closing the SELECT-then-UPDATE race that allowed double sessions.
+      const [claim] = await db.query(
+        `UPDATE ip_users
+         SET user_otp = NULL, user_otp_expiry = NULL,
+             user_last_active_at = NOW(), user_date_modified = NOW()
+         WHERE user_mobile_no = ? AND user_otp = ? AND user_otp_expiry > NOW()
+           AND user_active = 1 AND deleted_at IS NULL`,
+        [mobile, otp]
+      );
+
+      if (claim.affectedRows === 0) {
+        return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
+      }
+
+      // Safe to fetch by mobile alone — the UPDATE above proved this request exclusively
+      // consumed a valid OTP for this number.
+      const [[fetchedUser]] = await db.query(
+        `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
+         FROM ip_users WHERE user_mobile_no = ? AND deleted_at IS NULL LIMIT 1`,
+        [mobile]
+      );
+      dbUser = fetchedUser;
     }
-
-    // Safe to fetch by mobile alone now — the UPDATE above just proved
-    // (atomically, exclusively for this request) that exactly one account
-    // owns this number and just had its OTP genuinely, freshly consumed.
-    const [[dbUser]] = await db.query(
-      `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
-       FROM ip_users WHERE user_mobile_no = ? LIMIT 1`,
-      [mobile]
-    );
 
     const tokenExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
@@ -490,7 +507,7 @@ exports.verifyOtp = async (req, res) => {
       patient = patients[0];
     }
 
-    // Fetch patient list from PHP registry (micro_patient.php)
+    // Fetch patient list from ASMX web service (GetPatientList)
     let phpPatients = [];
     try {
       const phpResult = await fetchFromRegistry(process.env.CLIENT_PATIENT_URL, mobile, 'patient');
@@ -498,42 +515,80 @@ exports.verifyOtp = async (req, res) => {
         phpPatients = Array.isArray(phpResult.body.patient) ? phpResult.body.patient : [];
       }
     } catch (err) {
-      console.warn('[verifyOtp] micro_patient.php unreachable (non-fatal):', err.message);
+      console.warn('[verifyOtp] GetPatientList unreachable (non-fatal):', err.message);
     }
 
-    // If new user and client server has profile data, auto-fill from Self patient
+    // Sync all ASMX patients into ip_patients (upsert by patient_id_ref, runs every login)
     let profileAutoFilled = false;
-    if (isNewUser && phpPatients.length > 0) {
+    if (phpPatients.length > 0) {
       const selfP = phpPatients.find(p => p.relation === 'Self') || phpPatients[0];
-      if (selfP) {
-        const dobParts = selfP.date_of_birth ? selfP.date_of_birth.split('-') : null;
-        const dob = dobParts && dobParts.length === 3
-          ? (dobParts[0].length <= 2 ? `${dobParts[2]}-${dobParts[1]}-${dobParts[0]}` : selfP.date_of_birth)
-          : null;
 
-        await db.query(
-          `UPDATE ip_patients
-           SET patient_name=?, patient_gender=?, patient_city=?, patient_address=?,
-               patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
-               health_conditions=?, patient_photo=?, patient_id_ref=?, updated_at=NOW()
-           WHERE patient_id=?`,
-          [selfP.name, selfP.gender, selfP.location, selfP.address,
-           selfP.email || null, dob, selfP.age || null, selfP.relation || 'Self',
-           selfP.health_condition || null, selfP.photo || null,
-           String(selfP.patient_id), patient.patient_id]
+      for (const p of phpPatients) {
+        const dobParts = p.date_of_birth ? p.date_of_birth.split('-') : null;
+        const dob = dobParts && dobParts.length === 3
+          ? (dobParts[0].length <= 2 ? `${dobParts[2]}-${dobParts[1]}-${dobParts[0]}` : p.date_of_birth)
+          : null;
+        const isSelf      = p === selfP;
+        const patientIdRef = String(p.patient_id);
+
+        // Check if this ASMX patient is already stored (by patient_id_ref + client_id)
+        const [existing] = await db.query(
+          'SELECT patient_id FROM ip_patients WHERE client_id = ? AND patient_id_ref = ? LIMIT 1',
+          [dbUser.client_id, patientIdRef]
         );
-        await db.query(
-          `UPDATE ip_users SET user_name=?, user_email=?, user_date_modified=NOW() WHERE user_id=?`,
-          [selfP.name, selfP.email || null, dbUser.user_id]
-        );
-        await db.query(
-          `UPDATE ip_clients SET client_name=?, client_date_modified=NOW() WHERE client_id=?`,
-          [selfP.name, dbUser.client_id]
-        );
-        patient = { ...patient, patient_name: selfP.name, patient_gender: selfP.gender,
-                    patient_city: selfP.location, patient_relation: selfP.relation || 'Self' };
-        profileAutoFilled = true;
-        writeLog(`[verifyOtp] profile auto-filled from client server — mobile=${mobile} name=${selfP.name}`);
+
+        if (existing.length > 0) {
+          // Update the already-synced row
+          await db.query(
+            `UPDATE ip_patients
+             SET patient_name=?, patient_gender=?, patient_city=?, patient_address=?,
+                 patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
+                 health_conditions=?, patient_photo=?, updated_at=NOW()
+             WHERE patient_id=?`,
+            [p.name, p.gender || null, p.location || null, p.address || null,
+             p.email || null, dob, p.age || null, p.relation || (isSelf ? 'Self' : null),
+             p.health_condition || null, p.photo || null, existing[0].patient_id]
+          );
+        } else if (isSelf) {
+          // Update the primary patient row and stamp its patient_id_ref
+          await db.query(
+            `UPDATE ip_patients
+             SET patient_name=?, patient_gender=?, patient_city=?, patient_address=?,
+                 patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
+                 health_conditions=?, patient_photo=?, patient_id_ref=?, updated_at=NOW()
+             WHERE patient_id=?`,
+            [p.name, p.gender || null, p.location || null, p.address || null,
+             p.email || null, dob, p.age || null, p.relation || 'Self',
+             p.health_condition || null, p.photo || null, patientIdRef, patient.patient_id]
+          );
+          if (isNewUser) {
+            await db.query(
+              'UPDATE ip_users SET user_name=?, user_email=?, user_date_modified=NOW() WHERE user_id=?',
+              [p.name, p.email || null, dbUser.user_id]
+            );
+            await db.query(
+              'UPDATE ip_clients SET client_name=?, client_date_modified=NOW() WHERE client_id=?',
+              [p.name, dbUser.client_id]
+            );
+            patient = { ...patient, patient_name: p.name, patient_gender: p.gender,
+                        patient_city: p.location, patient_relation: p.relation || 'Self' };
+            profileAutoFilled = true;
+          }
+          writeLog(`[verifyOtp] self patient synced from ASMX — mobile=${mobile} name=${p.name}`);
+        } else {
+          // Insert new family member
+          await db.query(
+            `INSERT INTO ip_patients
+               (client_id, patient_name, patient_gender, patient_city, patient_address,
+                patient_email, patient_dob, patient_age, patient_relation,
+                health_conditions, patient_photo, patient_id_ref, patient_mobile, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'asmx_sync')`,
+            [dbUser.client_id, p.name, p.gender || null, p.location || null, p.address || null,
+             p.email || null, dob, p.age || null, p.relation || null,
+             p.health_condition || null, p.photo || null, patientIdRef, mobile]
+          );
+          writeLog(`[verifyOtp] family member inserted from ASMX — name=${p.name} ref=${patientIdRef}`);
+        }
       }
     }
 

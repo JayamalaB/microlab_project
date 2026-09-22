@@ -56,6 +56,9 @@ router.post('/:bookingId/pay', auth, bookingController.payBooking);
 // PUT /api/bookings/:bookingId/items — replace tests/packages on an existing booking
 router.put('/:bookingId/items', auth, bookingController.updateBookingItems);
 
+// POST /api/bookings/:bookingId/self-edit — customer edits tests after booking (handles topup/refund)
+router.post('/:bookingId/self-edit', auth, bookingController.selfEditItems);
+
 // PUT /api/bookings/:bookingId/lab-status — update lab pipeline stage (lab-side only)
 router.put('/:bookingId/lab-status',    adminSecret, bookingController.updateLabStatus);
 
