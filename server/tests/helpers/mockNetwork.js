@@ -23,10 +23,17 @@
 // started returning the mocked Jayamala body instead of ever reaching the
 // server). Callers MUST restore the original: `const real = global.fetch;
 // afterEach(() => { global.fetch = real; })`.
+// fetchFromRegistry (authController.js) reads the response via res.text(),
+// not res.json() — it's an ASMX web service whose HTTP POST response wraps
+// the real JSON payload in a <string xmlns="...">...</string> envelope,
+// which fetchFromRegistry regexes out before JSON.parse'ing. Mocking only
+// res.json() left res.text() undefined, which throws the moment real code
+// calls it — silently swallowed by the customer path's own try/catch, but
+// still not what a real registry response looks like.
 function mockFetchOnce(jsonBody, status = 200) {
   global.fetch = jest.fn().mockResolvedValue({
     status,
-    json: async () => jsonBody,
+    text: async () => `<string xmlns="http://tempuri.org/">${JSON.stringify(jsonBody)}</string>`,
   });
   return global.fetch;
 }

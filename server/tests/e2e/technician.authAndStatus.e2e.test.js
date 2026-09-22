@@ -25,12 +25,22 @@ afterAll(async () => { await server.close(); });
 // with a URL-aware passthrough so this file's OWN fetch() calls to the real
 // server keep working (see mockNetwork.js's warning about global.fetch
 // leaking across every call in the file, not just the one you intended).
+//
+// fetchFromRegistry (authController.js) now talks to an ASMX web service —
+// it reads the response via res.text(), not res.json(), and unwraps the
+// ASMX <string xmlns="...">JSON</string> envelope before JSON.parse'ing the
+// inner payload. The mock below has to reproduce that exact shape, or
+// res.text() on a plain {status, json} mock object throws and the
+// technician branch's try/catch turns that into an unrelated 502.
 const realFetch = global.fetch;
 afterEach(() => { global.fetch = realFetch; });
 function mockJayamalaRegistryOnce(jsonBody, status = 200) {
   global.fetch = jest.fn((url, opts) => {
     if (String(url).startsWith(server.url)) return realFetch(url, opts);
-    return Promise.resolve({ status, json: async () => jsonBody });
+    return Promise.resolve({
+      status,
+      text: async () => `<string xmlns="http://tempuri.org/">${JSON.stringify(jsonBody)}</string>`,
+    });
   });
 }
 
