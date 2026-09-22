@@ -1242,6 +1242,36 @@ exports.removeItem = async (req, res) => {
       [price, price, bookingId]
     );
 
+    // Overpayment check: if the customer paid more than the new total (e.g.
+    // a paid test was removed), create a pending refund record so the customer
+    // app surfaces "Refund ₹X pending" automatically.
+    const [[fresh]] = await db.execute(
+      `SELECT patient_id, amount_paid, total_amount FROM ip_bookings WHERE booking_id = ?`,
+      [bookingId]
+    );
+    if (fresh) {
+      const amountPaid = parseFloat(fresh.amount_paid ?? 0);
+      const newTotal   = parseFloat(fresh.total_amount ?? 0);
+      if (amountPaid > newTotal + 0.5) {
+        const refundAmt = +(amountPaid - newTotal).toFixed(2);
+        const refundRef = `RFN_MANUAL_${Date.now()}`;
+        await db.execute(
+          `INSERT INTO ip_payment_transactions
+             (transaction_ref, booking_id, patient_id, payment_type,
+              gross_amount, net_amount, amount_paid, amount_due,
+              currency, payment_status, transaction_status, is_refund,
+              gateway_transaction_id, gateway_status, paid_at)
+           VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'pending', NOW())`,
+          [`RFN${Date.now()}`, bookingId, fresh.patient_id,
+           refundAmt, refundAmt, refundAmt, refundRef]
+        );
+        await db.execute(
+          `UPDATE ip_bookings SET refund_amount = ?, refund_status = 'pending' WHERE booking_id = ?`,
+          [refundAmt, bookingId]
+        );
+      }
+    }
+
     // Sync to client server — package_removed is a proposed action, not yet
     // confirmed by Jayamala; the block log will surface a status:"failure"
     // response immediately if it's rejected.

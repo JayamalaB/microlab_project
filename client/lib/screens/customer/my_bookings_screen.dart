@@ -1213,7 +1213,7 @@ class _BookingCard extends StatelessWidget {
                             if (booking.paymentType == 'service_charge')
                               Text('Due at collection: ₹${(booking.grandTotal - booking.paidAmount).toInt()}',
                                   style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                            if (booking.status == 'Cancelled' && (booking.refundAmount ?? 0) > 0)
+                            if ((booking.refundAmount ?? 0) > 0)
                               Text(
                                 booking.refundStatus == 'processed'
                                     ? 'Refund of ₹${booking.refundAmount!.toInt()} initiated · 5–7 days'
@@ -1978,6 +1978,17 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                         _DetailRow(Icons.pending_outlined,
                             b.mode == 'Home Collection' ? 'Due at Collection' : 'Due at Lab',
                             '₹${b.amountDue.toInt()}', valueColor: const Color(0xFFE65100)),
+                      if ((b.refundAmount ?? 0) > 0)
+                        _DetailRow(
+                          Icons.currency_rupee_rounded,
+                          'Refund',
+                          b.refundStatus == 'processed'
+                              ? '₹${b.refundAmount!.toInt()} initiated'
+                              : '₹${b.refundAmount!.toInt()} pending',
+                          valueColor: b.refundStatus == 'processed'
+                              ? AppColors.brandGreen
+                              : const Color(0xFFE65100),
+                        ),
                     ],
                   ),
 

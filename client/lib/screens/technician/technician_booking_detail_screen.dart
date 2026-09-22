@@ -211,6 +211,9 @@ class _TechnicianBookingDetailScreenState
   // same Map<String,String> row shape as _selectedTests, populated by
   // _loadFamilyDocRequirements alongside its existing doc-required check.
   final Map<int, List<Map<String, String>>> _familyItems = {};
+  // Tracks refund owed per family booking when a paid test is removed and
+  // amount_due would go below zero — the overshoot is the refund amount.
+  final Map<int, double> _familyPendingRefund = {};
 
   // OTP
   final List<TextEditingController> _otpControllers =
@@ -282,16 +285,6 @@ class _TechnicianBookingDetailScreenState
     final status = c['payment_status'] as String?;
     return status != 'paid' && status != 'partial';
   });
-
-  // A test is locked when it was already paid for:
-  // - original tests on a booking whose payment_status is 'paid', OR
-  // - tests that existed in the booking when the technician collected payment
-  //   this session (captured in _paidTestIds at the moment of collection).
-  Set<String> _paidTestIds = {};
-
-  bool _isTestLocked(String testId) =>
-      (_livePaymentStatus == 'paid' && _originalItemIds.contains(testId)) ||
-      _paidTestIds.contains(testId);
 
   int get _currentStepIndex =>
       _journeySteps.indexWhere((s) => s.status == _currentStatus);
@@ -1288,22 +1281,197 @@ void _resumeJourney() {
       ));
       return;
     }
-    if (_isTestLocked(id)) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Tests cannot be removed after payment has been collected.'),
-        backgroundColor: Colors.red,
-        behavior: SnackBarBehavior.floating,
-      ));
-      return;
-    }
     final test          = _selectedTests.firstWhere((t) => t['id'] == id, orElse: () => {});
     final bookingItemId = int.tryParse(test['bookingItemId'] ?? '');
-    // Remove from UI immediately (optimistic)
-    setState(() => _selectedTests.removeWhere((t) => t['id'] == id));
+    final price         = double.tryParse(test['price'] ?? '0') ?? 0;
+    final wasOriginal   = _originalItemIds.contains(id);
+    // Remove from UI immediately (optimistic).
+    // If the removed test was in the original booking, also subtract its price
+    // from _totalAmount — otherwise _serviceCharge = _totalAmount - _originalItemsTotal
+    // inflates incorrectly (the original test drops out of _originalItemsTotal
+    // while _totalAmount stays high, making the service charge appear to grow).
+    setState(() {
+      _selectedTests.removeWhere((t) => t['id'] == id);
+      if (wasOriginal) {
+        _originalItemIds.remove(id);
+        _totalAmount = (_totalAmount - price).clamp(0.0, double.infinity);
+      }
+    });
     if (bookingItemId != null && bookingItemId > 0) {
       final bookingId = int.tryParse(widget.booking.id) ?? 0;
       await ApiService.removeBookingItem(bookingId: bookingId, bookingItemId: bookingItemId);
     }
+  }
+
+  // ── Family member test edits ──────────────────────────────
+  // Mirror of _removeTest / _addTest but scoped to a family member's
+  // own booking_id. No _totalAmount/_serviceCharge bookkeeping needed
+  // because those fields track only the primary patient's payment state.
+
+  // Updates _linkedPatients[i]['amount_due'] for the given family booking so
+  // the "₹X due" badge in the card reflects test additions/removals immediately
+  // without waiting for a full server reload.
+  void _updateFamilyAmountDue(int familyBookingId, double delta) {
+    setState(() {
+      _linkedPatients = _linkedPatients.map((p) {
+        if ((p['booking_id'] as num?)?.toInt() != familyBookingId) return p;
+        final oldDue = double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0;
+        final newDue = oldDue + delta;
+        if (newDue < -0.5) {
+          // amount_due went negative — the overshoot is a refund owed to the customer.
+          _familyPendingRefund[familyBookingId] =
+              (_familyPendingRefund[familyBookingId] ?? 0) + (-newDue);
+        }
+        return {...p, 'amount_due': newDue.clamp(0.0, double.infinity)};
+      }).toList();
+    });
+  }
+
+  Future<void> _removeFamilyTest(String testId, int familyBookingId) async {
+    if (_isFinalized) return;
+    final items = _familyItems[familyBookingId];
+    if (items == null) return;
+    final test          = items.firstWhere((t) => t['id'] == testId, orElse: () => {});
+    final bookingItemId = int.tryParse(test['bookingItemId'] ?? '');
+    final price         = double.tryParse(test['price'] ?? '0') ?? 0;
+    setState(() => items.removeWhere((t) => t['id'] == testId));
+    _updateFamilyAmountDue(familyBookingId, -price);
+    if (bookingItemId != null && bookingItemId > 0) {
+      await ApiService.removeBookingItem(bookingId: familyBookingId, bookingItemId: bookingItemId);
+    }
+  }
+
+  Future<void> _addFamilyTest(Map<String, String> t, int familyBookingId) async {
+    if (_isFinalized) return;
+    final items = _familyItems[familyBookingId] ?? [];
+    if (items.any((x) => x['id'] == t['id'])) return;
+    final price = double.tryParse(t['price'] ?? '0') ?? 0;
+    setState(() {
+      _familyItems[familyBookingId] = [
+        ...items,
+        {...Map<String, String>.from(t), 'bookingItemId': '', 'collected': 'pending'},
+      ];
+    });
+    _updateFamilyAmountDue(familyBookingId, price);
+    final productId = int.tryParse(t['id'] ?? '') ?? 0;
+    if (familyBookingId == 0 || productId == 0) return;
+    final result = await ApiService.addBookingItem(bookingId: familyBookingId, productId: productId);
+    if (!mounted) return;
+    if (result != null) {
+      setState(() {
+        final list = _familyItems[familyBookingId] ?? [];
+        final idx  = list.indexWhere((x) => x['id'] == t['id'] && x['bookingItemId'] == '');
+        if (idx != -1) {
+          list[idx]['bookingItemId'] = (result['bookingItemId'] as num?)?.toInt().toString() ?? '';
+        }
+      });
+    } else {
+      // Revert both the test list and the due amount on failure.
+      setState(() {
+        _familyItems[familyBookingId]?.removeWhere((x) => x['id'] == t['id'] && x['bookingItemId'] == '');
+      });
+      _updateFamilyAmountDue(familyBookingId, -price);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Failed to add test — please retry'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
+  }
+
+  void _showAddFamilyTestSheet(int familyBookingId) {
+    String searchQuery = '';
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          final already  = (_familyItems[familyBookingId] ?? []).map((t) => t['id']).toSet();
+          final filtered = _catalogueItems.where((t) {
+            if (already.contains(t['id'])) return false;
+            if (searchQuery.isEmpty) return true;
+            return (t['name']?.toLowerCase().contains(searchQuery.toLowerCase()) ?? false) ||
+                (t['category']?.toLowerCase().contains(searchQuery.toLowerCase()) ?? false);
+          }).toList();
+          return Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+            ),
+            padding: EdgeInsets.fromLTRB(
+              16, 0, 16,
+              MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 16,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 12),
+                  width: 40, height: 4,
+                  decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+                ),
+                const Text('Add Test / Package',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 12),
+                TextField(
+                  autofocus: true,
+                  onChanged: (v) => setSheet(() => searchQuery = v),
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    hintText: 'Search tests…',
+                    hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+                    prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 10),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: AppColors.divider)),
+                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: AppColors.divider)),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(ctx).size.height * 0.4,
+                  ),
+                  child: filtered.isEmpty
+                      ? const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 20),
+                          child: Text('No tests found',
+                              style: TextStyle(fontSize: 13, color: AppColors.textHint)),
+                        )
+                      : ListView.builder(
+                          shrinkWrap: true,
+                          itemCount: filtered.length,
+                          itemBuilder: (_, i) {
+                            final t = filtered[i];
+                            return ListTile(
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                              title: Text(t['name'] ?? '',
+                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                              subtitle: Text(t['category'] ?? '',
+                                  style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                              trailing: Text('₹${t['price'] ?? '0'}',
+                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                      color: AppColors.brandGreen)),
+                              onTap: () {
+                                Navigator.pop(ctx);
+                                _addFamilyTest(t, familyBookingId);
+                              },
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _addTest(Map<String, String> t) async {
@@ -2069,16 +2237,14 @@ void _resumeJourney() {
     openRazorpay(
       options: options,
       onSuccess: (paymentId) {
-        // Capture amount + test IDs before state changes
+        // Capture amount before state changes
         final paidAmount      = amount;
         final bookingId       = int.tryParse(widget.booking.id) ?? 0;
-        final nowPaidTestIds  = _selectedTests.map((t) => t['id'] ?? '').toSet();
         final stillDue        = paidAmount < _amountDue;
         setState(() {
           _isProcessingPayment     = false;
           _sessionPaymentCollected += paidAmount;
           _livePaymentStatus       = stillDue ? 'partial' : 'paid';
-          if (!stillDue) _paidTestIds = {..._paidTestIds, ...nowPaidTestIds};
         });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('Payment of ₹${paidAmount.toInt()} received · $paymentId'),
@@ -2123,7 +2289,6 @@ void _resumeJourney() {
   Future<void> _collectCashPayment({required double amount, VoidCallback? onDone}) async {
     setState(() => _isProcessingPayment = true);
     final bookingId      = int.tryParse(widget.booking.id) ?? 0;
-    final nowPaidTestIds = _selectedTests.map((t) => t['id'] ?? '').toSet();
     final stillDue       = amount < _amountDue;
 
     final ok = await ApiService.collectPayment(
@@ -2137,7 +2302,6 @@ void _resumeJourney() {
       if (ok) {
         _sessionPaymentCollected += amount;
         _livePaymentStatus       = stillDue ? 'partial' : 'paid';
-        if (!stillDue) _paidTestIds = {..._paidTestIds, ...nowPaidTestIds};
       }
     });
     if (ok) {
@@ -2285,7 +2449,7 @@ void _resumeJourney() {
     for (final p in _linkedPatients) {
       final sibId = (p['booking_id'] as num?)?.toInt();
       final due   = double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0;
-      if (sibId != null && due > 0 && p['payment_status'] != 'paid') {
+      if (sibId != null && due > 0) {
         unpaidItems.add({
           'bookingId': sibId,
           'amount':    due,
@@ -2331,7 +2495,6 @@ void _resumeJourney() {
             _sessionPaymentCollected += allocated;
             if (fullyPaid) {
               _livePaymentStatus = 'paid';
-              _paidTestIds       = {..._paidTestIds, ..._selectedTests.map((t) => t['id'] ?? '').toSet()};
             } else {
               _livePaymentStatus = 'partial';
             }
@@ -2713,9 +2876,7 @@ void _resumeJourney() {
                         const SizedBox(width: 8),
                         GestureDetector(
                           onTap: () { _removeTest(t['id'] ?? ''); },
-                          child: _isTestLocked(t['id'] ?? '')
-                              ? const Icon(Icons.lock_outline_rounded, size: 16, color: AppColors.textHint)
-                              : const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                          child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
                         ),
                       ],
                     ]),
@@ -3240,7 +3401,7 @@ void _resumeJourney() {
                   }
                   for (final p in _linkedPatients) {
                     final due = double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0;
-                    if (p['payment_status'] != 'paid' && due > 0) {
+                    if (due > 0) {
                       rows.add({
                         'name':   p['patient_name'] as String? ?? 'Visit Member',
                         'amount': due,
@@ -3296,7 +3457,7 @@ void _resumeJourney() {
                   final parentUnpaid    = !_paymentDone && _amountDue > 0;
                   final unpaidSiblings  = _linkedPatients.where((c) {
                     final due = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
-                    return (c['booking_id'] as num?) != null && due > 0 && c['payment_status'] != 'paid';
+                    return (c['booking_id'] as num?) != null && due > 0;
                   }).toList();
                   final totalUnpaid     = (parentUnpaid ? 1 : 0) + unpaidSiblings.length;
                   if (totalUnpaid < 2) return <Widget>[];
@@ -3336,7 +3497,7 @@ void _resumeJourney() {
                   final unpaidSiblings = _linkedPatients.where((c) {
                     final sibId = (c['booking_id'] as num?)?.toInt();
                     final due   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
-                    return sibId != null && due > 0 && c['payment_status'] != 'paid';
+                    return sibId != null && due > 0;
                   }).toList();
                   if ((parentUnpaid ? 1 : 0) + unpaidSiblings.length >= 2) return <Widget>[];
 
@@ -3456,7 +3617,7 @@ void _resumeJourney() {
                   ..._linkedPatients.map((c) {
                     final amountDue   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
                     final totalAmount = double.tryParse(c['total_amount']?.toString() ?? '0') ?? 0.0;
-                    final isPaid      = c['payment_status'] == 'paid' || amountDue <= 0;
+                    final isPaid      = amountDue <= 0;
                     final hasPayment  = (c['booking_id'] as num?) != null && totalAmount > 0;
                     final memberBookingId = (c['booking_id'] as num?)?.toInt();
                     final memberItems     = memberBookingId != null ? _familyItems[memberBookingId] : null;
@@ -3505,43 +3666,77 @@ void _resumeJourney() {
                                       style: const TextStyle(fontSize: 11, color: Color(0xFF1565C0), fontWeight: FontWeight.w600)),
                                 ),
                         ]),
-                        // This family member's own tests/packages checklist —
-                        // scoped to their own booking_id (_familyItems), same
-                        // visibility rule and toggle mechanism as the primary
-                        // patient's checklist above.
-                        if (_showCollectionChecklist && memberBookingId != null && memberItems != null && memberItems.isNotEmpty) ...[
+                        // Family member's tests — always shown (edit + checklist).
+                        if (memberBookingId != null && memberItems != null && memberItems.isNotEmpty) ...[
                           const Divider(height: 16),
                           ...memberItems.map((t) => Padding(
                             padding: const EdgeInsets.only(bottom: 6),
-                            child: GestureDetector(
-                              onTap: () => _toggleItemCollected(
-                                t['id'] ?? '', t['collected'] != 'completed',
-                                targetBookingId: memberBookingId,
-                              ),
-                              child: Row(children: [
-                                Icon(
-                                  t['collected'] == 'completed'
-                                      ? Icons.check_circle_rounded
-                                      : Icons.radio_button_unchecked_rounded,
-                                  size: 15,
-                                  color: t['collected'] == 'completed' ? AppColors.brandGreen : AppColors.textHint,
-                                ),
-                                const SizedBox(width: 6),
-                                Expanded(
-                                  child: Text(t['name'] ?? '',
-                                      style: const TextStyle(fontSize: 12)),
-                                ),
-                                Text(
-                                  t['collected'] == 'completed' ? 'Collected' : 'Pending',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.w600,
+                            child: Row(children: [
+                              if (_showCollectionChecklist)
+                                GestureDetector(
+                                  onTap: () => _toggleItemCollected(
+                                    t['id'] ?? '', t['collected'] != 'completed',
+                                    targetBookingId: memberBookingId,
+                                  ),
+                                  child: Icon(
+                                    t['collected'] == 'completed'
+                                        ? Icons.check_circle_rounded
+                                        : Icons.radio_button_unchecked_rounded,
+                                    size: 15,
                                     color: t['collected'] == 'completed' ? AppColors.brandGreen : AppColors.textHint,
                                   ),
+                                )
+                              else
+                                const Icon(Icons.circle_outlined, size: 8, color: AppColors.brandGreen),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(t['name'] ?? '',
+                                    style: const TextStyle(fontSize: 12)),
+                              ),
+                              Text('₹${t['price'] ?? '0'}',
+                                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                              if (!_isFinalized) ...[
+                                const SizedBox(width: 8),
+                                GestureDetector(
+                                  onTap: () => _removeFamilyTest(t['id'] ?? '', memberBookingId),
+                                  child: const Icon(Icons.close_rounded, size: 16, color: AppColors.textHint),
                                 ),
+                              ],
+                            ]),
+                          )),
+                        ],
+                        if (!_isFinalized && memberBookingId != null) ...[
+                          const SizedBox(height: 6),
+                          GestureDetector(
+                            onTap: () => _showAddFamilyTestSheet(memberBookingId),
+                            child: Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                color: AppColors.brandGreenSurface,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: AppColors.brandGreenLight),
+                              ),
+                              child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                Icon(Icons.add_circle_outline, size: 14, color: AppColors.brandGreen),
+                                SizedBox(width: 6),
+                                Text('Add Test / Package',
+                                    style: TextStyle(fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w500)),
                               ]),
                             ),
-                          )),
+                          ),
+                        ],
+                        if (memberBookingId != null &&
+                            (_familyPendingRefund[memberBookingId] ?? 0) > 0.5) ...[
+                          const SizedBox(height: 8),
+                          Row(children: [
+                            const Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFE65100)),
+                            const SizedBox(width: 4),
+                            Text(
+                              'Refund ₹${(_familyPendingRefund[memberBookingId]!).toInt()} pending',
+                              style: const TextStyle(fontSize: 12, color: Color(0xFFE65100), fontWeight: FontWeight.w500),
+                            ),
+                          ]),
                         ],
                       ]),
                     );
