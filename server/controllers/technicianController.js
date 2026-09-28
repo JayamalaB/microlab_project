@@ -4,7 +4,8 @@
 // Reads from ip_technician_live_location which is kept current by bookingSocket.js
 // via INSERT … ON DUPLICATE KEY UPDATE on every technician_online event.
 
-const db   = require('../config/db');
+const db       = require('../config/db');
+const settings = require('../config/settings');
 const fs   = require('fs');
 const path = require('path');
 const sms  = require('../utils/sms');
@@ -1046,9 +1047,16 @@ exports.addVisitMember = async (req, res) => {
         }
       }
 
-      // INSERT new booking — status='confirmed', technician directly assigned
-      const bookingRef = `BC${Date.now()}${String(refSeq).padStart(2, '0')}`;
-      const txnRef     = `TXN${Date.now()}${String(refSeq)}${Math.random().toString(36).slice(2, 4).toUpperCase()}`;
+      // INSERT new booking — status='confirmed', technician directly assigned.
+      // booking_ref is derived below from the row's own booking_id (same
+      // booking_id + ip_settings 'booking_ref_offset' scheme used by every
+      // other booking-creation path — see bookingController.js's own
+      // comment on why), not known until after the INSERT assigns one.
+      // Previously this used `BC${Date.now()}...`, the same
+      // timestamp-collision risk the other paths were already fixed for
+      // (see change_booking_ref_to_sequential.sql) — this path was simply
+      // missed until a real mismatched ref surfaced it.
+      const txnRef = `TXN${Date.now()}${String(refSeq)}${Math.random().toString(36).slice(2, 4).toUpperCase()}`;
       const [bRes] = await conn.execute(
         `INSERT INTO ip_bookings
            (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
@@ -1059,10 +1067,10 @@ exports.addVisitMember = async (req, res) => {
             patient_id, patient_id_ref, product_id,
             payment_status, visit_group_id, technician_id, technician_name,
             start_datetime, end_datetime, created_by, created_at)
-         VALUES (?, ?, ?, ?, NULL, ?, 'home_collection', 'confirmed', ?, 0, 0, ?,
+         VALUES (NULL, ?, ?, ?, NULL, ?, 'home_collection', 'confirmed', ?, 0, 0, ?,
                  'technician_app', NULL, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?,
                  NOW(), NOW(), ?, NOW())`,
-        [bookingRef, parent.client_id, parent.branch_id || null, parent.booking_date,
+        [parent.client_id, parent.branch_id || null, parent.booking_date,
          parent.available_slot_id || null, totalAmount, totalAmount,
          parent.collection_address, parent.postal_code, parent.city,
          parent.collection_latitude, parent.collection_longitude,
@@ -1071,6 +1079,8 @@ exports.addVisitMember = async (req, res) => {
          technicianId]
       );
       const newBookingId = bRes.insertId;
+      const bookingRef = String(newBookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
+      await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, newBookingId]);
 
       // Link patient to new booking
       await conn.execute(

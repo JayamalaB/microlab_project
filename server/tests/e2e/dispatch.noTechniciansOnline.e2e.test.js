@@ -64,6 +64,7 @@ test('with no technician ever online, the patient is told the booking timed out 
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${custToken}` },
     body: JSON.stringify({
       patientId: 501, totalAmount: 878, paymentType: 'pay_later',
+      bookingType: 'lab_visit', // this test is about dispatch, not Home Collection fare
       items: [{ packageId: 7, originalPrice: 878, finalPrice: 878 }],
     }),
   });

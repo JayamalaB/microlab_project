@@ -1,5 +1,6 @@
 ﻿const db       = require('../config/db');
 const settings = require('../config/settings');
+const { calculateHomeCollectionFare, FareCalculationError } = require('../services/fareCalculator');
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { messaging } = require('../config/firebase');
@@ -52,7 +53,6 @@ exports.createBooking = async (req, res) => {
     patientId,
     patientIdRef      = null,
     bookingType       = 'home_collection',
-    totalAmount       = 0,
     discountAmount    = 0,
     sourceChannel     = 'mobile_app',
     notes             = null,
@@ -69,14 +69,23 @@ exports.createBooking = async (req, res) => {
     razorpayPaymentId = null,
     razorpayOrderId   = null,
   } = req.body;
+  // let, not const — Home Collection bookings have this recomputed
+  // server-side below (see the fare-calculation block) rather than trusted
+  // as sent, once the authoritative Branch→Customer fare is known.
+  let totalAmount = Number(req.body.totalAmount) || 0;
 
   if (!patientId) {
     return res.status(400).json({ success: false, message: 'patientId is required' });
   }
 
+  // Pickup coordinates are required to price a Home Collection booking
+  // (Branch → Customer distance) — checked before any DB work starts, same
+  // as the patientId check above.
+  if (bookingType === 'home_collection' && (collectionLatitude == null || collectionLongitude == null)) {
+    return res.status(422).json({ success: false, message: 'Pickup location is required for Home Collection bookings' });
+  }
+
   const isPaid     = paymentType === 'full' && razorpayPaymentId;
-  const amountPaid = isPaid ? totalAmount : 0;
-  const amountDue  = isPaid ? 0 : totalAmount;
   const txPaymentType = isPaid ? 'RAZORPAY' : 'PAY_LATER';
 
   // Future-date bookings are held until the cron scheduler fires dispatch
@@ -88,6 +97,48 @@ exports.createBooking = async (req, res) => {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
+
+    // Home Collection fare — Branch → Customer distance, computed
+    // authoritatively here, never trusted from the client (see
+    // fareCalculator.js). itemsTotal is this request's own items[].finalPrice
+    // sum — already trusted the same way a few lines below when each item is
+    // inserted — so only the fare portion of totalAmount changes from
+    // client-supplied to server-computed, not item pricing.
+    //
+    // Pay-later bookings (nothing charged yet): totalAmount is fully
+    // recomputed here (itemsTotal + authoritative fare) — this is the actual
+    // fix for "the server currently trusts whatever totalAmount the client
+    // sends with zero validation."
+    //
+    // Pay-now bookings: Razorpay already captured a specific amount (based on
+    // a fare quote fetched moments earlier via this same
+    // calculateHomeCollectionFare logic) *before* this request is even sent —
+    // there is no undoing that capture from here. totalAmount is trusted as
+    // the amount actually paid; the authoritative fare is still computed and
+    // stored (home_collection_fare) for audit, and a disagreement beyond a
+    // cent of rounding (e.g. the active rate changed in the few minutes
+    // between quote and confirm) is logged as a warning rather than silently
+    // accepted or silently overridden — a completed payment can't be un-charged.
+    let homeCollectionFare = null;
+    if (bookingType === 'home_collection') {
+      homeCollectionFare = await calculateHomeCollectionFare({
+        branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude, dbConn: conn,
+      });
+
+      const itemsTotal = items.reduce((sum, item) => sum + (Number(item.finalPrice) || 0), 0);
+      if (isPaid) {
+        const expected = Number((itemsTotal + homeCollectionFare.finalFare).toFixed(2));
+        if (Math.abs(expected - totalAmount) > 0.01) {
+          console.warn(`⚠️  [CREATE BOOKING] paid totalAmount=₹${totalAmount} disagrees with itemsTotal+fare=₹${expected} (rateId=${homeCollectionFare.rateId}) — trusting the already-captured payment amount`);
+        }
+      } else {
+        totalAmount = Number((itemsTotal + homeCollectionFare.finalFare).toFixed(2));
+      }
+      console.log(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} finalFare=₹${homeCollectionFare.finalFare} rateId=${homeCollectionFare.rateId} → totalAmount=₹${totalAmount}`);
+    }
+
+    const amountPaid = isPaid ? totalAmount : 0;
+    const amountDue  = isPaid ? 0 : totalAmount;
 
     // Resolve patient_id_ref from ip_patients
     let resolvedPatientIdRef = patientIdRef ?? null;
@@ -127,20 +178,30 @@ exports.createBooking = async (req, res) => {
           amount_paid, amount_due,
           source_channel, notes, collection_address, postal_code, city,
           collection_latitude, collection_longitude,
+          home_collection_fare, home_collection_distance_km, km_rate_id,
           patient_id, patient_id_ref, product_id,
           payment_status, start_datetime, end_datetime, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
       [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
        bookingType, bookingStatus, totalAmount, discountAmount ?? 0, amountPaid, amountDue,
        sourceChannel, notes ?? null,
        collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
        collectionLatitude ?? null, collectionLongitude ?? null,
+       homeCollectionFare?.finalFare ?? null, homeCollectionFare?.distanceKm ?? null, homeCollectionFare?.rateId ?? null,
        patientId, resolvedPatientIdRef,
        isPaid ? 'paid' : 'unpaid',
        userId ?? null]
     );
     const bookingId  = bResult.insertId;
-    const bookingRef = `BK-${String(bookingId).padStart(6, '0')}`;
+    // booking_ref = booking_id + a fixed offset (ip_settings key
+    // 'booking_ref_offset', set once by change_booking_ref_to_sequential.sql
+    // so the earliest existing booking landed on exactly 100000001) — a
+    // plain sequential number, not the old BK-XXXXXX format. Still derived
+    // from booking_id's own AUTO_INCREMENT, so it keeps the exact same
+    // atomicity/uniqueness guarantee that format already relied on (see the
+    // LT-002 comment history on why deriving from a real DB auto-increment,
+    // rather than e.g. Date.now(), matters here).
+    const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
     await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
     console.log(`✅ ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef}`);
 
@@ -269,16 +330,53 @@ exports.createBooking = async (req, res) => {
     });
   } catch (err) {
     await conn.rollback();
-    console.error('❌ createBooking FAILED:', err.message);
-    res.status(500).json({
-      success: false,
-      message: 'Server error',
-      detail:   err.message,
-      sqlState: err.sqlState,
-      code:     err.code,
-    });
+    if (err instanceof FareCalculationError) {
+      // RATE_NOT_FOUND / RATE_CONFIG_INCOMPLETE mean the fare *system* isn't
+      // ready (503, an ops problem) — everything else (missing coordinates,
+      // missing branch location, outside service area) is this specific
+      // request being unable to be priced (422).
+      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
+      console.error(`❌ [CREATE BOOKING] fare calculation failed — code=${err.code} ${err.message}`);
+      res.status(status).json({ success: false, code: err.code, message: err.message });
+    } else {
+      console.error('❌ createBooking FAILED:', err.message);
+      res.status(500).json({
+        success: false,
+        message: 'Server error',
+        detail:   err.message,
+        sqlState: err.sqlState,
+        code:     err.code,
+      });
+    }
   } finally {
     conn.release();
+  }
+};
+
+// ── GET /api/bookings/fare-quote ────────────────────────────────────────────────
+// Pre-confirm Home Collection fare display — checkout_screen.dart calls this
+// once branchId + pickup coordinates are known (same inputs createBooking
+// itself independently recomputes at confirmation time — see that function's
+// own fare-calculation block for why it isn't simply trusted from here).
+exports.getHomeCollectionFareQuote = async (req, res) => {
+  const branchId  = req.query.branchId ? Number(req.query.branchId) : null;
+  const pickupLat = req.query.lat != null ? Number(req.query.lat) : null;
+  const pickupLng = req.query.lng != null ? Number(req.query.lng) : null;
+
+  if (!branchId) {
+    return res.status(422).json({ success: false, message: 'branchId is required' });
+  }
+
+  try {
+    const fare = await calculateHomeCollectionFare({ branchId, pickupLat, pickupLng });
+    res.json({ success: true, fare });
+  } catch (err) {
+    if (err instanceof FareCalculationError) {
+      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
+      return res.status(status).json({ success: false, code: err.code, message: err.message });
+    }
+    console.error('❌ [FARE QUOTE] failed:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
@@ -1997,7 +2095,10 @@ exports.createFamilyBooking = async (req, res) => {
          visitGroupId, userId ?? null]
       );
       const bookingId  = bResult.insertId;
-      const bookingRef = `BK-${String(bookingId).padStart(6, '0')}`;
+      // Same booking_id + offset scheme as createBooking above — see that
+      // function's own comment. visit_group_id (below) intentionally keeps
+      // its separate VG-XXXXXX format; only booking_ref changes.
+      const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
 
       // First member of this request: visitGroupId isn't known yet (it was
       // inserted as NULL above), so derive it now from this booking's own
@@ -2284,7 +2385,8 @@ exports.createAdminBooking = async (req, res) => {
        isPaid ? 'paid' : 'unpaid']
     );
     const bookingId  = bResult.insertId;
-    const bookingRef = `BK-${String(bookingId).padStart(6, '0')}`;
+    // Same booking_id + offset scheme as createBooking — see that function's own comment.
+    const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
     await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
     console.log(`✅ [ADMIN] ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef} status=${bookingStatus}`);
 

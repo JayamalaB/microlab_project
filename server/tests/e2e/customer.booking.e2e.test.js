@@ -52,6 +52,7 @@ describe('IT-C002 — Customer Creates Booking (real server)', () => {
       patientId: 501,
       totalAmount: 878,
       paymentType: 'pay_later',
+      bookingType: 'lab_visit', // this test is about the create→DB-write path, not Home Collection fare
       collectionAddress: '12 MG Road, Chennai',
       collectionPincode: '600001',
       items: [{ packageId: 7, originalPrice: 878, finalPrice: 878 }],
@@ -63,9 +64,11 @@ describe('IT-C002 — Customer Creates Booking (real server)', () => {
     expect(body.success).toBe(true);
     expect(body.bookingId).toBe(950);
     expect(body.bookingItems[0]).toMatchObject({ productId: 7, docRequired: false });
-    // booking_ref is now derived from the row's own id, not a timestamp —
-    // see bookingController.js's own comment on why (LT-002 fix).
-    expect(body.bookingRef).toBe('BK-000950');
+    // booking_ref = booking_id + the ip_settings 'booking_ref_offset' (see
+    // change_booking_ref_to_sequential.sql) — this test doesn't mock
+    // config/settings, so the real module's empty cache falls back to an
+    // offset of 0, making bookingRef exactly the booking_id itself.
+    expect(body.bookingRef).toBe('950');
 
     // Database result — the booking row, correct patient, correct amount, correct status.
     const bookingInsertParams = conn.execute.mock.calls[1][1];

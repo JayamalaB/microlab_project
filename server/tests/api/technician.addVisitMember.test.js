@@ -92,11 +92,12 @@ describe('POST /api/technicians/add-visit-member', () => {
       .mockResolvedValueOnce([[{ patient_id_ref: null }]])           // 7. patient_id_ref lookup
       .mockResolvedValueOnce([[{ product_id: 7, product_name: 'CBC', product_price: '500.00', offer: 'no', discount_percent: 0 }]]) // 8. product lookup
       .mockResolvedValueOnce([{ insertId: 950 }])                    // 9. INSERT ip_bookings (new member booking)
-      .mockResolvedValueOnce([{}])                                   // 10. INSERT ip_patient_bookings
-      .mockResolvedValueOnce([{}])                                   // 11. INSERT ip_booking_items
-      .mockResolvedValueOnce([{}])                                   // 12. INSERT ip_payment_transactions
-      .mockResolvedValueOnce([{}])                                   // 13. INSERT ip_technician_collection
-      .mockResolvedValueOnce([{}]);                                  // 14. UPDATE ip_patient_bookings collection_status='arrived'
+      .mockResolvedValueOnce([{}])                                   // 10. UPDATE booking_ref (derived from insertId)
+      .mockResolvedValueOnce([{}])                                   // 11. INSERT ip_patient_bookings
+      .mockResolvedValueOnce([{}])                                   // 12. INSERT ip_booking_items
+      .mockResolvedValueOnce([{}])                                   // 13. INSERT ip_payment_transactions
+      .mockResolvedValueOnce([{}])                                   // 14. INSERT ip_technician_collection
+      .mockResolvedValueOnce([{}]);                                  // 15. UPDATE ip_patient_bookings collection_status='arrived'
 
     const res = await post({
       parentBookingId: 900,
@@ -113,16 +114,21 @@ describe('POST /api/technicians/add-visit-member', () => {
 
     expect(conn.commit).toHaveBeenCalled();
     expect(conn.rollback).not.toHaveBeenCalled();
-    expect(conn.execute).toHaveBeenCalledTimes(14);
+    expect(conn.execute).toHaveBeenCalledTimes(15);
 
     // New booking is created already 'confirmed' (direct on-site add).
     expect(conn.execute.mock.calls[8][0]).toMatch(/'confirmed'/);
     // Its visit_group_id matches the one just backfilled onto the parent.
     const newBookingParams = conn.execute.mock.calls[8][1];
     expect(newBookingParams).toEqual(expect.arrayContaining([expect.stringMatching(/^VG\d+$/)]));
+    // booking_ref is derived from the new booking's own id (call 9, right
+    // after the INSERT) — no test mocks config/settings here, so the
+    // offset falls back to its default of 0, making booking_ref exactly
+    // the booking_id itself.
+    expect(conn.execute.mock.calls[9]).toEqual(['UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', ['950', 950]]);
     // ip_technician_collection starts 'arrived', not 'assigned' — no
     // dispatch step for a technician-initiated on-site addition.
-    expect(conn.execute.mock.calls[12][0]).toMatch(/'arrived'/);
+    expect(conn.execute.mock.calls[13][0]).toMatch(/'arrived'/);
   });
 
   // TC-FAM-02 — an existing patient found by mobile is updated in place
@@ -145,6 +151,7 @@ describe('POST /api/technicians/add-visit-member', () => {
       .mockResolvedValueOnce([[{ patient_id_ref: null }]])           // patient_id_ref lookup
       // no product lookups — tests: []
       .mockResolvedValueOnce([{ insertId: 951 }])                    // INSERT ip_bookings
+      .mockResolvedValueOnce([{}])                                   // UPDATE booking_ref (derived from insertId)
       .mockResolvedValueOnce([{}])                                   // INSERT ip_patient_bookings
       // no booking_items insert — no resolved products
       .mockResolvedValueOnce([{}])                                   // INSERT ip_payment_transactions
@@ -159,7 +166,7 @@ describe('POST /api/technicians/add-visit-member', () => {
     expect(res.status).toBe(201);
     expect(res.body.totalVisitAmount).toBe(0);
     expect(res.body.members[0].patientId).toBe(602);
-    expect(conn.execute).toHaveBeenCalledTimes(11);
+    expect(conn.execute).toHaveBeenCalledTimes(12);
     expect(conn.execute.mock.calls[3][0]).toMatch(/SELECT patient_id FROM ip_patients/);
     expect(conn.execute.mock.calls[4][0]).toMatch(/UPDATE ip_patients/);
   });

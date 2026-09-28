@@ -107,6 +107,7 @@ test('the complete visit — booking through to one consolidated Jayamala sync',
     .mockResolvedValueOnce([{}]);
   const createRes = await post(custToken, '/api/bookings', {
     patientId: 501, totalAmount: 1000, paymentType: 'pay_later',
+    bookingType: 'lab_visit', // this test is about the visit lifecycle, not Home Collection fare
     collectionAddress: '12 MG Road', collectionLatitude: 13.05, collectionLongitude: 80.25,
     items: [{ packageId: 7, originalPrice: 1000, finalPrice: 1000 }],
   });

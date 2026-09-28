@@ -89,6 +89,7 @@ describe('Family booking integration (real wire, technician on-site addition)', 
       .mockResolvedValueOnce([[{ patient_id_ref: null }]])
       .mockResolvedValueOnce([[{ product_id: 7, product_name: 'CBC', product_price: '500.00', offer: 'no', discount_percent: 0 }]])
       .mockResolvedValueOnce([{ insertId: 951 }])
+      .mockResolvedValueOnce([{}])   // UPDATE booking_ref (derived from insertId)
       .mockResolvedValueOnce([{}])
       .mockResolvedValueOnce([{}])
       .mockResolvedValueOnce([{}])
@@ -100,6 +101,7 @@ describe('Family booking integration (real wire, technician on-site addition)', 
       .mockResolvedValueOnce([[{ patient_id_ref: null }]])
       .mockResolvedValueOnce([[{ product_id: 9, product_name: 'Lipid Profile', product_price: '300.00', offer: 'no', discount_percent: 0 }]])
       .mockResolvedValueOnce([{ insertId: 952 }])
+      .mockResolvedValueOnce([{}])   // UPDATE booking_ref (derived from insertId)
       .mockResolvedValueOnce([{}])
       .mockResolvedValueOnce([{}])
       .mockResolvedValueOnce([{}])
@@ -176,6 +178,7 @@ describe('Payment integration (real wire) — full / partial / pay-later, exact 
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${custToken}` },
       body: JSON.stringify({
         patientId: 501, totalAmount: 1000, paymentType: 'pay_later',
+        bookingType: 'lab_visit', // this test is about payment-amount bookkeeping, not Home Collection fare
         items: [{ packageId: 7, originalPrice: 1000, finalPrice: 1000 }],
       }),
     });

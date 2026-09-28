@@ -143,7 +143,12 @@ describe('POST /api/bookings/family', () => {
     const firstMemberInsertVisitGroupId = conn.execute.mock.calls[1][1].at(-2);
     expect(firstMemberInsertVisitGroupId).toBeNull();
     const firstMemberUpdateParams = conn.execute.mock.calls[2][1];
-    expect(firstMemberUpdateParams).toEqual(['BK-000900', 'VG-000900', 900]);
+    // booking_ref = booking_id + ip_settings 'booking_ref_offset' (see
+    // change_booking_ref_to_sequential.sql) — this file's blanket
+    // settings.get mock (top of file) returns '4' for every key including
+    // this one, so bookingRef = 900 + 4 = '904'. visit_group_id is
+    // unaffected — it intentionally keeps its VG-XXXXXX format.
+    expect(firstMemberUpdateParams).toEqual(['904', 'VG-000900', 900]);
     const secondMemberInsertVisitGroupId = conn.execute.mock.calls[9][1].at(-2);
     expect(secondMemberInsertVisitGroupId).toBe('VG-000900');
     // Unpaid — no immediate Jayamala sync for either sibling.

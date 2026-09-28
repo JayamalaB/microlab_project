@@ -84,6 +84,12 @@ async function createRealBooking(bookingId) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${custToken}` },
     body: JSON.stringify({
       patientId: 501, totalAmount: 878, paymentType: 'pay_later',
+      // lab_visit — these dispatch tests are about technician
+      // matching/acceptance, not Home Collection fare (see
+      // bookings.createBooking.test.js's own "Home Collection fare" tests
+      // for that); opting out of the 'home_collection' default keeps this
+      // helper's original, simpler mock sequence valid.
+      bookingType: 'lab_visit',
       collectionAddress: '12 MG Road', collectionLatitude: 13.05, collectionLongitude: 80.25,
       items: [{ packageId: 7, originalPrice: 878, finalPrice: 878 }],
     }),
