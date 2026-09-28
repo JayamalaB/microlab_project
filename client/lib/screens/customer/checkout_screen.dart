@@ -152,11 +152,25 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     TechnicianModel(id: 't4', name: 'Meena Devi', mobile: '9876500004', rating: 4.6, totalReviews: 76, experience: '3 years', specializations: ['Vitamins', 'Wellness', 'General'], available: false),
   ];
 
+  // ── Home Collection fare (Branch → Customer distance-based pricing) ──────
+  // Fetched once from GET /api/bookings/fare-quote (see _loadHomeCollectionFare
+  // below) — this is only ever a PREVIEW of what the server will
+  // authoritatively (re)compute for itself at POST /api/bookings time (see
+  // bookingController.js's createBooking, which never trusts a client-sent
+  // fare) — shown here purely so the customer sees the real charge before
+  // confirming, and so the amount actually charged via Razorpay (built from
+  // _grandTotal below) matches what gets billed.
+  double? _homeCollectionFare;
+  double? _homeCollectionDistanceKm;
+  bool    _fareLoading = false;
+  String? _fareErrorMessage;
+
+  bool get _isHomeCollection => widget.mode != 'Lab Test';
+
   // ── Computed ──────────────────────────────────────────────
   double get _testsTotal => widget.cart.fold(0, (s, t) => s + t.finalPrice);
   double get _familyTotal => _familyMembers.fold(0.0, (s, m) => s + m.testsTotal);
-  // Service charge is collected at collection for Home Collection — not charged upfront.
-  double get _serviceCharge => 0;
+  double get _serviceCharge => _isHomeCollection ? (_homeCollectionFare ?? 0) : 0;
   double get _grandTotal => _testsTotal + _familyTotal + _serviceCharge;
 
   bool get _primaryNeedsPrescription => widget.cart.any((t) => t.docRequired);
@@ -176,6 +190,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (_currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null) return false;
     if (widget.isVip && _selectedTechnician == null) return false;
     if (_primaryNeedsPrescription && _prescriptions.isEmpty) return false;
+    // Home Collection can't be confirmed with an unknown or unpriceable
+    // fare — the amount charged via Razorpay is built from _grandTotal
+    // (which includes _serviceCharge/_homeCollectionFare), so proceeding
+    // while it's still loading or failed would charge the wrong amount.
+    if (_isHomeCollection && (_fareLoading || _fareErrorMessage != null)) return false;
     return true;
   }
 
@@ -204,6 +223,41 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       debugPrint('   pre-slot    : ${widget.preSelectedSlotLabel}');
     }
     debugPrint('────────────────────────────────────────────────────\n');
+
+    if (_isHomeCollection) _loadHomeCollectionFare();
+  }
+
+  // Fetches the Branch → Customer fare quote once (doesn't depend on
+  // date/slot, so — unlike _loadBranchSlots — this doesn't wait for the
+  // user to pick a date). branchId/patientLat/patientLng are the same
+  // values the earlier branch-lookup step already resolved, passed into
+  // this screen as constructor params.
+  Future<void> _loadHomeCollectionFare() async {
+    if (widget.branchId == null || widget.patientLat == null || widget.patientLng == null) {
+      setState(() => _fareErrorMessage = 'Pickup location unavailable — cannot calculate Home Collection charge');
+      return;
+    }
+    setState(() { _fareLoading = true; _fareErrorMessage = null; });
+    final body = await ApiService.getHomeCollectionFareQuote(
+      branchId: widget.branchId!,
+      lat: widget.patientLat!,
+      lng: widget.patientLng!,
+    );
+    if (!mounted) return;
+    if (body['success'] == true) {
+      final fare = body['fare'] as Map<String, dynamic>;
+      setState(() {
+        _homeCollectionFare       = (fare['finalFare'] as num).toDouble();
+        _homeCollectionDistanceKm = (fare['distanceKm'] as num).toDouble();
+        _fareLoading   = false;
+        _fareErrorMessage = null;
+      });
+    } else {
+      setState(() {
+        _fareLoading      = false;
+        _fareErrorMessage = body['message'] as String? ?? 'Could not calculate Home Collection charge';
+      });
+    }
   }
 
   @override
@@ -1492,8 +1546,41 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               children: [
                 _BillRow('${widget.member.name} (Tests)', '₹${_testsTotal.toInt()}'),
                 ..._familyMembers.map((m) => _BillRow('${m.patient.name}', '₹${m.testsTotal.toInt()}')),
-                if (widget.mode != 'Lab Test')
-                  _BillRow('Service Charge', 'At collection', sub: true),
+                if (_isHomeCollection) ...[
+                  if (_fareLoading)
+                    _BillRow('Service Charge', 'Calculating…', sub: true)
+                  else if (_fareErrorMessage != null)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Service Charge',
+                              style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                          Flexible(
+                            child: GestureDetector(
+                              onTap: _loadHomeCollectionFare,
+                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                Flexible(
+                                  child: Text(_fareErrorMessage!,
+                                      textAlign: TextAlign.right,
+                                      style: const TextStyle(fontSize: 11, color: Colors.red)),
+                                ),
+                                const SizedBox(width: 4),
+                                const Icon(Icons.refresh, size: 14, color: AppColors.brandGreen),
+                              ]),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else
+                    _BillRow(
+                      'Service Charge${_homeCollectionDistanceKm != null ? ' (${_homeCollectionDistanceKm!.toStringAsFixed(1)} km)' : ''}',
+                      '₹${_serviceCharge.toInt()}',
+                      sub: true,
+                    ),
+                ],
                 const Divider(height: 20),
                 _BillRow('Grand Total', '₹${_grandTotal.toInt()}', bold: true),
                 const SizedBox(height: 8),
@@ -1530,7 +1617,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                                   ? 'Please choose your preferred technician'
                                   : (_primaryNeedsPrescription && _prescriptions.isEmpty)
                                       ? 'Upload prescription for ${widget.member.name} to continue'
-                                      : '',
+                                      : (_isHomeCollection && _fareLoading)
+                                          ? 'Calculating Home Collection charge…'
+                                          : (_isHomeCollection && _fareErrorMessage != null)
+                                              ? _fareErrorMessage!
+                                              : '',
                   style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)),
                   textAlign: TextAlign.center,
                 ),

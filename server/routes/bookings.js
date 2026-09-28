@@ -14,6 +14,11 @@ router.post('/family', auth, bookingController.createFamilyBooking);
 // GET /api/bookings/mine — all bookings for the logged-in user (JWT)
 router.get('/mine', auth, bookingController.getMyBookings);
 
+// GET /api/bookings/fare-quote — Home Collection Branch→Customer fare preview
+// (must stay above GET /:bookingId — otherwise "fare-quote" would be parsed
+// as a bookingId)
+router.get('/fare-quote', auth, bookingController.getHomeCollectionFareQuote);
+
 // GET /api/bookings/patient/:patientId — patient booking history
 router.get('/patient/:patientId', bookingController.getPatientBookings);
 

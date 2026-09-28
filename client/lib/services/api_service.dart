@@ -290,6 +290,40 @@ class ApiService {
     return null;
   }
 
+  // Pre-confirm Home Collection fare preview — mirrors exactly what
+  // POST /api/bookings itself independently (re)computes at booking-creation
+  // time (server/services/fareCalculator.js), so this is a preview of the
+  // same number, not a separate estimate. Returns the raw decoded response
+  // body ({success, fare: {...}} on success; {success: false, code,
+  // message} on a known fare-calculation failure) rather than just the fare
+  // amount, so the caller can show a specific message (e.g. "outside
+  // service area") instead of a generic failure.
+  static Future<Map<String, dynamic>> getHomeCollectionFareQuote({
+    required int branchId,
+    required double lat,
+    required double lng,
+  }) async {
+    final token = await getToken();
+    if (token == null) {
+      return {'success': false, 'code': 'NOT_AUTHENTICATED', 'message': 'Not logged in'};
+    }
+    try {
+      final uri = Uri.parse('$baseUrl/api/bookings/fare-quote').replace(queryParameters: {
+        'branchId': branchId.toString(),
+        'lat': lat.toString(),
+        'lng': lng.toString(),
+      });
+      final res = await http.get(
+        uri,
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[getHomeCollectionFareQuote] ERROR: $e');
+      return {'success': false, 'code': 'NETWORK_ERROR', 'message': 'Could not reach the server'};
+    }
+  }
+
   static Future<String?> uploadFile(List<int> bytes, String fileName) async {
     final token = await getToken();
     if (token == null) return null;
