@@ -84,9 +84,23 @@ const TECHNICIAN_COLS = [
 ];
 // "technician info", "who is my technician", "which technician", "assigned technician".
 const TECHNICIAN_QUERY_PATTERN = /\b(technician\s*(info(rmation)?|details|name|contact|status)|who(?:'s| is) my technician|which technician|assigned technician|my technician)\b/i;
-// A booking reference ("BK1783658584549", "BK-2026-101") mentioned in the question — used
-// to scope a technician (or booking) lookup to that specific booking instead of the latest.
+// A booking reference mentioned in the question — used to scope a technician
+// (or booking) lookup to that specific booking instead of the latest.
+// change_booking_ref_to_sequential.sql renumbers EVERY booking (old and
+// new, every source) into one plain 8-digit sequence starting at 10000001
+// — no booking will have the old "BK-..." format after that migration
+// runs. BOOKING_REF_PATTERN is kept only as a defensive fallback (e.g. if
+// this ever runs against a pre-migration snapshot/backup) — it should
+// normally never match live data going forward. The real, current format
+// is matched by BOOKING_REF_NUMERIC_PATTERN: an exact 8-digit bare number
+// is unambiguous — comfortably shorter than a 10-digit Indian mobile
+// number (so "my number is 9876543210" doesn't false-positive-match) and
+// longer than a real booking_id will be for the foreseeable lifetime of
+// this business — so it's matched directly, unlike
+// BOOKING_ID_MENTION_PATTERN below which needs the word "booking" nearby
+// to avoid false positives on smaller numbers.
 const BOOKING_REF_PATTERN = /\bBK[-A-Z0-9]*\d+\b/i;
+const BOOKING_REF_NUMERIC_PATTERN = /\b(\d{8})\b/;
 // A bare booking id mentioned as "booking 87" / "booking id 101" / "booking #101".
 const BOOKING_ID_MENTION_PATTERN = /\bbooking\s*(?:id|#)?\s*[:#]?\s*(\d+)\b/i;
 
@@ -331,7 +345,9 @@ class LLMRetriever {
             if (failMessage) {
                 return { question, answer: failMessage, context_used: { intent, from_cache: false, session_id: sessionId } };
             }
-            const bookingRef = question.match(BOOKING_REF_PATTERN)?.[0] || null;
+            const bookingRef = question.match(BOOKING_REF_PATTERN)?.[0]
+                || question.match(BOOKING_REF_NUMERIC_PATTERN)?.[1]
+                || null;
             const bookingIdMention = bookingRef ? null : (question.match(BOOKING_ID_MENTION_PATTERN)?.[1] || null);
             const { answer, dataFound } = await this.answerTechnicianQuery(targetPatientId, bookingRef, bookingIdMention, subjectName);
             this._updateSession(sessionId, intent, entities);
