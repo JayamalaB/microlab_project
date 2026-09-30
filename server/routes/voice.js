@@ -296,8 +296,33 @@ function translateText(text, sourceLanguageCode, targetLanguageCode) {
 // labels turn up; anything not listed here still falls through to the
 // normal per-line API translation below.
 const TAMIL_LABELS = {
-  'mobile':         'கைபேசி',
-  'working hours':  'வேலை நேரம்',
+  'mobile':            'கைபேசி',
+  'working hours':     'வேலை நேரம்',
+  'gender':            'பாலினம்',
+  'age':               'வயது',
+  'dob':               'பிறந்த தேதி',
+  'email':             'மின்னஞ்சல்',
+  'city':              'நகரம்',
+  'health conditions': 'உடல் நிலை',
+  'blood group':       'இரத்த வகை',
+};
+
+// Common family-relation words shown in parens after a patient's name
+// (e.g. "kamalraj (Father)") — translated via lookup for the same
+// reliability reason as TAMIL_LABELS, while the name itself is never
+// touched (see the 👤 name-line handling below).
+const TAMIL_RELATIONS = {
+  father:   'தந்தை',
+  mother:   'தாய்',
+  spouse:   'துணைவர்',
+  wife:     'மனைவி',
+  husband:  'கணவர்',
+  son:      'மகன்',
+  daughter: 'மகள்',
+  brother:  'சகோதரர்',
+  sister:   'சகோதரி',
+  child:    'குழந்தை',
+  children: 'குழந்தைகள்',
 };
 
 // Sarvam's Translate API only accepts one string per call and doesn't
@@ -340,6 +365,21 @@ async function _translateLine(line, sourceLanguageCode, targetLanguageCode) {
     return { text: line };
   }
 
+  // 👤 marks a patient name line (formatPatientProfile()) — the name is a
+  // proper noun and must never be machine-translated either. Observed
+  // turning "desigan" into "கருத்து" (the Tamil word for "opinion") and
+  // "sathesh" into an unrelated name entirely. Only the relation word in
+  // parens, if present and recognized, is translated — via TAMIL_RELATIONS,
+  // same reliability reasoning as TAMIL_LABELS.
+  if (targetLanguageCode === 'ta-IN' && line.trim().startsWith('👤')) {
+    const withRelation = line.match(/^(.*?)\s*\(([A-Za-z]+)\)\s*$/);
+    const relation = withRelation ? TAMIL_RELATIONS[withRelation[2].toLowerCase()] : null;
+    if (withRelation && relation) {
+      return { text: `${withRelation[1]} (${relation})` };
+    }
+    return { text: line };
+  }
+
   const match = targetLanguageCode === 'ta-IN'
     ? line.match(/^(\s*(?:•\s*)?)([A-Za-z][A-Za-z ]*?):\s*(.*)$/)
     : null;
@@ -352,9 +392,9 @@ async function _translateLine(line, sourceLanguageCode, targetLanguageCode) {
     if (!value || value.toUpperCase() === 'N/A') {
       return { text: `${prefix}${knownLabel}: இல்லை` };
     }
-    if (/^[\d\s+\-()]+$/.test(value)) {
-      // Phone numbers etc. — nothing to translate, and translating digits
-      // risks the model "reading" them into words.
+    if (/^[\d\s+\-()]+$/.test(value) || /^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$/.test(value)) {
+      // Phone numbers, email addresses etc. — nothing to translate, and
+      // translating digits risks the model "reading" them into words.
       return { text: `${prefix}${knownLabel}: ${value}` };
     }
     const translatedValue = await translateText(value, sourceLanguageCode, targetLanguageCode);

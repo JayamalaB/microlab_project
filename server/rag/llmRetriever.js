@@ -830,9 +830,13 @@ class LLMRetriever {
 
         const lines = data.map((row, i) => {
             const name = [row.patient_name, row.patient_surname].filter(Boolean).join(' ') || 'Unnamed';
+            // 👤 marks this as a name line for the Tamil translate boundary
+            // (voice.js) — patient names are proper nouns and must never be
+            // machine-translated (observed turning "desigan" into "கருத்து",
+            // the Tamil word for "opinion", instead of preserving the name).
             let line = familyScope
-                ? `${i + 1}. ${name}${row.patient_relation ? ` (${row.patient_relation})` : ''}`
-                : name;
+                ? `👤 ${i + 1}. ${name}${row.patient_relation ? ` (${row.patient_relation})` : ''}`
+                : `👤 ${name}`;
             if (row.patient_gender)      line += `\n   • Gender: ${row.patient_gender}`;
             if (row.patient_age != null) line += `\n   • Age: ${row.patient_age}`;
             if (row.patient_dob)         line += `\n   • DOB: ${this._fmtDateOnly(row.patient_dob)}`;
