@@ -778,31 +778,21 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           ? 'voice_${DateTime.now().millisecondsSinceEpoch}.wav'
           : '${(await getTemporaryDirectory()).path}/voice_${DateTime.now().millisecondsSinceEpoch}.wav';
 
-      // Try with audio enhancements first; fall back if device doesn't support them.
-      // autoGain/noiseSuppress/echoCancel require VOICE_COMMUNICATION audio source,
-      // which some Android devices reject — hence the fallback.
-      try {
-        await _recorder.start(
-          const RecordConfig(
-            encoder: AudioEncoder.wav,
-            sampleRate: 16000,
-            numChannels: 1,
-            autoGain: true,
-            noiseSuppress: true,
-            echoCancel: true,
-          ),
-          path: path,
-        );
-      } catch (_) {
-        await _recorder.start(
-          const RecordConfig(
-            encoder: AudioEncoder.wav,
-            sampleRate: 16000,
-            numChannels: 1,
-          ),
-          path: path,
-        );
-      }
+      // autoGain/noiseSuppress/echoCancel switch Android to the
+      // VOICE_COMMUNICATION audio source, which applies aggressive signal
+      // processing that was found to keep amplitude readings above the
+      // silence threshold indefinitely — the auto-stop-on-silence timer
+      // below never armed, so recording only ever stopped on a manual
+      // second tap (web, using a plain browser audio stream, never had
+      // this problem). Plain config restores reliable silence detection.
+      await _recorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.wav,
+          sampleRate: 16000,
+          numChannels: 1,
+        ),
+        path: path,
+      );
       if (mounted) setState(() => _micState = _MicState.recording);
 
       // Give the user 600 ms to start speaking, then watch amplitude.
