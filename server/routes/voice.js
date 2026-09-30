@@ -335,18 +335,27 @@ const TAMIL_RELATIONS = {
 // never has a chance to reflow anything. Blank lines are preserved as-is
 // (not sent to the API) — the visual paragraph spacing survives untouched.
 // Calls run in parallel so wall-clock latency stays close to a single call.
+// A response with many entries (e.g. a 5-member family list) can mean 25-30
+// simultaneous Sarvam calls — if even one hit a transient error, aborting
+// the whole translation meant the ENTIRE answer fell back to English
+// instead of just that one line. Each line now falls back to its own
+// original English text on failure, so one bad call degrades gracefully
+// (a stray English field) rather than sinking the whole response.
 async function translateMultiline(text, sourceLanguageCode, targetLanguageCode) {
   if (!text || !text.trim()) return { text: '' };
 
   const lines = text.split('\n');
   const results = await Promise.all(
-    lines.map((line) => line.trim()
-      ? _translateLine(line, sourceLanguageCode, targetLanguageCode)
-      : Promise.resolve({ text: '' }))
+    lines.map(async (line) => {
+      if (!line.trim()) return { text: '' };
+      const r = await _translateLine(line, sourceLanguageCode, targetLanguageCode);
+      if (r.error) {
+        console.error('[Sarvam Translate] line failed, keeping original:', r.error);
+        return { text: line };
+      }
+      return r;
+    })
   );
-
-  const failed = results.find(r => r.error);
-  if (failed) return { error: failed.error };
 
   return { text: results.map(r => r.text).join('\n') };
 }
