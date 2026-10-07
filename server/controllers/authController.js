@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { forceTechnicianOffline } = require('../socket/bookingSocket');
+const { getSecret, refreshSecret } = require('../services/secretCache');
 
 const LOG_DIR  = path.join(__dirname, '..', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'otp.log');
@@ -76,8 +77,11 @@ exports.sendOtp = async (req, res) => {
       }
     }
 
-    // Demo account for Play Store review — fixed OTP, never expires, no SMS
-    const isDemo = process.env.DEMO_MOBILE && mobile === process.env.DEMO_MOBILE;
+    // Demo accounts for Play Store review — fixed OTP, never expires, no SMS
+    const isDemo = process.env.DEMO_OTP && (
+      (process.env.DEMO_MOBILE     && mobile === process.env.DEMO_MOBILE) ||
+      (process.env.DEMO_TECH_MOBILE && mobile === process.env.DEMO_TECH_MOBILE)
+    );
     const otp       = isDemo ? process.env.DEMO_OTP : generateOtp();
     const expiresAt = isDemo ? new Date('2099-12-31T23:59:59Z') : new Date(Date.now() + 10 * 60 * 1000);
 
@@ -199,30 +203,45 @@ exports.sendOtp = async (req, res) => {
   }
 };
 
-// ── HMAC helper — matches verifySecureId() in the PHP scripts ─────────────────
-function buildSecureId(mobileNo, userType, timestamp) {
+// ── HMAC helper — matches verifySecureId() in the PHP/ASMX scripts ───────────
+function buildSecureId(mobileNo, userType, timestamp, secret) {
   const message = `${mobileNo}|${userType}|${timestamp}`;
-  return crypto
-    .createHmac('sha256', process.env.CLIENT_SERVER_SECRET)
-    .update(message)
-    .digest('hex');
+  return crypto.createHmac('sha256', secret).update(message).digest('hex');
 }
 
-// ── HTTP POST to jayamala.neuralarc.com PHP registry ─────────────────────────
+function _isSignatureError(body) {
+  if (typeof body === 'number') return body === 401 || body === 403;
+  const msg = (body?.msg ?? body?.message ?? '').toLowerCase();
+  return msg.includes('sign') || msg.includes('secret') ||
+         msg.includes('unauthor') || msg.includes('invalid') || msg.includes('auth');
+}
+
+// ── HTTP POST to ASMX registry ────────────────────────────────────────────────
 async function fetchFromRegistry(url, mobileNo, userType) {
+  const secret    = await getSecret();
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const secure_id = buildSecureId(mobileNo, userType, timestamp);
-  const params = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id });
-  const res = await fetch(url, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body:    params.toString(),
-  });
-  const text = await res.text();
-  // ASMX HTTP POST wraps the return string in XML: <string xmlns="...">JSON</string>
-  const xmlMatch = /<string[^>]*>([\s\S]*?)<\/string>/.exec(text);
-  const body = JSON.parse(xmlMatch ? xmlMatch[1] : text);
-  return { httpStatus: res.status, body };
+  const secure_id = buildSecureId(mobileNo, userType, timestamp, secret);
+  const params    = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id });
+
+  const _post = async (body) => {
+    const res  = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    const text = await res.text();
+    const xmlMatch = /<string[^>]*>([\s\S]*?)<\/string>/.exec(text);
+    return { httpStatus: res.status, body: JSON.parse(xmlMatch ? xmlMatch[1] : text) };
+  };
+
+  let result = await _post(params.toString());
+
+  // Auto-recover on signature failure
+  if (_isSignatureError(result.body)) {
+    console.warn('[authController] signature error — refreshing secret and retrying');
+    const newSecret    = await refreshSecret();
+    const newSecureId  = buildSecureId(mobileNo, userType, timestamp, newSecret);
+    const retryParams  = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id: newSecureId });
+    result = await _post(retryParams.toString());
+  }
+
+  return result;
 }
 
 // ── Local technician fallback lookup ──────────────────────────────────────────
@@ -250,8 +269,10 @@ exports.verifyOtp = async (req, res) => {
     }
 
     // Demo account bypass — fixed OTP for Play Store review, never expires
-    const isDemo = process.env.DEMO_MOBILE && process.env.DEMO_OTP &&
-                   mobile === process.env.DEMO_MOBILE && otp === process.env.DEMO_OTP;
+    const isDemo = process.env.DEMO_OTP && otp === process.env.DEMO_OTP && (
+      (process.env.DEMO_MOBILE      && mobile === process.env.DEMO_MOBILE) ||
+      (process.env.DEMO_TECH_MOBILE && mobile === process.env.DEMO_TECH_MOBILE)
+    );
 
     let dbUser;
     if (isDemo) {

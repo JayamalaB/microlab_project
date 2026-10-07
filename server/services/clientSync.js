@@ -6,6 +6,7 @@ const db     = require('../config/db');
 const settings = require('../config/settings');
 const { messaging } = require('../config/firebase');
 const { buildSecureId } = require('../utils/secureId');
+const { getSecret, refreshSecret } = require('./secretCache');
 
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'client_sync.log');
 
@@ -68,8 +69,7 @@ function _logRequestResponseBlock({ payload, tests, httpStatus, result }) {
       lines.push('  test         : (none)');
     } else {
       for (const t of payload.blood_test_list) {
-        lines.push(`  test         : id=${t.id}  name=${t.name}  price=${Number(t.price).toFixed(2)}` +
-          ` [doc:${t.document_required}]  image=${t.document}`);
+        lines.push(`  test         : TestId=${t.TestId}  name=${t.TestName}  rate=${Number(t.Rate).toFixed(2)}`);
       }
     }
   }
@@ -105,8 +105,7 @@ function _logRequestResponseBlock({ payload, tests, httpStatus, result }) {
         lines.push('     test      : (none)');
       } else {
         for (const t of bk.blood_test_list) {
-          lines.push(`     test      : id=${t.id}  name=${t.name}  price=${Number(t.price).toFixed(2)}` +
-            ` [doc:${t.document_required}]  image=${t.document}`);
+          lines.push(`     test      : TestId=${t.TestId}  name=${t.TestName}  rate=${Number(t.Rate).toFixed(2)}`);
         }
       }
       const bp = bk.payment_details;
@@ -132,13 +131,21 @@ function _logRequestResponseBlock({ payload, tests, httpStatus, result }) {
   fs.appendFileSync(LOG_FILE, block, 'utf8');
 }
 
+function _isSignatureError(result) {
+  // ASMX sometimes returns a bare number (401/403) for auth failures
+  if (typeof result === 'number') return result === 401 || result === 403;
+  const msg = (result?.msg ?? result?.message ?? '').toLowerCase();
+  return msg.includes('sign') || msg.includes('secret') ||
+         msg.includes('unauthor') || msg.includes('invalid') || msg.includes('auth');
+}
+
 function formatDate(d) {
   if (!d) return null;
   const date = new Date(d);
   const dd = String(date.getDate()).padStart(2, '0');
   const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const yy = String(date.getFullYear()).slice(2);
-  return `${dd}-${mm}-${yy}`;
+  const yyyy = String(date.getFullYear());
+  return `${dd}/${mm}/${yyyy}`;
 }
 
 // Shared per-booking data fetch — patient, current tests, current payment,
@@ -163,6 +170,7 @@ async function _fetchPatientTestsPayment(booking) {
     `SELECT bi.booking_item_id, bi.product_id,
             COALESCE(bi.product_name_snapshot, p.product_name) AS name,
             bi.final_price                                      AS price,
+            p.test_code,
             p.document_required,
             (SELECT bd.file_path
              FROM ip_booking_documents bd
@@ -194,16 +202,11 @@ async function _fetchPatientTestsPayment(booking) {
 
   const isNewPatient = !patient.patient_id_ref;
 
-  const bloodTestList = tests.map(t => {
-    const docReq = t.document_required === 1 || t.document_required === '1' || t.document_required === 'yes';
-    return {
-      id:                t.product_id,
-      name:              t.name,
-      price:             t.price,
-      document_required: docReq ? 'yes' : 'no',
-      document:          t.prescription_url ?? 'no',
-    };
-  });
+  const bloodTestList = tests.map(t => ({
+    TestId:   t.test_code,
+    TestName: t.name,
+    Rate:     t.price,
+  }));
   const paymentDetails = {
     total_amount:        booking.total_amount,
     paid_amount:         payment?.amount_paid  ?? 0,
@@ -213,7 +216,7 @@ async function _fetchPatientTestsPayment(booking) {
   const patientDetails = {
     name:             patient.patient_name,
     mobile:           patient.patient_mobile,
-    gender:           patient.patient_gender,
+    gender:           patient.patient_gender?.toLowerCase() ?? null,
     location:         patient.patient_city,
     address:          patient.patient_address,
     email:            patient.patient_email,
@@ -229,6 +232,48 @@ async function _fetchPatientTestsPayment(booking) {
     bloodTestList, paymentDetails, patientDetails,
     proofPhoto: proofRow?.file_path ?? null,
   };
+}
+
+// Posts payload as bookingJson=<urlencoded JSON> to the Neuralarc ASMX endpoint.
+// Response is XML-wrapped: <string xmlns="...">JSON_STRING</string>
+function postAsmx(url, payload, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const body   = 'bookingJson=' + encodeURIComponent(JSON.stringify(payload));
+    const parsed = new URL(url);
+    const lib    = parsed.protocol === 'https:' ? https : http;
+    const req = lib.request(
+      {
+        hostname: parsed.hostname,
+        port:     parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path:     parsed.pathname + parsed.search,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', chunk => (data += chunk));
+        res.on('end', () => {
+          const match = data.match(/<string[^>]*>([\s\S]*?)<\/string>/);
+          if (!match) {
+            reject(new Error(`Unexpected ASMX response: ${data.slice(0, 300)}`));
+            return;
+          }
+          try {
+            resolve({ httpStatus: res.statusCode, body: JSON.parse(match[1]) });
+          } catch (e) {
+            reject(new Error(`Non-JSON ASMX result: ${match[1].slice(0, 300)}`));
+          }
+        });
+      }
+    );
+    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('ASMX request timeout')); });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 function postJson(url, payload, timeoutMs) {
@@ -302,7 +347,7 @@ async function syncBookingToClient(bookingId, initiator) {
       `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date,
               b.total_amount, b.patient_id, b.client_id, b.status, b.bill_id,
               b.visit_group_id,
-              TIME_FORMAT(av.slot_time, '%h:%i %p') AS slot_time
+              TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
        FROM ip_bookings b
        LEFT JOIN ip_available_slots av ON av.available_slot_id = b.available_slot_id
        WHERE b.booking_id = ?`,
@@ -314,7 +359,8 @@ async function syncBookingToClient(bookingId, initiator) {
     }
 
     const timestamp = Math.floor(Date.now() / 1000);
-    const secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp));
+    const secret    = await getSecret();
+    const secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp), secret);
     const action = initiator.action
       ?? (booking.status === 'cancelled' ? 'cancel'
         : booking.bill_id               ? 'update'
@@ -470,10 +516,18 @@ async function syncBookingToClient(bookingId, initiator) {
 
     
     // 6. POST to client server
+    // new_booking with a new patient goes directly to the Neuralarc ASMX.
+    // All other actions continue to micro_booking.php.
+    const asmxUrl   = process.env.NEURALARC_BOOKING_URL;
+    const useAsmx   = action === 'new_booking' && payload.patient_details != null && asmxUrl;
     const timeoutMs = parseInt(settings.get('client_sync_timeout_ms', '10000'), 10);
+    writeLog(`[clientSync] route=${useAsmx ? 'ASMX' : 'php'} action=${action}`);
+    if (useAsmx) writeLog(`[clientSync] ASMX payload — ${JSON.stringify(payload)}`);
     let httpStatus, result;
     try {
-      ({ httpStatus, body: result } = await postJson(clientUrl, payload, timeoutMs));
+      ({ httpStatus, body: result } = useAsmx
+        ? await postAsmx(asmxUrl, payload, timeoutMs)
+        : await postJson(clientUrl, payload, timeoutMs));
     } catch (postErr) {
       // Log the request block even when no response came back (timeout,
       // network error, non-JSON body) — httpStatus/result stay null, the
@@ -483,6 +537,25 @@ async function syncBookingToClient(bookingId, initiator) {
     }
 
     _logRequestResponseBlock({ payload, tests, httpStatus, result });
+    writeLog(`[clientSync] raw response — ${JSON.stringify(result)}`);
+
+    // Auto-recover: if ASMX rejects due to invalid signature, refresh secret
+    // from DB and retry the same call once with the new secure_id.
+    if (result && _isSignatureError(result)) {
+      writeLog(`[clientSync] ⚠️  signature error — refreshing secret and retrying`);
+      const newSecret = await refreshSecret();
+      payload.secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp), newSecret);
+      try {
+        ({ httpStatus, body: result } = useAsmx
+          ? await postAsmx(asmxUrl, payload, timeoutMs)
+          : await postJson(clientUrl, payload, timeoutMs));
+        _logRequestResponseBlock({ payload, tests, httpStatus, result });
+        writeLog(`[clientSync] retry response — ${JSON.stringify(result)}`);
+      } catch (retryErr) {
+        writeLog(`[clientSync] ❌ retry ERROR — ${retryErr.message}`);
+        return;
+      }
+    }
 
     if (result.status === 'success') {
       if (result.bill_id && booking.status !== 'cancelled') {
@@ -593,7 +666,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
                 patient_id, client_id, status, bill_id, visit_group_id,
                 TIME_FORMAT(
                   (SELECT av.slot_time FROM ip_available_slots av
-                   WHERE av.available_slot_id = b.available_slot_id), '%h:%i %p'
+                   WHERE av.available_slot_id = b.available_slot_id), '%H:%i'
                 ) AS slot_time
          FROM ip_bookings b
          WHERE b.visit_group_id = ? AND b.deleted_at IS NULL
@@ -604,7 +677,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       const [[b]] = await db.execute(
         `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date, b.total_amount,
                 b.patient_id, b.client_id, b.status, b.bill_id, b.visit_group_id,
-                TIME_FORMAT(av.slot_time, '%h:%i %p') AS slot_time
+                TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
          FROM ip_bookings b
          LEFT JOIN ip_available_slots av ON av.available_slot_id = b.available_slot_id
          WHERE b.booking_id = ?`,
@@ -682,7 +755,8 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     }
 
     const timestamp = Math.floor(Date.now() / 1000);
-    const secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp));
+    const secret    = await getSecret();
+    const secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp), secret);
 
     const payload = {
       mobile_no:    initiator.mobile,
@@ -720,6 +794,20 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     }
 
     _logRequestResponseBlock({ payload, tests: [], httpStatus, result });
+
+    if (result && _isSignatureError(result)) {
+      writeLog(`[clientSync] ⚠️  signature error (visit_completed) — refreshing secret and retrying`);
+      const newSecret = await refreshSecret();
+      payload.secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp), newSecret);
+      try {
+        ({ httpStatus, body: result } = await postJson(clientUrl, payload, timeoutMs));
+        _logRequestResponseBlock({ payload, tests: [], httpStatus, result });
+        writeLog(`[clientSync] retry response — ${JSON.stringify(result)}`);
+      } catch (retryErr) {
+        writeLog(`[clientSync] ❌ retry ERROR (visit_completed) — ${retryErr.message}`);
+        return;
+      }
+    }
 
     if (result.status === 'success') {
       const bookingIds = bookingRows.map(b => b.booking_id);
