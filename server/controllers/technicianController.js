@@ -11,6 +11,7 @@ const path = require('path');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 const { syncVisitCompletionToClient } = require('../services/clientSync');
+const dbLogger = require('../utils/dbLogger');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -18,6 +19,7 @@ function tlog(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(TECH_LOG, line, 'utf8');
+  dbLogger.logTechnicianEvent(msg);
 }
 
 const OTP_LOG = path.join(__dirname, '..', 'logs', 'otpinfo.log');
@@ -30,6 +32,7 @@ function otpLog(msg) {
     if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
     fs.appendFileSync(OTP_LOG, line, 'utf8');
   } catch (_) {}
+  dbLogger.logOtpInfoEvent(msg);
 }
 
 // Converts "HH:MM:SS" TIME strings to appointment slot array "HH:MM:00"

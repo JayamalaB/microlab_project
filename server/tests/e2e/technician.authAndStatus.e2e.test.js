@@ -11,6 +11,7 @@ const sms = require('../../utils/sms');
 const jwt = require('jsonwebtoken');
 const { startRealServer } = require('../helpers/realServer');
 const { connectClient, waitForEvent } = require('../helpers/socketServer');
+const { initDispatchState } = require('../../socket/bookingSocket');
 
 let server;
 beforeAll(async () => { server = await startRealServer(); });
@@ -132,6 +133,69 @@ describe('IT-T002 — Technician Online/Offline (real server + real Socket.IO)',
       const offlineWrite = db.execute.mock.calls.find(c => c[0].includes('ip_technician_live_location') && c[0].includes("'offline'"));
       expect(offlineWrite).toBeDefined();
       expect(offlineWrite[1]).toContain(501);
+    } finally {
+      tech.disconnect();
+    }
+  });
+
+  // Regression test for the bug reported on this technician: toggling Online
+  // while technicianActiveSlots already has a window recorded for today (the
+  // "reconnect mid-appointment" branch, Phase 3) used to update only
+  // socket_id/latitude/longitude/last_ping_at and silently skip online_status
+  // — leaving a DB row that was already 'offline' stuck on 'offline' even
+  // though the technician genuinely just went online. initDispatchState() is
+  // used here (rather than replaying a full booking_accepted flow) purely to
+  // seed technicianActiveSlots with a today-dated window — it's the same
+  // startup-recovery path that populates that Map in production.
+  test('going online with an active appointment today still sets online_status to online', async () => {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    db.execute.mockResolvedValueOnce([[{
+      booking_id: 9001, technician_id: 501,
+      slot_time: '10:00:00', duration_minutes: 30, slot_id: 55,
+      booking_date: todayIST,
+    }]]);
+    await initDispatchState();
+    db.execute.mockReset().mockResolvedValue([[], {}]);
+
+    const tech = await connectClient(server.url);
+    try {
+      tech.emit('technician_online', { technicianId: 501, technicianName: 'Suresh', lat: 13.05, lng: 80.25 });
+      await waitForEvent(tech, 'session_started');
+
+      const apptReconnectWrite = db.execute.mock.calls.find(c =>
+        c[0].includes('ip_technician_live_location') &&
+        c[0].includes('socket_id = ?') &&
+        !c[0].includes('INSERT INTO'));
+      expect(apptReconnectWrite).toBeDefined();
+      expect(apptReconnectWrite[0]).toContain("online_status = 'online'");
+    } finally {
+      tech.disconnect();
+    }
+  });
+
+  // Regression test: accepting a booking must not flip online_status to
+  // 'busy'. online_status reflects connectivity only — "busy" is already
+  // fully captured by task_status='assigned' + booking_id, and separately by
+  // the in-memory onlineTechnicians.isAvailable flag dispatch itself reads.
+  // Before this fix, booking_accepted's own UPDATE set online_status='busy',
+  // which made a working technician vanish from admin's online count/live
+  // map (GET /api/technicians/live filters WHERE online_status='online')
+  // for the entire duration of the job.
+  test('accepting a booking leaves online_status as online, only task_status/booking_id change', async () => {
+    const tech = await connectClient(server.url);
+    try {
+      tech.emit('technician_online', { technicianId: 501, technicianName: 'Suresh', lat: 13.05, lng: 80.25 });
+      await waitForEvent(tech, 'session_started');
+      db.execute.mockClear();
+
+      tech.emit('booking_accepted', { bookingId: 9101, technicianId: 501, technicianName: 'Suresh' });
+      await new Promise(r => setTimeout(r, 50)); // booking_accepted's DB writes are fire-and-forget
+
+      const assignWrite = db.execute.mock.calls.find(c =>
+        c[0].includes('ip_technician_live_location') &&
+        c[0].includes("task_status   = 'assigned'"));
+      expect(assignWrite).toBeDefined();
+      expect(assignWrite[0]).not.toContain('online_status');
     } finally {
       tech.disconnect();
     }

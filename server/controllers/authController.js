@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { forceTechnicianOffline } = require('../socket/bookingSocket');
+const dbLogger = require('../utils/dbLogger');
 
 const LOG_DIR  = path.join(__dirname, '..', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'otp.log');
@@ -15,6 +16,7 @@ function writeLog(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(LOG_FILE, line, 'utf8');
+  dbLogger.logOtpEvent(msg);
 }
 
 const sms = require('../utils/sms');
@@ -166,7 +168,7 @@ exports.sendOtp = async (req, res) => {
     }
 
     step = 'sms';
-    writeLog(`[sendOtp] OTP stored — value=${otp} expires=${expiresAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+    writeLog(`[sendOtp] OTP stored — value=**** expires=${expiresAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
     if (isDemo) {
       writeLog(`[sendOtp] demo account — SMS skipped`);
     } else {

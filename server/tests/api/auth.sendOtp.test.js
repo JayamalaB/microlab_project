@@ -8,6 +8,7 @@ jest.mock('../../config/db');
 jest.mock('../../utils/sms'); // never let a test send a real SMS — see utils/__mocks__/sms.js
 const db      = require('../../config/db');
 const sms     = require('../../utils/sms');
+const fs      = require('fs');
 const request = require('supertest');
 const { buildTestApp } = require('../helpers/testApp');
 
@@ -79,6 +80,42 @@ describe('POST /api/auth/send-otp', () => {
     expect(res.body.success).toBe(true);
     expect(db.query).toHaveBeenCalledTimes(2);
     expect(db.query.mock.calls[1][0]).toMatch(/UPDATE ip_users/);
+  });
+
+  // Security regression: otp.log historically wrote the real OTP in
+  // plaintext ("[sendOtp] OTP stored — value=1234 ..."). authController.js's
+  // writeLog() now also forwards every line to ip_login_otp_logs (dbLogger.js) —
+  // confirms the masked source line (value=****) is what both the file
+  // AND the DB copy receive, not just one or the other.
+  test('the OTP value is never written to otp.log in plaintext', async () => {
+    db.query
+      .mockResolvedValueOnce([[{
+        user_id: 42, client_id: 10, user_microlab_type: 'patient_user',
+        user_auth_token: null, user_token_expiry: null, deleted_at: null,
+      }]])
+      .mockResolvedValueOnce([{}]);
+
+    const appendSpy = jest.spyOn(fs, 'appendFileSync').mockImplementation(() => {});
+    try {
+      const res = await request(app)
+        .post('/api/auth/send-otp')
+        .send({ mobile: '9876543210', role: 'customer' });
+      expect(res.status).toBe(200);
+
+      const otpLogLines = appendSpy.mock.calls
+        .filter(c => String(c[0]).includes('otp.log'))
+        .map(c => c[1]);
+      const storedLine = otpLogLines.find(l => l.includes('OTP stored'));
+      expect(storedLine).toBeDefined();
+      expect(storedLine).toContain('value=****');
+      // The real OTP (generated 4-digit code) must not appear anywhere in
+      // any line written to otp.log.
+      otpLogLines.forEach(line => {
+        expect(line).not.toMatch(/value=\d{4}\b/);
+      });
+    } finally {
+      appendSpy.mockRestore();
+    }
   });
 
   // TC-AUTH-03 — soft-deleted account (this session's new feature): must be

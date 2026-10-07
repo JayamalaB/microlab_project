@@ -31,6 +31,10 @@ require('./scheduler/dispatchScheduler')(io);
 // this is separate from the 45s dispatch grace period).
 require('./scheduler/technicianOfflineSweep')();
 
+// Purges the 7 database log tables (server/utils/dbLogger.js) of rows older
+// than 90 days — the existing .log files themselves are untouched.
+require('./scheduler/logRetentionSweep')();
+
 app.use(cors());
 app.use(express.json());
 
