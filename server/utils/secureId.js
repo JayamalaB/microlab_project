@@ -1,48 +1,43 @@
 const crypto = require('crypto');
 const https  = require('https');
 const http   = require('http');
+const { getSecret, refreshSecret } = require('../services/secretCache');
 
-function buildSecureId(mobile_no, user_type, timestamp) {
+function buildSecureId(mobile_no, user_type, timestamp, secret) {
   const message = `${mobile_no}|${user_type}|${timestamp}`;
   return crypto
-    .createHmac('sha256', process.env.CLIENT_SERVER_SECRET)
+    .createHmac('sha256', secret)
     .update(message)
     .digest('hex');
 }
 
-/**
- * POST to client server and return parsed response.
- * Resolves with { status, msg } or null on error/timeout.
- */
-function checkClientUser(mobile_no, user_type) {
-  const url = process.env.CLIENT_SERVER_URL;
-  if (!url || !process.env.CLIENT_SERVER_SECRET) return Promise.resolve(null);
+function _isSignatureError(parsed) {
+  if (typeof parsed === 'number') return parsed === 401 || parsed === 403;
+  const msg = (parsed?.msg ?? parsed?.message ?? '').toLowerCase();
+  return msg.includes('sign') || msg.includes('secret') ||
+         msg.includes('unauthor') || msg.includes('invalid') || msg.includes('auth');
+}
 
-  const timestamp = Math.floor(Date.now() / 1000);
-  const secure_id = buildSecureId(mobile_no, user_type, timestamp);
-  const payload   = new URLSearchParams({ mobile_no, user_type, timestamp: String(timestamp), secure_id }).toString();
-
+function _postForm(url, payload, timeoutMs = 5000) {
   return new Promise((resolve) => {
     try {
       const parsedUrl = new URL(url);
       const lib = parsedUrl.protocol === 'https:' ? https : http;
       const options = {
         hostname: parsedUrl.hostname,
-        port    : parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-        path    : parsedUrl.pathname + parsedUrl.search,
-        method  : 'POST',
-        headers : {
-          'Content-Type'  : 'application/x-www-form-urlencoded',
+        port:     parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+        path:     parsedUrl.pathname + parsedUrl.search,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/x-www-form-urlencoded',
           'Content-Length': Buffer.byteLength(payload),
         },
       };
-
       const req = lib.request(options, (res) => {
         let body = '';
-        res.on('data', (chunk) => (body += chunk));
+        res.on('data', c => body += c);
         res.on('end', () => {
           try {
-            // ASMX HTTP POST wraps return value in XML: <string xmlns="...">JSON</string>
             const xmlMatch = /<string[^>]*>([\s\S]*?)<\/string>/.exec(body);
             const parsed = JSON.parse(xmlMatch ? xmlMatch[1] : body);
             console.log(`[clientServer] status ${res.statusCode} | response: ${body}`);
@@ -53,18 +48,8 @@ function checkClientUser(mobile_no, user_type) {
           }
         });
       });
-
-      req.on('error', (err) => {
-        console.error('[clientServer] request failed:', err.message);
-        resolve(null);
-      });
-
-      req.setTimeout(5000, () => {
-        req.destroy();
-        console.warn('[clientServer] request timed out');
-        resolve(null);
-      });
-
+      req.on('error', (err) => { console.error('[clientServer] request failed:', err.message); resolve(null); });
+      req.setTimeout(timeoutMs, () => { req.destroy(); console.warn('[clientServer] request timed out'); resolve(null); });
       req.write(payload);
       req.end();
     } catch (err) {
@@ -74,66 +59,49 @@ function checkClientUser(mobile_no, user_type) {
   });
 }
 
-/**
- * POST to client patient endpoint and return parsed response.
- * Resolves with { status, patient: [] } or null on error/timeout.
- */
-function fetchPatientData(mobile_no, user_type) {
-  const url = process.env.CLIENT_PATIENT_URL;
-  if (!url || !process.env.CLIENT_SERVER_SECRET) return Promise.resolve(null);
+async function checkClientUser(mobile_no, user_type) {
+  const url = process.env.CLIENT_SERVER_URL;
+  if (!url) return null;
 
+  const secret    = await getSecret();
   const timestamp = Math.floor(Date.now() / 1000);
-  const secure_id = buildSecureId(mobile_no, user_type, timestamp);
+  const secure_id = buildSecureId(mobile_no, user_type, String(timestamp), secret);
   const payload   = new URLSearchParams({ mobile_no, user_type, timestamp: String(timestamp), secure_id }).toString();
 
-  return new Promise((resolve) => {
-    try {
-      const parsedUrl = new URL(url);
-      const lib = parsedUrl.protocol === 'https:' ? https : http;
-      const options = {
-        hostname: parsedUrl.hostname,
-        port    : parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-        path    : parsedUrl.pathname + parsedUrl.search,
-        method  : 'POST',
-        headers : {
-          'Content-Type'  : 'application/x-www-form-urlencoded',
-          'Content-Length': Buffer.byteLength(payload),
-        },
-      };
+  let result = await _postForm(url, payload);
 
-      const req = lib.request(options, (res) => {
-        let body = '';
-        res.on('data', (chunk) => (body += chunk));
-        res.on('end', () => {
-          try {
-            // ASMX HTTP POST wraps return value in XML: <string xmlns="...">JSON</string>
-            const xmlMatch = /<string[^>]*>([\s\S]*?)<\/string>/.exec(body);
-            resolve(JSON.parse(xmlMatch ? xmlMatch[1] : body));
-          } catch {
-            console.error('[patientServer] invalid response:', body);
-            resolve(null);
-          }
-        });
-      });
+  // Auto-recover on signature failure — refresh secret from DB and retry once
+  if (result && _isSignatureError(result)) {
+    console.warn('[clientServer] signature error on checkClientUser — refreshing secret and retrying');
+    const newSecret    = await refreshSecret();
+    const newSecureId  = buildSecureId(mobile_no, user_type, String(timestamp), newSecret);
+    const retryPayload = new URLSearchParams({ mobile_no, user_type, timestamp: String(timestamp), secure_id: newSecureId }).toString();
+    result = await _postForm(url, retryPayload);
+  }
 
-      req.on('error', (err) => {
-        console.error('[patientServer] request failed:', err.message);
-        resolve(null);
-      });
+  return result;
+}
 
-      req.setTimeout(5000, () => {
-        req.destroy();
-        console.warn('[patientServer] request timed out');
-        resolve(null);
-      });
+async function fetchPatientData(mobile_no, user_type) {
+  const url = process.env.CLIENT_PATIENT_URL;
+  if (!url) return null;
 
-      req.write(payload);
-      req.end();
-    } catch (err) {
-      console.error('[patientServer] error:', err.message);
-      resolve(null);
-    }
-  });
+  const secret    = await getSecret();
+  const timestamp = Math.floor(Date.now() / 1000);
+  const secure_id = buildSecureId(mobile_no, user_type, String(timestamp), secret);
+  const payload   = new URLSearchParams({ mobile_no, user_type, timestamp: String(timestamp), secure_id }).toString();
+
+  let result = await _postForm(url, payload);
+
+  if (result && _isSignatureError(result)) {
+    console.warn('[patientServer] signature error on fetchPatientData — refreshing secret and retrying');
+    const newSecret    = await refreshSecret();
+    const newSecureId  = buildSecureId(mobile_no, user_type, String(timestamp), newSecret);
+    const retryPayload = new URLSearchParams({ mobile_no, user_type, timestamp: String(timestamp), secure_id: newSecureId }).toString();
+    result = await _postForm(url, retryPayload);
+  }
+
+  return result;
 }
 
 module.exports = { buildSecureId, checkClientUser, fetchPatientData };

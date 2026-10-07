@@ -4,7 +4,6 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -1216,13 +1215,17 @@ class _BookingCard extends StatelessWidget {
                             if ((booking.refundAmount ?? 0) > 0)
                               Text(
                                 booking.refundStatus == 'processed'
-                                    ? 'Refund of ₹${booking.refundAmount!.toInt()} initiated · 5–7 days'
-                                    : 'Refund of ₹${booking.refundAmount!.toInt()} pending',
+                                    ? 'Refund of ₹${booking.refundAmount!.toInt()} credited'
+                                    : booking.refundStatus == 'initiated'
+                                        ? 'Refund of ₹${booking.refundAmount!.toInt()} initiated · 5–7 days'
+                                        : 'Refund of ₹${booking.refundAmount!.toInt()} pending',
                                 style: TextStyle(
                                   fontSize: 11,
                                   color: booking.refundStatus == 'processed'
                                       ? AppColors.brandGreen
-                                      : const Color(0xFFE65100),
+                                      : booking.refundStatus == 'initiated'
+                                          ? AppColors.brandGreen
+                                          : const Color(0xFFE65100),
                                 ),
                               ),
                           ],
@@ -1395,127 +1398,218 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
   StreamSubscription<bool>? _connectedSub;
 
   bool _billBusy = false;
+  Uint8List? _cachedBillBytes;
+  Map<String, dynamic>? _cachedLetterhead;
+
+  Future<Map<String, dynamic>> _fetchLetterhead() async {
+    _cachedLetterhead ??= await ApiService.getLetterhead();
+    return _cachedLetterhead ?? {};
+  }
+
+  Future<pw.ImageProvider?> _loadImageUrl(String? url) async {
+    if (url == null || url.isEmpty) return null;
+    try {
+      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
+      if (res.statusCode == 200) return pw.MemoryImage(res.bodyBytes);
+    } catch (_) {}
+    return null;
+  }
 
   Future<Uint8List> _generateBillPdf(BookingModel b) async {
     final font       = await PdfGoogleFonts.notoSansRegular();
     final fontBold   = await PdfGoogleFonts.notoSansBold();
     final fontItalic = await PdfGoogleFonts.notoSansItalic();
 
-    final logoData  = await rootBundle.load('assets/icon/MicroLab-Logo.jpeg');
-    final logoImage = pw.MemoryImage(logoData.buffer.asUint8List());
+    final lh = await _fetchLetterhead();
+
+    final barColor      = PdfColor.fromHex((lh['bar_color'] as String?)      ?? '#2E7D32');
+    final titleColor    = PdfColor.fromHex((lh['title_color'] as String?)    ?? '#387738');
+    final subtitleColor = PdfColor.fromHex((lh['subtitle_color'] as String?) ?? '#EF7C00');
+    final showTopBar    = lh['show_top_bar']    as bool? ?? true;
+    final showBottomBar = lh['show_bottom_bar'] as bool? ?? true;
+    final headerMode    = (lh['header_mode'] as String?) ?? 'fields';
+
+    final title       = (lh['title']       as String?) ?? 'Microbiological Laboratory';
+    final subtitle    = (lh['subtitle']    as String?) ?? '';
+    final infoLine    = (lh['info_line']   as String?) ?? '';
+    final addressLine = (lh['address_line'] as String?) ?? '';
+    final footerCompany   = (lh['footer_company']   as String?) ?? '';
+    final footerSignatory = (lh['footer_signatory'] as String?) ?? '';
+
+    // Load images
+    final bannerImage = headerMode == 'banner'
+        ? await _loadImageUrl(lh['banner_url'] as String?)
+        : null;
+    final logoImage  = await _loadImageUrl(lh['logo_url']  as String?);
+    final badgeImage = await _loadImageUrl(lh['badge_url'] as String?);
 
     final doc   = pw.Document();
-    final green = PdfColor.fromHex('#2E7D32');
-    final grey  = PdfColors.grey700;
+    final green = barColor;
 
     pw.TextStyle base({bool bold = false, bool italic = false, double size = 10, PdfColor? color}) =>
         pw.TextStyle(font: bold ? fontBold : (italic ? fontItalic : font), fontSize: size, color: color);
 
-    doc.addPage(pw.Page(
-      pageFormat: PdfPageFormat.a4,
-      margin: const pw.EdgeInsets.all(32),
-      build: (ctx) => pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: [
-          // Header — matches printed letterhead
-          pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.center,
-            children: [
-              // Left: address block
-              pw.Expanded(
-                flex: 3,
-                child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                  pw.Text('# 12A, Cowley Brown Road(East), R.S.Puram Coimbatore-641002',
-                      style: base(size: 9)),
-                  pw.Text('Ph: 0422-2556628, 4354242', style: base(size: 9)),
-                  pw.SizedBox(height: 4),
-                  pw.Text('Web: www.microlabindia.com   E-mail: microlabcbe@microlabindia.com',
-                      style: base(bold: true, size: 8)),
-                ]),
-              ),
-              // Right: logo + name
-              pw.Expanded(
-                flex: 2,
-                child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
-                  pw.Image(logoImage, height: 90, fit: pw.BoxFit.contain),
-                ]),
-              ),
-            ],
-          ),
-          pw.Divider(thickness: 1.5, color: green),
-          // Receipt title + ref
-          pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-            pw.Text('BILL RECEIPT', style: base(bold: true, size: 13)),
-            pw.Text(b.id, style: base(size: 10, bold: true)),
-          ]),
-          pw.SizedBox(height: 8),
+    // Header widget
+    pw.Widget buildHeader() {
+      if (headerMode == 'banner' && bannerImage != null) {
+        return pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: pw.Image(bannerImage, fit: pw.BoxFit.contain),
+        );
+      }
+      // Fields mode: [logo?] center-text [badge?]
+      // Balancing spacers keep center text truly centered when only one side has an image.
+      const double imgSize = 56;
+      const double imgGap  = 8;
+      final bool hasLogo  = logoImage  != null;
+      final bool hasBadge = badgeImage != null;
 
-          // Booking info
-          pw.Table(
-            columnWidths: {
-              0: const pw.FixedColumnWidth(70),
-              1: const pw.FlexColumnWidth(),
-            },
-            children: [
-              _infoRow('Patient', b.member.name, base: base),
-              _infoRow('Mode',    b.mode,         base: base),
-              _infoRow('Date',    '${b.date.day}/${b.date.month}/${b.date.year}', base: base),
-              _infoRow('Slot',    b.timeSlot,     base: base),
-              if (b.address != null) _infoRow('Address', b.address!, base: base),
-            ],
-          ),
-          pw.SizedBox(height: 14),
-
-          // Tests table
-          pw.Text('Tests / Packages', style: base(bold: true, size: 11)),
-          pw.SizedBox(height: 6),
-          pw.Table(
-            border: pw.TableBorder.all(color: PdfColors.grey300),
-            columnWidths: {0: const pw.FlexColumnWidth(3), 1: const pw.FlexColumnWidth(1)},
-            children: [
-              pw.TableRow(
-                decoration: pw.BoxDecoration(color: PdfColor.fromHex('#E8F5E9')),
+      return pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.center,
+          children: [
+            if (hasLogo) ...[
+              pw.Image(logoImage, width: imgSize, height: imgSize, fit: pw.BoxFit.contain),
+              pw.SizedBox(width: imgGap),
+            ] else if (hasBadge)
+              pw.SizedBox(width: imgSize + imgGap),
+            pw.Expanded(
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.center,
                 children: [
-                  pw.Padding(padding: const pw.EdgeInsets.all(6),
-                      child: pw.Text('Test / Package', style: base(bold: true))),
-                  pw.Padding(padding: const pw.EdgeInsets.all(6),
-                      child: pw.Text('Amount', style: base(bold: true), textAlign: pw.TextAlign.right)),
+                  if (title.isNotEmpty)
+                    pw.Text(title,
+                        style: base(bold: true, size: 13, color: titleColor),
+                        textAlign: pw.TextAlign.center),
+                  if (subtitle.isNotEmpty) ...[
+                    pw.SizedBox(height: 2),
+                    pw.Text(subtitle,
+                        style: base(size: 7, color: subtitleColor),
+                        textAlign: pw.TextAlign.center),
+                  ],
+                  if (infoLine.isNotEmpty) ...[
+                    pw.SizedBox(height: 3),
+                    pw.Text(infoLine,
+                        style: base(size: 7, color: PdfColors.grey700),
+                        textAlign: pw.TextAlign.center),
+                  ],
+                  if (addressLine.isNotEmpty) ...[
+                    pw.SizedBox(height: 2),
+                    pw.Text(addressLine,
+                        style: base(bold: true, size: 7),
+                        textAlign: pw.TextAlign.center),
+                  ],
                 ],
               ),
-              ...b.tests.map((t) => pw.TableRow(children: [
-                pw.Padding(padding: const pw.EdgeInsets.all(6),
-                    child: pw.Text(t.name, style: base())),
-                pw.Padding(padding: const pw.EdgeInsets.all(6),
-                    child: pw.Text('Rs.${t.finalPrice.toInt()}', style: base(), textAlign: pw.TextAlign.right)),
-              ])),
-            ],
-          ),
-          pw.SizedBox(height: 14),
+            ),
+            if (hasBadge) ...[
+              pw.SizedBox(width: imgGap),
+              pw.Image(badgeImage, width: imgSize, height: imgSize, fit: pw.BoxFit.contain),
+            ] else if (hasLogo)
+              pw.SizedBox(width: imgSize + imgGap),
+          ],
+        ),
+      );
+    }
 
-          // Payment summary
-          pw.Align(
-            alignment: pw.Alignment.centerRight,
-            child: pw.SizedBox(
-              width: 220,
-              child: pw.Column(children: [
-                _pdfSummaryRow('Tests Total', 'Rs.${b.testsTotal.toInt()}', base: base),
-                if (b.serviceCharge > 0)
-                  _pdfSummaryRow('Service Charge', 'Rs.${b.serviceCharge.toInt()}', base: base),
-                pw.Divider(thickness: 0.8),
-                _pdfSummaryRow('Grand Total', 'Rs.${b.grandTotal.toInt()}', bold: true, base: base),
-                _pdfSummaryRow('Paid', 'Rs.${b.paidAmount.toInt()}', color: green, base: base),
-                if (b.amountDue > 0)
-                  _pdfSummaryRow('Amount Due', 'Rs.${b.amountDue.toInt()}', color: PdfColors.orange800, base: base),
-              ]),
+    doc.addPage(pw.Page(
+      pageFormat: PdfPageFormat.a4,
+      margin: pw.EdgeInsets.zero,
+      build: (ctx) => pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+        children: [
+          if (showTopBar) pw.Container(height: 10, color: green),
+
+          buildHeader(),
+
+          // ── White content area ────────────────────────────────────────────
+          pw.Expanded(
+            child: pw.Padding(
+              padding: const pw.EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Center(child: pw.Text('RECEIPT', style: base(bold: true, size: 14))),
+                  pw.SizedBox(height: 14),
+
+                  pw.Table(
+                    columnWidths: {
+                      0: const pw.FixedColumnWidth(70),
+                      1: const pw.FlexColumnWidth(),
+                    },
+                    children: [
+                      _infoRow('Patient', b.member.name, base: base),
+                      _infoRow('Mode',    b.mode,         base: base),
+                      _infoRow('Date',    '${b.date.day}/${b.date.month}/${b.date.year}', base: base),
+                      _infoRow('Slot',    b.timeSlot,     base: base),
+                      if (b.address != null) _infoRow('Address', b.address!, base: base),
+                    ],
+                  ),
+                  pw.SizedBox(height: 14),
+
+                  pw.Text('Tests / Packages', style: base(bold: true, size: 11)),
+                  pw.SizedBox(height: 6),
+                  pw.Table(
+                    border: pw.TableBorder.all(color: PdfColors.grey300),
+                    columnWidths: {0: const pw.FlexColumnWidth(3), 1: const pw.FlexColumnWidth(1)},
+                    children: [
+                      pw.TableRow(
+                        decoration: pw.BoxDecoration(color: PdfColor.fromHex('#E8F5E9')),
+                        children: [
+                          pw.Padding(padding: const pw.EdgeInsets.all(6),
+                              child: pw.Text('Test / Package', style: base(bold: true))),
+                          pw.Padding(padding: const pw.EdgeInsets.all(6),
+                              child: pw.Text('Amount', style: base(bold: true), textAlign: pw.TextAlign.right)),
+                        ],
+                      ),
+                      ...b.tests.map((t) => pw.TableRow(children: [
+                        pw.Padding(padding: const pw.EdgeInsets.all(6),
+                            child: pw.Text(t.name, style: base())),
+                        pw.Padding(padding: const pw.EdgeInsets.all(6),
+                            child: pw.Text('Rs.${t.finalPrice.toInt()}', style: base(), textAlign: pw.TextAlign.right)),
+                      ])),
+                    ],
+                  ),
+                  pw.SizedBox(height: 14),
+
+                  pw.Align(
+                    alignment: pw.Alignment.centerRight,
+                    child: pw.SizedBox(
+                      width: 220,
+                      child: pw.Column(children: [
+                        _pdfSummaryRow('Tests Total', 'Rs.${b.testsTotal.toInt()}', base: base),
+                        if (b.serviceCharge > 0)
+                          _pdfSummaryRow('Service Charge', 'Rs.${b.serviceCharge.toInt()}', base: base),
+                        pw.Divider(thickness: 0.8),
+                        _pdfSummaryRow('Grand Total', 'Rs.${b.grandTotal.toInt()}', bold: true, base: base),
+                        _pdfSummaryRow('Paid', 'Rs.${b.paidAmount.toInt()}', color: green, base: base),
+                        if (b.amountDue > 0)
+                          _pdfSummaryRow('Amount Due', 'Rs.${b.amountDue.toInt()}', color: PdfColors.orange800, base: base),
+                      ]),
+                    ),
+                  ),
+
+                  pw.Spacer(),
+
+                  if (footerCompany.isNotEmpty || footerSignatory.isNotEmpty)
+                    pw.Align(
+                      alignment: pw.Alignment.centerRight,
+                      child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
+                        if (footerCompany.isNotEmpty)
+                          pw.Text(footerCompany, style: base(size: 9)),
+                        pw.SizedBox(height: 24),
+                        if (footerSignatory.isNotEmpty)
+                          pw.Text(footerSignatory, style: base(size: 9)),
+                      ]),
+                    ),
+                  pw.SizedBox(height: 12),
+                ],
+              ),
             ),
           ),
 
-          pw.Spacer(),
-          pw.Divider(color: PdfColors.grey300),
-          pw.Center(
-            child: pw.Text('Thank you for choosing Microbiological Laboratory',
-                style: base(italic: true, size: 9, color: grey)),
-          ),
+          if (showBottomBar) pw.Container(height: 10, color: green),
         ],
       ),
     ));
@@ -1547,15 +1641,18 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     if (_billBusy) return;
     setState(() => _billBusy = true);
     try {
-      final bytes = await _generateBillPdf(widget.booking);
+      final bytes    = await _generateBillPdf(widget.booking);
       final filename = 'Bill_${widget.booking.id}.pdf';
       if (kIsWeb) {
         await Printing.sharePdf(bytes: bytes, filename: filename);
       } else {
-        final dir  = await getApplicationDocumentsDirectory();
+        final dir  = await getTemporaryDirectory();
         final file = File('${dir.path}/$filename');
         await file.writeAsBytes(bytes);
-        await OpenFilex.open(file.path);
+        final result = await OpenFilex.open(file.path, type: 'application/pdf');
+        if (result.type != ResultType.done && mounted) {
+          await Printing.sharePdf(bytes: bytes, filename: filename);
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1563,6 +1660,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
           content: Text('Could not download bill: $e'),
           backgroundColor: Colors.red.shade700,
           behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 6),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ));
       }
@@ -1575,7 +1673,9 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     if (_billBusy) return;
     setState(() => _billBusy = true);
     try {
-      final bytes    = await _generateBillPdf(widget.booking);
+      final bytes    = kIsWeb
+          ? (_cachedBillBytes ?? await _generateBillPdf(widget.booking))
+          : await _generateBillPdf(widget.booking);
       final filename = 'Bill_${widget.booking.id}.pdf';
       await Share.shareXFiles(
         [XFile.fromData(bytes, mimeType: 'application/pdf', name: filename)],
@@ -1612,6 +1712,13 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     _arrivedSub   = SocketService.instance.onTechnicianArrived.listen((_) => _refreshTechStatus());
     _collectedSub = SocketService.instance.onCollectionCompleted.listen((_) => _refreshTechStatus());
     _connectedSub = SocketService.instance.onConnected.listen((_) => _refreshTechStatus());
+    if (kIsWeb) {
+      _fetchLetterhead().then((_) {
+        _generateBillPdf(widget.booking)
+            .then((b) { if (mounted) setState(() => _cachedBillBytes = b); })
+            .catchError((_) {});
+      }).catchError((_) {});
+    }
   }
 
   @override
@@ -1710,7 +1817,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
 
     openRazorpay(
       options: {
-        'key':         'rzp_test_SonqjjPurqlLci',
+        'key':         AppConstants.razorpayKeyId,
         'amount':      (amount * 100).toInt(),
         'name':        'MicroLab',
         'description': b.tests.map((t) => t.name).join(', '),
@@ -1983,11 +2090,15 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                           Icons.currency_rupee_rounded,
                           'Refund',
                           b.refundStatus == 'processed'
-                              ? '₹${b.refundAmount!.toInt()} initiated'
-                              : '₹${b.refundAmount!.toInt()} pending',
+                              ? '₹${b.refundAmount!.toInt()} credited'
+                              : b.refundStatus == 'initiated'
+                                  ? '₹${b.refundAmount!.toInt()} initiated · 5–7 days'
+                                  : '₹${b.refundAmount!.toInt()} pending',
                           valueColor: b.refundStatus == 'processed'
                               ? AppColors.brandGreen
-                              : const Color(0xFFE65100),
+                              : b.refundStatus == 'initiated'
+                                  ? AppColors.brandGreen
+                                  : const Color(0xFFE65100),
                         ),
                     ],
                   ),
@@ -3060,7 +3171,7 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
         setState(() => _saving = true);
         openRazorpay(
           options: {
-            'key':         'rzp_test_SonqjjPurqlLci',
+            'key':         AppConstants.razorpayKeyId,
             'amount':      (topUp * 100).round(),
             'name':        'MicroLab',
             'description': 'Top-up for added tests',

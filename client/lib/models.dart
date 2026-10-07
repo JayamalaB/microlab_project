@@ -258,7 +258,7 @@ class BookingModel {
   final double? patientLat;         // collection_latitude  — patient's home coordinates
   final double? patientLng;         // collection_longitude
   final double? refundAmount;
-  final String? refundStatus;       // 'pending' | 'processed' | 'none' | null
+  final String? refundStatus;       // null | 'initiated' | 'processed'
   final int rescheduleCount;
   final bool canReschedule;
 

@@ -1182,4 +1182,15 @@ class ApiService {
     }
     return [];
   }
+
+  static Future<Map<String, dynamic>?> getLetterhead() async {
+    try {
+      final res = await http
+          .get(Uri.parse('$baseUrl/api/letterhead'))
+          .timeout(const Duration(seconds: 10));
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      if (data['success'] == true) return data;
+    } catch (_) {}
+    return null;
+  }
 }

@@ -716,7 +716,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     // then use response['order_id'] below
 
     final options = {
-      'key': 'rzp_test_SonqjjPurqlLci', // replace with your Razorpay key
+      'key': AppConstants.razorpayKeyId,
       'amount': (_payableNow * 100).toInt(), // paise
       'name': 'MicroLab',
       'description': widget.cart.map((t) => t.name).join(', '),

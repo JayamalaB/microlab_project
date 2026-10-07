@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/services/api_service.dart';
@@ -2219,7 +2220,7 @@ void _resumeJourney() {
     setState(() => _isProcessingPayment = true);
 
     final options = {
-      'key': 'rzp_test_SonqjjPurqlLci',
+      'key': AppConstants.razorpayKeyId,
       'amount': (amount * 100).toInt(),
       'name': 'MicroLab',
       'description': _selectedTests.map((t) => t['name']).join(', '),
@@ -2376,7 +2377,7 @@ void _resumeJourney() {
     }
 
     final options = {
-      'key': 'rzp_test_SonqjjPurqlLci',
+      'key': AppConstants.razorpayKeyId,
       'amount': (amount * 100).toInt(),
       'name': 'MicroLab',
       'description': 'Tests for $patientName',
@@ -4530,6 +4531,14 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   // then resets the form so the technician can add another member.
   void _addToQueue() {
     if (_selectedTestIds.isEmpty) return;
+    if (_mode == 'newPatient' && _dob == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Please select a date of birth'),
+        backgroundColor: Colors.red,
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
 
     final String name;
     final String mobile;
@@ -4654,7 +4663,9 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     if (_step == 2) return _queuedMembers.isNotEmpty;
     if (_step == 1) return _selectedTestIds.isNotEmpty;
     if (_mode == 'select') return _selectedFamilyMember != null;
-    return _nameCtrl.text.trim().isNotEmpty && _mobileCtrl.text.trim().length == 10;
+    return _nameCtrl.text.trim().isNotEmpty
+        && _mobileCtrl.text.trim().length == 10
+        && _dob != null;
   }
 
   String get _headerTitle {
@@ -4935,8 +4946,13 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
       controller: scroll,
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('Mobile Number *',
-            style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+        RichText(text: const TextSpan(
+          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+          children: [
+            TextSpan(text: 'Mobile Number'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ],
+        )),
         const SizedBox(height: 6),
         Row(children: [
           Expanded(
@@ -5015,18 +5031,44 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
 
         const SizedBox(height: 14),
 
-        _FormField(
-          label: 'Full Name *',
+        RichText(text: const TextSpan(
+          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+          children: [
+            TextSpan(text: 'Full Name'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ],
+        )),
+        const SizedBox(height: 5),
+        TextField(
           controller: _nameCtrl,
-          hint: 'Enter full name',
-          icon: Icons.person_outline,
           keyboardType: TextInputType.name,
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(
+            hintText: 'Enter full name',
+            hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
+            prefixIcon: const Icon(Icons.person_outline, size: 18, color: AppColors.textHint),
+            counterText: '',
+            filled: true,
+            fillColor: AppColors.background,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.divider)),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.divider)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+            contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+          ),
         ),
         const SizedBox(height: 10),
 
         Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Date of Birth',
-              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+          RichText(text: const TextSpan(
+            style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+            children: [
+              TextSpan(text: 'Date of Birth'),
+              TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+            ],
+          )),
           const SizedBox(height: 6),
           GestureDetector(
             onTap: _pickDob,
