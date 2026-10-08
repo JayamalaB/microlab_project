@@ -132,6 +132,62 @@ describe('IT-T003 — Technician Receives Booking (real REST + real Socket.IO)',
 
 });
 
+// IT-T006 — Business-rule change: a technician with an existing,
+// time-overlapping committed booking must still receive a NEW booking
+// request for an overlapping time — the exclusion was removed from
+// bookingSocket.js (5 sites); the technician now decides via accept/reject
+// instead of being silently skipped. Proven directly against
+// technicianActiveSlots (the exact data _hasSlotConflict reads) rather than
+// via a full prior accept-flow, since that Map is the one piece of state
+// that actually represents "this technician already has a committed job".
+describe('IT-T006 — Overlapping booking is still offered (business-rule change)', () => {
+  const { technicianActiveSlots } = require('../../services/branchEligibility');
+
+  afterEach(() => {
+    technicianActiveSlots.delete(501); // this Map is a module-level singleton — don't leak into other tests
+  });
+
+  test('a technician with a 4:00 PM committed booking still receives a request for 4:30 PM', async () => {
+    const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+    const tech = await connectClient(server.url);
+    try {
+      tech.emit('technician_online', { technicianId: 501, technicianName: 'Suresh', lat: 13.05, lng: 80.25 });
+      await waitForEvent(tech, 'session_started');
+
+      // Simulate Technician A already holding an accepted 4:00 PM–5:00 PM
+      // booking (960–1020 minutes since midnight) — exactly the data
+      // _hasSlotConflict would have used to exclude them before this change.
+      technicianActiveSlots.set(501, new Map([
+        [70199, { slotDate: todayIST, startMinutes: 960, endMinutes: 1020, slotId: 55 }],
+      ]));
+
+      const booking = await createRealBooking(70102);
+
+      const requestPromise = waitForEvent(tech, 'booking_request');
+      const patient = await connectClient(server.url);
+      // New booking requested at 4:30 PM (990 min) — squarely inside the
+      // 4:00–5:00 PM window seeded above.
+      patient.emit('booking_request', {
+        bookingId: booking.bookingId, patientId: 501, patientName: 'Ravi Kumar',
+        patientMobile: '9876543210', patientAddress: '12 MG Road',
+        patientLat: 13.05, patientLng: 80.25, hospital: 'Microlab Chennai',
+        slotId: 56, appointmentTime: '16:30',
+      });
+
+      // Old behavior would have silently skipped Technician A here and the
+      // booking would have timed out with nobody online to offer it to —
+      // this resolving at all (not timing out) is the proof.
+      const received = await requestPromise;
+      expect(received.bookingId).toBe(booking.bookingId);
+      expect(received.appointmentTime).toBe('16:30');
+      patient.disconnect();
+    } finally {
+      tech.disconnect();
+    }
+  });
+});
+
 // The "nobody online" negative case lives in its own file
 // (dispatch.noTechniciansOnline.e2e.test.js) — see that file's header for
 // why: bookingSocket.js's onlineTechnicians/fcmOnlineTechnicians Maps are
@@ -218,6 +274,133 @@ describe('IT-T005 — Concurrent Technician Acceptance (two real technicians)', 
       techA.disconnect();
       techB.disconnect();
       patient.disconnect();
+    }
+  });
+});
+
+// IT-T007 — total_attempts bug fix: the attempt number persisted to
+// ip_booking_requests must come from dispatch.attemptNum (the already-correct
+// in-memory per-technician counter), not the old self-referential SQL IF(...)
+// that silently never reset on a technician change (see bookingSocket.js's
+// own comment on the INSERT/ON DUPLICATE KEY UPDATE for the exact MySQL
+// evaluation-order bug this replaces).
+//
+// This proves the reset-on-technician-switch behavior — the part that was
+// actually broken — using real reject events (fast, deterministic). It
+// deliberately does NOT wait out a real same-technician timeout retry
+// (TIMEOUT_MS=40s, RETRY_GAP_MS=3s, both hardcoded with no test seam, and
+// out of scope to change here) to prove the increment case too; that part
+// of dispatch.attemptNum's own logic is untouched by this fix (per explicit
+// instruction) and was already correct before it — this test only needs to
+// prove the value it already produces is now what actually gets persisted.
+describe('IT-T007 — Attempt number resets per technician (total_attempts bug fix)', () => {
+  test('three different technicians, in sequence, are each persisted as attempt 1 — never a running total', async () => {
+    const techA   = await connectClient(server.url);
+    const techB   = await connectClient(server.url);
+    const techC   = await connectClient(server.url);
+    const patient = await connectClient(server.url);
+    try {
+      techA.emit('technician_online', { technicianId: 501, technicianName: 'Suresh', lat: 13.05, lng: 80.25 });
+      await waitForEvent(techA, 'session_started');
+      techB.emit('technician_online', { technicianId: 502, technicianName: 'Meena', lat: 13.06, lng: 80.26 });
+      await waitForEvent(techB, 'session_started');
+      techC.emit('technician_online', { technicianId: 503, technicianName: 'Kumar', lat: 13.07, lng: 80.27 });
+      await waitForEvent(techC, 'session_started');
+
+      const booking = await createRealBooking(70105);
+
+      // A — nearest, dispatched first.
+      const requestAtA = waitForEvent(techA, 'booking_request');
+      patient.emit('booking_request', {
+        bookingId: booking.bookingId, patientId: 501, patientName: 'Ravi Kumar',
+        patientLat: 13.05, patientLng: 80.25, hospital: 'Microlab Chennai',
+      });
+      await requestAtA;
+      techA.emit('booking_rejected', { bookingId: booking.bookingId, technicianId: 501 });
+
+      // B — next nearest, offered after A's rejection.
+      const requestAtB = waitForEvent(techB, 'booking_request');
+      await requestAtB;
+      techB.emit('booking_rejected', { bookingId: booking.bookingId, technicianId: 502 });
+
+      // C — offered after B's rejection too.
+      const requestAtC = waitForEvent(techC, 'booking_request');
+      await requestAtC;
+
+      const acceptedAtCustomer = waitForEvent(patient, 'booking_accepted');
+      techC.emit('booking_accepted', { bookingId: booking.bookingId, technicianId: 503, technicianName: 'Kumar' });
+      await acceptedAtCustomer;
+
+      // Every offer to a NEW technician must persist total_attempts=1 — old
+      // buggy behavior would have shown 1, 2, 3 (a running total across the
+      // whole booking) instead of resetting for each new technician.
+      const requestInserts = db.execute.mock.calls.filter(c =>
+        c[0].includes('INSERT INTO ip_booking_requests'));
+      expect(requestInserts.length).toBeGreaterThanOrEqual(3);
+
+      const forTech = (techId) => requestInserts.find(c => c[1][1] === techId);
+      expect(forTech(501)[1]).toEqual([booking.bookingId, 501, 'Suresh', 1, 3]); // MAX_ATTEMPTS=3
+      expect(forTech(502)[1]).toEqual([booking.bookingId, 502, 'Meena', 1, 3]);
+      expect(forTech(503)[1]).toEqual([booking.bookingId, 503, 'Kumar', 1, 3]);
+    } finally {
+      techA.disconnect();
+      techB.disconnect();
+      techC.disconnect();
+      patient.disconnect();
+    }
+  });
+});
+
+// IT-T008 — Duplicate-dispatch race-condition fix (booking #1226 incident).
+// Root cause: dispatchQueues.has(bookingId) was checked, then awaited past
+// (the slot hard-filter's own db.execute calls), before dispatchQueues.set()
+// ever ran — a second booking_request for the same bookingId landing in that
+// gap saw the same "not yet dispatching" state and started a second,
+// competing dispatch cycle. The fix claims the bookingId in dispatchQueues
+// synchronously, immediately after the existing check and before any await,
+// so a second request lands after the claim and is turned away by that same
+// pre-existing DUPLICATE_REQUEST branch instead of racing past it.
+describe('IT-T008 — Duplicate booking_request for the same booking is ignored', () => {
+  test('two back-to-back booking_request events for the same bookingId produce only one technician offer', async () => {
+    const tech = await connectClient(server.url);
+    const patient = await connectClient(server.url);
+    try {
+      tech.emit('technician_online', { technicianId: 501, technicianName: 'Suresh', lat: 13.05, lng: 80.25 });
+      await waitForEvent(tech, 'session_started');
+
+      const booking = await createRealBooking(70108);
+      const payload = {
+        bookingId: booking.bookingId, patientId: 501, patientName: 'Ravi Kumar',
+        patientMobile: '9876543210', patientAddress: '12 MG Road',
+        patientLat: 13.05, patientLng: 80.25, hospital: 'Microlab Chennai',
+      };
+
+      const requestPromise = waitForEvent(tech, 'booking_request');
+      // Fired back-to-back, no await between them — the same shape as the
+      // real duplicate that produced the #1226 incident (a second emit
+      // landing before the first dispatch cycle had finished claiming state).
+      patient.emit('booking_request', payload);
+      patient.emit('booking_request', payload);
+
+      const received = await requestPromise;
+      expect(received.bookingId).toBe(booking.bookingId);
+
+      // No second offer must ever reach the technician for this booking.
+      let gotSecond = false;
+      try {
+        await waitForEvent(tech, 'booking_request', 400);
+        gotSecond = true;
+      } catch (_) { /* expected: times out — no second offer */ }
+      expect(gotSecond).toBe(false);
+
+      // Only one write to ip_booking_requests for this booking — not two
+      // competing INSERTs from two independent dispatch cycles.
+      const requestInserts = db.execute.mock.calls.filter(c =>
+        c[0].includes('INSERT INTO ip_booking_requests') && c[1][0] === booking.bookingId);
+      expect(requestInserts.length).toBe(1);
+    } finally {
+      patient.disconnect();
+      tech.disconnect();
     }
   });
 });

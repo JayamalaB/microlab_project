@@ -7,6 +7,7 @@ const settings = require('../config/settings');
 const { messaging } = require('../config/firebase');
 const { buildSecureId } = require('../utils/secureId');
 const { getSecret, refreshSecret } = require('./secretCache');
+const dbLogger = require('../utils/dbLogger');
 
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'client_sync.log');
 
@@ -15,6 +16,7 @@ function writeLog(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(LOG_FILE, line, 'utf8');
+  dbLogger.logClientSyncEvent(msg);
 }
 
 // "DD-MM-YYYY HH:MM:SS IST" — distinct from writeLog's own header format,

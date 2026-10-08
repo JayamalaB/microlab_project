@@ -29,6 +29,7 @@ const {
 } = require('../services/branchEligibility');
 const fs              = require('fs');
 const path            = require('path');
+const dbLogger        = require('../utils/dbLogger');
 
 const COLLECTION_LOG = path.join(__dirname, '..', 'logs', 'collection.log');
 function clog(msg) {
@@ -36,6 +37,7 @@ function clog(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(COLLECTION_LOG, line, 'utf8');
+  dbLogger.logCollectionEvent(msg);
 }
 
 const DISPATCH_LOG = path.join(__dirname, '..', 'logs', 'dispatch.log');
@@ -49,6 +51,7 @@ function dlog(bookingId, tag, details = '') {
   const line   = `${ts} | ${idCol} | ${tagCol} | ${details}\n`;
   process.stdout.write(line);
   fs.appendFileSync(DISPATCH_LOG, line, 'utf8');
+  dbLogger.logDispatchEvent(bookingId, tag, details);
 }
 
 // "06:30:00" → "6:30 AM"
@@ -158,6 +161,13 @@ function log(emoji, label, bookingId, details = '') {
     `${ts} ${emoji}  [${String(label).padEnd(24)}] booking=${bookingId}` +
     (details ? ` | ${details}` : '')
   );
+  // log() is also used for non-booking technician-connectivity events
+  // (TECH_OFFLINE, GRACE_EXPIRED, etc.) with bookingId='-' — only the
+  // booking-scoped ones (duplicate-request, timeout/retry, skip,
+  // accept/reject, ...) belong in the dispatch event history.
+  if (bookingId != null && bookingId !== '-') {
+    dbLogger.logDispatchEvent(bookingId, label, details);
+  }
 }
 
 function logBlock(emoji, title, lines = []) {
@@ -342,9 +352,13 @@ function _sortedAvailableActors(patientLat, patientLng, actorMap, branchId = nul
     if (!actor.isOnline) return;
     if (branchId != null && actor.branchId != null && actor.branchId !== branchId) return;
 
-    if (apptCtx) {
-      if (_hasSlotConflict(id, apptCtx.bookingDate, apptCtx.requestedStart)) return; // window conflict
-    } else if (!actor.isAvailable) {
+    // Business-rule change: an overlapping committed appointment window no
+    // longer excludes a technician from receiving this offer — they decide
+    // via accept/reject. _hasSlotConflict() itself, technicianActiveSlots,
+    // and window recording are unchanged; this is only about whether a
+    // conflict disqualifies a candidate here. isAvailable still applies
+    // when there's no slot context at all (apptCtx null) — untouched.
+    if (!apptCtx && !actor.isAvailable) {
       return; // no slot context at all — fall back to the global flag
     }
 
@@ -491,13 +505,9 @@ async function dispatchAttempt(io, bookingId) {
       if (dispatch.slotTechIds && dispatch.slotTechIds.size > 0) {
         fresh = fresh.filter(a => dispatch.slotTechIds.has(a.id));
       }
-      // Remove any expanded tech with a genuinely conflicting window. No exemption
-      // for slotTechIds membership — DB slot registration answers "can this tech
-      // ever work this slot type", not "are they free right now"; only a real
-      // overlap check answers that, and it must never be overridden.
-      if (apptCtxD) {
-        fresh = fresh.filter(a => !_hasSlotConflict(a.id, apptCtxD.bookingDate, apptCtxD.requestedStart));
-      }
+      // Business-rule change: expanded candidates with a conflicting window
+      // are no longer removed here either — same reasoning as
+      // _sortedAvailableActors above.
 
       if (fresh.length > 0) {
         dispatch.queue.push(...fresh);
@@ -544,12 +554,8 @@ async function dispatchAttempt(io, bookingId) {
             bookingData.branchId   ?? null,
             apptCtxD // Phase 3: allow non-overlapping appointment-busy techs
           ).filter(a => !triedIds.has(a.id)); // no slotTechIds filter
-          // Phase 2/3: apply overlap filter for any residual conflicts
-          if (apptCtxD) {
-            fallbackFresh = fallbackFresh.filter(
-              a => !_hasSlotConflict(a.id, apptCtxD.bookingDate, apptCtxD.requestedStart)
-            );
-          }
+          // Business-rule change: no overlap filter here either — same
+          // reasoning as _sortedAvailableActors above.
 
           if (fallbackFresh.length === 0 && bookingType !== 'transport') {
             // Also check FCM-only techs without slot constraint
@@ -674,13 +680,13 @@ async function dispatchAttempt(io, bookingId) {
     const actor  = dispatch.queue[dispatch.techIdx];
     const online = actorMap.get(actor.id);
 
-    // Checkpoint B — the actual call-time gate. Must use the same per-slot logic
-    // as queue-build (Checkpoint A above) or a tech correctly queued for a non-
-    // overlapping slot gets silently skipped here, one line before the call
-    // would have gone out. isAvailable is only consulted when there's no slot
-    // context at all — one accepted slot must never block the rest of the day.
+    // Checkpoint B — the actual call-time gate. Business-rule change: a
+    // conflicting committed window no longer disqualifies a technician here
+    // either (apptCtxD branch always true now) — only genuinely being
+    // offline still skips them. isAvailable is still consulted when there's
+    // no slot context at all — unrelated to this change, untouched.
     const stillFree = !online ? false
-      : apptCtxD ? !_hasSlotConflict(actor.id, apptCtxD.bookingDate, apptCtxD.requestedStart)
+      : apptCtxD ? true
       : online.isAvailable;
 
     if (!online || !online.isOnline || !stillFree) {
@@ -727,20 +733,34 @@ async function dispatchAttempt(io, bookingId) {
     ]);
 
     if (bookingType !== 'transport') {
+      // total_attempts is persisted directly from dispatch.attemptNum — the
+      // in-memory counter that's already correct (resets to 1 on every
+      // genuine technician change, increments only on a same-technician
+      // timeout retry — see its own reset/increment sites elsewhere in this
+      // file). Previously this was recomputed independently in SQL via
+      // IF(technician_id = VALUES(technician_id), total_attempts + 1, 1) —
+      // which looked right but had a real MySQL bug: ON DUPLICATE KEY
+      // UPDATE's SET-clause assignments run left to right, and
+      // technician_id = VALUES(technician_id) (the line right above) had
+      // already overwritten technician_id by the time that IF evaluated, so
+      // the comparison was trivially true on every call and total_attempts
+      // never actually reset — it silently became a whole-booking total
+      // instead of a per-technician one. Passing attemptNum straight
+      // through removes that redundant (and buggy) recomputation entirely.
       dbRun(
         `INSERT INTO ip_booking_requests
            (booking_id, technician_id, technician_name, request_status,
             total_attempts, max_attempts, last_sent_at)
-         VALUES (?, ?, ?, 'pending', 1, ?, NOW())
+         VALUES (?, ?, ?, 'pending', ?, ?, NOW())
          ON DUPLICATE KEY UPDATE
            technician_id   = VALUES(technician_id),
            technician_name = VALUES(technician_name),
            request_status  = 'pending',
-           total_attempts  = IF(technician_id = VALUES(technician_id), total_attempts + 1, 1),
+           total_attempts  = VALUES(total_attempts),
            max_attempts    = VALUES(max_attempts),
            last_sent_at    = NOW(),
            updated_at      = NOW()`,
-        [bookingId, actor.id, actor.name || '', MAX_ATTEMPTS]
+        [bookingId, actor.id, actor.name || '', dispatch.attemptNum, MAX_ATTEMPTS]
       );
     }
 
@@ -1109,6 +1129,31 @@ async function _handleBookingRequest(io, socket, data = {}) {
     return;
   }
 
+  // Claim this bookingId SYNCHRONOUSLY, right here — before anything below
+  // that awaits (the slot hard-filter section a bit further down runs real
+  // db.execute() calls). Without this, a second booking_request for the
+  // same bookingId arriving while this invocation is mid-await would also
+  // see dispatchQueues.has(bookingId) as false above (this invocation
+  // hasn't reached its own real .set() yet) and start a second, competing
+  // dispatch cycle — two technicians offered the same job independently,
+  // each INSERT/UPDATE into ip_booking_requests overwriting the other's
+  // (confirmed root cause of a real duplicate-dispatch incident, booking
+  // #1226 — see this file's own dispatch log for that booking: a slot-based
+  // booking, which is exactly the case with an await gap here). This
+  // placeholder is immediately overwritten by the real dispatch state at
+  // whichever of this function's own dispatchQueues.set() calls is
+  // actually reached (line ~1377 below, or inside _trySlotBasedAssign) —
+  // normal Map.set() semantics, no special handling needed there. The ONLY
+  // extra care needed is releasing this claim on every path that returns
+  // WITHOUT ever reaching a real .set() (nobody available at all) — see the
+  // dispatchQueues.delete(bookingId) calls added at each such early return
+  // below; a leaked claim here would permanently block all future dispatch
+  // for this booking, which would be worse than the bug this fixes.
+  dispatchQueues.set(bookingId, {
+    bookingData: null, queue: [], techIdx: 0, attemptNum: 1, handle: null,
+    triedIds: new Set(), bookingType, _claiming: true,
+  });
+
   const actorMap    = bookingType === 'transport' ? onlineDrivers : onlineTechnicians;
   const totalOnline = actorMap.size;
   const available   = [...actorMap.values()].filter(a => a.isAvailable).length;
@@ -1168,6 +1213,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
         log('⚠️', 'NO_ACTORS_ONLINE', bookingId, `trying slot-based fallback branch=${branchId}`);
         const assigned = await _trySlotBasedAssign(io, socket, slotCtx);
         if (!assigned) {
+          dispatchQueues.delete(bookingId); // release the synchronous claim above — nobody was ever actually dispatched to
           socket.emit('booking_timeout', { bookingId });
           log('⏰', 'BOOKING_TIMEOUT', bookingId, 'no actors online & no slot match');
         }
@@ -1175,6 +1221,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
       }
     } else {
       // Transport has no FCM or slot fallback
+      dispatchQueues.delete(bookingId); // release the synchronous claim above
       socket.emit('booking_timeout', { bookingId });
       log('⏰', 'BOOKING_TIMEOUT', bookingId, 'no drivers online');
       return;
@@ -1213,6 +1260,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
       log('⚠️', 'ALL_ACTORS_BUSY', bookingId, `trying slot-based fallback branch=${branchId}`);
       const assigned = await _trySlotBasedAssign(io, socket, slotCtx);
       if (!assigned) {
+        dispatchQueues.delete(bookingId); // release the synchronous claim above
         socket.emit('booking_timeout', { bookingId });
         log('⏰', 'BOOKING_TIMEOUT', bookingId, 'all actors busy & no slot match');
       }
@@ -1311,6 +1359,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
               `all slot-matched techs busy — trying Lane 3`);
             const assigned = await _trySlotBasedAssign(io, socket, slotCtx);
             if (!assigned) {
+              dispatchQueues.delete(bookingId); // release the synchronous claim above
               // _trySlotBasedAssign found nothing and didn't emit; we notify here.
               await _notifySlotNoAvailability(io, bookingId, slotId, branchId, bookingDate, appointmentTime);
             }
@@ -1326,23 +1375,12 @@ async function _handleBookingRequest(io, socket, data = {}) {
     }
   }
 
-  // Appointment overlap filter — final pass over the queue. Removes any tech who
-  // already has a committed window covering this exact requested time. No
-  // exemption for slotTechIds membership: DB slot registration means "this tech
-  // can work this slot type", not "they are free right now" — only a genuine
-  // overlap check answers that, and one accepted slot must never be read as
-  // blocking the tech's other, non-overlapping slots for the rest of the day.
-  // Reuses apptCtx (built above, gated on slotId) so the broad-slotId case — no
-  // exact appointmentTime chosen — is covered too, using "now" as the requested
-  // time. Techs without any technicianActiveSlots entry are unaffected either way.
-  if (apptCtx && queue.length > 0) {
-    const before = queue.length;
-    queue = queue.filter(a => !_hasSlotConflict(a.id, apptCtx.bookingDate, apptCtx.requestedStart));
-    if (queue.length < before) {
-      log('🚦', 'OVERLAP_FILTER', bookingId,
-        `time=${appointmentTime ?? 'now'} — removed ${before - queue.length} tech(s) with conflicting appointment window`);
-    }
-  }
+  // Business-rule change: this final appointment-overlap pass over the
+  // initial queue has been removed — a technician with a conflicting
+  // committed window is no longer dropped here either. See
+  // _sortedAvailableActors (above, earlier in this file) for the full
+  // reasoning; buildQueue already builds this queue via that same function,
+  // so this was a redundant second pass applying the same now-removed rule.
 
   logBlock('📋', `Booking Created  #${bookingId}`, [
     `Patient    : ${patientName} (ID: ${patientId})`,
@@ -1488,10 +1526,13 @@ module.exports = function bookingSocket(io, socket) {
 
     // Phase 3: when reconnecting mid-appointment, only refresh socket/GPS — do NOT
     // reset task_status to 'idle' or clear booking_id, as the tech is still active.
+    // online_status is still always set to 'online' here — appointment/slot state
+    // must never gate the online flag itself, only dispatch eligibility
+    // (isAvailable above already encodes that via hasActiveApptToday).
     if (hasActiveApptToday) {
       dbRun(
         `UPDATE ip_technician_live_location
-         SET socket_id = ?, latitude = ?, longitude = ?, last_ping_at = NOW(), updated_at = NOW()
+         SET socket_id = ?, latitude = ?, longitude = ?, online_status = 'online', last_ping_at = NOW(), updated_at = NOW()
          WHERE technician_id = ?`,
         [socket.id, lat ?? null, lng ?? null, technicianId]
       );
@@ -1832,11 +1873,17 @@ module.exports = function bookingSocket(io, socket) {
         [actorId, actorName || null, bd.branchId ?? null, bookingId]
       );
 
+      // online_status is intentionally left untouched here — it reflects
+      // connectivity, not job state. task_status (and booking_id, used by
+      // dispatch's in-memory isAvailable flag set just above) already fully
+      // capture "this technician is busy on a job"; online_status must stay
+      // 'online' through the whole job so admin views (getStats/getLive/getAll)
+      // and branch.log's technician summary keep showing this technician as
+      // online while they work, instead of them vanishing from the live map.
       dbRun(
         `UPDATE ip_technician_live_location
          SET booking_id    = ?,
              task_status   = 'assigned',
-             online_status = 'busy',
              updated_at    = NOW()
          WHERE technician_id = ?`,
         [bookingId, actorId]

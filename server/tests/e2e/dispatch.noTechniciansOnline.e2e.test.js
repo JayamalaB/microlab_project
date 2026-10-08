@@ -79,6 +79,20 @@ test('with no technician ever online, the patient is told the booking timed out 
       hospital: 'Microlab Chennai',
     });
     await expect(timeoutPromise).resolves.toEqual({ bookingId: booking.bookingId });
+
+    // IT-T008b — the duplicate-dispatch guard's synchronous claim must be
+    // released once this cycle genuinely finishes with nobody available
+    // (bookingSocket.js's dispatchQueues.delete(bookingId) added at this
+    // exact early-return path). A second, LEGITIMATE booking_request for the
+    // same bookingId after that must go through normally — not be silently
+    // swallowed as a stale "already dispatching" duplicate. This is the
+    // server-side half of "customer retry must not be incorrectly blocked".
+    const secondTimeoutPromise = waitForEvent(patient, 'booking_timeout');
+    patient.emit('booking_request', {
+      bookingId: booking.bookingId, patientId: 501, patientName: 'Ravi Kumar',
+      hospital: 'Microlab Chennai',
+    });
+    await expect(secondTimeoutPromise).resolves.toEqual({ bookingId: booking.bookingId });
   } finally {
     patient.disconnect();
   }
