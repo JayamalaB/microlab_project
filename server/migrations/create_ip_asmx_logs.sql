@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS ip_asmx_logs (
+  log_id           INT(11)       NOT NULL AUTO_INCREMENT,
+  endpoint         VARCHAR(100)  NOT NULL,
+  booking_ref      VARCHAR(50)   DEFAULT NULL,
+  booking_id       INT(11)       DEFAULT NULL,
+  mobile_no        VARCHAR(20)   DEFAULT NULL,
+  request_payload  JSON          DEFAULT NULL,
+  response_payload JSON          DEFAULT NULL,
+  http_status      SMALLINT      DEFAULT NULL,
+  success          TINYINT(1)    NOT NULL DEFAULT 0,
+  error_message    VARCHAR(500)  DEFAULT NULL,
+  created_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (log_id),
+  KEY idx_booking_ref (booking_ref),
+  KEY idx_booking_id  (booking_id),
+  KEY idx_mobile_no   (mobile_no),
+  KEY idx_endpoint    (endpoint),
+  KEY idx_success     (success),
+  KEY idx_created_at  (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

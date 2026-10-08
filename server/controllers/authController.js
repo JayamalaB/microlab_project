@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { forceTechnicianOffline } = require('../socket/bookingSocket');
 const { getSecret, refreshSecret } = require('../services/secretCache');
+const { logAsmx } = require('../services/asmxLogger');
 
 const LOG_DIR  = path.join(__dirname, '..', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'otp.log');
@@ -240,6 +241,16 @@ async function fetchFromRegistry(url, mobileNo, userType) {
     const retryParams  = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id: newSecureId });
     result = await _post(retryParams.toString());
   }
+
+  const endpoint = url.includes('GetPatientList') ? 'GetPatientList' : 'UserLoginCheck';
+  await logAsmx(endpoint, {
+    mobileNo,
+    request:  { mobile_no: mobileNo, user_type: userType, timestamp },
+    response: result.body,
+    httpStatus: result.httpStatus,
+    success:  result.body != null && !_isSignatureError(result.body),
+    errorMessage: result.body == null ? 'no response' : _isSignatureError(result.body) ? 'signature error' : null,
+  });
 
   return result;
 }
@@ -528,15 +539,27 @@ exports.verifyOtp = async (req, res) => {
       patient = patients[0];
     }
 
-    // Fetch patient list from ASMX web service (GetPatientList)
-    let phpPatients = [];
+    // UserLoginCheck — determine if customer is existing or new patient on ASMX
+    let isExistingOnAsmx = false;
     try {
-      const phpResult = await fetchFromRegistry(process.env.CLIENT_PATIENT_URL, mobile, 'patient');
-      if (phpResult.body.status === 'success') {
-        phpPatients = Array.isArray(phpResult.body.patient) ? phpResult.body.patient : [];
-      }
+      const loginCheck = await fetchFromRegistry(process.env.CLIENT_SERVER_URL, mobile, 'patient_user');
+      isExistingOnAsmx = loginCheck.body.status === 'success';
+      writeLog(`[verifyOtp] UserLoginCheck — mobile=${mobile} existing=${isExistingOnAsmx} msg=${loginCheck.body.msg ?? ''}`);
     } catch (err) {
-      console.warn('[verifyOtp] GetPatientList unreachable (non-fatal):', err.message);
+      console.warn('[verifyOtp] UserLoginCheck unreachable (non-fatal):', err.message);
+    }
+
+    // Fetch patient list from ASMX web service (GetPatientList) — only for existing patients
+    let phpPatients = [];
+    if (isExistingOnAsmx) {
+      try {
+        const phpResult = await fetchFromRegistry(process.env.CLIENT_PATIENT_URL, mobile, 'patient');
+        if (phpResult.body.status === 'success') {
+          phpPatients = Array.isArray(phpResult.body.patient) ? phpResult.body.patient : [];
+        }
+      } catch (err) {
+        console.warn('[verifyOtp] GetPatientList unreachable (non-fatal):', err.message);
+      }
     }
 
     // Sync all ASMX patients into ip_patients (upsert by patient_id_ref, runs every login)
