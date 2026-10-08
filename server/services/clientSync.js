@@ -8,6 +8,7 @@ const { messaging } = require('../config/firebase');
 const { buildSecureId } = require('../utils/secureId');
 const { getSecret, refreshSecret } = require('./secretCache');
 const dbLogger = require('../utils/dbLogger');
+const { logAsmx } = require('./asmxLogger');
 
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'client_sync.log');
 
@@ -347,7 +348,7 @@ async function syncBookingToClient(bookingId, initiator) {
     // 1. Booking + slot time
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date,
-              b.total_amount, b.patient_id, b.client_id, b.status, b.bill_id,
+              b.total_amount, b.patient_id, b.client_id, b.status, b.reference_no,
               b.visit_group_id,
               TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
        FROM ip_bookings b
@@ -365,7 +366,7 @@ async function syncBookingToClient(bookingId, initiator) {
     const secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp), secret);
     const action = initiator.action
       ?? (booking.status === 'cancelled' ? 'cancel'
-        : booking.bill_id               ? 'update'
+        : booking.reference_no          ? 'update'
         :                                 'new_booking');
 
     let payload;
@@ -392,7 +393,7 @@ async function syncBookingToClient(bookingId, initiator) {
         secure_id,
         action,
         booking_ref:      booking.booking_ref,
-        existing_bill_id: booking.bill_id ?? null,
+        existing_bill_id: booking.reference_no ?? null,
         technician_details: {
           technician_id: initiator.technicianId ?? null,
           name:          technicianName,
@@ -411,7 +412,7 @@ async function syncBookingToClient(bookingId, initiator) {
         secure_id,
         action,
         booking_ref:      booking.booking_ref,
-        existing_bill_id: booking.bill_id ?? null,
+        existing_bill_id: booking.reference_no ?? null,
         added_test: {
           id:                at.id ?? null,
           name:              at.name ?? null,
@@ -433,7 +434,7 @@ async function syncBookingToClient(bookingId, initiator) {
         secure_id,
         action,
         booking_ref:      booking.booking_ref,
-        existing_bill_id: booking.bill_id ?? null,
+        existing_bill_id: booking.reference_no ?? null,
         removed_test: {
           id:    rt.id ?? null,
           name:  rt.name ?? null,
@@ -497,7 +498,7 @@ async function syncBookingToClient(bookingId, initiator) {
           secure_id,
           booking_ref:      booking.booking_ref,
           booking_status:   booking.status,
-          existing_bill_id: booking.bill_id ?? null,
+          existing_bill_id: booking.reference_no ?? null,
           action,
           booking_type: booking.booking_type,
           slot_details: {
@@ -507,7 +508,8 @@ async function syncBookingToClient(bookingId, initiator) {
           blood_test_list: bloodTestList,
           payment_details: paymentDetails,
         };
-        if (isNewPatient) {
+        // Cancel/reschedule/payment_update always send patient_id — patient already exists on ASMX side
+        if (isNewPatient && !['cancel', 'reschedule', 'payment_update'].includes(action)) {
           payload.patient_details = patientDetails;
         } else {
           payload.patient_id = patient.patient_id_ref;
@@ -518,23 +520,47 @@ async function syncBookingToClient(bookingId, initiator) {
 
     
     // 6. POST to client server
-    // new_booking with a new patient goes directly to the Neuralarc ASMX.
-    // All other actions continue to micro_booking.php.
-    const asmxUrl   = process.env.NEURALARC_BOOKING_URL;
-    const useAsmx   = action === 'new_booking' && payload.patient_details != null && asmxUrl;
-    const timeoutMs = parseInt(settings.get('client_sync_timeout_ms', '10000'), 10);
-    writeLog(`[clientSync] route=${useAsmx ? 'ASMX' : 'php'} action=${action}`);
-    if (useAsmx) writeLog(`[clientSync] ASMX payload — ${JSON.stringify(payload)}`);
+    const asmxUrl           = process.env.NEURALARC_BOOKING_URL;
+    const existingAsmxUrl   = process.env.NEURALARC_EXISTING_BOOKING_URL;
+    const cancelAsmxUrl     = process.env.NEURALARC_CANCEL_URL;
+    const rescheduleAsmxUrl = process.env.NEURALARC_RESCHEDULE_URL;
+    const paymentAsmxUrl    = process.env.NEURALARC_PAYMENT_URL;
+    const useAsmx           = action === 'new_booking'    && payload.patient_details != null && !!asmxUrl;
+    const useExistingAsmx   = action === 'new_booking'    && payload.patient_details == null && payload.patient_id != null && !!existingAsmxUrl;
+    const useCancelAsmx     = action === 'cancel'         && !!cancelAsmxUrl;
+    const useRescheduleAsmx = action === 'reschedule'     && !!rescheduleAsmxUrl;
+    const usePaymentAsmx    = action === 'payment_update' && !!paymentAsmxUrl;
+
+    // Skip these actions if booking was never synced to ASMX (no bill_id).
+    if (['cancel', 'reschedule', 'payment_update'].includes(action) && !booking.reference_no) {
+      writeLog(`[clientSync] ${action} skipped — no reference_no, booking was never synced to ASMX`);
+      return;
+    }
+
+    const timeoutMs    = parseInt(settings.get('client_sync_timeout_ms', '10000'), 10);
+    const routeLabel   = useAsmx ? 'ASMX:new_booking' : useExistingAsmx ? 'ASMX:existing_booking' : useCancelAsmx ? 'ASMX:cancel' : useRescheduleAsmx ? 'ASMX:reschedule' : usePaymentAsmx ? 'ASMX:payment_update' : 'php';
+    const asmxEndpoint = useAsmx ? 'NewPatientNewBooking' : useExistingAsmx ? 'ExistingPatientNewBooking' : useCancelAsmx ? 'BookingCancellation' : useRescheduleAsmx ? 'ReScheduleAppointment' : usePaymentAsmx ? 'PaymentUpdate' : null;
+    writeLog(`[clientSync] route=${routeLabel} action=${action}`);
+    if (useAsmx || useExistingAsmx || useCancelAsmx || useRescheduleAsmx || usePaymentAsmx) writeLog(`[clientSync] ASMX payload — ${JSON.stringify(payload)}`);
     let httpStatus, result;
     try {
       ({ httpStatus, body: result } = useAsmx
         ? await postAsmx(asmxUrl, payload, timeoutMs)
-        : await postJson(clientUrl, payload, timeoutMs));
+        : useExistingAsmx
+          ? await postAsmx(existingAsmxUrl, payload, timeoutMs)
+          : useCancelAsmx
+            ? await postAsmx(cancelAsmxUrl, payload, timeoutMs)
+            : useRescheduleAsmx
+              ? await postAsmx(rescheduleAsmxUrl, payload, timeoutMs)
+              : usePaymentAsmx
+                ? await postAsmx(paymentAsmxUrl, payload, timeoutMs)
+                : await postJson(clientUrl, payload, timeoutMs));
     } catch (postErr) {
       // Log the request block even when no response came back (timeout,
       // network error, non-JSON body) — httpStatus/result stay null, the
       // block renders "(no response — see error above)" for RESPONSE.
       _logRequestResponseBlock({ payload, tests, httpStatus: null, result: null });
+      if (asmxEndpoint) await logAsmx(asmxEndpoint, { bookingRef: booking.booking_ref, bookingId, mobileNo: initiator.mobile, request: payload, response: null, httpStatus: null, success: false, errorMessage: postErr.message });
       throw postErr; // preserves the existing outer catch's error logging
     }
 
@@ -550,22 +576,33 @@ async function syncBookingToClient(bookingId, initiator) {
       try {
         ({ httpStatus, body: result } = useAsmx
           ? await postAsmx(asmxUrl, payload, timeoutMs)
-          : await postJson(clientUrl, payload, timeoutMs));
+          : useExistingAsmx
+            ? await postAsmx(existingAsmxUrl, payload, timeoutMs)
+            : useCancelAsmx
+              ? await postAsmx(cancelAsmxUrl, payload, timeoutMs)
+              : useRescheduleAsmx
+                ? await postAsmx(rescheduleAsmxUrl, payload, timeoutMs)
+                : usePaymentAsmx
+                  ? await postAsmx(paymentAsmxUrl, payload, timeoutMs)
+                  : await postJson(clientUrl, payload, timeoutMs));
         _logRequestResponseBlock({ payload, tests, httpStatus, result });
         writeLog(`[clientSync] retry response — ${JSON.stringify(result)}`);
       } catch (retryErr) {
         writeLog(`[clientSync] ❌ retry ERROR — ${retryErr.message}`);
+        if (asmxEndpoint) await logAsmx(asmxEndpoint, { bookingRef: booking.booking_ref, bookingId, mobileNo: initiator.mobile, request: payload, response: null, httpStatus: null, success: false, errorMessage: retryErr.message });
         return;
       }
     }
 
+    if (asmxEndpoint) await logAsmx(asmxEndpoint, { bookingRef: booking.booking_ref, bookingId, mobileNo: initiator.mobile, request: payload, response: result, httpStatus, success: result?.status === 'success', errorMessage: result?.status === 'success' ? null : (result?.msg ?? null) });
+
     if (result.status === 'success') {
       if (result.bill_id && booking.status !== 'cancelled') {
         await db.execute(
-          `UPDATE ip_bookings SET bill_id = ?, client_sync_status = 'synced' WHERE booking_id = ?`,
+          `UPDATE ip_bookings SET reference_no = ?, client_sync_status = 'synced' WHERE booking_id = ?`,
           [String(result.bill_id), bookingId]
         );
-        writeLog(`[clientSync] ✅ bill_id=${result.bill_id} saved — booking_id=${bookingId}`);
+        writeLog(`[clientSync] ✅ reference_no=${result.bill_id} saved — booking_id=${bookingId}`);
       } else {
         await db.execute(
           `UPDATE ip_bookings SET client_sync_status = 'synced' WHERE booking_id = ?`,
@@ -648,7 +685,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
 
   try {
     const [[primaryBooking]] = await db.execute(
-      `SELECT booking_id, booking_ref, patient_id, status, bill_id, visit_group_id
+      `SELECT booking_id, booking_ref, patient_id, status, reference_no, visit_group_id
        FROM ip_bookings WHERE booking_id = ?`,
       [primaryBookingId]
     );
@@ -665,7 +702,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     if (primaryBooking.visit_group_id) {
       [bookingRows] = await db.execute(
         `SELECT booking_id, booking_ref, booking_type, booking_date, total_amount,
-                patient_id, client_id, status, bill_id, visit_group_id,
+                patient_id, client_id, status, reference_no, visit_group_id,
                 TIME_FORMAT(
                   (SELECT av.slot_time FROM ip_available_slots av
                    WHERE av.available_slot_id = b.available_slot_id), '%H:%i'
@@ -678,7 +715,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     } else {
       const [[b]] = await db.execute(
         `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date, b.total_amount,
-                b.patient_id, b.client_id, b.status, b.bill_id, b.visit_group_id,
+                b.patient_id, b.client_id, b.status, b.reference_no, b.visit_group_id,
                 TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
          FROM ip_bookings b
          LEFT JOIN ip_available_slots av ON av.available_slot_id = b.available_slot_id
@@ -719,7 +756,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       }
       const entry = {
         booking_ref:      b.booking_ref,
-        existing_bill_id: b.bill_id ?? null,
+        existing_bill_id: b.reference_no ?? null,
         blood_test_list:  data.bloodTestList,
         payment_details:  data.paymentDetails,
         proof_photo:      data.proofPhoto ?? 'no',
@@ -828,10 +865,10 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       // that shape is confirmed.
       if (result.bill_id) {
         await db.execute(
-          `UPDATE ip_bookings SET bill_id = ? WHERE booking_id = ?`,
+          `UPDATE ip_bookings SET reference_no = ? WHERE booking_id = ?`,
           [String(result.bill_id), primaryBookingId]
         );
-        writeLog(`[clientSync] ✅ bill_id=${result.bill_id} saved to primary booking_id=${primaryBookingId} (not applied to siblings — see code comment)`);
+        writeLog(`[clientSync] ✅ reference_no=${result.bill_id} saved to primary booking_id=${primaryBookingId} (not applied to siblings — see code comment)`);
       }
       if (result.patient_id) {
         const primaryEntry = bookings.find(bk => bk.booking_ref === primaryBooking.booking_ref);
