@@ -34,6 +34,10 @@ router.get('/:bookingId/results/:resultId/proxy', auth, bookingController.proxyR
 // POST /api/bookings/:bookingId/results/:resultId/released — admin notifies result released (fires FCM push)
 router.post('/:bookingId/results/:resultId/released', adminSecret, bookingController.releaseResult);
 
+// POST /api/bookings/report-status — ASMX client posts when a report is ready
+// Must be above /:bookingId routes so "report-status" is not parsed as a bookingId
+router.post('/report-status', adminSecret, bookingController.reportStatusWebhook);
+
 // GET  /api/bookings/:bookingId/items   — list booking test items
 router.get('/:bookingId/items',                    auth, bookingController.getItems);
 // GET  /api/bookings/:bookingId/linked-patients — additional patients added by technician

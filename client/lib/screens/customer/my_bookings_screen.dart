@@ -2074,10 +2074,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                     rows: [
                       _DetailRow(Icons.receipt_outlined, 'Tests Total', '₹${b.testsTotal.toInt()}'),
                       if (b.serviceCharge > 0)
-                        _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${b.serviceCharge.toInt()}')
-                      else if (b.mode == 'Home Collection')
-                        _DetailRow(Icons.add_circle_outline, 'Service Charge', 'At collection',
-                            valueColor: AppColors.textSecondary),
+                        _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${b.serviceCharge.toInt()}'),
                       _DetailRow(Icons.calculate_outlined, 'Grand Total', '₹${b.grandTotal.toInt()}', valueBold: true),
                       _DetailRow(Icons.check_circle_outline, 'Paid',
                           '₹${b.paidAmount.toInt()}', valueColor: AppColors.brandGreen),
