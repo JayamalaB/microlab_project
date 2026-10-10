@@ -8,3 +8,6 @@ process.env.CLIENT_SERVER_SECRET = 'test-client-server-secret';
 process.env.CLIENT_BOOKING_URL   = 'http://localhost:0/mock-jayamala'; // never actually called — postJson is mocked per-test
 process.env.OTP_MAX_ATTEMPTS     = '3';
 process.env.OTP_EXPIRY_MINUTES   = '10';
+// Dummy 32-byte key, base64-encoded (utils/encryption.js's required format)
+// — generated once for tests only, not a real production master key.
+process.env.DYNAMIC_KEY_MASTER_KEY = 'W1qZYoDAgqSVuUwjXSlZ9uWUbtfzx3vxZedhhMjsYXk=';

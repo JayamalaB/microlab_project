@@ -41,6 +41,11 @@ app.use(cors());
 // can receive the raw Buffer needed for HMAC-SHA256 signature verification.
 app.use('/api/razorpay/webhook', require('./routes/razorpayWebhook'));
 
+// Dynamic Key Admin API — also registered BEFORE express.json(): its HMAC
+// signature covers the raw request bytes, so the router must read the
+// body itself (see routes/dynamicKeyAdmin.js).
+app.use('/api/admin/dynamic-keys', require('./routes/dynamicKeyAdmin'));
+
 app.use(express.json());
 
 // Serve banner images at /banners/<filename>
