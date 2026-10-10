@@ -64,6 +64,10 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
+    if (_gender == null || _dob == null) {
+      setState(() {});
+      return;
+    }
     setState(() => _saving = true);
 
     final body = {
@@ -73,10 +77,9 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
       'location':      _cityCtrl.text.trim(),
       'address':       _addrCtrl.text.trim(),
       'relation':      'Self',
-      if (_dob != null)
-        'date_of_birth': '${_dob!.year}-'
-            '${_dob!.month.toString().padLeft(2, '0')}-'
-            '${_dob!.day.toString().padLeft(2, '0')}',
+      'date_of_birth': '${_dob!.year}-'
+          '${_dob!.month.toString().padLeft(2, '0')}-'
+          '${_dob!.day.toString().padLeft(2, '0')}',
     };
 
     final result = await ApiService.updatePatient(
@@ -189,7 +192,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       const SizedBox(height: 18),
 
                       // Full name
-                      _Label('Full Name *'),
+                      _Label('Full Name', required: true),
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _namCtrl,
@@ -209,7 +212,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       const SizedBox(height: 18),
 
                       // Gender
-                      _Label('Gender *'),
+                      _Label('Gender', required: true),
                       const SizedBox(height: 8),
                       Row(
                         children: ['Male', 'Female', 'Other'].map((g) {
@@ -259,8 +262,14 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
 
                       const SizedBox(height: 18),
 
-                      // Date of birth
-                      _Label('Date of Birth'),
+                      // Date of birth (mandatory)
+                      RichText(text: const TextSpan(
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
+                        children: [
+                          TextSpan(text: 'Date of Birth'),
+                          TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+                        ],
+                      )),
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _dobCtrl,
@@ -269,16 +278,24 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                         style: const TextStyle(
                             fontSize: 14, color: AppColors.textPrimary),
                         decoration: _inputDec(
-                          hint: 'DD/MM/YYYY  (optional)',
+                          hint: 'DD/MM/YYYY',
                           prefix: const Icon(Icons.cake_outlined,
                               size: 18, color: AppColors.textHint),
                         ),
                       ),
+                      if (_saving && _dob == null)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 6, left: 4),
+                          child: Text('Date of birth is required',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFFD32F2F))),
+                        ),
 
                       const SizedBox(height: 18),
 
                       // City
-                      _Label('City *'),
+                      _Label('City', required: true),
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _cityCtrl,
@@ -298,7 +315,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       const SizedBox(height: 18),
 
                       // Address
-                      _Label('Address *'),
+                      _Label('Address', required: true),
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _addrCtrl,
@@ -329,7 +346,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                           onPressed: _saving
                               ? null
                               : () {
-                                  if (_gender == null) {
+                                  if (_gender == null || _dob == null) {
                                     setState(() {});
                                     return;
                                   }
@@ -372,16 +389,31 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
 
 class _Label extends StatelessWidget {
   final String text;
-  const _Label(this.text);
+  final bool required;
+  const _Label(this.text, {this.required = false});
 
   @override
-  Widget build(BuildContext context) => Text(
-        text,
+  Widget build(BuildContext context) {
+    if (!required) {
+      return Text(text,
+          style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: AppColors.textPrimary));
+    }
+    return RichText(
+      text: TextSpan(
         style: const TextStyle(
             fontSize: 13,
             fontWeight: FontWeight.w600,
             color: AppColors.textPrimary),
-      );
+        children: [
+          TextSpan(text: text),
+          const TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+        ],
+      ),
+    );
+  }
 }
 
 InputDecoration _inputDec({

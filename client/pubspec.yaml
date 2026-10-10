@@ -59,6 +59,10 @@ flutter:
     - assets/sounds/beeb_sound.mp3
     - assets/icon/app_icon.png
     - assets/icon/MicroLab-Logo.jpeg
+    - assets/icon/microbes-logo.png
+    - assets/icon/49-years-badge.png
+    - assets/icon/header-oneline-noline.png
+    - assets/icon/microbiological-lab-header.png
 
 flutter_launcher_icons:
   android: true

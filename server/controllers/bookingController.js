@@ -4,8 +4,9 @@ const { calculateHomeCollectionFare, FareCalculationError } = require('../servic
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { messaging } = require('../config/firebase');
-const fs   = require('fs');
-const path = require('path');
+const fs    = require('fs');
+const path  = require('path');
+const https = require('https');
 
 // ── Reports-screen debug log ──────────────────────────────────────────────────
 const REPORTS_LOG = path.join(__dirname, '..', 'logs', 'reports_debug.log');
@@ -32,6 +33,35 @@ function logNotify(msg) {
   fs.appendFileSync(NOTIFY_LOG, line, 'utf8');
 }
 const { triggerScheduledDispatch, freeTechnician, unassignAndRedispatch } = require('../socket/bookingSocket');
+
+// ── Razorpay capture (web checkout.js leaves payments as "Authorized") ─────────
+// Fire-and-forget: never blocks the booking flow. Mobile SDK auto-captures,
+// but checkout.js on web requires an explicit server-side capture call.
+function captureRazorpayPayment(paymentId, amountInRupees) {
+  if (!paymentId || paymentId.startsWith('wallet:') || paymentId === 'pay_later') return;
+  const keyId     = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) return;
+
+  const body = JSON.stringify({ amount: Math.round(amountInRupees * 100), currency: 'INR' });
+  const auth = 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+  const req  = https.request({
+    hostname: 'api.razorpay.com',
+    path:     `/v1/payments/${encodeURIComponent(paymentId)}/capture`,
+    method:   'POST',
+    headers:  { 'Authorization': auth, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+  }, (upstream) => {
+    let data = '';
+    upstream.on('data', c => data += c);
+    upstream.on('end', () => {
+      if (upstream.statusCode === 200) console.log(`💳 Razorpay captured: ${paymentId}`);
+      else console.warn(`⚠️  Razorpay capture ${paymentId} → ${upstream.statusCode}: ${data}`);
+    });
+  });
+  req.on('error', err => console.warn(`⚠️  Razorpay capture error: ${err.message}`));
+  req.write(body);
+  req.end();
+}
 
 let _io = null;
 exports.setIo = (io) => { _io = io; };
@@ -309,6 +339,8 @@ exports.createBooking = async (req, res) => {
     await conn.commit();
     console.log(`🎉 Booking created — booking_id=${bookingId} ref=${bookingRef}`);
     console.log('─────────────────────────────────────────────────\n');
+
+    if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, totalAmount);
 
     // Sync all bookings to client server regardless of payment status (fire-and-forget)
     syncBookingToClient(bookingId, {
@@ -591,7 +623,7 @@ exports.cancelBooking = async (req, res) => {
     // Verify booking ownership
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.booking_ref, b.status, b.booking_type, b.total_amount, b.available_slot_id, b.booking_date,
-              b.visit_group_id,
+              b.patient_id, b.visit_group_id,
               COALESCE(pt.amount_paid, 0) AS amount_paid,
               COALESCE((SELECT SUM(bi.final_price) FROM ip_booking_items bi WHERE bi.booking_id = b.booking_id), 0) AS items_total
        FROM ip_bookings b
@@ -774,16 +806,16 @@ exports.cancelBooking = async (req, res) => {
                   gross_amount, net_amount, amount_paid, amount_due,
                   currency, payment_status, transaction_status, is_refund,
                   gateway_transaction_id, gateway_status, paid_at)
-               VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'refunded', NOW())`,
+               VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'pending', 1, ?, 'refunded', NULL)`,
               [refundTxnRef, bookingId, booking.patient_id ?? null,
                refundAmount, refundAmount, refundAmount,
                rzpBody.id]
             );
             await db.execute(
-              `UPDATE ip_bookings SET refund_status = 'processed' WHERE booking_id = ?`,
+              `UPDATE ip_bookings SET refund_status = 'initiated' WHERE booking_id = ?`,
               [bookingId]
             );
-            finalRefundStatus = 'processed';
+            finalRefundStatus = 'initiated';
             logRefund(`✅ SUCCESS — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} refund_id=${rzpBody.id} amount=₹${refundAmount}`);
           } else {
             logRefund(`❌ FAILED — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} amount=₹${refundAmount} response=${JSON.stringify(rzpBody)}`);
@@ -817,12 +849,12 @@ exports.cancelBooking = async (req, res) => {
                 gross_amount, net_amount, amount_paid, amount_due,
                 currency, payment_status, transaction_status, is_refund,
                 gateway_transaction_id, gateway_status, paid_at)
-             VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'refunded', NOW())`,
+             VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'pending', 1, ?, 'refunded', NULL)`,
             [scRefundRef, inheritedChargeOriginalPayer.booking_id, inheritedChargeOriginalPayer.patient_id ?? null,
              bookingServiceCharge, bookingServiceCharge, bookingServiceCharge, rzpBody.id]
           );
           await db.execute(
-            `UPDATE ip_bookings SET refund_amount = refund_amount + ?, refund_status = 'processed' WHERE booking_id = ?`,
+            `UPDATE ip_bookings SET refund_amount = refund_amount + ?, refund_status = 'initiated' WHERE booking_id = ?`,
             [bookingServiceCharge, inheritedChargeOriginalPayer.booking_id]
           );
           logRefund(`✅ SC-REFUND SUCCESS — original_booking_id=${inheritedChargeOriginalPayer.booking_id} refund_id=${rzpBody.id} amount=₹${bookingServiceCharge}`);
@@ -949,6 +981,8 @@ exports.payBooking = async (req, res) => {
     
     await conn.commit();
     console.log(`✅ payBooking → booking_id=${bookingId} paid ₹${amount}`);
+
+    captureRazorpayPayment(razorpayPaymentId, amount);
 
     // Sync to client server now that payment is confirmed (fire-and-forget)
     syncBookingToClient(Number(bookingId), {
@@ -1359,7 +1393,7 @@ exports.removeItem = async (req, res) => {
               gross_amount, net_amount, amount_paid, amount_due,
               currency, payment_status, transaction_status, is_refund,
               gateway_transaction_id, gateway_status, paid_at)
-           VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'pending', NOW())`,
+           VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'pending', NULL)`,
           [`RFN${Date.now()}`, bookingId, fresh.patient_id,
            refundAmt, refundAmt, refundAmt, refundRef]
         );
@@ -1929,7 +1963,7 @@ exports.selfEditItems = async (req, res) => {
             gross_amount, net_amount, amount_paid, amount_due,
             currency, payment_status, transaction_status, is_refund,
             gateway_transaction_id, gateway_status, paid_at)
-         VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, ?, NOW())`,
+         VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, ?, NULL)`,
         [`RFN${Date.now()}`, bookingId, booking.patient_id,
          refundAmount, refundAmount, refundAmount,
          refundRef, rzpRefundId ? 'refunded' : 'pending']
@@ -2191,6 +2225,8 @@ exports.createFamilyBooking = async (req, res) => {
     await conn.commit();
     console.log(`🎉 Family booking done — visitGroupId=${visitGroupId} members=${createdBookings.length}`);
     console.log('─────────────────────────────────────────────────\n');
+
+    if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, totalAmount);
 
     if (isPaid) {
       for (const { bookingId } of createdBookings) {
