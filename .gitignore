@@ -23,3 +23,7 @@ client/.flutter-plugins-dependencies
 # IDE
 .idea/
 *.iml
+.vscode/
+
+# Runtime-uploaded files (test-booking documents, patient photos) — not source
+server/uploads/
