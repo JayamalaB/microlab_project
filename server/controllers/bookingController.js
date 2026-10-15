@@ -1,10 +1,15 @@
-﻿const db       = require('../config/db');
+﻿const crypto = require('crypto');
+const db       = require('../config/db');
 const settings = require('../config/settings');
+const { calculateHomeCollectionFare, FareCalculationError } = require('../services/fareCalculator');
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { messaging } = require('../config/firebase');
-const fs   = require('fs');
-const path = require('path');
+const { getSecret, refreshSecret } = require('../services/secretCache');
+const { logAsmx } = require('../services/asmxLogger');
+const fs    = require('fs');
+const path  = require('path');
+const https = require('https');
 
 // ── Reports-screen debug log ──────────────────────────────────────────────────
 const REPORTS_LOG = path.join(__dirname, '..', 'logs', 'reports_debug.log');
@@ -32,6 +37,35 @@ function logNotify(msg) {
 }
 const { triggerScheduledDispatch, freeTechnician, unassignAndRedispatch } = require('../socket/bookingSocket');
 
+// ── Razorpay capture (web checkout.js leaves payments as "Authorized") ─────────
+// Fire-and-forget: never blocks the booking flow. Mobile SDK auto-captures,
+// but checkout.js on web requires an explicit server-side capture call.
+function captureRazorpayPayment(paymentId, amountInRupees) {
+  if (!paymentId || paymentId.startsWith('wallet:') || paymentId === 'pay_later') return;
+  const keyId     = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) return;
+
+  const body = JSON.stringify({ amount: Math.round(amountInRupees * 100), currency: 'INR' });
+  const auth = 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+  const req  = https.request({
+    hostname: 'api.razorpay.com',
+    path:     `/v1/payments/${encodeURIComponent(paymentId)}/capture`,
+    method:   'POST',
+    headers:  { 'Authorization': auth, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+  }, (upstream) => {
+    let data = '';
+    upstream.on('data', c => data += c);
+    upstream.on('end', () => {
+      if (upstream.statusCode === 200) console.log(`💳 Razorpay captured: ${paymentId}`);
+      else console.warn(`⚠️  Razorpay capture ${paymentId} → ${upstream.statusCode}: ${data}`);
+    });
+  });
+  req.on('error', err => console.warn(`⚠️  Razorpay capture error: ${err.message}`));
+  req.write(body);
+  req.end();
+}
+
 let _io = null;
 exports.setIo = (io) => { _io = io; };
 
@@ -52,7 +86,6 @@ exports.createBooking = async (req, res) => {
     patientId,
     patientIdRef      = null,
     bookingType       = 'home_collection',
-    totalAmount       = 0,
     discountAmount    = 0,
     sourceChannel     = 'mobile_app',
     notes             = null,
@@ -69,14 +102,23 @@ exports.createBooking = async (req, res) => {
     razorpayPaymentId = null,
     razorpayOrderId   = null,
   } = req.body;
+  // let, not const — Home Collection bookings have this recomputed
+  // server-side below (see the fare-calculation block) rather than trusted
+  // as sent, once the authoritative Branch→Customer fare is known.
+  let totalAmount = Number(req.body.totalAmount) || 0;
 
   if (!patientId) {
     return res.status(400).json({ success: false, message: 'patientId is required' });
   }
 
+  // Pickup coordinates are required to price a Home Collection booking
+  // (Branch → Customer distance) — checked before any DB work starts, same
+  // as the patientId check above.
+  if (bookingType === 'home_collection' && (collectionLatitude == null || collectionLongitude == null)) {
+    return res.status(422).json({ success: false, message: 'Pickup location is required for Home Collection bookings' });
+  }
+
   const isPaid     = paymentType === 'full' && razorpayPaymentId;
-  const amountPaid = isPaid ? totalAmount : 0;
-  const amountDue  = isPaid ? 0 : totalAmount;
   const txPaymentType = isPaid ? 'RAZORPAY' : 'PAY_LATER';
 
   // Future-date bookings are held until the cron scheduler fires dispatch
@@ -88,6 +130,48 @@ exports.createBooking = async (req, res) => {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
+
+    // Home Collection fare — Branch → Customer distance, computed
+    // authoritatively here, never trusted from the client (see
+    // fareCalculator.js). itemsTotal is this request's own items[].finalPrice
+    // sum — already trusted the same way a few lines below when each item is
+    // inserted — so only the fare portion of totalAmount changes from
+    // client-supplied to server-computed, not item pricing.
+    //
+    // Pay-later bookings (nothing charged yet): totalAmount is fully
+    // recomputed here (itemsTotal + authoritative fare) — this is the actual
+    // fix for "the server currently trusts whatever totalAmount the client
+    // sends with zero validation."
+    //
+    // Pay-now bookings: Razorpay already captured a specific amount (based on
+    // a fare quote fetched moments earlier via this same
+    // calculateHomeCollectionFare logic) *before* this request is even sent —
+    // there is no undoing that capture from here. totalAmount is trusted as
+    // the amount actually paid; the authoritative fare is still computed and
+    // stored (home_collection_fare) for audit, and a disagreement beyond a
+    // cent of rounding (e.g. the active rate changed in the few minutes
+    // between quote and confirm) is logged as a warning rather than silently
+    // accepted or silently overridden — a completed payment can't be un-charged.
+    let homeCollectionFare = null;
+    if (bookingType === 'home_collection') {
+      homeCollectionFare = await calculateHomeCollectionFare({
+        branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude, dbConn: conn,
+      });
+
+      const itemsTotal = items.reduce((sum, item) => sum + (Number(item.finalPrice) || 0), 0);
+      if (isPaid) {
+        const expected = Number((itemsTotal + homeCollectionFare.finalFare).toFixed(2));
+        if (Math.abs(expected - totalAmount) > 0.01) {
+          console.warn(`⚠️  [CREATE BOOKING] paid totalAmount=₹${totalAmount} disagrees with itemsTotal+fare=₹${expected} (rateId=${homeCollectionFare.rateId}) — trusting the already-captured payment amount`);
+        }
+      } else {
+        totalAmount = Number((itemsTotal + homeCollectionFare.finalFare).toFixed(2));
+      }
+      console.log(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} finalFare=₹${homeCollectionFare.finalFare} rateId=${homeCollectionFare.rateId} → totalAmount=₹${totalAmount}`);
+    }
+
+    const amountPaid = isPaid ? totalAmount : 0;
+    const amountDue  = isPaid ? 0 : totalAmount;
 
     // Resolve patient_id_ref from ip_patients
     let resolvedPatientIdRef = patientIdRef ?? null;
@@ -114,8 +198,12 @@ exports.createBooking = async (req, res) => {
       console.log(`🗓  available_slot_id=${availableSlotId} → lab_slot_id=${labSlotId} tech_slot_id=${techSlotId}`);
     }
 
-    // 1. Master booking record (product_id updated after items loop)
-    const bookingRef = `BK${Date.now()}`;
+    // 1. Master booking record (product_id updated after items loop). The
+    // reference is derived from the row's own auto-increment id (assigned
+    // atomically by the database — two concurrent inserts can never receive
+    // the same one) instead of Date.now(), which two requests landing in
+    // the same millisecond could collide on. See the load-testing report's
+    // LT-002 finding for the real, reproduced defect this replaces.
     const [bResult] = await conn.execute(
       `INSERT INTO ip_bookings
          (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
@@ -123,20 +211,32 @@ exports.createBooking = async (req, res) => {
           amount_paid, amount_due,
           source_channel, notes, collection_address, postal_code, city,
           collection_latitude, collection_longitude,
+          home_collection_fare, home_collection_distance_km, km_rate_id,
           patient_id, patient_id_ref, product_id,
           payment_status, start_datetime, end_datetime, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
-      [bookingRef, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
+      [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
        bookingType, bookingStatus, totalAmount, discountAmount ?? 0, amountPaid, amountDue,
        sourceChannel, notes ?? null,
        collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
        collectionLatitude ?? null, collectionLongitude ?? null,
+       homeCollectionFare?.finalFare ?? null, homeCollectionFare?.distanceKm ?? null, homeCollectionFare?.rateId ?? null,
        patientId, resolvedPatientIdRef,
        isPaid ? 'paid' : 'unpaid',
        userId ?? null]
     );
-    const bookingId = bResult.insertId;
-    console.log(`✅ ip_bookings inserted → booking_id=${bookingId}`);
+    const bookingId  = bResult.insertId;
+    // booking_ref = booking_id + a fixed offset (ip_settings key
+    // 'booking_ref_offset', set once by change_booking_ref_to_sequential.sql
+    // so the earliest existing booking landed on exactly 100000001) — a
+    // plain sequential number, not the old BK-XXXXXX format. Still derived
+    // from booking_id's own AUTO_INCREMENT, so it keeps the exact same
+    // atomicity/uniqueness guarantee that format already relied on (see the
+    // LT-002 comment history on why deriving from a real DB auto-increment,
+    // rather than e.g. Date.now(), matters here).
+    const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
+    await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
+    console.log(`✅ ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef}`);
 
     // 2. Patient → booking link
     await conn.execute(
@@ -243,6 +343,8 @@ exports.createBooking = async (req, res) => {
     console.log(`🎉 Booking created — booking_id=${bookingId} ref=${bookingRef}`);
     console.log('─────────────────────────────────────────────────\n');
 
+    if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, totalAmount);
+
     // Sync all bookings to client server regardless of payment status (fire-and-forget)
     syncBookingToClient(bookingId, {
       mobile: req.user.mobile,
@@ -263,16 +365,53 @@ exports.createBooking = async (req, res) => {
     });
   } catch (err) {
     await conn.rollback();
-    console.error('❌ createBooking FAILED:', err.message);
-    res.status(500).json({
-      success: false,
-      message: 'Server error',
-      detail:   err.message,
-      sqlState: err.sqlState,
-      code:     err.code,
-    });
+    if (err instanceof FareCalculationError) {
+      // RATE_NOT_FOUND / RATE_CONFIG_INCOMPLETE mean the fare *system* isn't
+      // ready (503, an ops problem) — everything else (missing coordinates,
+      // missing branch location, outside service area) is this specific
+      // request being unable to be priced (422).
+      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
+      console.error(`❌ [CREATE BOOKING] fare calculation failed — code=${err.code} ${err.message}`);
+      res.status(status).json({ success: false, code: err.code, message: err.message });
+    } else {
+      console.error('❌ createBooking FAILED:', err.message);
+      res.status(500).json({
+        success: false,
+        message: 'Server error',
+        detail:   err.message,
+        sqlState: err.sqlState,
+        code:     err.code,
+      });
+    }
   } finally {
     conn.release();
+  }
+};
+
+// ── GET /api/bookings/fare-quote ────────────────────────────────────────────────
+// Pre-confirm Home Collection fare display — checkout_screen.dart calls this
+// once branchId + pickup coordinates are known (same inputs createBooking
+// itself independently recomputes at confirmation time — see that function's
+// own fare-calculation block for why it isn't simply trusted from here).
+exports.getHomeCollectionFareQuote = async (req, res) => {
+  const branchId  = req.query.branchId ? Number(req.query.branchId) : null;
+  const pickupLat = req.query.lat != null ? Number(req.query.lat) : null;
+  const pickupLng = req.query.lng != null ? Number(req.query.lng) : null;
+
+  if (!branchId) {
+    return res.status(422).json({ success: false, message: 'branchId is required' });
+  }
+
+  try {
+    const fare = await calculateHomeCollectionFare({ branchId, pickupLat, pickupLng });
+    res.json({ success: true, fare });
+  } catch (err) {
+    if (err instanceof FareCalculationError) {
+      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
+      return res.status(status).json({ success: false, code: err.code, message: err.message });
+    }
+    console.error('❌ [FARE QUOTE] failed:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
@@ -354,8 +493,44 @@ exports.getMyBookings = async (req, res) => {
          (SELECT COUNT(*)
           FROM ip_test_results tr
           WHERE tr.booking_id = b.booking_id
-            AND tr.result_status = 'released') AS released_results_count
-       FROM ip_bookings b
+            AND tr.result_status = 'released') AS released_results_count,
+         (SELECT COUNT(*)
+          FROM ip_booking_test_status bts
+          WHERE bts.booking_id = b.booking_id
+            AND bts.report_status = 'report_ready') AS asmx_report_count
+       FROM (
+         -- Candidate booking_ids this account is allowed to see, computed
+         -- FIRST and cheaply — client_id=? and patient_id=? are each a
+         -- single indexable condition on their own table (idx_bookings_client,
+         -- idx_pb_patient), UNIONed (deduping any booking that matches both,
+         -- e.g. the account holder viewing their own "self" patient record)
+         -- into a small candidate set before any of the heavy joins below
+         -- ever run. Same two ownership rules as before (own account's
+         -- bookings, or any booking this specific patient is linked to via
+         -- ip_patient_bookings — the family/sibling-booking case), just
+         -- computed separately instead of as one OR across two tables.
+         --
+         -- Why this replaces the old 'client_id = ? OR booking_id IN
+         -- (subquery on a different table)' form: that shape is a real,
+         -- confirmed MariaDB planner limitation — real EXPLAIN showed it
+         -- scanning every row of ip_bookings (type: index, rows: 5574,
+         -- Using temporary; Using filesort) even with idx_bookings_client
+         -- listed as a possible key, because the optimizer can't combine an
+         -- OR across two different tables into a single indexed access path.
+         -- This form lets each branch use its own index directly, and the
+         -- outer join below only ever touches this account's own candidate
+         -- rows via ip_bookings' PRIMARY KEY — cost scales with how many
+         -- bookings THIS account has, never with the whole table. Verified
+         -- byte-for-byte equivalent output (same rows, same field values,
+         -- no duplicates) against the original query across a heavy
+         -- customer (94 bookings), a sparse one (1 booking), a family-
+         -- booking customer, and a nonexistent/empty one before this change
+         -- was made.
+         SELECT bb.booking_id FROM ip_bookings bb WHERE bb.client_id = ?
+         UNION
+         SELECT pb.booking_id FROM ip_patient_bookings pb WHERE pb.patient_id = ?
+       ) AS my_booking_ids
+       INNER JOIN ip_bookings b ON b.booking_id = my_booking_ids.booking_id
        LEFT JOIN ip_patients pat       ON pat.patient_id  = b.patient_id
        LEFT JOIN ip_branches br        ON br.branch_id    = b.branch_id
        LEFT JOIN ip_available_slots av   ON av.available_slot_id = b.available_slot_id
@@ -371,13 +546,7 @@ exports.getMyBookings = async (req, res) => {
        LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id
        LEFT JOIN ip_users u          ON u.user_id = tech.user_id
        LEFT JOIN ip_feedback f        ON f.booking_id = b.booking_id
-       WHERE (
-         b.client_id = ?
-         OR b.booking_id IN (
-           SELECT pb.booking_id FROM ip_patient_bookings pb WHERE pb.patient_id = ?
-         )
-       )
-         AND b.deleted_at IS NULL
+       WHERE b.deleted_at IS NULL
        GROUP BY b.booking_id
        ORDER BY b.created_at DESC
        LIMIT 50`,
@@ -452,7 +621,7 @@ exports.cancelBooking = async (req, res) => {
   const { reason } = req.body;
 
   try {
-    const allowedBookingStatuses    = settings.getList('cancel_allowed_booking_statuses',    ['pending', 'scheduled', 'confirmed', 'assigned']);
+    const allowedBookingStatuses    = settings.getList('cancel_allowed_booking_statuses',    ['pending', 'scheduled', 'confirmed', 'assigned', 'arrived']);
     const allowedCollectionStatuses = settings.getList('cancel_allowed_collection_statuses', ['assigned', 'en_route', 'arrived']);
     const chargeStatuses            = settings.getList('cancel_charge_trigger_statuses',     ['arrived']);
     const serviceCharge             = parseFloat(settings.get('cancel_service_charge_amount', '0')) || 0;
@@ -461,7 +630,7 @@ exports.cancelBooking = async (req, res) => {
     // Verify booking ownership
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.booking_ref, b.status, b.booking_type, b.total_amount, b.available_slot_id, b.booking_date,
-              b.visit_group_id,
+              b.patient_id, b.visit_group_id,
               COALESCE(pt.amount_paid, 0) AS amount_paid,
               COALESCE((SELECT SUM(bi.final_price) FROM ip_booking_items bi WHERE bi.booking_id = b.booking_id), 0) AS items_total
        FROM ip_bookings b
@@ -644,16 +813,16 @@ exports.cancelBooking = async (req, res) => {
                   gross_amount, net_amount, amount_paid, amount_due,
                   currency, payment_status, transaction_status, is_refund,
                   gateway_transaction_id, gateway_status, paid_at)
-               VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'refunded', NOW())`,
+               VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'pending', 1, ?, 'refunded', NULL)`,
               [refundTxnRef, bookingId, booking.patient_id ?? null,
                refundAmount, refundAmount, refundAmount,
                rzpBody.id]
             );
             await db.execute(
-              `UPDATE ip_bookings SET refund_status = 'processed' WHERE booking_id = ?`,
+              `UPDATE ip_bookings SET refund_status = 'initiated' WHERE booking_id = ?`,
               [bookingId]
             );
-            finalRefundStatus = 'processed';
+            finalRefundStatus = 'initiated';
             logRefund(`✅ SUCCESS — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} refund_id=${rzpBody.id} amount=₹${refundAmount}`);
           } else {
             logRefund(`❌ FAILED — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} amount=₹${refundAmount} response=${JSON.stringify(rzpBody)}`);
@@ -687,12 +856,12 @@ exports.cancelBooking = async (req, res) => {
                 gross_amount, net_amount, amount_paid, amount_due,
                 currency, payment_status, transaction_status, is_refund,
                 gateway_transaction_id, gateway_status, paid_at)
-             VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'refunded', NOW())`,
+             VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'pending', 1, ?, 'refunded', NULL)`,
             [scRefundRef, inheritedChargeOriginalPayer.booking_id, inheritedChargeOriginalPayer.patient_id ?? null,
              bookingServiceCharge, bookingServiceCharge, bookingServiceCharge, rzpBody.id]
           );
           await db.execute(
-            `UPDATE ip_bookings SET refund_amount = refund_amount + ?, refund_status = 'processed' WHERE booking_id = ?`,
+            `UPDATE ip_bookings SET refund_amount = refund_amount + ?, refund_status = 'initiated' WHERE booking_id = ?`,
             [bookingServiceCharge, inheritedChargeOriginalPayer.booking_id]
           );
           logRefund(`✅ SC-REFUND SUCCESS — original_booking_id=${inheritedChargeOriginalPayer.booking_id} refund_id=${rzpBody.id} amount=₹${bookingServiceCharge}`);
@@ -820,6 +989,8 @@ exports.payBooking = async (req, res) => {
     await conn.commit();
     console.log(`✅ payBooking → booking_id=${bookingId} paid ₹${amount}`);
 
+    captureRazorpayPayment(razorpayPaymentId, amount);
+
     // Sync to client server now that payment is confirmed (fire-and-forget)
     syncBookingToClient(Number(bookingId), {
       mobile: req.user.mobile,
@@ -837,6 +1008,32 @@ exports.payBooking = async (req, res) => {
   }
 };
 
+// ── Proxy report log (written alongside client_sync.log) ─────────────────────
+const REPORT_LOG = path.join(__dirname, '..', 'logs', 'client_sync.log');
+function _logReport(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
+  const line = `[${ist}] [proxyReport] ${msg}\n`;
+  process.stdout.write(line);
+  try { fs.appendFileSync(REPORT_LOG, line, 'utf8'); } catch (_) {}
+}
+
+function _isGetReportSignatureError(parsed) {
+  const msg = (parsed?.msg ?? parsed?.message ?? parsed?.error ?? '').toLowerCase();
+  return msg.includes('sign') || msg.includes('secret') ||
+         msg.includes('unauthor') || msg.includes('invalid') || msg.includes('auth');
+}
+
+async function _callGetReport(getReportUrl, billId, secret) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const secure_id = crypto.createHmac('sha256', secret).update(`${billId}|${timestamp}`).digest('hex');
+  const upstream  = await fetch(getReportUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ billId, timestamp: String(timestamp), secure_id }).toString(),
+  });
+  return { upstream, timestamp };
+}
+
 // ── GET /api/bookings/:bookingId/results/:resultId/proxy ─────────────────────
 exports.proxyReport = async (req, res) => {
   const bookingId = parseInt(req.params.bookingId, 10);
@@ -850,22 +1047,129 @@ exports.proxyReport = async (req, res) => {
     );
     if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
 
+    // Check ASMX report first (ip_booking_test_status)
+    const [[asmxRow]] = await db.execute(
+      `SELECT bill_id FROM ip_booking_test_status
+       WHERE id = ? AND booking_id = ? AND report_status = 'report_ready' LIMIT 1`,
+      [resultId, bookingId]
+    );
+    if (asmxRow?.bill_id) {
+      const getReportUrl = process.env.NEURALARC_GET_REPORT_URL;
+      if (!getReportUrl) {
+        _logReport(`bill_id=${asmxRow.bill_id} ERROR: NEURALARC_GET_REPORT_URL not set`);
+        return res.status(503).json({ success: false, message: 'GetReport URL not configured' });
+      }
+      let secret = await getSecret();
+      _logReport(`bill_id=${asmxRow.bill_id} → calling ASMX GetReport`);
+      let { upstream, timestamp } = await _callGetReport(getReportUrl, asmxRow.bill_id, secret);
+      const contentType = upstream.headers.get('content-type') ?? '';
+      _logReport(`bill_id=${asmxRow.bill_id} ASMX response: status=${upstream.status} content-type=${contentType}`);
+      if (!upstream.ok) {
+        const errText = await upstream.text();
+        _logReport(`bill_id=${asmxRow.bill_id} ASMX error body: ${errText.slice(0, 300)}`);
+        await logAsmx('GetReport', {
+          bookingId,
+          mobileNo: null,
+          request:  { billId: asmxRow.bill_id, timestamp },
+          response: { body: errText.slice(0, 300) },
+          httpStatus: upstream.status,
+          success: false,
+          errorMessage: `HTTP ${upstream.status}`,
+        });
+        return res.status(502).json({ success: false, message: `ASMX GetReport error: ${upstream.status}` });
+      }
+
+      let buffer;
+      if (contentType.includes('xml')) {
+        // ASMX wraps the response in XML: <string>{"fileName":"...","pdfData":"<base64>"}</string>
+        const xmlText = await upstream.text();
+        const match = xmlText.match(/<string[^>]*>([\s\S]*?)<\/string>/);
+        if (!match) {
+          _logReport(`bill_id=${asmxRow.bill_id} ERROR: could not parse XML wrapper. body=${xmlText.slice(0, 300)}`);
+          await logAsmx('GetReport', { bookingId, mobileNo: null, request: { billId: asmxRow.bill_id, timestamp }, response: { raw: xmlText.slice(0, 300) }, httpStatus: upstream.status, success: false, errorMessage: 'XML parse failed' });
+          return res.status(502).json({ success: false, message: 'ASMX response parse failed' });
+        }
+        let parsed;
+        try { parsed = JSON.parse(match[1]); } catch (e) {
+          _logReport(`bill_id=${asmxRow.bill_id} ERROR: JSON parse failed inside XML. content=${match[1].slice(0, 200)}`);
+          await logAsmx('GetReport', { bookingId, mobileNo: null, request: { billId: asmxRow.bill_id, timestamp }, response: { raw: match[1].slice(0, 200) }, httpStatus: upstream.status, success: false, errorMessage: 'JSON parse failed' });
+          return res.status(502).json({ success: false, message: 'ASMX JSON parse failed' });
+        }
+        if (!parsed.pdfData) {
+          if (_isGetReportSignatureError(parsed)) {
+            _logReport(`bill_id=${asmxRow.bill_id} signature error — refreshing secret and retrying`);
+            secret = await refreshSecret();
+            const retry = await _callGetReport(getReportUrl, asmxRow.bill_id, secret);
+            const retryText = await retry.upstream.text();
+            const retryMatch = retryText.match(/<string[^>]*>([\s\S]*?)<\/string>/);
+            let retryParsed = {};
+            try { retryParsed = retryMatch ? JSON.parse(retryMatch[1]) : {}; } catch (_) {}
+            if (retryParsed.pdfData) {
+              _logReport(`bill_id=${asmxRow.bill_id} ✅ retry succeeded`);
+              parsed = retryParsed;
+              timestamp = retry.timestamp;
+            } else {
+              _logReport(`bill_id=${asmxRow.bill_id} retry also failed: ${JSON.stringify(retryParsed).slice(0, 200)}`);
+              await logAsmx('GetReport', { bookingId, mobileNo: null, request: { billId: asmxRow.bill_id, timestamp: retry.timestamp }, response: retryParsed, httpStatus: retry.upstream.status, success: false, errorMessage: 'signature error after retry' });
+              return res.status(502).json({ success: false, message: 'ASMX signature error' });
+            }
+          } else {
+            _logReport(`bill_id=${asmxRow.bill_id} ERROR: no pdfData in response. keys=${Object.keys(parsed).join(',')}`);
+            await logAsmx('GetReport', { bookingId, mobileNo: null, request: { billId: asmxRow.bill_id, timestamp }, response: { keys: Object.keys(parsed) }, httpStatus: upstream.status, success: false, errorMessage: 'missing pdfData' });
+            return res.status(502).json({ success: false, message: 'ASMX response missing pdfData' });
+          }
+        }
+        buffer = Buffer.from(parsed.pdfData, 'base64');
+        _logReport(`bill_id=${asmxRow.bill_id} ✅ decoded base64 PDF bytes=${buffer.length} file=${parsed.fileName ?? ''}`);
+        await logAsmx('GetReport', {
+          bookingId,
+          mobileNo: null,
+          request:  { billId: asmxRow.bill_id, timestamp },
+          response: { fileName: parsed.fileName, pdfData: '<binary omitted>' },
+          httpStatus: upstream.status,
+          success: true,
+        });
+      } else {
+        buffer = Buffer.from(await upstream.arrayBuffer());
+        _logReport(`bill_id=${asmxRow.bill_id} ✅ binary PDF bytes=${buffer.length}`);
+        await logAsmx('GetReport', {
+          bookingId,
+          mobileNo: null,
+          request:  { billId: asmxRow.bill_id, timestamp },
+          response: { bytes: buffer.length },
+          httpStatus: upstream.status,
+          success: true,
+        });
+      }
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="report_${asmxRow.bill_id}.pdf"`);
+      return res.send(buffer);
+    }
+
+    // Fall back to legacy ip_test_results
+    _logReport(`resultId=${resultId} bookingId=${bookingId} — no ASMX row, trying legacy ip_test_results`);
     const [[result]] = await db.execute(
       `SELECT report_url FROM ip_test_results
        WHERE result_id = ? AND booking_id = ? AND result_status = 'released' LIMIT 1`,
       [resultId, bookingId]
     );
-    if (!result?.report_url) return res.status(404).json({ success: false, message: 'Report not found' });
-
+    if (!result?.report_url) {
+      _logReport(`resultId=${resultId} bookingId=${bookingId} ERROR: not found in ip_test_results`);
+      return res.status(404).json({ success: false, message: 'Report not found' });
+    }
     const upstream = await fetch(result.report_url);
+    _logReport(`resultId=${resultId} legacy fetch status=${upstream.status} url=${result.report_url}`);
     if (!upstream.ok) {
       return res.status(502).json({ success: false, message: `Upstream error: ${upstream.status}` });
     }
     const buffer = Buffer.from(await upstream.arrayBuffer());
+    _logReport(`resultId=${resultId} ✅ legacy PDF received bytes=${buffer.length}`);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="report_${resultId}.pdf"`);
     res.send(buffer);
   } catch (err) {
+    _logReport(`ERROR bookingId=${bookingId} resultId=${resultId}: ${err.message}`);
     console.error('proxyReport error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -885,18 +1189,72 @@ exports.getBookingResults = async (req, res) => {
     );
     if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
 
-    const [rows] = await db.execute(
+    const [oldRows] = await db.execute(
       `SELECT result_id, test_name, test_code, result_value, result_unit,
               reference_range, result_flag, result_remarks, report_url,
-              result_file_path, released_at
+              result_file_path, released_at, 'legacy' AS source
        FROM ip_test_results
        WHERE booking_id = ? AND result_status = 'released'
        ORDER BY result_id ASC`,
       [bookingId]
     );
-    res.json({ success: true, results: rows });
+    const [asmxRows] = await db.execute(
+      `SELECT id AS result_id,
+              CONCAT('Report (', bill_id, ')') AS test_name,
+              test_code, bill_id, updated_at AS released_at,
+              'asmx' AS source
+       FROM ip_booking_test_status
+       WHERE booking_id = ? AND report_status = 'report_ready'
+       ORDER BY id ASC`,
+      [bookingId]
+    );
+    res.json({ success: true, results: [...oldRows, ...asmxRows] });
   } catch (err) {
     console.error('❌ getBookingResults FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── POST /api/bookings/report-status (webhook — ASMX client posts when report ready) ──
+exports.reportStatusWebhook = async (req, res) => {
+  const { bill_id, report_status } = req.body ?? {};
+  if (!bill_id || !report_status) {
+    return res.status(400).json({ success: false, message: 'bill_id and report_status are required' });
+  }
+  try {
+    const [upd] = await db.execute(
+      `UPDATE ip_booking_test_status
+          SET report_status = ?, updated_at = NOW()
+        WHERE bill_id = ?`,
+      [report_status, String(bill_id)]
+    );
+    if (upd.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'bill_id not found' });
+    }
+
+    // Fire FCM push to patient if report is now ready
+    if (report_status === 'report_ready') {
+      const [[row]] = await db.execute(
+        `SELECT bts.booking_id, b.patient_id
+           FROM ip_booking_test_status bts
+           JOIN ip_bookings b ON b.booking_id = bts.booking_id
+          WHERE bts.bill_id = ? LIMIT 1`,
+        [String(bill_id)]
+      );
+      if (row) {
+        sendToBookingOwner(
+          row.booking_id,
+          'Report Ready',
+          'Your lab report is ready. Tap to view.',
+          { type: 'report_ready' }
+        ).catch(err => console.error('[reportStatusWebhook] FCM failed:', err.message));
+        _pushToPatient(row.booking_id, 'report_ready', { bookingId: row.booking_id });
+      }
+    }
+
+    res.json({ success: true, affected: upd.affectedRows });
+  } catch (err) {
+    console.error('❌ reportStatusWebhook FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
@@ -1070,15 +1428,12 @@ exports.saveCollectionProofPhoto = async (req, res) => {
       [bookingId, booking.patient_id, imageUrl, fileName, uploadedBy]
     );
 
-    // Sync to client server — this action uses its own minimal payload shape
-    // (technician_details + proof_photo), built inside syncBookingToClient.
-    syncBookingToClient(Number(bookingId), {
-      mobile:        req.user.mobile,
-      type:          'technician',
-      action:        'collection_photo_added',
-      technicianId:  req.user.id,
-      proofPhoto:    imageUrl,
-    }).catch(err => console.error(`[clientSync] saveCollectionProofPhoto sync failed booking_id=${bookingId}:`, err.message));
+    // No individual Jayamala sync here — the collection photo now reaches
+    // the client server only once, in the consolidated visit_completed
+    // request fired from verifyBookingOtp, which reads the most recent
+    // collection_proof row for each booking directly from the DB. This
+    // photo is still saved to ip_booking_documents above exactly as before;
+    // only the immediate per-action sync was removed.
 
     res.status(201).json({ success: true, docId: result.insertId });
   } catch (err) {
@@ -1153,34 +1508,11 @@ exports.addItem = async (req, res) => {
        WHERE booking_id = ?`,
       [price, price, bookingId]
     );
-    // A generic (booking-level, not item-specific) prescription may already
-    // exist for this booking — see the same booking_item_id-OR-NULL join
-    // used for blood_test_list in clientSync.js. A brand-new item can never
-    // have its OWN prescription yet, but it can inherit that generic one.
-    const [[existingDoc]] = await db.execute(
-      `SELECT file_path FROM ip_booking_documents
-       WHERE booking_id = ? AND booking_item_id IS NULL AND file_description = 'prescription'
-       ORDER BY created_at DESC LIMIT 1`,
-      [bookingId]
-    );
-    const rawDocReq = product.document_required;
-    const docRequired = rawDocReq === 1 || rawDocReq === '1' || rawDocReq === 'yes';
-
-    // Sync to client server — this action uses its own minimal payload shape
-    // (added_test), built inside syncBookingToClient. Each add (even after a
-    // prior item was removed) is its own independent package_added event.
-    syncBookingToClient(Number(bookingId), {
-      mobile: req.user.mobile,
-      type:   'technician',
-      action: 'package_added',
-      addedTest: {
-        id:               product.product_id,
-        name:             product.product_name,
-        price,
-        documentRequired: docRequired,
-        documentUrl:      existingDoc?.file_path ?? null,
-      },
-    }).catch(err => console.error(`[clientSync] addItem sync failed booking_id=${bookingId}:`, err.message));
+    // No individual Jayamala sync here — a newly added package now reaches
+    // the client server only once, in the consolidated visit_completed
+    // request fired from verifyBookingOtp. This item is still saved to
+    // ip_booking_items/ip_bookings above exactly as before; only the
+    // immediate per-action sync was removed.
 
     res.status(201).json({
       success: true,
@@ -1235,6 +1567,36 @@ exports.removeItem = async (req, res) => {
        WHERE booking_id = ?`,
       [price, price, bookingId]
     );
+
+    // Overpayment check: if the customer paid more than the new total (e.g.
+    // a paid test was removed), create a pending refund record so the customer
+    // app surfaces "Refund ₹X pending" automatically.
+    const [[fresh]] = await db.execute(
+      `SELECT patient_id, amount_paid, total_amount FROM ip_bookings WHERE booking_id = ?`,
+      [bookingId]
+    );
+    if (fresh) {
+      const amountPaid = parseFloat(fresh.amount_paid ?? 0);
+      const newTotal   = parseFloat(fresh.total_amount ?? 0);
+      if (amountPaid > newTotal + 0.5) {
+        const refundAmt = +(amountPaid - newTotal).toFixed(2);
+        const refundRef = `RFN_MANUAL_${Date.now()}`;
+        await db.execute(
+          `INSERT INTO ip_payment_transactions
+             (transaction_ref, booking_id, patient_id, payment_type,
+              gross_amount, net_amount, amount_paid, amount_due,
+              currency, payment_status, transaction_status, is_refund,
+              gateway_transaction_id, gateway_status, paid_at)
+           VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'pending', NULL)`,
+          [`RFN${Date.now()}`, bookingId, fresh.patient_id,
+           refundAmt, refundAmt, refundAmt, refundRef]
+        );
+        await db.execute(
+          `UPDATE ip_bookings SET refund_amount = ?, refund_status = 'pending' WHERE booking_id = ?`,
+          [refundAmt, bookingId]
+        );
+      }
+    }
 
     // Sync to client server — package_removed is a proposed action, not yet
     // confirmed by Jayamala; the block log will surface a status:"failure"
@@ -1667,6 +2029,195 @@ exports.updateBookingItems = async (req, res) => {
   }
 };
 
+// ── POST /api/bookings/:bookingId/self-edit ────────────────────────────────────
+// Customer-initiated test edit after booking is paid.
+// Additions  → requires razorpayPaymentId for the diff; returns needsTopUp:true if missing.
+// Removals   → server auto-refunds the diff via Razorpay; no client payment needed.
+// Pay-later  → just swaps items with no payment action.
+exports.selfEditItems = async (req, res) => {
+  const { bookingId } = req.params;
+  const { items = [], razorpayPaymentId, payDiffLater = false, topUpAmount } = req.body;
+  const clientId = req.user.client_id;
+
+  if (!items.length) {
+    return res.status(400).json({ success: false, message: 'At least one test is required' });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [[booking]] = await conn.execute(
+      `SELECT b.booking_id, b.patient_id, b.status, b.total_amount, b.amount_paid,
+              b.payment_status, b.amount_due,
+              tc.collection_status
+       FROM ip_bookings b
+       LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       WHERE b.booking_id = ? AND b.client_id = ? AND b.deleted_at IS NULL`,
+      [bookingId, clientId]
+    );
+    if (!booking) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    const blockedCollectionStatuses = ['en_route', 'arrived', 'collection_started', 'sample_collected', 'handed_to_lab'];
+    const blockedBookingStatuses    = ['collected', 'submitted', 'completed', 'cancelled'];
+    if (blockedCollectionStatuses.includes(booking.collection_status)) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: 'Cannot edit — technician is already on the way' });
+    }
+    if (blockedBookingStatuses.includes(booking.status)) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: 'Cannot edit booking in its current status' });
+    }
+
+    // Get current items total to preserve service charge component
+    const [[curRow]] = await conn.execute(
+      'SELECT COALESCE(SUM(final_price), 0) AS items_total FROM ip_booking_items WHERE booking_id = ?',
+      [bookingId]
+    );
+    const oldItemsTotal = Number(curRow.items_total) || 0;
+    const oldTotal      = Number(booking.total_amount) || 0;
+    const serviceCharge = Math.max(0, oldTotal - oldItemsTotal);
+
+    // Calculate new totals from submitted items
+    let newItemsTotal = 0;
+    for (const item of items) newItemsTotal += Number(item.finalPrice) || 0;
+    const newTotal    = newItemsTotal + serviceCharge;
+    const diffAmount  = Math.round((newTotal - oldTotal) * 100) / 100; // positive = owes more
+
+    const amountPaid = Number(booking.amount_paid) || 0;
+    const isPaid     = booking.payment_status === 'paid';
+
+    // Additions on a paid booking — client must either pay now or defer to collection
+    if (diffAmount > 0.5 && isPaid && !razorpayPaymentId && !payDiffLater) {
+      await conn.rollback();
+      return res.json({
+        success: false, needsTopUp: true, diffAmount,
+        message: `Pay ₹${Math.round(diffAmount)} to add the selected tests`,
+      });
+    }
+
+    // Record top-up payment when provided.
+    // topUpAmount (from Flutter) = newTotal - amountPaid (clears all outstanding).
+    // Fall back to diffAmount if topUpAmount not sent (older clients).
+    const actualTopUp = topUpAmount ? Number(topUpAmount) : diffAmount;
+    if (diffAmount > 0.5 && isPaid && razorpayPaymentId) {
+      await conn.execute(
+        `INSERT INTO ip_payment_transactions
+           (transaction_ref, booking_id, patient_id, payment_type,
+            gross_amount, net_amount, amount_paid, amount_due,
+            currency, payment_status, transaction_status, is_refund,
+            gateway_transaction_id, gateway_status, paid_at)
+         VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'paid', 'completed', 0, ?, 'success', NOW())`,
+        [`TUP${Date.now()}`, bookingId, booking.patient_id,
+         actualTopUp, actualTopUp, actualTopUp, razorpayPaymentId]
+      );
+    }
+
+    // Auto-refund removals only when the customer has actually overpaid relative to the new total.
+    // If amount_due > 0 (e.g. Pay Later additions), removing a test just reduces the due — no refund.
+    let refundIssued = false;
+    if (diffAmount < -0.5 && isPaid && amountPaid > newTotal) {
+      // Refund only what was actually overpaid — never more than amount_paid.
+      const refundAmount = Math.min(amountPaid - newTotal, amountPaid);
+
+      // Always insert the refund record so the DB stays accurate.
+      // Attempt the Razorpay API call to get a real refund ID; fall back to a
+      // local reference if it fails (test-mode payments, network error, etc.).
+      let rzpRefundId = null;
+      const [[txn]] = await conn.execute(
+        `SELECT gateway_transaction_id FROM ip_payment_transactions
+         WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)
+           AND gateway_transaction_id IS NOT NULL AND payment_status = 'paid'
+         ORDER BY created_at DESC LIMIT 1`,
+        [bookingId]
+      );
+      if (txn?.gateway_transaction_id) {
+        try {
+          const auth   = 'Basic ' + Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64');
+          const rzpRes = await fetch(
+            `https://api.razorpay.com/v1/payments/${txn.gateway_transaction_id}/refund`,
+            { method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ amount: Math.round(refundAmount * 100) }) }
+          );
+          const rzpBody = await rzpRes.json();
+          if (rzpRes.ok && rzpBody.id) rzpRefundId = rzpBody.id;
+          else console.warn(`[selfEditItems] Razorpay refund skipped:`, rzpBody);
+        } catch (err) {
+          console.error(`[selfEditItems] Razorpay refund error booking_id=${bookingId}:`, err.message);
+        }
+      }
+
+      const refundRef = rzpRefundId ?? `RFN_MANUAL_${Date.now()}`;
+      await conn.execute(
+        `INSERT INTO ip_payment_transactions
+           (transaction_ref, booking_id, patient_id, payment_type,
+            gross_amount, net_amount, amount_paid, amount_due,
+            currency, payment_status, transaction_status, is_refund,
+            gateway_transaction_id, gateway_status, paid_at)
+         VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, ?, NULL)`,
+        [`RFN${Date.now()}`, bookingId, booking.patient_id,
+         refundAmount, refundAmount, refundAmount,
+         refundRef, rzpRefundId ? 'refunded' : 'pending']
+      );
+      refundIssued = true;
+    }
+
+    // Swap booking items
+    await conn.execute('DELETE FROM ip_booking_items WHERE booking_id = ?', [bookingId]);
+    for (const item of items) {
+      const rawId = item.packageId ? Number(item.packageId) : null;
+      let productId = 0, productName = null;
+      if (rawId) {
+        const [rows] = await conn.execute(
+          'SELECT product_id, product_name FROM ip_products WHERE product_id = ? LIMIT 1', [rawId]);
+        if (rows.length) { productId = rawId; productName = rows[0].product_name ?? null; }
+      }
+      const price = Number(item.finalPrice) || 0;
+      await conn.execute(
+        `INSERT INTO ip_booking_items
+           (booking_id, product_id, product_name_snapshot, patient_id, unit_price, final_price, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+        [bookingId, productId, productName, booking.patient_id, price, price]
+      );
+    }
+
+    // Update booking totals
+    // - Top-up paid now: increase amount_paid by actualTopUp (clears prior due too)
+    // - Refund issued:   decrease amount_paid by refund amount (diffAmount is negative)
+    // - Pay later:       amount_paid unchanged; diff surfaces in amount_due
+    const newAmountPaid = isPaid && diffAmount > 0.5 && razorpayPaymentId
+      ? amountPaid + actualTopUp
+      : refundIssued
+        ? newTotal   // refund covered the overpayment; customer now paid exactly the new total
+        : amountPaid;
+    const newAmountDue  = Math.max(0, newTotal - newAmountPaid);
+    await conn.execute(
+      `UPDATE ip_bookings SET total_amount = ?, amount_paid = ?, amount_due = ?, updated_at = NOW() WHERE booking_id = ?`,
+      [newTotal, newAmountPaid, newAmountDue, bookingId]
+    );
+
+    await conn.commit();
+    console.log(`✅ selfEditItems booking_id=${bookingId} diff=₹${diffAmount} refund=${refundIssued}`);
+    res.json({
+      success: true, newTotal, diffAmount,
+      refundIssued,
+      refundAmount: diffAmount < -0.5 && isPaid ? Math.abs(diffAmount) : 0,
+      message: refundIssued
+        ? `Tests updated. ₹${Math.round(Math.abs(diffAmount))} refund in 5–7 days.`
+        : 'Tests updated successfully.',
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error('❌ selfEditItems FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    conn.release();
+  }
+};
+
 // ── POST /api/bookings/family ─────────────────────────────────────────────────
 // Creates multiple bookings in one transaction sharing the same slot/visit.
 // members[] = [{ patientId, items, totalAmount, serviceCharge }, ...]
@@ -1705,8 +2256,18 @@ exports.createFamilyBooking = async (req, res) => {
     return res.status(400).json({ success: false, message: `Maximum ${maxMembers} members allowed per visit` });
   }
 
-  const isPaid       = paymentType === 'full' && razorpayPaymentId;
-  const visitGroupId = `VG${Date.now()}`;
+  const isPaid = paymentType === 'full' && razorpayPaymentId;
+  // visitGroupId is derived below from the FIRST member's own booking_id
+  // (assigned atomically by the database) once it's known — not from
+  // Date.now(), which two different customers' family-booking requests
+  // landing in the same millisecond could collide on. That was a real,
+  // confirmed defect (LT-011): two unrelated customers' bookings silently
+  // merged into one visit group, and collectPayment's own ownership check
+  // trusts visit_group_id to decide who may collect payment on which
+  // booking — so the collision was a real cross-customer risk, not just a
+  // bookkeeping oddity. Left null here; set once the first member's real
+  // booking_id exists (see inside the loop below).
+  let visitGroupId = null;
 
   // Resolve slot → lab_slot_id / technician_slot_id
   let labSlotId  = null;
@@ -1737,7 +2298,9 @@ exports.createFamilyBooking = async (req, res) => {
       );
       if (patRow?.patient_id_ref) resolvedPatientIdRef = patRow.patient_id_ref;
 
-      const bookingRef  = `BK${Date.now()}${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      // See createBooking's own comment above for why this is derived from
+      // the row's own auto-increment id instead of a timestamp+random tail —
+      // the random tail reduced collisions but never guaranteed against them.
       const amountPaid  = isPaid ? totalAmount : 0;
       const amountDue   = isPaid ? 0 : totalAmount;
       const txPayType   = isPaid ? 'RAZORPAY' : 'PAY_LATER';
@@ -1752,14 +2315,30 @@ exports.createFamilyBooking = async (req, res) => {
             payment_status, visit_group_id, start_datetime, end_datetime, created_by, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, 'mobile_app', NULL,
                  ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), ?, NOW())`,
-        [bookingRef, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
+        [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
          bookingType, totalAmount, amountPaid, amountDue,
          collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
          patientId, resolvedPatientIdRef,
          isPaid ? 'paid' : 'unpaid',
          visitGroupId, userId ?? null]
       );
-      const bookingId = bResult.insertId;
+      const bookingId  = bResult.insertId;
+      // Same booking_id + offset scheme as createBooking above — see that
+      // function's own comment. visit_group_id (below) intentionally keeps
+      // its separate VG-XXXXXX format; only booking_ref changes.
+      const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
+
+      // First member of this request: visitGroupId isn't known yet (it was
+      // inserted as NULL above), so derive it now from this booking's own
+      // guaranteed-unique id and back-fill this row. Every subsequent
+      // member already has visitGroupId set by this point, so their INSERT
+      // above already carried the correct value — no second update needed.
+      if (visitGroupId === null) {
+        visitGroupId = `VG-${String(bookingId).padStart(6, '0')}`;
+        await conn.execute('UPDATE ip_bookings SET booking_ref = ?, visit_group_id = ? WHERE booking_id = ?', [bookingRef, visitGroupId, bookingId]);
+      } else {
+        await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
+      }
 
       // Patient → booking link
       await conn.execute(
@@ -1841,14 +2420,14 @@ exports.createFamilyBooking = async (req, res) => {
     console.log(`🎉 Family booking done — visitGroupId=${visitGroupId} members=${createdBookings.length}`);
     console.log('─────────────────────────────────────────────────\n');
 
-    if (isPaid) {
-      for (const { bookingId } of createdBookings) {
-        syncBookingToClient(bookingId, {
-          mobile: req.user.mobile,
-          type:   req.user.user_type ?? 'customer',
-          action: 'new_booking',
-        }).catch(err => console.error('[clientSync] unhandled:', err.message));
-      }
+    if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, totalAmount);
+
+    for (const { bookingId } of createdBookings) {
+      syncBookingToClient(bookingId, {
+        mobile: req.user.mobile,
+        type:   req.user.user_type ?? 'customer',
+        action: 'new_booking',
+      }).catch(err => console.error('[clientSync] unhandled:', err.message));
     }
 
     res.status(201).json({ success: true, visitGroupId, bookings: createdBookings });
@@ -2010,8 +2589,9 @@ exports.createAdminBooking = async (req, res) => {
       }
     }
 
-    // 1. Master booking record
-    const bookingRef = `BK${Date.now()}`;
+    // 1. Master booking record. See createBooking's own comment above for
+    // why the reference is derived from the row's own auto-increment id
+    // instead of Date.now().
     const [bResult] = await conn.execute(
       `INSERT INTO ip_bookings
          (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
@@ -2022,7 +2602,7 @@ exports.createAdminBooking = async (req, res) => {
           patient_id, patient_id_ref, product_id,
           payment_status, start_datetime, end_datetime, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin_panel', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), NULL, NOW())`,
-      [bookingRef, clientId, branchId ?? null, collectionDate ?? null,
+      [null, clientId, branchId ?? null, collectionDate ?? null,
        labSlotId ?? null, availableSlotId ?? null,
        bookingType, bookingStatus, totalAmount, discountAmount ?? 0,
        amountPaid, amountDue,
@@ -2032,8 +2612,11 @@ exports.createAdminBooking = async (req, res) => {
        patientId, resolvedPatientIdRef,
        isPaid ? 'paid' : 'unpaid']
     );
-    const bookingId = bResult.insertId;
-    console.log(`✅ [ADMIN] ip_bookings inserted → booking_id=${bookingId} status=${bookingStatus}`);
+    const bookingId  = bResult.insertId;
+    // Same booking_id + offset scheme as createBooking — see that function's own comment.
+    const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
+    await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
+    console.log(`✅ [ADMIN] ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef} status=${bookingStatus}`);
 
     // 2. Patient → booking link
     await conn.execute(

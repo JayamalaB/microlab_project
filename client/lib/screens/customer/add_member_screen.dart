@@ -261,6 +261,17 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
       );
       return;
     }
+    if (_selectedDob == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Please select a date of birth'),
+          backgroundColor: Colors.red[700],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      );
+      return;
+    }
 
     setState(() => _isLoading = true);
 
@@ -484,31 +495,9 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                     ? 'Address is required'
                     : null,
               ),
-            ]),
-
-            const SizedBox(height: 16),
-
-            // ── Optional ──────────────────────────────────
-            _SectionHeader(label: 'Optional Information'),
-            _FormCard(children: [
-              _FieldLabel(label: 'Email Address'),
-              _AppTextField(
-                controller: _emailController,
-                hint: 'example@email.com',
-                icon: Icons.email_outlined,
-                keyboardType: TextInputType.emailAddress,
-                validator: (v) {
-                  if (v == null || v.trim().isEmpty) return null;
-                  if (!RegExp(r'^[\w.-]+@[\w.-]+\.\w{2,}$')
-                      .hasMatch(v.trim())) {
-                    return 'Enter a valid email address';
-                  }
-                  return null;
-                },
-              ),
 
               const SizedBox(height: 16),
-              _FieldLabel(label: 'Date of Birth'),
+              _FieldLabel(label: 'Date of Birth', required: true),
               GestureDetector(
                 onTap: _pickDate,
                 child: Container(
@@ -558,6 +547,28 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                     ],
                   ),
                 ),
+              ),
+            ]),
+
+            const SizedBox(height: 16),
+
+            // ── Optional ──────────────────────────────────
+            _SectionHeader(label: 'Optional Information'),
+            _FormCard(children: [
+              _FieldLabel(label: 'Email Address'),
+              _AppTextField(
+                controller: _emailController,
+                hint: 'example@email.com',
+                icon: Icons.email_outlined,
+                keyboardType: TextInputType.emailAddress,
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) return null;
+                  if (!RegExp(r'^[\w.-]+@[\w.-]+\.\w{2,}$')
+                      .hasMatch(v.trim())) {
+                    return 'Enter a valid email address';
+                  }
+                  return null;
+                },
               ),
 
               const SizedBox(height: 16),

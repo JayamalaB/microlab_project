@@ -1,21 +1,22 @@
 'use strict';
 const crypto = require('crypto');
+const { getActiveEncryptedValue } = require('../services/dynamicKeyService');
 
 // Verifies that a request came from the CodeIgniter admin portal.
 // Each request must include:
-//   X-Admin-Signature : HMAC-SHA256( bookingId + "|" + timestamp, ADMIN_PORTAL_SECRET )
+//   X-Admin-Signature : HMAC-SHA256( bookingId + "|" + timestamp, <active encrypted_value> )
 //   X-Admin-Timestamp : unix timestamp (seconds)
 //
 // The 5-minute window blocks replay attacks — a captured request cannot be
 // reused after the window expires.
+//
+// The HMAC secret is the active ADMIN_PORTAL_SECRET row's encrypted_value in
+// ip_dynamic_keys, used exactly as stored — no decryption, no master key. The
+// Admin Panel reads the same column and signs with the same string. Read on
+// every request, after the cheap header/timestamp checks. It lives only in
+// this function's scope — never logged, returned, or stored elsewhere.
 
-module.exports = function adminAuth(req, res, next) {
-  const secret = process.env.ADMIN_PORTAL_SECRET;
-  if (!secret) {
-    console.error('[adminAuth] ADMIN_PORTAL_SECRET not set in .env');
-    return res.status(500).json({ success: false, message: 'Server misconfiguration' });
-  }
-
+module.exports = async function adminAuth(req, res, next) {
   const signature = req.headers['x-admin-signature'];
   const timestamp = req.headers['x-admin-timestamp'];
 
@@ -32,7 +33,18 @@ module.exports = function adminAuth(req, res, next) {
     return res.status(403).json({ success: false, message: 'Request timestamp expired' });
   }
 
-  // Recompute expected signature: HMAC-SHA256( bookingId|timestamp , ADMIN_PORTAL_SECRET )
+  // Missing/expired/inactive row and DB errors all collapse to the same
+  // external 500 (fail closed). Name/code only — never err.message, which
+  // can carry query details.
+  let secret;
+  try {
+    secret = await getActiveEncryptedValue('ADMIN_PORTAL_SECRET');
+  } catch (err) {
+    console.error(`[adminAuth] ADMIN_PORTAL_SECRET unavailable  error=${err.name}${err.code ? ` code=${err.code}` : ''}`);
+    return res.status(500).json({ success: false, message: 'Server misconfiguration' });
+  }
+
+  // Recompute expected signature: HMAC-SHA256( bookingId|timestamp , encrypted_value )
   const bookingId = req.params.bookingId ?? '';
   const expected  = crypto
     .createHmac('sha256', secret)

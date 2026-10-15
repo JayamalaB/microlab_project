@@ -4,12 +4,14 @@
 // Reads from ip_technician_live_location which is kept current by bookingSocket.js
 // via INSERT … ON DUPLICATE KEY UPDATE on every technician_online event.
 
-const db   = require('../config/db');
+const db       = require('../config/db');
+const settings = require('../config/settings');
 const fs   = require('fs');
 const path = require('path');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
-const { syncBookingToClient } = require('../services/clientSync');
+const { syncVisitCompletionToClient } = require('../services/clientSync');
+const dbLogger = require('../utils/dbLogger');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -17,6 +19,7 @@ function tlog(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(TECH_LOG, line, 'utf8');
+  dbLogger.logTechnicianEvent(msg);
 }
 
 const OTP_LOG = path.join(__dirname, '..', 'logs', 'otpinfo.log');
@@ -29,6 +32,7 @@ function otpLog(msg) {
     if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
     fs.appendFileSync(OTP_LOG, line, 'utf8');
   } catch (_) {}
+  dbLogger.logOtpInfoEvent(msg);
 }
 
 // Converts "HH:MM:SS" TIME strings to appointment slot array "HH:MM:00"
@@ -676,9 +680,26 @@ exports.collectPayment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
     }
 
-    const totalAmount      = parseFloat(booking.total_amount) || 0;
-    const currentPaid      = parseFloat(booking.amount_paid) || 0;
-    const newAmountPaid    = currentPaid + Number(amount);
+    const totalAmount   = parseFloat(booking.total_amount) || 0;
+    const currentPaid   = parseFloat(booking.amount_paid) || 0;
+    const incomingAmount = Number(amount);
+    const amountDueBefore = Math.max(0, Math.round((totalAmount - currentPaid) * 100) / 100);
+
+    // Reject anything that would push amount_paid past total_amount — covers
+    // both a booking that's already fully paid (amountDueBefore = 0, so any
+    // positive amount is rejected) and a single payment larger than what's
+    // left owed. 0.01 tolerance absorbs float rounding on the subtraction
+    // above, not a real allowance to overpay.
+    if (incomingAmount > amountDueBefore + 0.01) {
+      console.warn(`⚠️  collectPayment — booking_id=${bookingId} rejected: amount=₹${incomingAmount} exceeds amount due=₹${amountDueBefore} by technician_id=${technicianId}`);
+      return res.status(400).json({
+        success: false,
+        message: `Payment amount ₹${incomingAmount} exceeds the amount due ₹${amountDueBefore}`,
+        amountDue: amountDueBefore,
+      });
+    }
+
+    const newAmountPaid    = currentPaid + incomingAmount;
     const newAmountDue     = Math.max(0, totalAmount - newAmountPaid);
     const newPaymentStatus = newAmountDue <= 0 ? 'paid' : 'partial';
 
@@ -711,14 +732,11 @@ exports.collectPayment = async (req, res) => {
 
     console.log(`✅ collectPayment — booking_id=${bookingId} method=${paymentMethod} +₹${amount} → paid=₹${newAmountPaid} due=₹${newAmountDue} status=${newPaymentStatus} by technician_id=${technicianId}`);
 
-    // Sync to client server — payment_update is the same, already-confirmed
-    // action the customer-side payment flow uses; only the initiator
-    // (technician, not the account-holder) differs here.
-    syncBookingToClient(Number(bookingId), {
-      mobile: req.user.mobile,
-      type:   'technician',
-      action: 'payment_update',
-    }).catch(err => console.error(`[clientSync] collectPayment sync failed booking_id=${bookingId}:`, err.message));
+    // No individual Jayamala sync here — payment for a technician-run visit
+    // now reaches the client server only once, in the consolidated
+    // visit_completed request fired from verifyBookingOtp. This value is
+    // still saved to ip_payment_transactions/ip_bookings above exactly as
+    // before; only the immediate per-action sync was removed.
 
     res.json({ success: true, amountPaid: newAmountPaid, amountDue: newAmountDue, paymentStatus: newPaymentStatus });
   } catch (err) {
@@ -1032,9 +1050,16 @@ exports.addVisitMember = async (req, res) => {
         }
       }
 
-      // INSERT new booking — status='confirmed', technician directly assigned
-      const bookingRef = `BC${Date.now()}${String(refSeq).padStart(2, '0')}`;
-      const txnRef     = `TXN${Date.now()}${String(refSeq)}${Math.random().toString(36).slice(2, 4).toUpperCase()}`;
+      // INSERT new booking — status='confirmed', technician directly assigned.
+      // booking_ref is derived below from the row's own booking_id (same
+      // booking_id + ip_settings 'booking_ref_offset' scheme used by every
+      // other booking-creation path — see bookingController.js's own
+      // comment on why), not known until after the INSERT assigns one.
+      // Previously this used `BC${Date.now()}...`, the same
+      // timestamp-collision risk the other paths were already fixed for
+      // (see change_booking_ref_to_sequential.sql) — this path was simply
+      // missed until a real mismatched ref surfaced it.
+      const txnRef = `TXN${Date.now()}${String(refSeq)}${Math.random().toString(36).slice(2, 4).toUpperCase()}`;
       const [bRes] = await conn.execute(
         `INSERT INTO ip_bookings
            (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
@@ -1045,10 +1070,10 @@ exports.addVisitMember = async (req, res) => {
             patient_id, patient_id_ref, product_id,
             payment_status, visit_group_id, technician_id, technician_name,
             start_datetime, end_datetime, created_by, created_at)
-         VALUES (?, ?, ?, ?, NULL, ?, 'home_collection', 'confirmed', ?, 0, 0, ?,
+         VALUES (NULL, ?, ?, ?, NULL, ?, 'home_collection', 'confirmed', ?, 0, 0, ?,
                  'technician_app', NULL, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?,
                  NOW(), NOW(), ?, NOW())`,
-        [bookingRef, parent.client_id, parent.branch_id || null, parent.booking_date,
+        [parent.client_id, parent.branch_id || null, parent.booking_date,
          parent.available_slot_id || null, totalAmount, totalAmount,
          parent.collection_address, parent.postal_code, parent.city,
          parent.collection_latitude, parent.collection_longitude,
@@ -1057,6 +1082,8 @@ exports.addVisitMember = async (req, res) => {
          technicianId]
       );
       const newBookingId = bRes.insertId;
+      const bookingRef = String(newBookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
+      await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, newBookingId]);
 
       // Link patient to new booking
       await conn.execute(
@@ -1118,22 +1145,13 @@ exports.addVisitMember = async (req, res) => {
     const totalVisitAmount = results.reduce((s, r) => s + r.totalAmount, 0);
     console.log(`✅ addVisitMember — ${results.length} member(s) added parent=${parentBookingId} visit_group=${visitGroupId}`);
 
-    // Sync each new member's booking to the client server — technician is
-    // the initiator here (not the account-holder patient), per explicit
-    // requirement: technician's own mobile + user_type: 'technician'.
-    // Uses the family_member_added action's own minimal payload shape
-    // (technician_details + visit_group_id), not the generic new_booking one.
-    // Fire-and-forget, same non-blocking pattern used by every other
-    // syncBookingToClient call site in the codebase.
-    for (const r of results) {
-      syncBookingToClient(r.newBookingId, {
-        mobile:       req.user.mobile,
-        type:         'technician',
-        action:       'family_member_added',
-        technicianId: technicianId,
-        visitGroupId: visitGroupId,
-      }).catch(err => console.error(`[clientSync] addVisitMember sync failed booking_id=${r.newBookingId}:`, err.message));
-    }
+    // No individual Jayamala sync here — a newly added family member now
+    // reaches the client server only once, in the consolidated
+    // visit_completed request fired from verifyBookingOtp, which resolves
+    // every booking sharing this visit_group_id (including these new ones)
+    // at that time. These bookings are still saved to ip_bookings/
+    // ip_booking_items above exactly as before; only the immediate
+    // per-action sync was removed.
     res.status(201).json({
       success: true,
       members: results,
@@ -1395,6 +1413,19 @@ exports.verifyBookingOtp = async (req, res) => {
     } catch (e) {
       console.error(`❌ [verifyBookingOtp] sibling cascade failed booking=${bookingId}: ${e.message}`);
     }
+
+    // Sync the whole visit to the client server in one consolidated request
+    // — primary booking + every sibling in the same visit_group_id, each
+    // with their own tests/payment/photo. This is now the only Jayamala
+    // sync point for a technician-run visit; the individual package_added /
+    // payment_update / family_member_added / collection_photo_added syncs
+    // were removed from their respective actions. Fire-and-forget — must
+    // never affect the OTP-verification response already being sent below.
+    syncVisitCompletionToClient(Number(bookingId), {
+      mobile:       req.user.mobile,
+      type:         'technician',
+      technicianId: technicianId,
+    }).catch(err => console.error(`[clientSync] verifyBookingOtp visit_completed sync failed booking_id=${bookingId}:`, err.message));
 
     console.log(`✅ verifyBookingOtp — booking_id=${bookingId} OTP verified by technician_id=${technicianId}`);
     res.json({ success: true });

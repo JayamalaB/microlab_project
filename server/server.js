@@ -31,7 +31,21 @@ require('./scheduler/dispatchScheduler')(io);
 // this is separate from the 45s dispatch grace period).
 require('./scheduler/technicianOfflineSweep')();
 
+// Purges the 7 database log tables (server/utils/dbLogger.js) of rows older
+// than 90 days — the existing .log files themselves are untouched.
+require('./scheduler/logRetentionSweep')();
+
 app.use(cors());
+
+// Razorpay webhook — must be registered BEFORE express.json() so the route
+// can receive the raw Buffer needed for HMAC-SHA256 signature verification.
+app.use('/api/razorpay/webhook', require('./routes/razorpayWebhook'));
+
+// Dynamic Key Admin API — also registered BEFORE express.json(): its HMAC
+// signature covers the raw request bytes, so the router must read the
+// body itself (see routes/dynamicKeyAdmin.js).
+app.use('/api/admin/dynamic-keys', require('./routes/dynamicKeyAdmin'));
+
 app.use(express.json());
 
 // Serve banner images at /banners/<filename>
@@ -53,6 +67,7 @@ app.use('/api/upload',        require('./routes/upload'));
 app.use('/api/prescriptions', require('./routes/prescriptions'));
 app.use('/api/feedback',               require('./routes/feedback'));
 app.use('/api/prescription-requests',  require('./routes/prescriptionRequests'));
+app.use('/api/letterhead',             require('./routes/letterhead'));
 
 app.get('/', (req, res) => {
   res.json({ success: true, message: 'MicroLab API running' });
@@ -72,6 +87,7 @@ const PORT = process.env.PORT || 3000;
 
 async function start() {
   await settings.init();
+  await require('./services/secretCache').refreshSecret();
   await initKnowledge();
   // Rebuild in-memory dispatch state from DB before accepting connections.
   // Ensures assigned bookings from before a restart are not forgotten.

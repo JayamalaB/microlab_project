@@ -4,6 +4,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { forceTechnicianOffline } = require('../socket/bookingSocket');
+const { getSecret, refreshSecret } = require('../services/secretCache');
+const dbLogger = require('../utils/dbLogger');
+const { logAsmx } = require('../services/asmxLogger');
 
 const LOG_DIR  = path.join(__dirname, '..', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'otp.log');
@@ -15,6 +18,7 @@ function writeLog(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(LOG_FILE, line, 'utf8');
+  dbLogger.logOtpEvent(msg);
 }
 
 const sms = require('../utils/sms');
@@ -76,16 +80,36 @@ exports.sendOtp = async (req, res) => {
       }
     }
 
-    const otp = generateOtp();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    // Demo accounts for Play Store review — fixed OTP, never expires, no SMS
+    const isDemo = process.env.DEMO_OTP && (
+      (process.env.DEMO_MOBILE     && mobile === process.env.DEMO_MOBILE) ||
+      (process.env.DEMO_TECH_MOBILE && mobile === process.env.DEMO_TECH_MOBILE)
+    );
+    const otp       = isDemo ? process.env.DEMO_OTP : generateOtp();
+    const expiresAt = isDemo ? new Date('2099-12-31T23:59:59Z') : new Date(Date.now() + 10 * 60 * 1000);
 
     step = 'select_user';
     writeLog(`[sendOtp] SELECT ip_users — ${elapsed()}`);
     const [existing] = await db.query(
-      'SELECT user_id, client_id, user_microlab_type, user_auth_token, user_token_expiry FROM ip_users WHERE user_mobile_no = ?',
+      'SELECT user_id, client_id, user_microlab_type, user_auth_token, user_token_expiry, deleted_at FROM ip_users WHERE user_mobile_no = ?',
       [mobile]
     );
     writeLog(`[sendOtp] select done — found=${existing.length} — ${elapsed()}`);
+
+    // Soft-deleted account — reject immediately, before any of the
+    // existing/new-user branching below. Deliberately NOT filtered out of
+    // the SELECT above (e.g. "AND deleted_at IS NULL") — doing that would
+    // make this row invisible to the query entirely, and the code below
+    // would then treat this mobile number as brand new and create a second,
+    // duplicate account for it. Checking it explicitly here, first, is what
+    // actually blocks the number instead of silently working around it.
+    if (existing.length > 0 && existing[0].deleted_at) {
+      writeLog(`[sendOtp] rejected — mobile=${mobile} account is soft-deleted (deleted_at=${existing[0].deleted_at})`);
+      return res.status(403).json({
+        success: false,
+        message: 'This account has been deleted. Please contact support.',
+      });
+    }
 
     // Block technician numbers from logging in as customer
     if (role !== 'technician' && existing.length > 0 && existing[0].user_microlab_type === 'technician') {
@@ -96,22 +120,16 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    // Single-active-session check — up front, before an OTP is ever generated
-    // or sent, so a device that's already logged in elsewhere doesn't even
-    // reach the OTP screen. This is a fast-fail UX check only; it is NOT
-    // the actual enforcement point (a plain SELECT here can race two
-    // concurrent requests) — the atomic claim in verifyOtp remains the real,
-    // race-safe guard that actually grants or denies the session.
-    if (existing.length > 0) {
-      const u = existing[0];
-      if (u.user_auth_token && u.user_token_expiry && new Date(u.user_token_expiry) > new Date()) {
-        writeLog(`[sendOtp] rejected — mobile=${mobile} already has an active session on another device`);
-        return res.status(409).json({
-          success: false,
-          message: 'This number is already logged in on another device. Please log out from that device and try again.',
-        });
-      }
-    }
+    // An existing account with an active session no longer blocks a new OTP
+    // here — a device that's uninstalled (or just switched) has no way to
+    // log itself out first, so blocking at this step permanently locked
+    // that real, common case out of its own account. The single-active-
+    // session GUARANTEE is not weakened by removing this: it now lives
+    // entirely in verifyOtp, at the one point that's actually safe to make
+    // it — after a real OTP has proven who's asking (see verifyOtp's own
+    // comment on the atomic claim for exactly how). This was always only a
+    // fast-fail UX shortcut anyway (see the removed comment this replaces),
+    // never the real enforcement.
 
     if (existing.length === 0) {
       step = 'insert_user';
@@ -155,19 +173,23 @@ exports.sendOtp = async (req, res) => {
     }
 
     step = 'sms';
-    writeLog(`[sendOtp] OTP stored — value=${otp} expires=${expiresAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
-    writeLog(`[sendOtp] SMS env — api_key=${process.env.PING4SMS_API_KEY ? 'SET' : 'MISSING'} sender=${process.env.PING4SMS_SENDER_ID ?? 'MISSING'} template=${process.env.PING4SMS_LOGIN_TEMPLATE_ID ?? 'MISSING'}`);
-    try {
-      writeLog(`[sendOtp] calling SMS gateway — target=91${mobile} — ${elapsed()}`);
-      const smsResponse = await sms.sendLoginOtp(mobile, otp);
-      const raw = String(smsResponse ?? '').trim();
-      const isSuccess = /^\d+$/.test(raw);
-      const meaning = isSuccess
-        ? `✅ delivered — message_id=${raw}`
-        : `❌ gateway error — ${raw}`;
-      writeLog(`[sendOtp] SMS response — ${elapsed()} | raw="${raw}" | ${meaning}`);
-    } catch (smsErr) {
-      writeLog(`[sendOtp] SMS failed (non-fatal) — ${elapsed()} | ${smsErr.message}`);
+    writeLog(`[sendOtp] OTP stored — value=**** expires=${expiresAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+    if (isDemo) {
+      writeLog(`[sendOtp] demo account — SMS skipped`);
+    } else {
+      writeLog(`[sendOtp] SMS env — api_key=${process.env.PING4SMS_API_KEY ? 'SET' : 'MISSING'} sender=${process.env.PING4SMS_SENDER_ID ?? 'MISSING'} template=${process.env.PING4SMS_LOGIN_TEMPLATE_ID ?? 'MISSING'}`);
+      try {
+        writeLog(`[sendOtp] calling SMS gateway — target=91${mobile} — ${elapsed()}`);
+        const smsResponse = await sms.sendLoginOtp(mobile, otp);
+        const raw = String(smsResponse ?? '').trim();
+        const isSuccess = /^\d+$/.test(raw);
+        const meaning = isSuccess
+          ? `✅ delivered — message_id=${raw}`
+          : `❌ gateway error — ${raw}`;
+        writeLog(`[sendOtp] SMS response — ${elapsed()} | raw="${raw}" | ${meaning}`);
+      } catch (smsErr) {
+        writeLog(`[sendOtp] SMS failed (non-fatal) — ${elapsed()} | ${smsErr.message}`);
+      }
     }
 
     writeLog(`[sendOtp] done — total ${elapsed()}`);
@@ -184,26 +206,55 @@ exports.sendOtp = async (req, res) => {
   }
 };
 
-// ── HMAC helper — matches verifySecureId() in the PHP scripts ─────────────────
-function buildSecureId(mobileNo, userType, timestamp) {
+// ── HMAC helper — matches verifySecureId() in the PHP/ASMX scripts ───────────
+function buildSecureId(mobileNo, userType, timestamp, secret) {
   const message = `${mobileNo}|${userType}|${timestamp}`;
-  return crypto
-    .createHmac('sha256', process.env.CLIENT_SERVER_SECRET)
-    .update(message)
-    .digest('hex');
+  return crypto.createHmac('sha256', secret).update(message).digest('hex');
 }
 
-// ── HTTP POST to jayamala.neuralarc.com PHP registry ─────────────────────────
+function _isSignatureError(body) {
+  if (typeof body === 'number') return body === 401 || body === 403;
+  const msg = (body?.msg ?? body?.message ?? '').toLowerCase();
+  return msg.includes('sign') || msg.includes('secret') ||
+         msg.includes('unauthor') || msg.includes('invalid') || msg.includes('auth');
+}
+
+// ── HTTP POST to ASMX registry ────────────────────────────────────────────────
 async function fetchFromRegistry(url, mobileNo, userType) {
+  const secret    = await getSecret();
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const secure_id = buildSecureId(mobileNo, userType, timestamp);
-  const res = await fetch(url, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id }),
+  const secure_id = buildSecureId(mobileNo, userType, timestamp, secret);
+  const params    = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id });
+
+  const _post = async (body) => {
+    const res  = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    const text = await res.text();
+    const xmlMatch = /<string[^>]*>([\s\S]*?)<\/string>/.exec(text);
+    return { httpStatus: res.status, body: JSON.parse(xmlMatch ? xmlMatch[1] : text) };
+  };
+
+  let result = await _post(params.toString());
+
+  // Auto-recover on signature failure
+  if (_isSignatureError(result.body)) {
+    console.warn('[authController] signature error — refreshing secret and retrying');
+    const newSecret    = await refreshSecret();
+    const newSecureId  = buildSecureId(mobileNo, userType, timestamp, newSecret);
+    const retryParams  = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id: newSecureId });
+    result = await _post(retryParams.toString());
+  }
+
+  const endpoint = url.includes('GetPatientList') ? 'GetPatientList' : 'UserLoginCheck';
+  await logAsmx(endpoint, {
+    mobileNo,
+    request:  { mobile_no: mobileNo, user_type: userType, timestamp },
+    response: result.body,
+    httpStatus: result.httpStatus,
+    success:  result.body != null && !_isSignatureError(result.body),
+    errorMessage: result.body == null ? 'no response' : _isSignatureError(result.body) ? 'signature error' : null,
   });
-  const body = await res.json();
-  return { httpStatus: res.status, body };
+
+  return result;
 }
 
 // ── Local technician fallback lookup ──────────────────────────────────────────
@@ -230,30 +281,54 @@ exports.verifyOtp = async (req, res) => {
       return res.status(422).json({ success: false, message: 'Mobile and OTP required' });
     }
 
-    // DB-based OTP verification
-    const [rows] = await db.query(
-      `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
-       FROM ip_users
-       WHERE user_mobile_no = ? AND user_otp = ? AND user_otp_expiry > NOW() AND user_active = 1`,
-      [mobile, otp]
+    // Demo account bypass — fixed OTP for Play Store review, never expires
+    const isDemo = process.env.DEMO_OTP && otp === process.env.DEMO_OTP && (
+      (process.env.DEMO_MOBILE      && mobile === process.env.DEMO_MOBILE) ||
+      (process.env.DEMO_TECH_MOBILE && mobile === process.env.DEMO_TECH_MOBILE)
     );
 
-    if (rows.length === 0) {
-      return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
+    let dbUser;
+    if (isDemo) {
+      // Look up by mobile only — skip OTP and expiry check, don't consume the OTP
+      // so the fixed code remains reusable across Play Store review sessions.
+      const [[demoUser]] = await db.query(
+        `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
+         FROM ip_users WHERE user_mobile_no = ? AND user_active = 1 AND deleted_at IS NULL LIMIT 1`,
+        [mobile]
+      );
+      if (!demoUser) {
+        return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
+      }
+      dbUser = demoUser;
+      writeLog(`[verifyOtp] demo account login — mobile=${mobile}`);
+    } else {
+      // Atomic claim-and-consume: fold the validity check into the UPDATE's WHERE clause so
+      // MySQL serializes concurrent requests to the same row — only one request can ever
+      // clear a given OTP, closing the SELECT-then-UPDATE race that allowed double sessions.
+      const [claim] = await db.query(
+        `UPDATE ip_users
+         SET user_otp = NULL, user_otp_expiry = NULL,
+             user_last_active_at = NOW(), user_date_modified = NOW()
+         WHERE user_mobile_no = ? AND user_otp = ? AND user_otp_expiry > NOW()
+           AND user_active = 1 AND deleted_at IS NULL`,
+        [mobile, otp]
+      );
+
+      if (claim.affectedRows === 0) {
+        return res.status(401).json({ success: false, message: 'Invalid or expired OTP' });
+      }
+
+      // Safe to fetch by mobile alone — the UPDATE above proved this request exclusively
+      // consumed a valid OTP for this number.
+      const [[fetchedUser]] = await db.query(
+        `SELECT user_id, client_id, user_name, user_microlab_type, user_mobile_no
+         FROM ip_users WHERE user_mobile_no = ? AND deleted_at IS NULL LIMIT 1`,
+        [mobile]
+      );
+      dbUser = fetchedUser;
     }
 
-    const dbUser = rows[0];
     const tokenExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-
-    // Clear OTP after use. is_logged_in is deliberately NOT set here — it's
-    // only set true once the single-active-session claim below actually
-    // succeeds, so it never reports true for a login that got rejected.
-    await db.query(
-      `UPDATE ip_users SET user_otp = NULL, user_otp_expiry = NULL,
-       user_last_active_at = NOW(), user_date_modified = NOW()
-       WHERE user_id = ?`,
-      [dbUser.user_id]
-    );
 
     // ── Technician path ───────────────────────────────────────────────────────
     if (role === 'technician') {
@@ -377,23 +452,25 @@ exports.verifyOtp = async (req, res) => {
         { expiresIn: '30d' }
       );
 
-      // Single-active-session claim — atomic so two simultaneous logins for
-      // the same mobile can't both succeed (see verifyOtp's customer path
-      // for the identical pattern). The WHERE guard only lets this land when
-      // no other device currently holds an unexpired session.
-      const [claimResult] = await db.query(
+      // Session claim — unconditional. Whatever was previously in
+      // user_auth_token belonged to an old session (a different device, or
+      // this same device's earlier login); a real OTP has already proven
+      // this request owns the number (the atomic claim above this
+      // function's OTP check made sure of that), so it always wins,
+      // silently invalidating that old token. That old token still LOOKS
+      // well-formed to jwt.verify elsewhere in the app, but every
+      // authenticated route re-checks it against this exact column
+      // (grep authMiddleware.js) — once overwritten here, the old token no
+      // longer matches what's on file and every request using it is
+      // rejected from that point on. That is the actual revocation; there
+      // is no separate "blocklist" to maintain.
+      await db.query(
         `UPDATE ip_users
          SET user_auth_token = ?, user_token_expiry = ?, is_logged_in = 1, user_date_modified = NOW()
-         WHERE user_id = ?
-           AND (user_auth_token IS NULL OR user_token_expiry <= NOW())`,
+         WHERE user_id = ?`,
         [token, tokenExpiry, dbUser.user_id]
       );
-      if (claimResult.affectedRows === 0) {
-        return res.status(409).json({
-          success: false,
-          message: 'This number is already logged in on another device. Please log out from that device and try again.',
-        });
-      }
+      writeLog(`[verifyOtp] technician_id=${dbTechnicianId} — new session claimed for mobile=${mobile}, any previous session on this number is now invalid`);
 
       // Create session + live_location rows
       let sessionId = null;
@@ -464,50 +541,100 @@ exports.verifyOtp = async (req, res) => {
       patient = patients[0];
     }
 
-    // Fetch patient list from PHP registry (micro_patient.php)
-    let phpPatients = [];
+    // UserLoginCheck — determine if customer is existing or new patient on ASMX
+    let isExistingOnAsmx = false;
     try {
-      const phpResult = await fetchFromRegistry(process.env.CLIENT_PATIENT_URL, mobile, 'patient');
-      if (phpResult.body.status === 'success') {
-        phpPatients = Array.isArray(phpResult.body.patient) ? phpResult.body.patient : [];
-      }
+      const loginCheck = await fetchFromRegistry(process.env.CLIENT_SERVER_URL, mobile, 'patient_user');
+      isExistingOnAsmx = loginCheck.body.status === 'success';
+      writeLog(`[verifyOtp] UserLoginCheck — mobile=${mobile} existing=${isExistingOnAsmx} msg=${loginCheck.body.msg ?? ''}`);
     } catch (err) {
-      console.warn('[verifyOtp] micro_patient.php unreachable (non-fatal):', err.message);
+      console.warn('[verifyOtp] UserLoginCheck unreachable (non-fatal):', err.message);
     }
 
-    // If new user and client server has profile data, auto-fill from Self patient
-    let profileAutoFilled = false;
-    if (isNewUser && phpPatients.length > 0) {
-      const selfP = phpPatients.find(p => p.relation === 'Self') || phpPatients[0];
-      if (selfP) {
-        const dobParts = selfP.date_of_birth ? selfP.date_of_birth.split('-') : null;
-        const dob = dobParts && dobParts.length === 3
-          ? (dobParts[0].length <= 2 ? `${dobParts[2]}-${dobParts[1]}-${dobParts[0]}` : selfP.date_of_birth)
-          : null;
+    // Fetch patient list from ASMX web service (GetPatientList) — only for existing patients
+    let phpPatients = [];
+    if (isExistingOnAsmx) {
+      try {
+        const phpResult = await fetchFromRegistry(process.env.CLIENT_PATIENT_URL, mobile, 'patient');
+        if (phpResult.body.status === 'success') {
+          phpPatients = Array.isArray(phpResult.body.patient) ? phpResult.body.patient : [];
+        }
+      } catch (err) {
+        console.warn('[verifyOtp] GetPatientList unreachable (non-fatal):', err.message);
+      }
+    }
 
-        await db.query(
-          `UPDATE ip_patients
-           SET patient_name=?, patient_gender=?, patient_city=?, patient_address=?,
-               patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
-               health_conditions=?, patient_photo=?, patient_id_ref=?, updated_at=NOW()
-           WHERE patient_id=?`,
-          [selfP.name, selfP.gender, selfP.location, selfP.address,
-           selfP.email || null, dob, selfP.age || null, selfP.relation || 'Self',
-           selfP.health_condition || null, selfP.photo || null,
-           String(selfP.patient_id), patient.patient_id]
+    // Sync all ASMX patients into ip_patients (upsert by patient_id_ref, runs every login)
+    let profileAutoFilled = false;
+    if (phpPatients.length > 0) {
+      const selfP = phpPatients.find(p => p.relation === 'Self') || phpPatients[0];
+
+      for (const p of phpPatients) {
+        const dobParts = p.date_of_birth ? p.date_of_birth.split('-') : null;
+        const dob = dobParts && dobParts.length === 3
+          ? (dobParts[0].length <= 2 ? `${dobParts[2]}-${dobParts[1]}-${dobParts[0]}` : p.date_of_birth)
+          : null;
+        const isSelf      = p === selfP;
+        const patientIdRef = String(p.patient_id);
+
+        // Check if this ASMX patient is already stored (by patient_id_ref + client_id)
+        const [existing] = await db.query(
+          'SELECT patient_id FROM ip_patients WHERE client_id = ? AND patient_id_ref = ? LIMIT 1',
+          [dbUser.client_id, patientIdRef]
         );
-        await db.query(
-          `UPDATE ip_users SET user_name=?, user_email=?, user_date_modified=NOW() WHERE user_id=?`,
-          [selfP.name, selfP.email || null, dbUser.user_id]
-        );
-        await db.query(
-          `UPDATE ip_clients SET client_name=?, client_date_modified=NOW() WHERE client_id=?`,
-          [selfP.name, dbUser.client_id]
-        );
-        patient = { ...patient, patient_name: selfP.name, patient_gender: selfP.gender,
-                    patient_city: selfP.location, patient_relation: selfP.relation || 'Self' };
-        profileAutoFilled = true;
-        writeLog(`[verifyOtp] profile auto-filled from client server — mobile=${mobile} name=${selfP.name}`);
+
+        if (existing.length > 0) {
+          // Update the already-synced row
+          await db.query(
+            `UPDATE ip_patients
+             SET patient_name=?, patient_gender=?, patient_city=?, patient_address=?,
+                 patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
+                 health_conditions=?, patient_photo=?, updated_at=NOW()
+             WHERE patient_id=?`,
+            [p.name, p.gender || null, p.location || null, p.address || null,
+             p.email || null, dob, p.age || null, p.relation || (isSelf ? 'Self' : null),
+             p.health_condition || null, p.photo || null, existing[0].patient_id]
+          );
+        } else if (isSelf) {
+          // Update the primary patient row and stamp its patient_id_ref
+          await db.query(
+            `UPDATE ip_patients
+             SET patient_name=?, patient_gender=?, patient_city=?, patient_address=?,
+                 patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
+                 health_conditions=?, patient_photo=?, patient_id_ref=?, updated_at=NOW()
+             WHERE patient_id=?`,
+            [p.name, p.gender || null, p.location || null, p.address || null,
+             p.email || null, dob, p.age || null, p.relation || 'Self',
+             p.health_condition || null, p.photo || null, patientIdRef, patient.patient_id]
+          );
+          if (isNewUser) {
+            await db.query(
+              'UPDATE ip_users SET user_name=?, user_email=?, user_date_modified=NOW() WHERE user_id=?',
+              [p.name, p.email || null, dbUser.user_id]
+            );
+            await db.query(
+              'UPDATE ip_clients SET client_name=?, client_date_modified=NOW() WHERE client_id=?',
+              [p.name, dbUser.client_id]
+            );
+            patient = { ...patient, patient_name: p.name, patient_gender: p.gender,
+                        patient_city: p.location, patient_relation: p.relation || 'Self' };
+            profileAutoFilled = true;
+          }
+          writeLog(`[verifyOtp] self patient synced from ASMX — mobile=${mobile} name=${p.name}`);
+        } else {
+          // Insert new family member
+          await db.query(
+            `INSERT INTO ip_patients
+               (client_id, patient_name, patient_gender, patient_city, patient_address,
+                patient_email, patient_dob, patient_age, patient_relation,
+                health_conditions, patient_photo, patient_id_ref, patient_mobile, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'asmx_sync')`,
+            [dbUser.client_id, p.name, p.gender || null, p.location || null, p.address || null,
+             p.email || null, dob, p.age || null, p.relation || null,
+             p.health_condition || null, p.photo || null, patientIdRef, mobile]
+          );
+          writeLog(`[verifyOtp] family member inserted from ASMX — name=${p.name} ref=${patientIdRef}`);
+        }
       }
     }
 
@@ -524,23 +651,20 @@ exports.verifyOtp = async (req, res) => {
       { expiresIn: '30d' }
     );
 
-    // Single-active-session claim — atomic so two simultaneous logins for
-    // the same mobile can't both succeed (see the technician branch above
-    // for the identical pattern). The WHERE guard only lets this land when
-    // no other device currently holds an unexpired session.
-    const [claimResult] = await db.query(
+    // Session claim — unconditional. See the identical technician-branch
+    // claim above for the full reasoning: a real OTP already proved this
+    // request owns the number, so it always wins, and authMiddleware's own
+    // live comparison against this column (not just JWT signature
+    // validity) is what makes that overwrite the actual revocation of
+    // whatever token was here before — old device, or this device's own
+    // earlier login.
+    await db.query(
       `UPDATE ip_users
        SET user_auth_token = ?, user_token_expiry = ?, is_logged_in = 1, user_date_modified = NOW()
-       WHERE user_id = ?
-         AND (user_auth_token IS NULL OR user_token_expiry <= NOW())`,
+       WHERE user_id = ?`,
       [token, tokenExpiry, dbUser.user_id]
     );
-    if (claimResult.affectedRows === 0) {
-      return res.status(409).json({
-        success: false,
-        message: 'This number is already logged in on another device. Please log out from that device and try again.',
-      });
-    }
+    writeLog(`[verifyOtp] client_id=${dbUser.client_id} — new session claimed for mobile=${mobile}, any previous session on this number is now invalid`);
 
     return res.json({
       success: true,

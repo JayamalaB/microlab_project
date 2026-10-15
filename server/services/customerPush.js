@@ -2,6 +2,7 @@ const db            = require('../config/db');
 const { messaging } = require('../config/firebase');
 const fs            = require('fs');
 const path          = require('path');
+const dbLogger      = require('../utils/dbLogger');
 
 const CHANNEL_ID = 'booking_updates';
 const LOG_FILE   = path.join(__dirname, '..', 'logs', 'customer_push.log');
@@ -11,6 +12,7 @@ function writeLog(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(LOG_FILE, line, 'utf8');
+  dbLogger.logCustomerPushEvent(msg);
 }
 
 /**

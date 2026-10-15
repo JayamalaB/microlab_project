@@ -567,11 +567,11 @@ class _MemberCard extends StatelessWidget {
   }
 
   String get _initials {
-    final parts = member.name.trim().split(' ');
+    final parts = member.name.trim().split(' ').where((p) => p.isNotEmpty).toList();
     if (parts.length >= 2) {
       return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
     }
-    return member.name.isNotEmpty ? member.name[0].toUpperCase() : '?';
+    return parts.isNotEmpty ? parts[0][0].toUpperCase() : '?';
   }
 
   @override
@@ -675,21 +675,23 @@ class _MemberCard extends StatelessWidget {
                       Text(genderAge,
                           style: const TextStyle(
                               fontSize: 12, color: AppColors.textSecondary)),
-                      const SizedBox(height: 2),
-                      Row(
-                        children: [
-                          const Icon(Icons.location_on_outlined,
-                              size: 11, color: AppColors.textHint),
-                          const SizedBox(width: 2),
-                          Expanded(
-                            child: Text(member.location,
-                                style: const TextStyle(
-                                    fontSize: 12,
-                                    color: AppColors.textSecondary),
-                                overflow: TextOverflow.ellipsis),
-                          ),
-                        ],
-                      ),
+                      if (member.location.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            const Icon(Icons.location_on_outlined,
+                                size: 11, color: AppColors.textHint),
+                            const SizedBox(width: 2),
+                            Expanded(
+                              child: Text(member.location,
+                                  style: const TextStyle(
+                                      fontSize: 12,
+                                      color: AppColors.textSecondary),
+                                  overflow: TextOverflow.ellipsis),
+                            ),
+                          ],
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -869,10 +871,11 @@ class _MemberDetailSheet extends StatelessWidget {
               icon: Icons.phone_outlined,
               label: 'Mobile',
               value: '+91 ${member.mobile}'),
-          _DetailRow(
-              icon: Icons.wc_outlined,
-              label: 'Gender',
-              value: member.gender),
+          if (member.gender.isNotEmpty)
+            _DetailRow(
+                icon: Icons.wc_outlined,
+                label: 'Gender',
+                value: member.gender),
           if (member.dob != null)
             _DetailRow(
                 icon: Icons.cake_outlined,
@@ -884,14 +887,16 @@ class _MemberDetailSheet extends StatelessWidget {
                 icon: Icons.email_outlined,
                 label: 'Email',
                 value: member.email!),
-          _DetailRow(
-              icon: Icons.location_on_outlined,
-              label: 'Location',
-              value: member.location),
-          _DetailRow(
-              icon: Icons.home_outlined,
-              label: 'Address',
-              value: member.address),
+          if (member.location.isNotEmpty)
+            _DetailRow(
+                icon: Icons.location_on_outlined,
+                label: 'Location',
+                value: member.location),
+          if (member.address.isNotEmpty)
+            _DetailRow(
+                icon: Icons.home_outlined,
+                label: 'Address',
+                value: member.address),
           if (member.healthCondition != null &&
               member.healthCondition!.isNotEmpty)
             _DetailRow(

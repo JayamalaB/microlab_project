@@ -14,6 +14,11 @@ router.post('/family', auth, bookingController.createFamilyBooking);
 // GET /api/bookings/mine — all bookings for the logged-in user (JWT)
 router.get('/mine', auth, bookingController.getMyBookings);
 
+// GET /api/bookings/fare-quote — Home Collection Branch→Customer fare preview
+// (must stay above GET /:bookingId — otherwise "fare-quote" would be parsed
+// as a bookingId)
+router.get('/fare-quote', auth, bookingController.getHomeCollectionFareQuote);
+
 // GET /api/bookings/patient/:patientId — patient booking history
 router.get('/patient/:patientId', bookingController.getPatientBookings);
 
@@ -28,6 +33,10 @@ router.get('/:bookingId/results/:resultId/proxy', auth, bookingController.proxyR
 
 // POST /api/bookings/:bookingId/results/:resultId/released — admin notifies result released (fires FCM push)
 router.post('/:bookingId/results/:resultId/released', adminSecret, bookingController.releaseResult);
+
+// POST /api/bookings/report-status — ASMX client posts when a report is ready
+// Must be above /:bookingId routes so "report-status" is not parsed as a bookingId
+router.post('/report-status', adminSecret, bookingController.reportStatusWebhook);
 
 // GET  /api/bookings/:bookingId/items   — list booking test items
 router.get('/:bookingId/items',                    auth, bookingController.getItems);
@@ -55,6 +64,9 @@ router.post('/:bookingId/pay', auth, bookingController.payBooking);
 
 // PUT /api/bookings/:bookingId/items — replace tests/packages on an existing booking
 router.put('/:bookingId/items', auth, bookingController.updateBookingItems);
+
+// POST /api/bookings/:bookingId/self-edit — customer edits tests after booking (handles topup/refund)
+router.post('/:bookingId/self-edit', auth, bookingController.selfEditItems);
 
 // PUT /api/bookings/:bookingId/lab-status — update lab pipeline stage (lab-side only)
 router.put('/:bookingId/lab-status',    adminSecret, bookingController.updateLabStatus);

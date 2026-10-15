@@ -1,5 +1,12 @@
 import 'dart:typed_data';
 
+String toTitleCase(String s) => s
+    .trim()
+    .split(RegExp(r'\s+'))
+    .where((w) => w.isNotEmpty)
+    .map((w) => w[0].toUpperCase() + w.substring(1).toLowerCase())
+    .join(' ');
+
 // ─── Member Model ─────────────────────────────────────────────────────────────
 
 class MemberModel {
@@ -82,10 +89,10 @@ class PatientModel {
     return PatientModel(
       patientId:       (j['patient_id'] as num).toInt(),
       patientIdRef:    j['patient_id_ref']?.toString(),
-      name:            j['name'].toString(),
-      gender:          j['gender'].toString(),
-      location:        j['location'].toString(),
-      address:         j['address'].toString(),
+      name:            toTitleCase(j['name']?.toString() ?? ''),
+      gender:          j['gender']?.toString() ?? '',
+      location:        j['location']?.toString() ?? '',
+      address:         j['address']?.toString() ?? '',
       email:           j['email']?.toString(),
       dateOfBirth:     j['date_of_birth']?.toString(),
       age:             j['age']?.toString(),
@@ -251,7 +258,7 @@ class BookingModel {
   final double? patientLat;         // collection_latitude  — patient's home coordinates
   final double? patientLng;         // collection_longitude
   final double? refundAmount;
-  final String? refundStatus;       // 'pending' | 'processed' | 'none' | null
+  final String? refundStatus;       // null | 'initiated' | 'processed'
   final int rescheduleCount;
   final bool canReschedule;
 

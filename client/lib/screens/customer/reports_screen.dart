@@ -69,7 +69,8 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
       final raw = await ApiService.getMyBookings();
       final reportable = raw.where((b) =>
         b['report_url'] != null ||
-        ((b['released_results_count'] as num?) ?? 0) > 0
+        ((b['released_results_count'] as num?) ?? 0) > 0 ||
+        ((b['asmx_report_count'] as num?) ?? 0) > 0
       ).toList();
       final bookings = reportable.map(_fromApi).toList()
         ..sort((a, b) => b.date.compareTo(a.date));
@@ -396,7 +397,9 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
       final data = await ApiService.getBookingResults(id);
       if (mounted) {
         setState(() {
-          _results = data.where((r) => r['report_url'] != null).toList();
+          _results = data.where((r) =>
+            r['report_url'] != null || r['source'] == 'asmx'
+          ).toList();
           _resultsLoading = false;
         });
       }

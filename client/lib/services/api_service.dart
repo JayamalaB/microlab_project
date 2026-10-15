@@ -9,12 +9,26 @@ import 'package:microlab/constants/app_constants.dart';
 class ApiService {
   static const String baseUrl = AppConstants.serverUrl;
 
-  static Future<Map<String, dynamic>> sendOtp(String mobile, String role) async {
+  // forceLogout: set only after the user has explicitly confirmed, in
+  // response to "already logged in on another device", that they want to
+  // release that other session and continue. Must also be passed to
+  // whichever verify-otp call completes this same login attempt (see
+  // AuthService.verifyOtp, which is what OtpScreen actually calls) — this
+  // flag alone only gets the OTP sent, the real session claim happens there.
+  static Future<Map<String, dynamic>> sendOtp(
+    String mobile,
+    String role, {
+    bool forceLogout = false,
+  }) async {
     final res = await http
         .post(
           Uri.parse('$baseUrl/api/auth/send-otp'),
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'mobile': mobile, 'role': role}),
+          body: jsonEncode({
+            'mobile': mobile,
+            'role': role,
+            if (forceLogout) 'forceLogout': true,
+          }),
         )
         .timeout(const Duration(seconds: 15));
     return jsonDecode(res.body) as Map<String, dynamic>;
@@ -274,6 +288,40 @@ class ApiService {
       debugPrint('[lookupBranch] ERROR: $e');
     }
     return null;
+  }
+
+  // Pre-confirm Home Collection fare preview — mirrors exactly what
+  // POST /api/bookings itself independently (re)computes at booking-creation
+  // time (server/services/fareCalculator.js), so this is a preview of the
+  // same number, not a separate estimate. Returns the raw decoded response
+  // body ({success, fare: {...}} on success; {success: false, code,
+  // message} on a known fare-calculation failure) rather than just the fare
+  // amount, so the caller can show a specific message (e.g. "outside
+  // service area") instead of a generic failure.
+  static Future<Map<String, dynamic>> getHomeCollectionFareQuote({
+    required int branchId,
+    required double lat,
+    required double lng,
+  }) async {
+    final token = await getToken();
+    if (token == null) {
+      return {'success': false, 'code': 'NOT_AUTHENTICATED', 'message': 'Not logged in'};
+    }
+    try {
+      final uri = Uri.parse('$baseUrl/api/bookings/fare-quote').replace(queryParameters: {
+        'branchId': branchId.toString(),
+        'lat': lat.toString(),
+        'lng': lng.toString(),
+      });
+      final res = await http.get(
+        uri,
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[getHomeCollectionFareQuote] ERROR: $e');
+      return {'success': false, 'code': 'NETWORK_ERROR', 'message': 'Could not reach the server'};
+    }
   }
 
   static Future<String?> uploadFile(List<int> bytes, String fileName) async {
@@ -1112,6 +1160,27 @@ class ApiService {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  static Future<Map<String, dynamic>> selfEditBookingItems(
+    int bookingIdNum, {
+    required List<Map<String, dynamic>> items,
+    String? razorpayPaymentId,
+    bool payDiffLater = false,
+    double? topUpAmount,
+  }) async {
+    final token = await getToken();
+    if (token == null) throw Exception('Not authenticated');
+    final body = <String, dynamic>{'items': items};
+    if (razorpayPaymentId != null) body['razorpayPaymentId'] = razorpayPaymentId;
+    if (payDiffLater) body['payDiffLater'] = true;
+    if (topUpAmount != null) body['topUpAmount'] = topUpAmount;
+    final res = await http.post(
+      Uri.parse('$baseUrl/api/bookings/$bookingIdNum/self-edit'),
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode(body),
+    ).timeout(const Duration(seconds: 20));
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   static Future<Map<String, dynamic>> submitFeedback(
       int bookingIdNum, int rating, String comment) async {
     final token = await getToken();
@@ -1146,5 +1215,16 @@ class ApiService {
       )).toList();
     }
     return [];
+  }
+
+  static Future<Map<String, dynamic>?> getLetterhead() async {
+    try {
+      final res = await http
+          .get(Uri.parse('$baseUrl/api/letterhead'))
+          .timeout(const Duration(seconds: 10));
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      if (data['success'] == true) return data;
+    } catch (_) {}
+    return null;
   }
 }

@@ -4,7 +4,6 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -170,7 +169,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
 
     final member = MemberModel(
       id: b['patient_id']?.toString() ?? '0',
-      name: b['patient_name'] as String? ?? 'Patient',
+      name: toTitleCase(b['patient_name'] as String? ?? 'Patient'),
       mobile: b['patient_mobile'] as String? ?? '',
       gender: '',
       location: '',
@@ -1213,16 +1212,20 @@ class _BookingCard extends StatelessWidget {
                             if (booking.paymentType == 'service_charge')
                               Text('Due at collection: ₹${(booking.grandTotal - booking.paidAmount).toInt()}',
                                   style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                            if (booking.status == 'Cancelled' && (booking.refundAmount ?? 0) > 0)
+                            if ((booking.refundAmount ?? 0) > 0)
                               Text(
                                 booking.refundStatus == 'processed'
-                                    ? 'Refund of ₹${booking.refundAmount!.toInt()} initiated · 5–7 days'
-                                    : 'Refund of ₹${booking.refundAmount!.toInt()} pending',
+                                    ? 'Refund of ₹${booking.refundAmount!.toInt()} credited'
+                                    : booking.refundStatus == 'initiated'
+                                        ? 'Refund of ₹${booking.refundAmount!.toInt()} initiated · 5–7 days'
+                                        : 'Refund of ₹${booking.refundAmount!.toInt()} pending',
                                 style: TextStyle(
                                   fontSize: 11,
                                   color: booking.refundStatus == 'processed'
                                       ? AppColors.brandGreen
-                                      : const Color(0xFFE65100),
+                                      : booking.refundStatus == 'initiated'
+                                          ? AppColors.brandGreen
+                                          : const Color(0xFFE65100),
                                 ),
                               ),
                           ],
@@ -1322,7 +1325,7 @@ class _BookingCard extends StatelessWidget {
 
                     // Cancel button — only for pending/scheduled/confirmed/assigned, future dates,
                     // slot time not yet passed, and before technician starts collection
-                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated') &&
+                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated' || booking.status == 'Technician Arrived') &&
                         !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
                         !_slotHasPassed(booking) &&
                         !const {'collection_started', 'otp_verified', 'sample_collected',
@@ -1395,127 +1398,218 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
   StreamSubscription<bool>? _connectedSub;
 
   bool _billBusy = false;
+  Uint8List? _cachedBillBytes;
+  Map<String, dynamic>? _cachedLetterhead;
+
+  Future<Map<String, dynamic>> _fetchLetterhead() async {
+    _cachedLetterhead ??= await ApiService.getLetterhead();
+    return _cachedLetterhead ?? {};
+  }
+
+  Future<pw.ImageProvider?> _loadImageUrl(String? url) async {
+    if (url == null || url.isEmpty) return null;
+    try {
+      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
+      if (res.statusCode == 200) return pw.MemoryImage(res.bodyBytes);
+    } catch (_) {}
+    return null;
+  }
 
   Future<Uint8List> _generateBillPdf(BookingModel b) async {
     final font       = await PdfGoogleFonts.notoSansRegular();
     final fontBold   = await PdfGoogleFonts.notoSansBold();
     final fontItalic = await PdfGoogleFonts.notoSansItalic();
 
-    final logoData  = await rootBundle.load('assets/icon/MicroLab-Logo.jpeg');
-    final logoImage = pw.MemoryImage(logoData.buffer.asUint8List());
+    final lh = await _fetchLetterhead();
+
+    final barColor      = PdfColor.fromHex((lh['bar_color'] as String?)      ?? '#2E7D32');
+    final titleColor    = PdfColor.fromHex((lh['title_color'] as String?)    ?? '#387738');
+    final subtitleColor = PdfColor.fromHex((lh['subtitle_color'] as String?) ?? '#EF7C00');
+    final showTopBar    = lh['show_top_bar']    as bool? ?? true;
+    final showBottomBar = lh['show_bottom_bar'] as bool? ?? true;
+    final headerMode    = (lh['header_mode'] as String?) ?? 'fields';
+
+    final title       = (lh['title']       as String?) ?? 'Microbiological Laboratory';
+    final subtitle    = (lh['subtitle']    as String?) ?? '';
+    final infoLine    = (lh['info_line']   as String?) ?? '';
+    final addressLine = (lh['address_line'] as String?) ?? '';
+    final footerCompany   = (lh['footer_company']   as String?) ?? '';
+    final footerSignatory = (lh['footer_signatory'] as String?) ?? '';
+
+    // Load images
+    final bannerImage = headerMode == 'banner'
+        ? await _loadImageUrl(lh['banner_url'] as String?)
+        : null;
+    final logoImage  = await _loadImageUrl(lh['logo_url']  as String?);
+    final badgeImage = await _loadImageUrl(lh['badge_url'] as String?);
 
     final doc   = pw.Document();
-    final green = PdfColor.fromHex('#2E7D32');
-    final grey  = PdfColors.grey700;
+    final green = barColor;
 
     pw.TextStyle base({bool bold = false, bool italic = false, double size = 10, PdfColor? color}) =>
         pw.TextStyle(font: bold ? fontBold : (italic ? fontItalic : font), fontSize: size, color: color);
 
-    doc.addPage(pw.Page(
-      pageFormat: PdfPageFormat.a4,
-      margin: const pw.EdgeInsets.all(32),
-      build: (ctx) => pw.Column(
-        crossAxisAlignment: pw.CrossAxisAlignment.start,
-        children: [
-          // Header — matches printed letterhead
-          pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.center,
-            children: [
-              // Left: address block
-              pw.Expanded(
-                flex: 3,
-                child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                  pw.Text('# 12A, Cowley Brown Road(East), R.S.Puram Coimbatore-641002',
-                      style: base(size: 9)),
-                  pw.Text('Ph: 0422-2556628, 4354242', style: base(size: 9)),
-                  pw.SizedBox(height: 4),
-                  pw.Text('Web: www.microlabindia.com   E-mail: microlabcbe@microlabindia.com',
-                      style: base(bold: true, size: 8)),
-                ]),
-              ),
-              // Right: logo + name
-              pw.Expanded(
-                flex: 2,
-                child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
-                  pw.Image(logoImage, height: 90, fit: pw.BoxFit.contain),
-                ]),
-              ),
-            ],
-          ),
-          pw.Divider(thickness: 1.5, color: green),
-          // Receipt title + ref
-          pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-            pw.Text('BILL RECEIPT', style: base(bold: true, size: 13)),
-            pw.Text(b.id, style: base(size: 10, bold: true)),
-          ]),
-          pw.SizedBox(height: 8),
+    // Header widget
+    pw.Widget buildHeader() {
+      if (headerMode == 'banner' && bannerImage != null) {
+        return pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: pw.Image(bannerImage, fit: pw.BoxFit.contain),
+        );
+      }
+      // Fields mode: [logo?] center-text [badge?]
+      // Balancing spacers keep center text truly centered when only one side has an image.
+      const double imgSize = 56;
+      const double imgGap  = 8;
+      final bool hasLogo  = logoImage  != null;
+      final bool hasBadge = badgeImage != null;
 
-          // Booking info
-          pw.Table(
-            columnWidths: {
-              0: const pw.FixedColumnWidth(70),
-              1: const pw.FlexColumnWidth(),
-            },
-            children: [
-              _infoRow('Patient', b.member.name, base: base),
-              _infoRow('Mode',    b.mode,         base: base),
-              _infoRow('Date',    '${b.date.day}/${b.date.month}/${b.date.year}', base: base),
-              _infoRow('Slot',    b.timeSlot,     base: base),
-              if (b.address != null) _infoRow('Address', b.address!, base: base),
-            ],
-          ),
-          pw.SizedBox(height: 14),
-
-          // Tests table
-          pw.Text('Tests / Packages', style: base(bold: true, size: 11)),
-          pw.SizedBox(height: 6),
-          pw.Table(
-            border: pw.TableBorder.all(color: PdfColors.grey300),
-            columnWidths: {0: const pw.FlexColumnWidth(3), 1: const pw.FlexColumnWidth(1)},
-            children: [
-              pw.TableRow(
-                decoration: pw.BoxDecoration(color: PdfColor.fromHex('#E8F5E9')),
+      return pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: pw.Row(
+          crossAxisAlignment: pw.CrossAxisAlignment.center,
+          children: [
+            if (hasLogo) ...[
+              pw.Image(logoImage, width: imgSize, height: imgSize, fit: pw.BoxFit.contain),
+              pw.SizedBox(width: imgGap),
+            ] else if (hasBadge)
+              pw.SizedBox(width: imgSize + imgGap),
+            pw.Expanded(
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.center,
                 children: [
-                  pw.Padding(padding: const pw.EdgeInsets.all(6),
-                      child: pw.Text('Test / Package', style: base(bold: true))),
-                  pw.Padding(padding: const pw.EdgeInsets.all(6),
-                      child: pw.Text('Amount', style: base(bold: true), textAlign: pw.TextAlign.right)),
+                  if (title.isNotEmpty)
+                    pw.Text(title,
+                        style: base(bold: true, size: 13, color: titleColor),
+                        textAlign: pw.TextAlign.center),
+                  if (subtitle.isNotEmpty) ...[
+                    pw.SizedBox(height: 2),
+                    pw.Text(subtitle,
+                        style: base(size: 7, color: subtitleColor),
+                        textAlign: pw.TextAlign.center),
+                  ],
+                  if (infoLine.isNotEmpty) ...[
+                    pw.SizedBox(height: 3),
+                    pw.Text(infoLine,
+                        style: base(size: 7, color: PdfColors.grey700),
+                        textAlign: pw.TextAlign.center),
+                  ],
+                  if (addressLine.isNotEmpty) ...[
+                    pw.SizedBox(height: 2),
+                    pw.Text(addressLine,
+                        style: base(bold: true, size: 7),
+                        textAlign: pw.TextAlign.center),
+                  ],
                 ],
               ),
-              ...b.tests.map((t) => pw.TableRow(children: [
-                pw.Padding(padding: const pw.EdgeInsets.all(6),
-                    child: pw.Text(t.name, style: base())),
-                pw.Padding(padding: const pw.EdgeInsets.all(6),
-                    child: pw.Text('Rs.${t.finalPrice.toInt()}', style: base(), textAlign: pw.TextAlign.right)),
-              ])),
-            ],
-          ),
-          pw.SizedBox(height: 14),
+            ),
+            if (hasBadge) ...[
+              pw.SizedBox(width: imgGap),
+              pw.Image(badgeImage, width: imgSize, height: imgSize, fit: pw.BoxFit.contain),
+            ] else if (hasLogo)
+              pw.SizedBox(width: imgSize + imgGap),
+          ],
+        ),
+      );
+    }
 
-          // Payment summary
-          pw.Align(
-            alignment: pw.Alignment.centerRight,
-            child: pw.SizedBox(
-              width: 220,
-              child: pw.Column(children: [
-                _pdfSummaryRow('Tests Total', 'Rs.${b.testsTotal.toInt()}', base: base),
-                if (b.serviceCharge > 0)
-                  _pdfSummaryRow('Service Charge', 'Rs.${b.serviceCharge.toInt()}', base: base),
-                pw.Divider(thickness: 0.8),
-                _pdfSummaryRow('Grand Total', 'Rs.${b.grandTotal.toInt()}', bold: true, base: base),
-                _pdfSummaryRow('Paid', 'Rs.${b.paidAmount.toInt()}', color: green, base: base),
-                if (b.amountDue > 0)
-                  _pdfSummaryRow('Amount Due', 'Rs.${b.amountDue.toInt()}', color: PdfColors.orange800, base: base),
-              ]),
+    doc.addPage(pw.Page(
+      pageFormat: PdfPageFormat.a4,
+      margin: pw.EdgeInsets.zero,
+      build: (ctx) => pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+        children: [
+          if (showTopBar) pw.Container(height: 10, color: green),
+
+          buildHeader(),
+
+          // ── White content area ────────────────────────────────────────────
+          pw.Expanded(
+            child: pw.Padding(
+              padding: const pw.EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+              child: pw.Column(
+                crossAxisAlignment: pw.CrossAxisAlignment.start,
+                children: [
+                  pw.Center(child: pw.Text('RECEIPT', style: base(bold: true, size: 14))),
+                  pw.SizedBox(height: 14),
+
+                  pw.Table(
+                    columnWidths: {
+                      0: const pw.FixedColumnWidth(70),
+                      1: const pw.FlexColumnWidth(),
+                    },
+                    children: [
+                      _infoRow('Patient', b.member.name, base: base),
+                      _infoRow('Mode',    b.mode,         base: base),
+                      _infoRow('Date',    '${b.date.day}/${b.date.month}/${b.date.year}', base: base),
+                      _infoRow('Slot',    b.timeSlot,     base: base),
+                      if (b.address != null) _infoRow('Address', b.address!, base: base),
+                    ],
+                  ),
+                  pw.SizedBox(height: 14),
+
+                  pw.Text('Tests / Packages', style: base(bold: true, size: 11)),
+                  pw.SizedBox(height: 6),
+                  pw.Table(
+                    border: pw.TableBorder.all(color: PdfColors.grey300),
+                    columnWidths: {0: const pw.FlexColumnWidth(3), 1: const pw.FlexColumnWidth(1)},
+                    children: [
+                      pw.TableRow(
+                        decoration: pw.BoxDecoration(color: PdfColor.fromHex('#E8F5E9')),
+                        children: [
+                          pw.Padding(padding: const pw.EdgeInsets.all(6),
+                              child: pw.Text('Test / Package', style: base(bold: true))),
+                          pw.Padding(padding: const pw.EdgeInsets.all(6),
+                              child: pw.Text('Amount', style: base(bold: true), textAlign: pw.TextAlign.right)),
+                        ],
+                      ),
+                      ...b.tests.map((t) => pw.TableRow(children: [
+                        pw.Padding(padding: const pw.EdgeInsets.all(6),
+                            child: pw.Text(t.name, style: base())),
+                        pw.Padding(padding: const pw.EdgeInsets.all(6),
+                            child: pw.Text('Rs.${t.finalPrice.toInt()}', style: base(), textAlign: pw.TextAlign.right)),
+                      ])),
+                    ],
+                  ),
+                  pw.SizedBox(height: 14),
+
+                  pw.Align(
+                    alignment: pw.Alignment.centerRight,
+                    child: pw.SizedBox(
+                      width: 220,
+                      child: pw.Column(children: [
+                        _pdfSummaryRow('Tests Total', 'Rs.${b.testsTotal.toInt()}', base: base),
+                        if (b.serviceCharge > 0)
+                          _pdfSummaryRow('Service Charge', 'Rs.${b.serviceCharge.toInt()}', base: base),
+                        pw.Divider(thickness: 0.8),
+                        _pdfSummaryRow('Grand Total', 'Rs.${b.grandTotal.toInt()}', bold: true, base: base),
+                        _pdfSummaryRow('Paid', 'Rs.${b.paidAmount.toInt()}', color: green, base: base),
+                        if (b.amountDue > 0)
+                          _pdfSummaryRow('Amount Due', 'Rs.${b.amountDue.toInt()}', color: PdfColors.orange800, base: base),
+                      ]),
+                    ),
+                  ),
+
+                  pw.Spacer(),
+
+                  if (footerCompany.isNotEmpty || footerSignatory.isNotEmpty)
+                    pw.Align(
+                      alignment: pw.Alignment.centerRight,
+                      child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
+                        if (footerCompany.isNotEmpty)
+                          pw.Text(footerCompany, style: base(size: 9)),
+                        pw.SizedBox(height: 24),
+                        if (footerSignatory.isNotEmpty)
+                          pw.Text(footerSignatory, style: base(size: 9)),
+                      ]),
+                    ),
+                  pw.SizedBox(height: 12),
+                ],
+              ),
             ),
           ),
 
-          pw.Spacer(),
-          pw.Divider(color: PdfColors.grey300),
-          pw.Center(
-            child: pw.Text('Thank you for choosing Microbiological Laboratory',
-                style: base(italic: true, size: 9, color: grey)),
-          ),
+          if (showBottomBar) pw.Container(height: 10, color: green),
         ],
       ),
     ));
@@ -1547,15 +1641,18 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     if (_billBusy) return;
     setState(() => _billBusy = true);
     try {
-      final bytes = await _generateBillPdf(widget.booking);
+      final bytes    = await _generateBillPdf(widget.booking);
       final filename = 'Bill_${widget.booking.id}.pdf';
       if (kIsWeb) {
         await Printing.sharePdf(bytes: bytes, filename: filename);
       } else {
-        final dir  = await getApplicationDocumentsDirectory();
+        final dir  = await getTemporaryDirectory();
         final file = File('${dir.path}/$filename');
         await file.writeAsBytes(bytes);
-        await OpenFilex.open(file.path);
+        final result = await OpenFilex.open(file.path, type: 'application/pdf');
+        if (result.type != ResultType.done && mounted) {
+          await Printing.sharePdf(bytes: bytes, filename: filename);
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1563,6 +1660,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
           content: Text('Could not download bill: $e'),
           backgroundColor: Colors.red.shade700,
           behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 6),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ));
       }
@@ -1575,7 +1673,9 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     if (_billBusy) return;
     setState(() => _billBusy = true);
     try {
-      final bytes    = await _generateBillPdf(widget.booking);
+      final bytes    = kIsWeb
+          ? (_cachedBillBytes ?? await _generateBillPdf(widget.booking))
+          : await _generateBillPdf(widget.booking);
       final filename = 'Bill_${widget.booking.id}.pdf';
       await Share.shareXFiles(
         [XFile.fromData(bytes, mimeType: 'application/pdf', name: filename)],
@@ -1612,6 +1712,13 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     _arrivedSub   = SocketService.instance.onTechnicianArrived.listen((_) => _refreshTechStatus());
     _collectedSub = SocketService.instance.onCollectionCompleted.listen((_) => _refreshTechStatus());
     _connectedSub = SocketService.instance.onConnected.listen((_) => _refreshTechStatus());
+    if (kIsWeb) {
+      _fetchLetterhead().then((_) {
+        _generateBillPdf(widget.booking)
+            .then((b) { if (mounted) setState(() => _cachedBillBytes = b); })
+            .catchError((_) {});
+      }).catchError((_) {});
+    }
   }
 
   @override
@@ -1683,13 +1790,13 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
   BookingModel get b => widget.booking;
 
   bool get _canEditTests {
-    if (b.paymentStatus == 'paid') return false;
     const blocked = {
       'en_route', 'arrived', 'collection_started', 'sample_collected',
       'handed_to_lab', 'handed_to_lab_pending',
     };
     if (b.collectionStatus != null && blocked.contains(b.collectionStatus)) return false;
-    return b.status == 'Pending' || b.status == 'Confirmed' || b.status == 'Scheduled';
+    return b.status == 'Pending' || b.status == 'Confirmed' || b.status == 'Scheduled' ||
+        b.status == 'Technician Allocated';
   }
 
   String _formatDate(DateTime d) {
@@ -1699,6 +1806,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
   }
 
   bool get _paymentPending => b.status != 'Cancelled' && b.paymentStatus != 'paid' && b.grandTotal > 0;
+  bool get _hasDueOnPaidBooking => b.status != 'Cancelled' && b.paymentStatus == 'paid' && b.amountDue > 0.5;
   bool get _prescriptionBlocking =>
       b.prescriptionImages.isNotEmpty && b.prescriptionStatus != 'verified';
 
@@ -1709,7 +1817,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
 
     openRazorpay(
       options: {
-        'key':         'rzp_test_SonqjjPurqlLci',
+        'key':         AppConstants.razorpayKeyId,
         'amount':      (amount * 100).toInt(),
         'name':        'MicroLab',
         'description': b.tests.map((t) => t.name).join(', '),
@@ -1974,6 +2082,21 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                         _DetailRow(Icons.pending_outlined,
                             b.mode == 'Home Collection' ? 'Due at Collection' : 'Due at Lab',
                             '₹${b.amountDue.toInt()}', valueColor: const Color(0xFFE65100)),
+                      if ((b.refundAmount ?? 0) > 0)
+                        _DetailRow(
+                          Icons.currency_rupee_rounded,
+                          'Refund',
+                          b.refundStatus == 'processed'
+                              ? '₹${b.refundAmount!.toInt()} credited'
+                              : b.refundStatus == 'initiated'
+                                  ? '₹${b.refundAmount!.toInt()} initiated · 5–7 days'
+                                  : '₹${b.refundAmount!.toInt()} pending',
+                          valueColor: b.refundStatus == 'processed'
+                              ? AppColors.brandGreen
+                              : b.refundStatus == 'initiated'
+                                  ? AppColors.brandGreen
+                                  : const Color(0xFFE65100),
+                        ),
                     ],
                   ),
 
@@ -2110,6 +2233,37 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                                 const SizedBox(width: 8),
                                 Text(
                                   'Pay ₹${(b.amountDue > 0 ? b.amountDue : b.grandTotal).toInt()} via Razorpay',
+                                  style: const TextStyle(fontSize: 14,
+                                      fontWeight: FontWeight.w600, color: Colors.white),
+                                ),
+                              ]),
+                      ),
+                    ),
+                  ],
+
+                  // Pay Due button — shown when booking is paid but has an outstanding due amount
+                  // (e.g. user added tests and chose "Pay Later")
+                  if (_hasDueOnPaidBooking) ...[
+                    const SizedBox(height: 20),
+                    GestureDetector(
+                      onTap: _isProcessing ? null : _triggerPayment,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        decoration: BoxDecoration(
+                          color: _isProcessing
+                              ? AppColors.brandGreen.withValues(alpha: 0.5)
+                              : const Color(0xFF1565C0),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: _isProcessing
+                            ? const Center(child: SizedBox(width: 20, height: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white))))
+                            : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                const Icon(Icons.payment_outlined, size: 18, color: Colors.white),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Pay Due ₹${b.amountDue.toInt()} via Razorpay',
                                   style: const TextStyle(fontSize: 14,
                                       fontWeight: FontWeight.w600, color: Colors.white),
                                 ),
@@ -2808,6 +2962,7 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
   @override
   void dispose() {
     _searchCtrl.dispose();
+    clearRazorpay();
     super.dispose();
   }
 
@@ -2937,42 +3092,163 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
     ));
   }
 
+  double get _diffAmount {
+    final newItemsTotal = _allTests
+        .where((t) => _selectedIds.contains(t.id))
+        .fold(0.0, (s, t) => s + t.finalPrice);
+    return newItemsTotal - (widget.booking.testsTotal > 0 ? widget.booking.testsTotal : _itemsTotal);
+  }
+
+  bool get _isPaid => widget.booking.paymentStatus == 'paid';
+
+  // When paying now on a paid booking, charge enough to clear ALL outstanding (including
+  // any prior amount_due), not just the delta in items. This prevents a leftover due after payment.
+  double get _topUpAmount {
+    if (!_isPaid || _diffAmount <= 0.5) return _diffAmount;
+    final newTotal = widget.booking.grandTotal + _diffAmount;
+    return (newTotal - widget.booking.paidAmount).clamp(0.0, double.infinity);
+  }
+
+  // True only when removing tests causes an actual overpayment (mirrors server logic).
+  // If amount_due > 0, the removed test was unpaid — just reduces due, no refund.
+  bool get _removalCausesRefund =>
+      _diffAmount < -0.5 &&
+      _isPaid &&
+      widget.booking.paidAmount > (widget.booking.grandTotal + _diffAmount);
+
+  // Actual refund = overpayment only, capped at what was paid.
+  // e.g. paid=168, newTotal=124 → refund=44 (not the full 799 diff).
+  double get _refundAmount {
+    final newTotal = widget.booking.grandTotal + _diffAmount;
+    return (widget.booking.paidAmount - newTotal).clamp(0.0, widget.booking.paidAmount);
+  }
+
   Future<void> _save() async {
     if (_selectedIds.isEmpty || _saving || widget.booking.bookingIdNum == null) return;
+
+    final selectedTests = _allTests.where((t) => _selectedIds.contains(t.id)).toList();
+    final items = selectedTests.map((t) => {
+      'packageId':  int.tryParse(t.id) ?? 0,
+      'finalPrice': t.finalPrice,
+    }).toList();
+
+    // Additions on paid booking → let user choose pay now or pay later
+    if (_diffAmount > 0.5 && _isPaid) {
+      // _topUpAmount clears ALL outstanding (prior due + new additions), not just the delta.
+      final topUp = _topUpAmount;
+      final topUpStr = topUp.toStringAsFixed(0);
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (_) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Additional Amount', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          content: Text(
+            'Your updated tests require ₹$topUpStr more. How would you like to pay?',
+            style: const TextStyle(fontSize: 14, height: 1.5),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, null),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'later'),
+              child: const Text('Pay Later', style: TextStyle(color: AppColors.textSecondary)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'now'),
+              child: Text('Pay ₹$topUpStr Now',
+                  style: const TextStyle(color: AppColors.brandGreen, fontWeight: FontWeight.w700)),
+            ),
+          ],
+        ),
+      );
+      if (choice == null || !mounted) return;
+      if (choice == 'now') {
+        setState(() => _saving = true);
+        openRazorpay(
+          options: {
+            'key':         AppConstants.razorpayKeyId,
+            'amount':      (topUp * 100).round(),
+            'name':        'MicroLab',
+            'description': 'Top-up for added tests',
+            'prefill':     {'contact': widget.booking.member.mobile},
+            'theme':       {'color': '#0A5C4A'},
+          },
+          onSuccess: (paymentId) => _doSelfEdit(items, razorpayPaymentId: paymentId, topUpAmount: topUp),
+          onError: (msg) {
+            if (mounted) setState(() => _saving = false);
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Payment failed: $msg'),
+              backgroundColor: Colors.red[700],
+              behavior: SnackBarBehavior.floating,
+            ));
+          },
+        );
+        return;
+      }
+      // choice == 'later': pay at collection
+      await _doSelfEdit(items, payDiffLater: true);
+      return;
+    }
+
+    // Removals on paid booking → confirm refund dialog only if actually overpaid
+    if (_removalCausesRefund) {
+      final refundAmt = _refundAmount.toInt();
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Confirm Changes',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          content: Text(
+            'Tests will be updated and ₹$refundAmt will be refunded to your original payment method within 5–7 business days.',
+            style: const TextStyle(fontSize: 14, height: 1.5),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false),
+                child: const Text('Back', style: TextStyle(color: AppColors.textSecondary))),
+            TextButton(onPressed: () => Navigator.pop(context, true),
+                child: const Text('Confirm',
+                    style: TextStyle(color: AppColors.brandGreen, fontWeight: FontWeight.w700))),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
+
+    await _doSelfEdit(items);
+  }
+
+  Future<void> _doSelfEdit(List<Map<String, dynamic>> items,
+      {String? razorpayPaymentId, bool payDiffLater = false, double? topUpAmount}) async {
+    if (!mounted) return;
     setState(() => _saving = true);
     try {
-      final selectedTests = _allTests.where((t) => _selectedIds.contains(t.id)).toList();
-      final items = selectedTests.map((t) => {
-        'packageId':     t.id,
-        'originalPrice': t.originalPrice,
-        'finalPrice':    t.finalPrice,
-      }).toList();
-      final result = await ApiService.updateBookingItems(
-        bookingId:     widget.booking.bookingIdNum!,
-        items:         items,
-        serviceCharge: _serviceCharge,
+      final result = await ApiService.selfEditBookingItems(
+        widget.booking.bookingIdNum!,
+        items: items,
+        razorpayPaymentId: razorpayPaymentId,
+        payDiffLater: payDiffLater,
+        topUpAmount: topUpAmount,
       );
       if (!mounted) return;
-      if (result != null && result['success'] == true) {
-        // Upload any collected prescriptions (non-fatal if it fails)
+      if (result['success'] == true) {
+        // Upload any collected prescriptions (non-fatal)
         if (_prescriptions.isNotEmpty) {
           try {
-            final rawIds = result['docRequiredItemIds'];
-            final bookingItemId = (rawIds is List && rawIds.isNotEmpty)
-                ? rawIds[0] as int?
-                : null;
             final urls = <String>[];
             for (final bytes in _prescriptions) {
               final url = await ApiService.uploadFile(
                   bytes, 'pres_${DateTime.now().millisecondsSinceEpoch}.jpg');
               if (url != null) urls.add(url);
             }
-            if (urls.isNotEmpty) {
+            if (urls.isNotEmpty && mounted) {
               await ApiService.savePrescription(
-                bookingId:     widget.booking.bookingIdNum!,
-                patientId:     int.tryParse(widget.booking.member.id) ?? 0,
-                bookingItemId: bookingItemId,
-                imageUrls:     urls,
+                bookingId:    widget.booking.bookingIdNum!,
+                patientId:    int.tryParse(widget.booking.member.id) ?? 0,
+                bookingItemId: null,
+                imageUrls:    urls,
               );
             }
           } catch (_) {}
@@ -2980,10 +3256,16 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
         if (!mounted) return;
         Navigator.pop(context);
         widget.onSaved();
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(result['message'] as String? ?? 'Tests updated'),
+          backgroundColor: AppColors.brandGreen,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
       } else {
         setState(() => _saving = false);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(result?['message'] as String? ?? 'Failed to update booking'),
+          content: Text(result['message'] as String? ?? 'Failed to update booking'),
           backgroundColor: Colors.red[700],
           behavior: SnackBarBehavior.floating,
         ));
@@ -3259,7 +3541,9 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                     (_needsPrescription && _prescriptions.isEmpty)
                     ? null : _save,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.brandGreen,
+                  backgroundColor: _diffAmount > 0.5
+                      ? const Color(0xFF1565C0)
+                      : AppColors.brandGreen,
                   disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
                   elevation: 0,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -3275,7 +3559,11 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                             ? 'Select at least one test'
                             : (_needsPrescription && _prescriptions.isEmpty)
                                 ? 'Upload prescription to continue'
-                                : 'Update Booking · ₹${_total.toInt()}',
+                                : _diffAmount > 0.5 && _isPaid
+                                    ? 'Pay ₹${_topUpAmount.toInt()} & Confirm'
+                                    : _removalCausesRefund
+                                        ? 'Confirm & Get ₹${_refundAmount.toInt()} Refund'
+                                        : 'Update Booking · ₹${_total.toInt()}',
                         style: const TextStyle(
                             color: Colors.white,
                             fontSize: 15,
