@@ -884,7 +884,7 @@ exports.verifyOtp = async (req, res) => {
     return res.json({
       success: true,
       message: 'Login successful',
-      data: { token, user: patient, patients: phpPatients, is_new_user: isNewUser && !profileAutoFilled },
+      data: { token, user: patient, patients: phpPatients, is_new_user: isNewUser && !profileAutoFilled, ip_user_id: dbUser.user_id },
     });
 
   } catch (err) {

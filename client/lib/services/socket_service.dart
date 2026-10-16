@@ -301,6 +301,7 @@ class SocketService {
 
   // ── Identity ───────────────────────────────────────────────────────────────
   int    userId   = 0;
+  int    ipUserId = 0; // ip_users.user_id — used only for force_logout socket lookup
   String userRole = ''; // 'technician' | 'customer' | 'driver'
   int?   sessionId;
   String userName   = '';
@@ -442,6 +443,7 @@ class SocketService {
     required String name,
     int?    sessionId,
     int?    branchId,
+    int     ipUserId = 0,
     double? lat,
     double? lng,
   }) {
@@ -451,6 +453,7 @@ class SocketService {
     }
 
     this.userId    = userId;
+    this.ipUserId  = ipUserId;
     userRole       = role;
     this.sessionId = sessionId;
     userName       = name;
@@ -461,7 +464,7 @@ class SocketService {
       io.OptionBuilder()
           .setTransports(['websocket'])
           .disableAutoConnect()
-          .setQuery({'userId': userId.toString()})
+          .setQuery({'userId': ipUserId.toString()})
           // No attempt limit — socket.io will keep retrying forever.
           // Delay starts at 2 s and doubles per attempt, capped at 10 s so the
           // technician reconnects quickly after a brief outage (tunnel, elevator).
@@ -969,6 +972,7 @@ class SocketService {
     _driverLng       = null;
     // Reset identity so the next technician's connect() always writes fresh credentials.
     userId           = 0;
+    ipUserId         = 0;
     userName         = '';
     userRole         = '';
     sessionId        = null;

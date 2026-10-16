@@ -89,18 +89,19 @@ class _SplashScreenState extends State<SplashScreen>
     Widget destination;
 
     if (token.isNotEmpty && role.isNotEmpty && mobile.isNotEmpty) {
-      final userId = prefs.getInt('user_id') ?? 0;
-      final name   = prefs.getString('user_name') ?? mobile;
+      final userId    = prefs.getInt('user_id')    ?? 0;
+      final ipUserId  = prefs.getInt('ip_user_id') ?? 0;
+      final name      = prefs.getString('user_name') ?? mobile;
 
       if (role == 'technician') {
         final branchId = prefs.getInt('branch_id') ?? 0;
         SocketService.instance.connect(
-          userId: userId, role: 'technician', name: name, branchId: branchId,
+          userId: userId, role: 'technician', name: name, branchId: branchId, ipUserId: ipUserId,
         );
         destination = TechnicianDashboardScreen(mobile: mobile);
       } else {
         SocketService.instance.connect(
-          userId: userId, role: 'customer', name: name, branchId: null,
+          userId: userId, role: 'customer', name: name, branchId: null, ipUserId: ipUserId,
         );
         destination = CustomerHomeScreen(mobile: mobile, isVip: false);
       }

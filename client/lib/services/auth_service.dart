@@ -86,6 +86,7 @@ class AuthService {
 
     if (role == 'technician') {
       await prefs.setInt('user_id',          user['technician_id']  as int?    ?? 0);
+      await prefs.setInt('ip_user_id',       user['user_id']        as int?    ?? 0);
       await prefs.setString('user_name',     user['user_name']      as String? ?? mobile);
       await prefs.setString('user_email',    user['user_email']     as String? ?? '');
       await prefs.setInt('branch_id',        user['branch_id']      as int?    ?? 0);
@@ -95,6 +96,7 @@ class AuthService {
       await prefs.setString('tech_photo',      user['tech_photo']      as String? ?? '');
     } else {
       await prefs.setInt('user_id',    user['patient_id']    as int?    ?? 0);
+      await prefs.setInt('ip_user_id', data['ip_user_id']   as int?    ?? 0);
       await prefs.setString('user_name', user['patient_name'] as String? ?? mobile);
     }
   }

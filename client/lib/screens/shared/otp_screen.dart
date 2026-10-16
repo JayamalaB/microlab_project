@@ -175,16 +175,18 @@ class _OtpScreenState extends State<OtpScreen> {
     final user = data['user']  as Map<String, dynamic>? ?? {};
 
     if (widget.userRole == 'technician') {
-      final techId   = user['technician_id'] as int? ?? 0;
-      final branchId = user['branch_id']     as int? ?? 0;
-      final name     = user['user_name']     as String? ?? widget.mobile;
-      _connectSocket(techId, branchId, name);
+      final techId    = user['technician_id'] as int? ?? 0;
+      final branchId  = user['branch_id']     as int? ?? 0;
+      final name      = user['user_name']     as String? ?? widget.mobile;
+      final ipUserId  = user['user_id']       as int? ?? 0;
+      _connectSocket(techId, branchId, name, ipUserId: ipUserId);
       _navigateTechnician();
     } else {
-      final patientId = user['patient_id'] as int? ?? 0;
+      final patientId = user['patient_id']  as int? ?? 0;
       final name      = user['patient_name'] as String? ?? widget.mobile;
-      final isNewUser = data['is_new_user'] as bool? ?? false;
-      _connectSocket(patientId, null, name);
+      final isNewUser = data['is_new_user']  as bool? ?? false;
+      final ipUserId  = data['ip_user_id']   as int? ?? 0;
+      _connectSocket(patientId, null, name, ipUserId: ipUserId);
       NotificationService.instance.loadCustomerToken();
       if (isNewUser) {
         _navigateCompleteProfile(patientId);
@@ -194,12 +196,13 @@ class _OtpScreenState extends State<OtpScreen> {
     }
   }
 
-  void _connectSocket(int userId, int? branchId, String name) {
+  void _connectSocket(int userId, int? branchId, String name, {int ipUserId = 0}) {
     SocketService.instance.connect(
       userId:   userId,
       role:     widget.userRole == 'technician' ? 'technician' : 'customer',
       name:     name,
       branchId: branchId,
+      ipUserId: ipUserId,
     );
   }
 
