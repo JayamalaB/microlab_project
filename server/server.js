@@ -37,6 +37,10 @@ require('./scheduler/logRetentionSweep')();
 
 app.use(cors());
 
+// Error replies never carry internal details (DB messages, SQL, error codes)
+// and 5xx replies get a plain-language message — see the middleware.
+app.use(require('./middleware/safeErrorResponse'));
+
 // Razorpay webhook — must be registered BEFORE express.json() so the route
 // can receive the raw Buffer needed for HMAC-SHA256 signature verification.
 app.use('/api/razorpay/webhook', require('./routes/razorpayWebhook'));

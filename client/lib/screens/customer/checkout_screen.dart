@@ -5,9 +5,11 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/package_pager.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/utils/app_messages.dart';
 import 'my_bookings_screen.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
@@ -138,8 +140,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   // ── Family members (Home Collection only) ─────────────────
   final List<_FamilyMember> _familyMembers = [];
-  List<TestModel> _allTests = [];
-  bool _loadingAllTests = false;
 
   // ── VIP: selected technician ─────────────────────────────
   TechnicianModel? _selectedTechnician;
@@ -255,7 +255,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     } else {
       setState(() {
         _fareLoading      = false;
-        _fareErrorMessage = body['message'] as String? ?? 'Could not calculate Home Collection charge';
+        _fareErrorMessage = AppMessages.serverMessage(body['message'],
+            fallback: 'We couldn\'t calculate the Home Collection charge. Tap to try again.');
       });
     }
   }
@@ -383,20 +384,22 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           }
         } else {
           debugPrint('   ⚠️  API returned success=false: ${body['message']}');
-          setState(() { _loadingSlots = false; _slotsError = body['message'] as String? ?? 'Could not load slots.'; });
+          setState(() { _loadingSlots = false; _slotsError = AppMessages.serverMessage(body['message'], fallback: _slotsLoadFailed); });
         }
       } else {
         final body = jsonDecode(res.body) as Map<String, dynamic>;
         debugPrint('   ❌ HTTP ${res.statusCode}: ${body['message']}');
-        setState(() { _loadingSlots = false; _slotsError = body['message'] as String? ?? 'Could not load slots.'; });
+        setState(() { _loadingSlots = false; _slotsError = AppMessages.serverMessage(body['message'], fallback: _slotsLoadFailed); });
       }
     } catch (e) {
       debugPrint('   ❌ exception : $e');
       if (!mounted) return;
-      setState(() { _loadingSlots = false; _slotsError = 'Could not reach server. Check your connection.'; });
+      setState(() { _loadingSlots = false; _slotsError = AppMessages.friendlyError(e); });
     }
     debugPrint('────────────────────────────────────────────────────\n');
   }
+
+  static const String _slotsLoadFailed = 'We couldn\'t load the available slots. Please try again.';
 
   // ── Slot section body ─────────────────────────────────────
   Widget _buildSlotBody() {
@@ -555,15 +558,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     setState(() => _prescriptions.removeAt(index));
   }
 
-  // ── Family: load tests + open add-member sheet ────────────
+  // ── Family: open add-member sheet (it loads tests page by page itself) ──
   Future<void> _showAddMemberSheet() async {
-    if (_allTests.isEmpty && !_loadingAllTests) {
-      setState(() => _loadingAllTests = true);
-      final tests = await ApiService.getPackages();
-      if (!mounted) return;
-      setState(() { _allTests = tests; _loadingAllTests = false; });
-    }
-    if (!mounted) return;
     final excludedIds = {widget.patientId, ..._familyMembers.map((m) => m.patient.patientId)};
     await showModalBottomSheet(
       context: context,
@@ -572,7 +568,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       builder: (_) => _AddMemberSheet(
         primaryPatientId:  widget.patientId,
         excludedPatientIds: excludedIds,
-        allTests: _allTests,
         onAdd: (m) => setState(() => _familyMembers.add(m)),
       ),
     );
@@ -628,12 +623,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     setState(() => _isProcessing = false);
 
     if (result == null || result['success'] != true) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(result?['message'] as String? ?? 'Booking failed. Please try again.'),
-        backgroundColor: Colors.red[700],
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.error(context, AppMessages.serverMessage(result?['message'],
+          fallback: 'We couldn\'t complete your booking. Please try again.'));
       return;
     }
 
@@ -883,7 +874,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       debugPrint('📥 [CHECKOUT] Response ${res.statusCode}: ${res.body}');
 
       if (res.statusCode != 201) {
-        throw Exception('Server returned ${res.statusCode}');
+        // Show the server's reason (e.g. outside the service area) when it
+        // is a plain message; otherwise a general one.
+        Object? serverMsg;
+        try { serverMsg = (jsonDecode(res.body) as Map<String, dynamic>)['message']; } catch (_) {}
+        if (!mounted) return;
+        setState(() => _isProcessing = false);
+        AppMessages.error(context, AppMessages.serverMessage(serverMsg,
+            fallback: 'We couldn\'t complete your booking. Please try again.'));
+        return;
       }
 
       final data = jsonDecode(res.body) as Map<String, dynamic>;
@@ -904,11 +903,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       debugPrint('❌ [CHECKOUT] API call failed: $e');
       if (!mounted) return;
       setState(() => _isProcessing = false);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Booking failed: $e'),
-        backgroundColor: Colors.red[700],
-        behavior: SnackBarBehavior.floating,
-      ));
+      AppMessages.error(context, 'We couldn\'t complete your booking. ${AppMessages.friendlyError(e)}');
       return;
     }
 
@@ -1516,10 +1511,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton.icon(
-                      onPressed: _loadingAllTests ? null : _showAddMemberSheet,
-                      icon: _loadingAllTests
-                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
-                          : const Icon(Icons.person_add_outlined, size: 16),
+                      onPressed: _showAddMemberSheet,
+                      icon: const Icon(Icons.person_add_outlined, size: 16),
                       label: const Text('Add Family Member'),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: AppColors.brandGreen,
@@ -2612,13 +2605,11 @@ class _FamilyMemberTile extends StatelessWidget {
 class _AddMemberSheet extends StatefulWidget {
   final int primaryPatientId;
   final Set<int> excludedPatientIds;
-  final List<TestModel> allTests;
   final void Function(_FamilyMember) onAdd;
 
   const _AddMemberSheet({
     required this.primaryPatientId,
     required this.excludedPatientIds,
-    required this.allTests,
     required this.onAdd,
   });
 
@@ -2630,8 +2621,15 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   bool _loadingPatients = true;
   List<PatientModel> _patients = [];
   PatientModel? _selected;
-  final Set<String> _selectedTestIds = {};
+  // Selected tests by id. Kept apart from the loaded page, so a test picked
+  // before a new search is still counted in the total and the booking.
+  final Map<String, TestModel> _selectedTests = {};
+  Iterable<String> get _selectedTestIds => _selectedTests.keys;
   int _step = 0; // 0 = pick patient, 1 = pick tests, 2 = upload prescription
+
+  // Tests load one page at a time, searched on the server.
+  final PackagePager _pager = PackagePager();
+  final TextEditingController _testSearchCtrl = TextEditingController();
 
   final List<Uint8List> _prescriptionBytes = [];
   bool _isPicking = false;
@@ -2641,6 +2639,21 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   void initState() {
     super.initState();
     _loadPatients();
+    _pager.addListener(_onPagerChanged);
+    _pager.refresh();
+    _testSearchCtrl.addListener(() => _pager.setSearch(_testSearchCtrl.text));
+  }
+
+  void _onPagerChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _pager.removeListener(_onPagerChanged);
+    _pager.dispose();
+    _testSearchCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _loadPatients() async {
@@ -2656,10 +2669,10 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   }
 
   double get _selectedTotal =>
-    widget.allTests.where((t) => _selectedTestIds.contains(t.id)).fold(0.0, (s, t) => s + t.finalPrice);
+    _selectedTests.values.fold(0.0, (s, t) => s + t.finalPrice);
 
   bool get _needsPrescriptionStep =>
-    widget.allTests.where((t) => _selectedTestIds.contains(t.id)).any((t) => t.docRequired);
+    _selectedTests.values.any((t) => t.docRequired);
 
   void _showPresSourcePicker() {
     showModalBottomSheet(
@@ -2725,7 +2738,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
 
   void _confirm() {
     if (_selected == null || _selectedTestIds.isEmpty) return;
-    final tests = widget.allTests.where((t) => _selectedTestIds.contains(t.id)).toList();
+    final tests = _selectedTests.values.toList();
     widget.onAdd(_FamilyMember(
       patient: _selected!,
       tests: tests,
@@ -2766,7 +2779,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                       _prescriptionBytes.clear();
                     } else {
                       _step = 0;
-                      _selectedTestIds.clear();
+                      _selectedTests.clear();
                     }
                   }),
                   child: const Icon(Icons.arrow_back_rounded, size: 20, color: AppColors.textPrimary),
@@ -2919,33 +2932,105 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   }
 
   Widget _buildTestStep(ScrollController scroll) {
-    if (widget.allTests.isEmpty) {
-      return const Center(child: Text('No tests available.',
-          style: TextStyle(color: AppColors.textHint)));
+    final tests = _pager.items;
+    Widget list;
+    if (_pager.loading) {
+      list = const Center(child: CircularProgressIndicator(color: AppColors.brandGreen, strokeWidth: 2));
+    } else if (tests.isEmpty) {
+      list = Center(
+        child: _pager.failed
+            ? TextButton(
+                onPressed: _pager.refresh,
+                style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
+                child: const Text('Couldn\'t load tests. Try again'),
+              )
+            : Text(_pager.search.trim().isEmpty ? 'No tests available.' : 'No tests found',
+                style: const TextStyle(color: AppColors.textHint)),
+      );
+    } else {
+      // One extra row at the end: the next page's spinner, or "Show more"
+      // when a page failed or the list is too short to scroll.
+      final extraRow = _pager.hasMore ? 1 : 0;
+      list = NotificationListener<ScrollNotification>(
+        onNotification: _pager.onScroll,
+        child: ListView.separated(
+          controller: scroll,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          itemCount: tests.length + extraRow,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (_, i) {
+            if (i >= tests.length) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Center(
+                  child: _pager.loadingMore
+                      ? const SizedBox(width: 22, height: 22,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
+                      : TextButton(
+                          onPressed: _pager.loadMore,
+                          style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
+                          child: Text('Show more (${_pager.total - tests.length} more)'),
+                        ),
+                ),
+              );
+            }
+            return _buildTestTile(tests[i]);
+          },
+        ),
+      );
     }
-    return ListView.separated(
-      controller: scroll,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      itemCount: widget.allTests.length,
-      separatorBuilder: (_, __) => const Divider(height: 1),
-      itemBuilder: (_, i) {
-        final t = widget.allTests[i];
-        final checked = _selectedTestIds.contains(t.id);
-        return CheckboxListTile(
-          value: checked,
-          onChanged: (v) => setState(() => v! ? _selectedTestIds.add(t.id) : _selectedTestIds.remove(t.id)),
-          activeColor: AppColors.brandGreen,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-          title: Text(t.name,
-              style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
-          subtitle: t.type == 'package'
-              ? const Text('Package', style: TextStyle(fontSize: 11, color: AppColors.brandGreen))
-              : null,
-          secondary: Text('₹${t.finalPrice.toInt()}',
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-          controlAffinity: ListTileControlAffinity.leading,
-        );
-      },
+
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 2),
+        child: TextField(
+          controller: _testSearchCtrl,
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(
+            hintText: 'Search tests & packages…',
+            hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+            prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
+            contentPadding: const EdgeInsets.symmetric(vertical: 10),
+            filled: true,
+            fillColor: AppColors.background,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+          ),
+        ),
+      ),
+      if (_selectedTests.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text('${_selectedTests.length} selected · ₹${_selectedTotal.toInt()}',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+          ),
+        ),
+      Expanded(child: list),
+    ]);
+  }
+
+  Widget _buildTestTile(TestModel t) {
+    final checked = _selectedTests.containsKey(t.id);
+    return CheckboxListTile(
+      value: checked,
+      onChanged: (v) => setState(() {
+        if (v == true) {
+          _selectedTests[t.id] = t;
+        } else {
+          _selectedTests.remove(t.id);
+        }
+      }),
+      activeColor: AppColors.brandGreen,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      title: Text(t.name,
+          style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+      subtitle: t.type == 'package'
+          ? const Text('Package', style: TextStyle(fontSize: 11, color: AppColors.brandGreen))
+          : null,
+      secondary: Text('₹${t.finalPrice.toInt()}',
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+      controlAffinity: ListTileControlAffinity.leading,
     );
   }
 

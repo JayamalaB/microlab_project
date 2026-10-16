@@ -9,6 +9,7 @@ const { buildSecureId } = require('../utils/secureId');
 const { getSecret, refreshSecret } = require('./secretCache');
 const dbLogger = require('../utils/dbLogger');
 const { logAsmx } = require('./asmxLogger');
+const { getBranchCode } = require('./branchCodes');
 
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'client_sync.log');
 
@@ -151,6 +152,38 @@ function formatDate(d) {
   return `${dd}/${mm}/${yyyy}`;
 }
 
+// ASMX method name for ip_asmx_logs.endpoint — the last path segment of the
+// URL (…/Neuralarc.asmx/TechnicianVisitCompleted → "TechnicianVisitCompleted").
+function _asmxMethodName(url) {
+  try {
+    return new URL(url).pathname.split('/').filter(Boolean).pop() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+// ── visit_completed formatting helpers ───────────────────────────────────────
+// DB DECIMAL ("878.00") → number (878). JSON shows whole amounts without
+// ".00" — the same value.
+function _toAmount(v) {
+  if (v === null || v === undefined || v === '') return 0;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Technician ID as a number when it is numeric ("262" → 262).
+function _toIdNumber(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isInteger(n) ? n : v;
+}
+
+// "Dinesh Kumar S (0107057)" → "Dinesh Kumar S" — drops a trailing "(code)".
+function _cleanTechnicianName(name) {
+  if (typeof name !== 'string') return name ?? null;
+  return name.replace(/\s*\([^)]*\)\s*$/, '').trim();
+}
+
 // Shared per-booking data fetch — patient, current tests, current payment,
 // and the most recent collection-proof photo. Used by both the generic
 // single-booking payload (syncBookingToClient) and the consolidated
@@ -237,13 +270,22 @@ async function _fetchPatientTestsPayment(booking) {
   };
 }
 
-// Posts payload as bookingJson=<urlencoded JSON> to the Neuralarc ASMX endpoint.
+// Posts payload as <paramName>=<urlencoded JSON> to the Neuralarc ASMX endpoint
+// (HTTP POST protocol). paramName is the method's parameter on its ?op= help
+// page: bookingJson for the booking methods, visitCompleteJson for
+// TechnicianVisitCompleted.
 // Response is XML-wrapped: <string xmlns="...">JSON_STRING</string>
-function postAsmx(url, payload, timeoutMs) {
+// Resolves { httpStatus, body, raw, durationMs } — raw is the response text
+// exactly as received. Errors carry err.httpStatus / err.raw / err.durationMs
+// when a response arrived but couldn't be read, so callers can log it.
+function postAsmx(url, payload, timeoutMs, paramName = 'bookingJson') {
   return new Promise((resolve, reject) => {
-    const body   = 'bookingJson=' + encodeURIComponent(JSON.stringify(payload));
-    const parsed = new URL(url);
-    const lib    = parsed.protocol === 'https:' ? https : http;
+    const body    = `${paramName}=` + encodeURIComponent(JSON.stringify(payload));
+    const parsed  = new URL(url);
+    const lib     = parsed.protocol === 'https:' ? https : http;
+    const started = Date.now();
+    const fail = (message, extra = {}) =>
+      reject(Object.assign(new Error(message), { durationMs: Date.now() - started }, extra));
     const req = lib.request(
       {
         hostname: parsed.hostname,
@@ -261,19 +303,19 @@ function postAsmx(url, payload, timeoutMs) {
         res.on('end', () => {
           const match = data.match(/<string[^>]*>([\s\S]*?)<\/string>/);
           if (!match) {
-            reject(new Error(`Unexpected ASMX response: ${data.slice(0, 300)}`));
+            fail(`Unexpected ASMX response: ${data.slice(0, 300)}`, { httpStatus: res.statusCode, raw: data });
             return;
           }
           try {
-            resolve({ httpStatus: res.statusCode, body: JSON.parse(match[1]) });
+            resolve({ httpStatus: res.statusCode, body: JSON.parse(match[1]), raw: data, durationMs: Date.now() - started });
           } catch (e) {
-            reject(new Error(`Non-JSON ASMX result: ${match[1].slice(0, 300)}`));
+            fail(`Non-JSON ASMX result: ${match[1].slice(0, 300)}`, { httpStatus: res.statusCode, raw: data });
           }
         });
       }
     );
-    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('ASMX request timeout')); });
-    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => { req.destroy(); fail('ASMX request timeout'); });
+    req.on('error', (err) => fail(err.message, { code: err.code }));
     req.write(body);
     req.end();
   });
@@ -377,14 +419,16 @@ async function syncBookingToClient(bookingId, initiator) {
       // booking/patient/test/payment blob, just enough to identify the
       // booking plus who took the photo and the photo itself.
       let technicianName = null;
+      let technicianRef  = null; // ASMX technician ID (ip_technicians.technician_id_ref)
       if (initiator.technicianId) {
         const [[techRow]] = await db.execute(
-          `SELECT u.user_name FROM ip_technicians t
+          `SELECT u.user_name, t.technician_id_ref FROM ip_technicians t
            JOIN ip_users u ON u.user_id = t.user_id
            WHERE t.technician_id = ? LIMIT 1`,
           [initiator.technicianId]
         );
         technicianName = techRow?.user_name ?? null;
+        technicianRef  = techRow?.technician_id_ref ?? null;
       }
       payload = {
         mobile_no:    initiator.mobile,
@@ -395,7 +439,10 @@ async function syncBookingToClient(bookingId, initiator) {
         booking_ref:      booking.booking_ref,
         existing_bill_id: booking.reference_no ?? null,
         technician_details: {
-          technician_id: initiator.technicianId ?? null,
+          // The external API's own technician ID; our ID only for
+          // technicians it doesn't know (local-fallback logins).
+          technician_id:          technicianRef ?? initiator.technicianId ?? null,
+          microlab_technician_id: initiator.technicianId ?? null,
           name:          technicianName,
         },
         proof_photo: initiator.proofPhoto ?? null,
@@ -460,14 +507,16 @@ async function syncBookingToClient(bookingId, initiator) {
         // technician_details instead — a technician is always the initiator
         // for this action, never the account-holder.
         let technicianName = null;
+        let technicianRef  = null; // ASMX technician ID (ip_technicians.technician_id_ref)
         if (initiator.technicianId) {
           const [[techRow]] = await db.execute(
-            `SELECT u.user_name FROM ip_technicians t
+            `SELECT u.user_name, t.technician_id_ref FROM ip_technicians t
              JOIN ip_users u ON u.user_id = t.user_id
              WHERE t.technician_id = ? LIMIT 1`,
             [initiator.technicianId]
           );
           technicianName = techRow?.user_name ?? null;
+          technicianRef  = techRow?.technician_id_ref ?? null;
         }
         payload = {
           mobile_no:      initiator.mobile,
@@ -478,7 +527,10 @@ async function syncBookingToClient(bookingId, initiator) {
           booking_ref:      booking.booking_ref,
           visit_group_id:   initiator.visitGroupId ?? booking.visit_group_id ?? null,
           technician_details: {
-            technician_id: initiator.technicianId ?? null,
+            // The external API's own technician ID; our ID only for
+            // technicians it doesn't know (local-fallback logins).
+            technician_id:          technicianRef ?? initiator.technicianId ?? null,
+            microlab_technician_id: initiator.technicianId ?? null,
             name:          technicianName,
           },
           blood_test_list: bloodTestList,
@@ -663,7 +715,11 @@ async function syncBookingToClient(bookingId, initiator) {
  * has already been sent to the technician's app.
  *
  * @param {number} primaryBookingId
- * @param {{ mobile: string, type: string, technicianId?: number }} initiator
+ * @param {{ mobile: string, type: string, technicianId?: number,
+ *           handover?: { branchId: number|null, receivedByName: string|null } }} initiator
+ *   handover — given at the Handed to Lab step: our branch_id the samples
+ *   were handed to, sent as the payload's branch_id (its branch_code).
+ *   receivedByName is not sent to the ASMX (stored locally only).
  */
 async function syncVisitCompletionToClient(primaryBookingId, initiator) {
   if (!settings.getBool('client_sync_enabled', true)) {
@@ -675,24 +731,42 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     return;
   }
 
-  const clientUrl = process.env.CLIENT_BOOKING_URL;
-  if (!clientUrl) {
-    writeLog(`[clientSync] CLIENT_SERVER_URL not set — skipping visit_completed`);
+  // ASMX TechnicianVisitCompleted — no fallback to micro_booking.php.
+  const visitUrl     = process.env.VISIT_COMPLETED_URL;
+  const asmxEndpoint = visitUrl ? _asmxMethodName(visitUrl) : 'TechnicianVisitCompleted';
+
+  // One ip_asmx_logs row per visit sync, like technician login — written on
+  // every outcome (skipped, error, partial, success). logCtx.bookingRef is
+  // filled in once the primary booking is loaded.
+  const logCtx = { bookingRef: null, bookingId: primaryBookingId, mobileNo: initiator.mobile };
+  let visitLogged = false;
+  const _logVisit = async (fields) => {
+    visitLogged = true;
+    await logAsmx(asmxEndpoint, { ...logCtx, ...fields });
+  };
+
+  if (!visitUrl) {
+    writeLog(`[clientSync] VISIT_COMPLETED_URL not set in .env — skipping visit_completed booking_id=${primaryBookingId}`);
+    await _logVisit({ request: null, response: null, httpStatus: null, success: false,
+      errorMessage: 'skipped — VISIT_COMPLETED_URL not set in .env' });
     return;
   }
 
-  writeLog(`[clientSync] starting — action=visit_completed primary_booking_id=${primaryBookingId} initiator=${initiator.mobile}`);
+  writeLog(`[clientSync] starting — action=visit_completed endpoint=${asmxEndpoint} primary_booking_id=${primaryBookingId} initiator=${initiator.mobile}`);
 
   try {
     const [[primaryBooking]] = await db.execute(
-      `SELECT booking_id, booking_ref, patient_id, status, reference_no, visit_group_id
+      `SELECT booking_id, booking_ref, patient_id, client_id, branch_id, status, reference_no, visit_group_id
        FROM ip_bookings WHERE booking_id = ?`,
       [primaryBookingId]
     );
     if (!primaryBooking) {
       writeLog(`[clientSync] booking_id=${primaryBookingId} not found — visit_completed skipped`);
+      await _logVisit({ request: null, response: null, httpStatus: null, success: false,
+        errorMessage: 'skipped — primary booking not found' });
       return;
     }
+    logCtx.bookingRef = primaryBooking.booking_ref;
 
     // Resolve every booking in this visit — primary + siblings sharing the
     // same visit_group_id, same grouping already proven correct by
@@ -727,6 +801,8 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
 
     if (bookingRows.length === 0) {
       writeLog(`[clientSync] no bookings resolved for visit — primary_booking_id=${primaryBookingId}`);
+      await _logVisit({ request: null, response: null, httpStatus: null, success: false,
+        errorMessage: 'skipped — no bookings resolved for the visit' });
       return;
     }
 
@@ -740,14 +816,15 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       writeLog(`[clientSync] ⚠️  could not set pending — ${dbErr.message}`);
     }
 
+    // One entry per booking in the visit, fields in the agreed order:
+    // booking_ref, booking_status, booking_type, existing_bill_id,
+    // patient_id | patient_details, slot_details, blood_test_list,
+    // payment_details, proof_photo.
     const bookings = [];
-    // Jayamala's endpoint validates patient_id/patient_details at the request
-    // root, same as every other action — it doesn't look inside bookings[].
-    // Captured here (from the primary booking specifically) so it can also
-    // be set at the top level of the payload below, alongside the unchanged
-    // per-booking value inside bookings[].
-    let primaryPatientId = null;
-    let primaryPatientDetails = null;
+    // Parallel to bookings[]: what was sent for each entry, in the same order.
+    // The ASMX replies with one result per booking in that order, so result N
+    // is matched to sent[N].
+    const sent = [];
     for (const b of bookingRows) {
       const data = await _fetchPatientTestsPayment(b);
       if (!data) {
@@ -756,79 +833,144 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       }
       const entry = {
         booking_ref:      b.booking_ref,
-        existing_bill_id: b.reference_no ?? null,
-        blood_test_list:  data.bloodTestList,
-        payment_details:  data.paymentDetails,
-        proof_photo:      data.proofPhoto ?? 'no',
+        booking_status:   b.status,
+        booking_type:     b.booking_type,
+        existing_bill_id: b.reference_no ? String(b.reference_no) : 'none',
       };
       if (data.isNewPatient) {
-        entry.patient_details = data.patientDetails;
+        // Same fields as the shared patientDetails, minus mobile, age as text.
+        const { mobile: _mobile, ...patientDetails } = data.patientDetails;
+        entry.patient_details = {
+          ...patientDetails,
+          age: patientDetails.age != null ? String(patientDetails.age) : null,
+        };
       } else {
-        entry.patient_id = data.patient.patient_id_ref;
+        entry.patient_id = String(data.patient.patient_id_ref); // text — keeps leading zeros
       }
+      entry.slot_details = {
+        date: formatDate(b.booking_date),
+        time: b.slot_time ?? null,
+      };
+      entry.blood_test_list = data.bloodTestList;
+      entry.payment_details = {
+        total_amount:        _toAmount(data.paymentDetails.total_amount),
+        paid_amount:         _toAmount(data.paymentDetails.paid_amount),
+        payment_type:        data.paymentDetails.payment_type,
+        razorpay_payment_id: data.paymentDetails.razorpay_payment_id,
+      };
+      entry.proof_photo = data.proofPhoto ?? '';
       bookings.push(entry);
-
-      if (b.booking_id === primaryBookingId) {
-        if (data.isNewPatient) {
-          primaryPatientDetails = data.patientDetails;
-        } else {
-          primaryPatientId = data.patient.patient_id_ref;
-        }
-      }
+      sent.push({
+        bookingId:     b.booking_id,
+        bookingRef:    b.booking_ref,
+        patientId:     b.patient_id,
+        isNewPatient:  !!data.isNewPatient,
+        sentPatientId: data.isNewPatient ? null : String(data.patient.patient_id_ref),
+      });
     }
 
     if (bookings.length === 0) {
       writeLog(`[clientSync] no bookings had a resolvable patient — visit_completed skipped for primary_booking_id=${primaryBookingId}`);
+      await _logVisit({ request: null, response: null, httpStatus: null, success: false,
+        errorMessage: 'skipped — no booking in the visit had a resolvable patient' });
       return;
     }
 
     let technicianName = null;
+    let technicianRef  = null; // ASMX technician ID (ip_technicians.technician_id_ref)
     if (initiator.technicianId) {
       const [[techRow]] = await db.execute(
-        `SELECT u.user_name FROM ip_technicians t
+        `SELECT u.user_name, t.technician_id_ref FROM ip_technicians t
          JOIN ip_users u ON u.user_id = t.user_id
          WHERE t.technician_id = ? LIMIT 1`,
         [initiator.technicianId]
       );
       technicianName = techRow?.user_name ?? null;
+      technicianRef  = techRow?.technician_id_ref ?? null;
     }
 
     const timestamp = Math.floor(Date.now() / 1000);
     const secret    = await getSecret();
     const secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp), secret);
 
+    // Account holder = the customer who made the booking (ip_clients), with
+    // their customer login (ip_users) as a fallback when the client row has
+    // no mobile.
+    const [[holder]] = await db.execute(
+      `SELECT COALESCE(NULLIF(c.client_mobile_no, ''),
+                       (SELECT u.user_mobile_no FROM ip_users u
+                        WHERE u.client_id = c.client_id AND u.user_microlab_type = 'patient_user'
+                        LIMIT 1)) AS mobile
+       FROM ip_clients c WHERE c.client_id = ? LIMIT 1`,
+      [primaryBooking.client_id]
+    );
+
+    // branch_id = the HANDOVER branch (the branch the samples were handed to
+    // at the Handed to Lab step) as its ip_branches.branch_code. The
+    // handover step already falls back to the booking's own branch when the
+    // technician chose none; without handover info, the booking's branch.
+    // Missing code → null (logged) — never derived from branch_id.
+    const sendBranchId = initiator.handover?.branchId ?? primaryBooking.branch_id;
+    let branchCode = null;
+    try {
+      branchCode = await getBranchCode(sendBranchId);
+    } catch (err) {
+      writeLog(`[clientSync] ⚠️  branch_code lookup failed — branch_id=${sendBranchId} error=${err.code ?? err.message}`);
+    }
+    if (branchCode == null && sendBranchId != null) {
+      writeLog(`[clientSync] ⚠️  no branch_code for branch_id=${sendBranchId} — visit_completed branch_id sent as null`);
+    }
+
     const payload = {
-      mobile_no:    initiator.mobile,
-      user_type:    initiator.type,
+      mobile_no:         initiator.mobile,
+      user_type:         initiator.type,
       timestamp,
       secure_id,
-      action:          'visit_completed',
-      booking_ref:     primaryBooking.booking_ref,
-      visit_group_id:  primaryBooking.visit_group_id ?? null,
+      action:            'visit_completed',
+      patient_mobile_no: holder?.mobile ?? null,
+      branch_id:         branchCode,
       technician_details: {
-        technician_id: initiator.technicianId ?? null,
-        name:          technicianName,
+        // The external API's own technician ID (as a number); our ID only
+        // for technicians it doesn't know (local-fallback logins).
+        technician_id: _toIdNumber(technicianRef ?? initiator.technicianId),
+        name:          _cleanTechnicianName(technicianName),
       },
       bookings,
     };
-    // Top-level patient_id/patient_details, mirroring the primary booking's
-    // own patient — required by Jayamala's validation, which checks the
-    // request root the same way every other action does. bookings[]'s own
-    // per-entry patient_id/patient_details is unchanged.
-    if (primaryPatientDetails) {
-      payload.patient_details = primaryPatientDetails;
-    } else if (primaryPatientId) {
-      payload.patient_id = primaryPatientId;
-    }
 
     writeLog(`[clientSync] sending — action=visit_completed bookings=${bookings.length} primary_booking_id=${primaryBookingId}`);
 
     const timeoutMs = parseInt(settings.get('client_sync_timeout_ms', '10000'), 10);
+    const sentIds   = sent.map(s => s.bookingId);
+
+    // Every attempt writes the exact payload sent and the exact response
+    // received to logs/client_sync.log (secure_id masked). The same request
+    // and response are stored in ip_asmx_logs (request_payload/response_payload).
+    const _send = async (attempt) => {
+      const shown = { ...payload, secure_id: payload.secure_id ? `${String(payload.secure_id).slice(0, 8)}…` : null };
+      writeLog(`[clientSync] ▶ ${asmxEndpoint} REQUEST (${attempt}) booking_id=${primaryBookingId} timeout=${timeoutMs}ms — ${JSON.stringify(shown)}`);
+      try {
+        const r = await postAsmx(visitUrl, payload, timeoutMs, 'visitCompleteJson');
+        writeLog(`[clientSync] ◀ ${asmxEndpoint} RESPONSE (${attempt}) http=${r.httpStatus} ${r.durationMs}ms — ${r.raw}`);
+        return r;
+      } catch (e) {
+        writeLog(`[clientSync] ◀ ${asmxEndpoint} RESPONSE (${attempt}) ERROR http=${e.httpStatus ?? '-'} ${e.durationMs ?? '-'}ms — ${e.message}` +
+          (e.raw != null ? ` — raw: ${e.raw}` : ''));
+        throw e;
+      }
+    };
+    // ip_asmx_logs.response_payload is a JSON column — an unreadable reply is
+    // stored as { raw: "<text>" } so it is never lost.
+    const _rawResponse = (e) => (e?.raw != null ? { raw: String(e.raw).slice(0, 20000) } : null);
+
     let httpStatus, result;
     try {
-      ({ httpStatus, body: result } = await postJson(clientUrl, payload, timeoutMs));
+      ({ httpStatus, body: result } = await _send('attempt 1'));
     } catch (postErr) {
       _logRequestResponseBlock({ payload, tests: [], httpStatus: null, result: null });
+      await _logVisit({ request: payload, response: _rawResponse(postErr), httpStatus: postErr.httpStatus ?? null,
+        success: false, errorMessage: postErr.message });
+      await _setSyncStatus(sentIds, 'failed');
       throw postErr;
     }
 
@@ -839,53 +981,110 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       const newSecret = await refreshSecret();
       payload.secure_id = buildSecureId(initiator.mobile, initiator.type, String(timestamp), newSecret);
       try {
-        ({ httpStatus, body: result } = await postJson(clientUrl, payload, timeoutMs));
+        ({ httpStatus, body: result } = await _send('attempt 2 — after secret refresh'));
         _logRequestResponseBlock({ payload, tests: [], httpStatus, result });
-        writeLog(`[clientSync] retry response — ${JSON.stringify(result)}`);
       } catch (retryErr) {
-        writeLog(`[clientSync] ❌ retry ERROR (visit_completed) — ${retryErr.message}`);
+        await _logVisit({ request: payload, response: _rawResponse(retryErr), httpStatus: retryErr.httpStatus ?? null,
+          success: false, errorMessage: retryErr.message });
+        await _setSyncStatus(sentIds, 'failed');
         return;
       }
     }
 
-    if (result.status === 'success') {
-      const bookingIds = bookingRows.map(b => b.booking_id);
+    // A single non-success object is the ASMX rejecting the whole request
+    // (signature, validation, server error) — report its own message instead
+    // of a misleading "result count 1 != N".
+    if (result && !Array.isArray(result) && typeof result === 'object' && result.status !== 'success') {
+      const why = `ASMX rejected the visit: ${result.msg ?? result.message ?? 'no message'}`;
+      writeLog(`[clientSync] ❌ visit_completed ${why} — nothing saved, primary_booking_id=${primaryBookingId}`);
+      await _logVisit({ request: payload, response: result, httpStatus, success: false, errorMessage: why });
+      await _setSyncStatus(sentIds, 'failed');
+      return;
+    }
+
+    // ── Per-booking results ────────────────────────────────────────────────
+    // Family visit → a list, one result per booking, in bookings[] order.
+    // Single booking → usually a plain object. Both are handled the same way.
+    const items = Array.isArray(result) ? result
+      : (result && typeof result === 'object') ? [result]
+      : null;
+
+    if (!items || items.length !== sent.length) {
+      // Can't tell which result belongs to which booking — save nothing.
+      const why = !items
+        ? 'unrecognised response'
+        : `ASMX returned ${items.length} result(s) for ${sent.length} booking(s)`;
+      writeLog(`[clientSync] ❌ visit_completed ${why} — nothing saved, primary_booking_id=${primaryBookingId}`);
+      await _logVisit({ request: payload, response: result ?? null, httpStatus, success: false, errorMessage: why });
+      await _setSyncStatus(sentIds, 'failed');
+      return;
+    }
+
+    const failures = [];
+    for (let i = 0; i < sent.length; i++) {
+      const s    = sent[i];
+      const item = items[i] ?? {};
+      const tag  = `booking ${i + 1}/${sent.length} (booking_id=${s.bookingId} ref=${s.bookingRef})`;
+
+      if (item.status !== 'success') {
+        const msg = item.msg ?? item.message ?? 'no message';
+        failures.push(`${tag}: ${msg}`);
+        writeLog(`[clientSync] ⚠️  ${tag} failed — ${msg}`);
+        await _setSyncStatus([s.bookingId], 'failed');
+        continue;
+      }
+
+      const billId = item.bill_id != null && String(item.bill_id).trim() !== '' ? String(item.bill_id) : null;
       await db.execute(
-        `UPDATE ip_bookings SET client_sync_status = 'synced' WHERE booking_id IN (${bookingIds.map(() => '?').join(',')})`,
-        bookingIds
+        `UPDATE ip_bookings SET client_sync_status = 'synced', reference_no = COALESCE(?, reference_no) WHERE booking_id = ?`,
+        [billId, s.bookingId]
       );
 
-      // bill_id/patient_id attribution across multiple bookings in one
-      // response is unconfirmed — Jayamala has only ever returned a single
-      // bill_id/patient_id for a single-booking request before now. Applying
-      // a returned value to every sibling booking would be a guess that
-      // could silently overwrite an already-correct bill_id, so only the
-      // primary booking is updated here. If the real response turns out to
-      // carry per-booking identifiers, this needs a follow-up fix once
-      // that shape is confirmed.
-      if (result.bill_id) {
-        await db.execute(
-          `UPDATE ip_bookings SET reference_no = ? WHERE booking_id = ?`,
-          [String(result.bill_id), primaryBookingId]
-        );
-        writeLog(`[clientSync] ✅ reference_no=${result.bill_id} saved to primary booking_id=${primaryBookingId} (not applied to siblings — see code comment)`);
-      }
-      if (result.patient_id) {
-        const primaryEntry = bookings.find(bk => bk.booking_ref === primaryBooking.booking_ref);
-        if (primaryEntry?.patient_details) {
-          const ref = String(result.patient_id);
-          await db.execute(`UPDATE ip_patients SET patient_id_ref = ? WHERE patient_id = ?`, [ref, primaryBooking.patient_id]);
-          await db.execute(`UPDATE ip_bookings SET patient_id_ref = ? WHERE booking_id = ?`, [ref, primaryBookingId]);
-          writeLog(`[clientSync] ✅ patient_id_ref=${result.patient_id} saved to primary patient_id=${primaryBooking.patient_id}`);
-        }
+      const returnedPatientId = item.patient_id != null && String(item.patient_id).trim() !== ''
+        ? String(item.patient_id) : null;
+      if (s.isNewPatient && returnedPatientId) {
+        // New patient — link our patient to the ASMX patient ID, so the next
+        // visit sends patient_id instead of patient_details.
+        await db.execute(`UPDATE ip_patients SET patient_id_ref = ? WHERE patient_id = ?`, [returnedPatientId, s.patientId]);
+        await db.execute(`UPDATE ip_bookings SET patient_id_ref = ? WHERE booking_id = ?`, [returnedPatientId, s.bookingId]);
+      } else if (!s.isNewPatient && returnedPatientId && returnedPatientId !== s.sentPatientId) {
+        // Existing patient but a different ID came back — never overwrite.
+        writeLog(`[clientSync] ⚠️  ${tag} returned patient_id=${returnedPatientId} but sent ${s.sentPatientId} — not overwritten`);
       }
 
-      writeLog(`[clientSync] ✅ visit_completed synced — ${bookings.length} booking(s) — primary_booking_id=${primaryBookingId}`);
-    } else {
-      writeLog(`[clientSync] ⚠️  client server failure — ${result.msg ?? 'no message'}`);
+      writeLog(`[clientSync] ✅ ${tag} ${item.action ?? 'synced'} — bill_id=${billId ?? '-'} patient_id=${returnedPatientId ?? '-'}${s.isNewPatient ? ' (new patient linked)' : ''}`);
     }
+
+    await _logVisit({
+      request:      payload,
+      response:     result,
+      httpStatus,
+      success:      failures.length === 0,
+      errorMessage: failures.length ? failures.join(' | ') : null,
+    });
+
+    writeLog(`[clientSync] ${failures.length ? '⚠️ ' : '✅'} visit_completed — ${sent.length - failures.length}/${sent.length} booking(s) synced — primary_booking_id=${primaryBookingId}`);
   } catch (err) {
     writeLog(`[clientSync] ❌ ERROR — ${err.message}`);
+    // Every visit sync leaves an ip_asmx_logs row, even when it fails before
+    // or after the HTTP call (DB error while building the payload, etc.).
+    if (!visitLogged) {
+      await _logVisit({ request: null, response: null, httpStatus: null, success: false, errorMessage: err.message });
+    }
+  }
+}
+
+// ip_bookings.client_sync_status for a list of bookings. Never throws — a
+// failure here (e.g. the column not accepting 'failed') is only logged.
+async function _setSyncStatus(bookingIds, status) {
+  if (!bookingIds || bookingIds.length === 0) return;
+  try {
+    await db.execute(
+      `UPDATE ip_bookings SET client_sync_status = ? WHERE booking_id IN (${bookingIds.map(() => '?').join(',')})`,
+      [status, ...bookingIds]
+    );
+  } catch (err) {
+    writeLog(`[clientSync] ⚠️  could not set client_sync_status=${status} — ${err.code ?? err.message}`);
   }
 }
 

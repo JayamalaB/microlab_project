@@ -6,6 +6,7 @@ import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/utils/app_messages.dart';
 
 class TechnicianHistoryScreen extends StatefulWidget {
   final String mobile;
@@ -101,11 +102,16 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
         });
       } else {
         debugPrint('🔴 [HISTORY] non-200 status=${res.statusCode} body=${res.body.substring(0, res.body.length.clamp(0, 200))}');
-        setState(() { _loading = false; _error = 'Failed to load history. (${res.statusCode})'; });
+        setState(() { _loading = false; _error = 'We couldn\'t load your job history. Please try again.'; });
       }
     } catch (e) {
       debugPrint('🔴 [HISTORY] EXCEPTION type=${e.runtimeType} msg=$e');
-      if (mounted) setState(() { _loading = false; _error = 'Error: ${e.runtimeType} — $e'; });
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'We couldn\'t load your job history. ${AppMessages.friendlyError(e)}';
+        });
+      }
     }
   }
 

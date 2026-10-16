@@ -8,7 +8,7 @@ exports.submitFeedback = async (req, res) => {
   const { booking_id, overall_rating, feedback_comments } = req.body;
 
   if (!booking_id || !overall_rating) {
-    return res.status(400).json({ success: false, message: 'booking_id and overall_rating are required' });
+    return res.status(400).json({ success: false, message: 'Please choose a rating before submitting your feedback.' });
   }
   if (overall_rating < 1 || overall_rating > 5) {
     return res.status(400).json({ success: false, message: 'overall_rating must be between 1 and 5' });

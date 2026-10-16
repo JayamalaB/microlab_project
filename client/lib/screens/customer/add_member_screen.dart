@@ -4,6 +4,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/utils/app_messages.dart';
 
 class AddMemberScreen extends StatefulWidget {
   final MemberModel? existingMember;
@@ -104,15 +105,11 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
         });
       }
     } on PlatformException catch (e) {
+      debugPrint('[AddMember] image picker error: ${e.code} ${e.message}');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Could not access ${source == ImageSource.camera ? 'camera' : 'gallery'}: ${e.message}'),
-            backgroundColor: Colors.red[700],
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ),
-        );
+        AppMessages.error(context, source == ImageSource.camera
+            ? 'We couldn\'t open the camera. Allow camera access in your phone\'s Settings, then try again.'
+            : 'We couldn\'t open your photos. Allow photo access in your phone\'s Settings, then try again.');
       }
     }
   }
@@ -327,12 +324,8 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
 
       if (result['success'] != true) {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(result['message']?.toString() ?? 'Failed to save'),
-          backgroundColor: Colors.red[700],
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.error(context, AppMessages.serverMessage(result['message'],
+            fallback: 'We couldn\'t save the family member. Please try again.'));
         return;
       }
 
@@ -365,12 +358,8 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Network error: $e'),
-          backgroundColor: Colors.red[700],
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        debugPrint('[AddMember] save failed: $e');
+        AppMessages.error(context, AppMessages.friendlyError(e));
       }
     }
   }

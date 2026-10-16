@@ -6,6 +6,8 @@
 process.env.JWT_SECRET           = 'test-jwt-secret-not-a-real-secret';
 process.env.CLIENT_SERVER_SECRET = 'test-client-server-secret';
 process.env.CLIENT_BOOKING_URL   = 'http://localhost:0/mock-jayamala'; // never actually called — postJson is mocked per-test
+process.env.TECHNICIAN_LOGIN_URL = 'http://localhost:0/mock-asmx/TechnicianLoginCheck'; // fetch is mocked per-test
+process.env.VISIT_COMPLETED_URL  = 'http://localhost:0/mock-asmx/TechnicianVisitCompleted'; // https/http is mocked per-test
 process.env.OTP_MAX_ATTEMPTS     = '3';
 process.env.OTP_EXPIRY_MINUTES   = '10';
 // Dummy 32-byte key, base64-encoded (utils/encryption.js's required format)

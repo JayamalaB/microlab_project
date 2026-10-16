@@ -11,6 +11,7 @@ const {
   calculateHomeCollectionFare,
   computeFare,
   FareCalculationError,
+  DEFAULT_MAX_SERVICE_DISTANCE_KM,
 } = require('../../services/fareCalculator');
 
 function fakeDbConn({ branchRows = [], rateRows = [] } = {}) {
@@ -115,12 +116,35 @@ describe('fareCalculator.calculateHomeCollectionFare', () => {
     ).rejects.toMatchObject({ code: 'OUTSIDE_SERVICE_AREA' });
   });
 
-  test('max_service_distance_km left NULL enforces no cap at all', async () => {
-    const dbConn = fakeDbConn({ branchRows: branchCoords, rateRows: [baseRate] }); // baseRate.max_service_distance_km is null
-    const result = await calculateHomeCollectionFare({
-      branchId: 3, pickupLat: 13.0827, pickupLng: 81.2, dbConn, // same "far" pickup as the capped test above
+  test(`max_service_distance_km left NULL falls back to the ${DEFAULT_MAX_SERVICE_DISTANCE_KM} km default cap`, async () => {
+    // baseRate.max_service_distance_km is null. ~50km away → still priced.
+    const near = await calculateHomeCollectionFare({
+      branchId: 3, pickupLat: 13.0827, pickupLng: 80.73,
+      dbConn: fakeDbConn({ branchRows: branchCoords, rateRows: [baseRate] }),
     });
-    expect(result.finalFare).toBeGreaterThan(0); // succeeds instead of throwing OUTSIDE_SERVICE_AREA
+    expect(near.finalFare).toBeGreaterThan(0);
+
+    // ~1,000km away (Chennai → Mumbai area) → refused, not priced.
+    await expect(
+      calculateHomeCollectionFare({
+        branchId: 3, pickupLat: 19.07, pickupLng: 72.87,
+        dbConn: fakeDbConn({ branchRows: branchCoords, rateRows: [baseRate] }),
+      })
+    ).rejects.toMatchObject({ code: 'OUTSIDE_SERVICE_AREA' });
+  });
+
+  test('a pickup outside India (e.g. an IP-based browser location) → INVALID_COORDINATES, no DB call', async () => {
+    const dbConn = fakeDbConn();
+    await expect(
+      calculateHomeCollectionFare({ branchId: 3, pickupLat: 51.5072, pickupLng: -0.1276, dbConn }) // London
+    ).rejects.toMatchObject({ code: 'INVALID_COORDINATES' });
+    expect(dbConn.execute).not.toHaveBeenCalled();
+  });
+
+  test('a 0,0 pickup (failed location lookup) → INVALID_COORDINATES', async () => {
+    await expect(
+      calculateHomeCollectionFare({ branchId: 3, pickupLat: 0, pickupLng: 0, dbConn: fakeDbConn() })
+    ).rejects.toMatchObject({ code: 'INVALID_COORDINATES' });
   });
 
   test("the active-rate query orders by effective_from DESC — most recently effective row wins when multiple are is_active", async () => {

@@ -5,6 +5,7 @@ import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/auth_service.dart';
 import 'package:microlab/services/notification_service.dart';
 import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/utils/app_messages.dart';
 import '../customer/customer_home_screen.dart';
 import '../customer/complete_profile_screen.dart';
 import '../technician/technician_dashboard_screen.dart';
@@ -137,11 +138,11 @@ class _OtpScreenState extends State<OtpScreen> {
     if (!mounted) return;
 
     if (result['success'] != true) {
-      final msg = result['message'] as String? ?? 'Incorrect OTP. Please try again.';
+      final msg = result['message'] as String? ?? '';
       setState(() {
         _isVerifying = false;
         _hasError    = true;
-        _errorMsg    = msg;
+        _errorMsg    = AppMessages.serverMessage(msg, fallback: 'Incorrect OTP. Please try again.');
         for (final c in _controllers) c.clear();
       });
       FocusScope.of(context).requestFocus(_focusNodes[0]);
@@ -269,21 +270,12 @@ class _OtpScreenState extends State<OtpScreen> {
     );
     if (!mounted) return;
 
-    final msg = result['success'] == true
-        ? 'OTP resent to +91 ${widget.mobile}'
-        : (result['message'] as String? ?? 'Failed to resend OTP');
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        backgroundColor: result['success'] == true
-            ? AppColors.brandGreen
-            : const Color(0xFFD32F2F),
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        duration: const Duration(seconds: 2),
-      ),
-    );
+    if (result['success'] == true) {
+      AppMessages.success(context, 'OTP resent to +91 ${widget.mobile}');
+    } else {
+      AppMessages.error(context, AppMessages.serverMessage(result['message'],
+          fallback: 'We couldn\'t resend the OTP. Please try again.'));
+    }
   }
 
   @override

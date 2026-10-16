@@ -8,6 +8,8 @@
     <string>MicroLab needs gallery access to select a customer profile photo.</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>MicroLab needs permission to save photos.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>MicroLab uses your location to find your nearest branch and calculate the Home Collection service charge.</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleExecutable</key>

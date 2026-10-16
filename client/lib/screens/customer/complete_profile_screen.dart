@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/utils/app_messages.dart';
 import 'customer_home_screen.dart';
 
 class CompleteProfileScreen extends StatefulWidget {
@@ -100,12 +101,8 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
         (route) => false,
       );
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(result['message'] as String? ?? 'Could not save profile'),
-        backgroundColor: Colors.red.shade700,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.error(context, AppMessages.serverMessage(result['message'],
+          fallback: 'We couldn\'t save your profile. Please try again.'));
     }
   }
 

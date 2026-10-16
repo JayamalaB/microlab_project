@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/utils/app_messages.dart';
 import 'otp_screen.dart';
 
 /// This widget is embedded directly inside [OnboardingScreen] as the bottom
@@ -68,9 +69,10 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         );
       } else {
-        final message = (result['message'] as String?) ?? 'Failed to send OTP';
+        final message = (result['message'] as String?) ?? '';
         _showError(
-          message,
+          AppMessages.serverMessage(message,
+              fallback: 'We couldn\'t send the OTP. Please try again.'),
           // Only offer this when it's genuinely that specific error, and
           // only if we haven't already tried forcing it (avoids offering
           // the same "fix" again if forcing it somehow still fails).
@@ -79,9 +81,10 @@ class _LoginScreenState extends State<LoginScreen> {
               : null,
         );
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[Login] send OTP failed: $e');
       if (!mounted) return;
-      _showError('Network error. Check your connection.');
+      _showError(AppMessages.friendlyError(e));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }

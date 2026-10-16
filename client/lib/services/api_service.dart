@@ -117,6 +117,71 @@ class ApiService {
     return [];
   }
 
+  // One page of the catalog, filtered and searched on the server — the
+  // customer home screen loads the list this way instead of all ~1,000
+  // products at once. Throws on a network/server error so the caller can
+  // keep what it already shows.
+  static Future<({List<TestModel> items, int total, bool hasMore})> getPackagesPage({
+    String search = '',
+    String? category,
+    bool offersOnly = false,
+    int limit = 20,
+    int offset = 0,
+  }) async {
+    final params = <String, String>{
+      'limit':  '$limit',
+      'offset': '$offset',
+      if (search.trim().isNotEmpty) 'search': search.trim(),
+      if (category != null && category != 'All') 'category': category,
+      if (offersOnly) 'offer': 'yes',
+    };
+    final res = await http
+        .get(Uri.parse('$baseUrl/api/tests').replace(queryParameters: params))
+        .timeout(const Duration(seconds: 15));
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (body['success'] != true) {
+      throw Exception(body['message'] ?? 'Could not load tests');
+    }
+    final items = (body['data'] as List)
+        .map((p) => TestModel.fromJson(p as Map<String, dynamic>))
+        .toList();
+    return (
+      items:   items,
+      total:   (body['total'] as num?)?.toInt() ?? items.length,
+      hasMore: body['hasMore'] == true,
+    );
+  }
+
+  // Specific products by id (e.g. the tests already on a booking), without
+  // downloading the whole catalog. At most 100 ids per call.
+  static Future<List<TestModel>> getPackagesByIds(Iterable<String> ids) async {
+    final list = ids.where((id) => id.isNotEmpty && id != '0').toSet().toList();
+    if (list.isEmpty) return [];
+    final res = await http
+        .get(Uri.parse('$baseUrl/api/tests').replace(queryParameters: {'ids': list.join(',')}))
+        .timeout(const Duration(seconds: 15));
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (body['success'] != true) {
+      throw Exception(body['message'] ?? 'Could not load tests');
+    }
+    return (body['data'] as List)
+        .map((p) => TestModel.fromJson(p as Map<String, dynamic>))
+        .toList();
+  }
+
+  // Category names for the filter chips (all active products, not just the
+  // loaded page).
+  static Future<List<String>> getPackageCategories() async {
+    final res = await http
+        .get(Uri.parse('$baseUrl/api/tests/categories'))
+        .timeout(const Duration(seconds: 15));
+    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    if (body['success'] == true) {
+      return (body['data'] as List).map((c) => c.toString()).toList();
+    }
+    return [];
+  }
+
   static Future<List<PatientModel>> getPatients() async {
     final token = await getToken();
     if (token == null) return [];
@@ -333,7 +398,9 @@ class ApiService {
         ..headers['Authorization'] = 'Bearer $token'
         ..files.add(http.MultipartFile.fromBytes('photo', bytes, filename: fileName));
       final streamed = await req.send().timeout(const Duration(seconds: 30));
-      final res  = await http.Response.fromStream(streamed);
+      // Reading the reply is covered too, so a stalled response can't keep
+      // the caller (e.g. "Uploading photo…") waiting with no limit.
+      final res  = await http.Response.fromStream(streamed).timeout(const Duration(seconds: 15));
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       if (body['success'] == true) return body['url'] as String?;
       debugPrint('[uploadFile] failed: ${body['message']}');

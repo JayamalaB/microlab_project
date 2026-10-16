@@ -12,6 +12,7 @@ import 'package:microlab/models.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/customer_refresh_notifier.dart';
 import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/utils/app_messages.dart';
 
 // ─── Reports screen ───────────────────────────────────────────────────────────
 
@@ -75,7 +76,13 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
         ..sort((a, b) => b.date.compareTo(a.date));
       if (mounted) setState(() { _bookings = bookings; _isLoading = false; });
     } catch (e) {
-      if (mounted) setState(() { _error = e.toString(); _isLoading = false; });
+      debugPrint('[Reports] load failed: $e');
+      if (mounted) {
+        setState(() {
+          _error = 'We couldn\'t load your reports. ${AppMessages.friendlyError(e)}';
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -444,13 +451,9 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
         subject: 'MicroLab Report – ${booking.id}',
       );
     } catch (e) {
+      debugPrint('[Reports] share failed: $e');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Could not share: $e'),
-        backgroundColor: Colors.red.shade700,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.error(context, 'We couldn\'t share the report. ${AppMessages.friendlyError(e)}');
     } finally {
       if (mounted) setState(() => _busy[i] = null);
     }
@@ -473,13 +476,9 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
         await OpenFilex.open(file.path);
       }
     } catch (e) {
+      debugPrint('[Reports] download failed: $e');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Could not download: $e'),
-        backgroundColor: Colors.red.shade700,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.error(context, 'We couldn\'t download the report. ${AppMessages.friendlyError(e)}');
     } finally {
       if (mounted) setState(() => _busy[i] = null);
     }

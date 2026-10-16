@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/models.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/utils/app_messages.dart';
 import 'package:http/http.dart' as http;
 import 'checkout_screen.dart';
 
@@ -190,14 +191,16 @@ class _SlotSelectionScreenState extends State<SlotSelectionScreen> {
       } else {
         setState(() {
           _loadingSlots = false;
-          _slotError    = body['message'] as String? ?? 'Could not load slots.';
+          _slotError    = AppMessages.serverMessage(body['message'],
+              fallback: 'We couldn\'t load the available slots. Please try again.');
         });
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[SlotSelection] load failed: $e');
       if (!mounted) return;
       setState(() {
         _loadingSlots = false;
-        _slotError    = 'Could not reach the server. Check your connection.';
+        _slotError    = AppMessages.friendlyError(e);
       });
     }
   }

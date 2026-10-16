@@ -7,6 +7,7 @@ const { forceTechnicianOffline } = require('../socket/bookingSocket');
 const { getSecret, refreshSecret } = require('../services/secretCache');
 const dbLogger = require('../utils/dbLogger');
 const { logAsmx } = require('../services/asmxLogger');
+const { resolveBranchIdByCode } = require('../services/branchCodes');
 
 const LOG_DIR  = path.join(__dirname, '..', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'otp.log');
@@ -20,6 +21,7 @@ function writeLog(msg) {
   fs.appendFileSync(LOG_FILE, line, 'utf8');
   dbLogger.logOtpEvent(msg);
 }
+
 
 const sms = require('../utils/sms');
 
@@ -55,16 +57,19 @@ exports.sendOtp = async (req, res) => {
       step = 'fetchRegistry';
       writeLog(`[sendOtp] fetching technician registry for ${mobile}`);
       try {
-        const phpResult = await fetchFromRegistry(process.env.JAYAMALA_URL, mobile, 'technician');
+        const phpResult = await fetchFromRegistry(_technicianLoginUrl(), mobile, 'technician');
         writeLog(`[sendOtp] registry response — ${elapsed()} | status: ${phpResult.body.status}`);
         if (phpResult.body.status !== 'success') {
           // Not found in Jayamala — fall back to local ip_users before rejecting.
           step = 'local_fallback_lookup';
           const localTech = await _findLocalTechnicianUser(mobile);
           if (!localTech) {
+            // The registry's own msg (e.g. "Invalid secure_id") is for the log,
+            // not the technician.
+            writeLog(`[sendOtp] registry rejected — mobile=${mobile} msg=${phpResult.body.msg ?? '—'}`);
             return res.status(403).json({
               success: false,
-              message: phpResult.body.msg ?? 'Mobile not registered as technician',
+              message: 'This mobile number is not registered as a MicroLab technician. Please contact your admin.',
             });
           }
           writeLog(`[sendOtp] not found in Jayamala but found locally — user_id=${localTech.user_id} — ${elapsed()}`);
@@ -76,7 +81,7 @@ exports.sendOtp = async (req, res) => {
         }
       } catch (regErr) {
         writeLog(`[sendOtp] registry unreachable — ${regErr.message}`);
-        return res.status(502).json({ success: false, message: 'Technician registry unreachable. Try again.' });
+        return res.status(502).json({ success: false, code: 'REGISTRY_UNAVAILABLE', message: 'We couldn\'t verify your account right now. Please try again in a moment.' });
       }
     }
 
@@ -219,12 +224,26 @@ function _isSignatureError(body) {
          msg.includes('unauthor') || msg.includes('invalid') || msg.includes('auth');
 }
 
+// ASMX method name for ip_asmx_logs.endpoint — the last path segment of the
+// URL (…/Neuralarc.asmx/TechnicianLoginCheck → "TechnicianLoginCheck").
+function _asmxMethodName(url) {
+  try {
+    return new URL(url).pathname.split('/').filter(Boolean).pop() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 // ── HTTP POST to ASMX registry ────────────────────────────────────────────────
+// Every call is logged to ip_asmx_logs — including calls that fail with a
+// network/parse error (logged, then rethrown so callers behave as before).
 async function fetchFromRegistry(url, mobileNo, userType) {
+  const endpoint  = _asmxMethodName(url);
   const secret    = await getSecret();
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const secure_id = buildSecureId(mobileNo, userType, timestamp, secret);
   const params    = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id });
+  const logRequest = { mobile_no: mobileNo, user_type: userType, timestamp };
 
   const _post = async (body) => {
     const res  = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
@@ -233,28 +252,123 @@ async function fetchFromRegistry(url, mobileNo, userType) {
     return { httpStatus: res.status, body: JSON.parse(xmlMatch ? xmlMatch[1] : text) };
   };
 
-  let result = await _post(params.toString());
+  let result;
+  try {
+    result = await _post(params.toString());
 
-  // Auto-recover on signature failure
-  if (_isSignatureError(result.body)) {
-    console.warn('[authController] signature error — refreshing secret and retrying');
-    const newSecret    = await refreshSecret();
-    const newSecureId  = buildSecureId(mobileNo, userType, timestamp, newSecret);
-    const retryParams  = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id: newSecureId });
-    result = await _post(retryParams.toString());
+    // Auto-recover on signature failure
+    if (_isSignatureError(result.body)) {
+      console.warn('[authController] signature error — refreshing secret and retrying');
+      const newSecret    = await refreshSecret();
+      const newSecureId  = buildSecureId(mobileNo, userType, timestamp, newSecret);
+      const retryParams  = new URLSearchParams({ mobile_no: mobileNo, user_type: userType, timestamp, secure_id: newSecureId });
+      result = await _post(retryParams.toString());
+    }
+  } catch (err) {
+    await logAsmx(endpoint, {
+      mobileNo,
+      request:  logRequest,
+      response: null,
+      httpStatus: null,
+      success:  false,
+      errorMessage: err.message,
+    });
+    throw err;
   }
 
-  const endpoint = url.includes('GetPatientList') ? 'GetPatientList' : 'UserLoginCheck';
   await logAsmx(endpoint, {
     mobileNo,
-    request:  { mobile_no: mobileNo, user_type: userType, timestamp },
+    request:  logRequest,
     response: result.body,
     httpStatus: result.httpStatus,
     success:  result.body != null && !_isSignatureError(result.body),
-    errorMessage: result.body == null ? 'no response' : _isSignatureError(result.body) ? 'signature error' : null,
+    errorMessage: result.body == null ? 'no response'
+      : _isSignatureError(result.body) ? 'signature error'
+      : result.body.status !== 'success' ? (result.body.msg ?? null)
+      : null,
   });
 
   return result;
+}
+
+// ── Technician registry (ASMX TechnicianLoginCheck) ──────────────────────────
+// TECHNICIAN_LOGIN_URL points at …/Neuralarc.asmx/TechnicianLoginCheck.
+// No fallback: JAYAMALA_URL is the customer UserLoginCheck, which doesn't
+// return technician details. Missing → throw, so the caller fails with its
+// "registry unreachable" response instead of calling the wrong method.
+function _technicianLoginUrl() {
+  const url = process.env.TECHNICIAN_LOGIN_URL;
+  if (!url) throw new Error('TECHNICIAN_LOGIN_URL not set in .env');
+  return url;
+}
+
+// "" / whitespace / undefined → null, so COALESCE(?, col) keeps the existing
+// DB value instead of overwriting it with an empty string.
+function _blankToNull(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === 'string') {
+    const s = v.trim();
+    return s === '' ? null : s;
+  }
+  return v;
+}
+
+// Turns the registry's technician object into the fields ip_technicians uses.
+// Handles both shapes:
+//   TechnicianLoginCheck — branch_id: ["03","04","07"], default_branch_id: "07"
+//   legacy registry      — branch_id: 7
+// The registry's branch values are ASMX branch CODES, matched against
+// ip_branches.branch_code to find our branch_id (see verifyOtp and
+// services/branchCodes.js) — branch_id is set there, not here.
+// With several branches and no default_branch_id, no branch is picked
+// (never guessed). Returns null when there is no usable object.
+function _normalizeRegistryTechnician(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const branchCodes = (Array.isArray(raw.branch_id) ? raw.branch_id : [raw.branch_id])
+    .map(_blankToNull)
+    .filter(v => v != null)
+    .map(String);
+  const branchCode = _blankToNull(raw.default_branch_id) != null
+    ? String(_blankToNull(raw.default_branch_id))
+    : (branchCodes.length === 1 ? branchCodes[0] : null);
+
+  const maxDaily = Number(raw.max_daily_bookings);
+
+  return {
+    externalId:         _blankToNull(raw.technician_id) != null ? String(raw.technician_id) : null,
+    name:               _blankToNull(raw.name),
+    email:              _blankToNull(raw.email),
+    branchCodes,
+    branchCode,
+    branch_id:          null, // resolved from branchCode via ip_branches.branch_code
+    technician_code:    _blankToNull(raw.technician_code),
+    specialization:     _blankToNull(raw.specialization),
+    tech_photo:         _blankToNull(raw.tech_photo),
+    tech_city:          _blankToNull(raw.tech_city),
+    max_daily_bookings: Number.isInteger(maxDaily) && maxDaily > 0 ? maxDaily : null,
+  };
+}
+
+// ASMX branch codes as a JSON string for ip_technicians.branch_ids, e.g.
+// '["03","04","07"]'. null when there are none, so COALESCE keeps the
+// stored list (local-fallback logins never clear it).
+function _asmxBranchIdsJson(t) {
+  return t?.branchCodes?.length ? JSON.stringify(t.branchCodes) : null;
+}
+
+// ASMX branch code ("07") → our branch_id, via ip_branches.branch_code
+// (non-deleted branches only). Unknown code, or the lookup failing (e.g.
+// branch_code column not added yet) → null, so the technician's existing
+// branch is kept instead of the login failing.
+async function _resolveBranchIdFromCode(code) {
+  if (code == null) return null;
+  try {
+    return await resolveBranchIdByCode(code, 'query');
+  } catch (err) {
+    writeLog(`[verifyOtp] branch_code lookup failed — code=${code} error=${err.code ?? err.message}`);
+    return null;
+  }
 }
 
 // ── Local technician fallback lookup ──────────────────────────────────────────
@@ -340,33 +454,74 @@ exports.verifyOtp = async (req, res) => {
       let localTech = null;
       let phpResult;
       try {
-        phpResult = await fetchFromRegistry(process.env.JAYAMALA_URL, mobile, 'technician');
+        phpResult = await fetchFromRegistry(_technicianLoginUrl(), mobile, 'technician');
       } catch (err) {
-        return res.status(502).json({ success: false, message: 'User registry unreachable. Try again.' });
+        writeLog(`[verifyOtp] technician registry unreachable — ${err.message}`);
+        return res.status(502).json({ success: false, code: 'REGISTRY_UNAVAILABLE', message: 'We couldn\'t verify your account right now. Please try again in a moment.' });
       }
       if (phpResult.body.status === 'success') {
-        t = phpResult.body.technician;
-        writeLog(`[verifyOtp] registry success — mobile=${mobile} branch_id=${t.branch_id} technician_code=${t.technician_code} specialization=${t.specialization} tech_photo=${t.tech_photo} tech_city=${t.tech_city} max_daily_bookings=${t.max_daily_bookings}`);
+        t = _normalizeRegistryTechnician(phpResult.body.technician);
+      }
+      if (t) {
+        // Registry default branch CODE → our branch_id through
+        // ip_branches.branch_code. Unknown/missing → null, so the existing
+        // branch is kept.
+        const resolvedBranchId = await _resolveBranchIdFromCode(t.branchCode);
+        writeLog(`[verifyOtp] registry success — mobile=${mobile} external_technician_id=${t.externalId ?? 'none'} branch_codes=[${t.branchCodes.join(',')}] default_branch=${t.branchCode ?? 'none'} resolved_branch_id=${resolvedBranchId ?? 'none(keep existing)'} technician_code=${t.technician_code} specialization=${t.specialization} tech_photo=${t.tech_photo} tech_city=${t.tech_city} max_daily_bookings=${t.max_daily_bookings}`);
+        t.branch_id = resolvedBranchId;
       } else {
         // Not found in Jayamala — fall back to local ip_users before rejecting.
         localTech = await _findLocalTechnicianUser(mobile);
         if (!localTech) {
-          return res.status(404).json({ success: false, message: phpResult.body.msg ?? 'Technician not registered.' });
+          writeLog(`[verifyOtp] registry rejected — mobile=${mobile} msg=${phpResult.body.msg ?? '—'}`);
+          return res.status(404).json({ success: false, message: 'This mobile number is not registered as a MicroLab technician. Please contact your admin.' });
         }
         writeLog(`[verifyOtp] not found in Jayamala but found locally — user_id=${localTech.user_id}`);
       }
 
       // Find or auto-create ip_technicians row — same lookup regardless of
       // whether the technician was confirmed via Jayamala or the local fallback.
-      const [existingRows] = await db.query(
-        `SELECT u.user_id, tech.technician_id, tech.branch_id
-         FROM ip_users u
-         JOIN ip_technicians tech ON tech.user_id = u.user_id
-         WHERE u.user_mobile_no = ? AND u.user_microlab_type = 'technician'
-         ORDER BY tech.technician_id ASC LIMIT 1`,
-        [mobile]
-      );
-      writeLog(`[verifyOtp] existingRows found=${existingRows.length} technician_id=${existingRows[0]?.technician_id ?? 'none'} branch_id=${existingRows[0]?.branch_id ?? 'none'}`);
+      //
+      // Match order: the external ASMX technician ID (technician_id_ref) first,
+      // then this mobile number. Our own technician_id primary key is never
+      // changed — technician_id_ref is only the link to the external API.
+      let existingRows = [];
+      let matchedBy = 'none';
+      if (t?.externalId) {
+        const [refRows] = await db.query(
+          `SELECT tech.user_id, tech.technician_id, tech.branch_id
+           FROM ip_technicians tech
+           WHERE tech.technician_id_ref = ?
+           LIMIT 1`,
+          [t.externalId]
+        );
+        if (refRows.length > 0) {
+          if (Number(refRows[0].user_id) !== Number(dbUser.user_id)) {
+            // The external technician is already linked to a different
+            // MicroLab user. Never re-link silently — that would move one
+            // person's technician record onto another account.
+            writeLog(`[verifyOtp] technician_id_ref conflict — ref=${t.externalId} is linked to technician_id=${refRows[0].technician_id} user_id=${refRows[0].user_id}, but this login is user_id=${dbUser.user_id} mobile=${mobile}`);
+            return res.status(409).json({
+              success: false,
+              message: 'This technician is already linked to another account. Contact admin.',
+            });
+          }
+          existingRows = refRows;
+          matchedBy = 'technician_id_ref';
+        }
+      }
+      if (existingRows.length === 0) {
+        [existingRows] = await db.query(
+          `SELECT u.user_id, tech.technician_id, tech.branch_id
+           FROM ip_users u
+           JOIN ip_technicians tech ON tech.user_id = u.user_id
+           WHERE u.user_mobile_no = ? AND u.user_microlab_type = 'technician'
+           ORDER BY tech.technician_id ASC LIMIT 1`,
+          [mobile]
+        );
+        if (existingRows.length > 0) matchedBy = 'mobile';
+      }
+      writeLog(`[verifyOtp] existingRows found=${existingRows.length} matched_by=${matchedBy} technician_id=${existingRows[0]?.technician_id ?? 'none'} technician_id_ref=${t?.externalId ?? 'none'} branch_id=${existingRows[0]?.branch_id ?? 'none'}`);
 
       let dbTechnicianId, dbBranchId;
       if (existingRows.length > 0) {
@@ -386,31 +541,53 @@ exports.verifyOtp = async (req, res) => {
         writeLog(`[verifyOtp] refreshing ip_technicians technician_id=${dbTechnicianId} source=${t ? 'jayamala' : 'local_fallback'} newBranchId=${newBranchId} technician_code=${t?.technician_code ?? 'null(coalesce keeps existing)'} tech_photo=${t?.tech_photo ?? 'null(coalesce keeps existing)'} tech_city=${newTechCity} max_daily_bookings=${t?.max_daily_bookings ?? 'null(coalesce keeps existing)'}`);
         const [updResult] = await db.query(
           `UPDATE ip_technicians
-           SET branch_id          = COALESCE(?, branch_id),
+           SET technician_id_ref  = COALESCE(?, technician_id_ref),
+               branch_id          = COALESCE(?, branch_id),
+               branch_ids         = COALESCE(?, branch_ids),
+               default_branch_id  = COALESCE(?, default_branch_id),
                technician_code    = COALESCE(?, technician_code),
                specialization     = COALESCE(?, specialization),
                tech_photo         = COALESCE(?, tech_photo),
                tech_city          = COALESCE(?, tech_city),
                max_daily_bookings = COALESCE(?, max_daily_bookings)
            WHERE technician_id = ?`,
-          [newBranchId, t?.technician_code ?? null, t?.specialization ?? null,
+          [t?.externalId ?? null, newBranchId, _asmxBranchIdsJson(t), t?.branchCode ?? null,
+           t?.technician_code ?? null, t?.specialization ?? null,
            t?.tech_photo ?? null, newTechCity, t?.max_daily_bookings ?? null,
            dbTechnicianId]
         );
         writeLog(`[verifyOtp] refresh UPDATE result — affectedRows=${updResult.affectedRows} changedRows=${updResult.changedRows}`);
         dbBranchId = newBranchId ?? dbBranchId;
       } else if (t) {
-        // Jayamala-sourced insert — unchanged from the existing implementation.
+        // Registry-sourced insert. ip_technicians.branch_id is NOT NULL, so
+        // when the registry branch couldn't be resolved, fall back to
+        // ip_users.user_branch_id; if that is empty too, refuse (never guess).
+        let insertBranchId = t.branch_id;
+        if (insertBranchId == null) {
+          const localRow = await _findLocalTechnicianUser(mobile);
+          insertBranchId = localRow?.user_branch_id ?? null;
+        }
+        if (insertBranchId == null) {
+          writeLog(`[verifyOtp] registry insert blocked — no valid branch (codes=[${t.branchCodes.join(',')}] default=${t.branchCode ?? 'none'}) and ip_users.user_branch_id is empty — user_id=${dbUser.user_id}`);
+          return res.status(422).json({
+            success: false,
+            message: 'Your account isn\'t linked to a MicroLab branch yet. Please contact your admin.',
+          });
+        }
+        // max_daily_bookings is left out when the registry doesn't send it,
+        // so the schema default applies instead of NULL.
+        const hasMax = t.max_daily_bookings != null;
         const [techResult] = await db.query(
           `INSERT INTO ip_technicians
-             (user_id, branch_id, technician_code, specialization,
-              tech_photo, tech_city, is_available, max_daily_bookings, technician_active)
-           VALUES (?, ?, ?, ?, ?, ?, 1, ?, 1)`,
-          [dbUser.user_id, t.branch_id, t.technician_code, t.specialization,
-           t.tech_photo, t.tech_city, t.max_daily_bookings]
+             (user_id, technician_id_ref, branch_id, branch_ids, default_branch_id, technician_code, specialization,
+              tech_photo, tech_city, is_available${hasMax ? ', max_daily_bookings' : ''}, technician_active)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1${hasMax ? ', ?' : ''}, 1)`,
+          [dbUser.user_id, t.externalId, insertBranchId, _asmxBranchIdsJson(t), t.branchCode,
+           t.technician_code, t.specialization,
+           t.tech_photo, t.tech_city, ...(hasMax ? [t.max_daily_bookings] : [])]
         );
         dbTechnicianId = techResult.insertId;
-        dbBranchId     = t.branch_id;
+        dbBranchId     = insertBranchId;
       } else {
         // Local-fallback insert. ip_technicians.branch_id is NOT NULL with no
         // schema default, so it must come from ip_users.user_branch_id — the
@@ -422,7 +599,7 @@ exports.verifyOtp = async (req, res) => {
           writeLog(`[verifyOtp] local fallback blocked — ip_users.user_branch_id is NULL for user_id=${localTech.user_id}, cannot satisfy ip_technicians.branch_id (NOT NULL, no default)`);
           return res.status(422).json({
             success: false,
-            message: 'Technician found locally but cannot be activated: no branch assigned (ip_users.user_branch_id is empty). Contact admin to assign a branch.',
+            message: 'Your account isn\'t linked to a MicroLab branch yet. Please contact your admin.',
           });
         }
         const [techResult] = await db.query(
@@ -433,6 +610,19 @@ exports.verifyOtp = async (req, res) => {
         );
         dbTechnicianId = techResult.insertId;
         dbBranchId     = localTech.user_branch_id;
+      }
+
+      // Registry name/email → ip_users, only filling placeholders: the name
+      // only while it is still the sendOtp placeholder "user_<mobile>", the
+      // email only while empty. Never overwrites a real local value.
+      if (t && (t.name || t.email)) {
+        await db.query(
+          `UPDATE ip_users
+           SET user_name  = CASE WHEN user_name = ? AND ? IS NOT NULL THEN ? ELSE user_name END,
+               user_email = CASE WHEN (user_email IS NULL OR user_email = '') AND ? IS NOT NULL THEN ? ELSE user_email END
+           WHERE user_id = ?`,
+          [`user_${mobile}`, t.name, t.name, t.email, t.email, dbUser.user_id]
+        );
       }
 
       // Re-read branch_id from DB (admin may have changed it)

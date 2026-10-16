@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
@@ -10,6 +11,7 @@ import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/notification_service.dart';
 import 'package:microlab/constants/app_constants.dart';
+import 'package:microlab/utils/app_messages.dart';
 import '../shared/location_picker_screen.dart';
 import 'customer_home_screen.dart';
 import 'checkout_screen.dart';
@@ -80,56 +82,111 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
   final List<BranchModel> _branches = [];
 
-  // Mock tests — replace with GET /api/tests
+  // Tests/packages are loaded from GET /api/tests one page at a time — the
+  // catalog has ~1,000 products, too many to download and draw at once.
+  // Search, category and offers are applied on the server, so this list
+  // already holds only matching products: the first page, plus each further
+  // page fetched as the customer scrolls near the end.
+  static const int _pageSize = 20;
   List<TestModel> _allTests = [];
-  List<TestModel> get _filteredTests {
-    var list = _allTests;
-    if (_showOffersOnly) {
-      list = list.where((t) => t.hasOffer).toList();
-    }
-    if (_selectedCategory != 'All') {
-      list = list.where((t) => t.category.toLowerCase() == _selectedCategory.toLowerCase()).toList();
-    }
-    if (_searchQuery.isNotEmpty) {
-      list = list.where((t) =>
-        t.name.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-        t.category.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-        t.description.toLowerCase().contains(_searchQuery.toLowerCase())
-      ).toList();
-    }
-    return list;
-  }
+  int  _totalTests   = 0;
+  bool _hasMoreTests = false;
+  bool _loadingMoreTests = false;
+  // Bumped on every new search/filter, so a slow reply for an older query
+  // can't overwrite the results of the current one.
+  int  _testsRequestId = 0;
+  Timer? _searchDebounce;
+  List<String> _categoryNames = [];
 
-  List<String> get _categories {
-    final cats = {'All', ..._allTests.map((t) => t.category)};
-    return cats.toList();
-  }
+  List<TestModel> get _filteredTests => _allTests;
+
+  List<String> get _categories => ['All', ..._categoryNames];
 
   @override
   void initState() {
     super.initState();
     _loadTests();
+    _loadCategories();
     NotificationService.instance.loadCustomerToken();
     if (widget.initialCartTests.isNotEmpty) {
       _cart.addAll(widget.initialCartTests);
     }
     _searchController.addListener(() {
+      if (_searchController.text == _searchQuery) return;
       setState(() => _searchQuery = _searchController.text);
+      // Ask the server once typing pauses, not on every keystroke.
+      _searchDebounce?.cancel();
+      _searchDebounce = Timer(const Duration(milliseconds: 400), _loadTests);
     });
   }
 
+  // First page for the current search + filters (also pull-to-refresh).
   Future<void> _loadTests() async {
-    setState(() => _loadingTests = true);
+    _searchDebounce?.cancel();
+    final requestId = ++_testsRequestId;
+    setState(() { _loadingTests = true; _loadingMoreTests = false; });
     try {
-      final tests = await ApiService.getPackages();
-      if (!mounted) return;
+      final page = await ApiService.getPackagesPage(
+        search:     _searchQuery,
+        category:   _selectedCategory,
+        offersOnly: _showOffersOnly,
+        limit:      _pageSize,
+      );
+      if (!mounted || requestId != _testsRequestId) return;
       setState(() {
-        _allTests = tests;
+        _allTests     = page.items;
+        _totalTests   = page.total;
+        _hasMoreTests = page.hasMore;
         _loadingTests = false;
       });
-    } catch (_) {
-      if (mounted) setState(() => _loadingTests = false);
+    } catch (e) {
+      debugPrint('[Tests] first page failed: $e');
+      if (mounted && requestId == _testsRequestId) setState(() => _loadingTests = false);
     }
+  }
+
+  // Next page, when the customer scrolls near the end of the list.
+  Future<void> _loadMoreTests() async {
+    if (_loadingTests || _loadingMoreTests || !_hasMoreTests) return;
+    final requestId = _testsRequestId;
+    setState(() => _loadingMoreTests = true);
+    try {
+      final page = await ApiService.getPackagesPage(
+        search:     _searchQuery,
+        category:   _selectedCategory,
+        offersOnly: _showOffersOnly,
+        limit:      _pageSize,
+        offset:     _allTests.length,
+      );
+      if (!mounted || requestId != _testsRequestId) return;
+      setState(() {
+        final have = _allTests.map((t) => t.id).toSet();
+        _allTests = [..._allTests, ...page.items.where((t) => !have.contains(t.id))];
+        _totalTests   = page.total;
+        _hasMoreTests = page.hasMore;
+        _loadingMoreTests = false;
+      });
+    } catch (e) {
+      debugPrint('[Tests] next page failed: $e');
+      if (mounted && requestId == _testsRequestId) setState(() => _loadingMoreTests = false);
+    }
+  }
+
+  Future<void> _loadCategories() async {
+    try {
+      final names = await ApiService.getPackageCategories();
+      if (mounted) setState(() => _categoryNames = names);
+    } catch (e) {
+      debugPrint('[Tests] categories failed: $e');
+    }
+  }
+
+  // Start fetching the next page while ~2 cards are still below the screen.
+  bool _onTestsScroll(ScrollNotification n) {
+    if (n.metrics.axis == Axis.vertical && n.metrics.extentAfter < 400) {
+      _loadMoreTests();
+    }
+    return false;
   }
 
   void _toggleCart(TestModel test) {
@@ -206,17 +263,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           // not seeing the true-nearest branch, same idea as Uber surfacing
           // "matched with a nearby driver" instead of silently substituting.
           if (branch.isFallback && body['message'] is String && mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Row(children: [
-                const Icon(Icons.info_outline_rounded, color: Colors.white, size: 16),
-                const SizedBox(width: 8),
-                Expanded(child: Text(body['message'] as String)),
-              ]),
-              backgroundColor: AppColors.brandGreen,
-              behavior: SnackBarBehavior.floating,
-              duration: const Duration(seconds: 5),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ));
+            AppMessages.info(context, AppMessages.serverMessage(body['message'],
+                fallback: 'We matched you with ${branch.name}, the nearest branch with availability.'));
           }
         } else {
           setState(() => _branchDetecting = false);
@@ -232,17 +280,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           try {
             final body = jsonDecode(res.body) as Map<String, dynamic>;
             if (body['message'] is String) {
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Row(children: [
-                  const Icon(Icons.error_outline_rounded, color: Colors.white, size: 16),
-                  const SizedBox(width: 8),
-                  Expanded(child: Text(body['message'] as String)),
-                ]),
-                backgroundColor: const Color(0xFFD32F2F),
-                behavior: SnackBarBehavior.floating,
-                duration: const Duration(seconds: 5),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ));
+              AppMessages.error(context, AppMessages.serverMessage(body['message'],
+                  fallback: 'No nearby branch has availability right now. Please try a different time or location.'));
             }
           } catch (_) {
             // non-JSON error body — nothing to show, stay silent as before
@@ -509,6 +548,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _searchController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -585,10 +625,14 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         ),
       ],
       body: RefreshIndicator(
-        onRefresh: _loadTests,
+        onRefresh: () async {
+          await Future.wait([_loadTests(), _loadCategories()]);
+        },
         color: AppColors.brandGreen,
         backgroundColor: Colors.white,
-        child: SingleChildScrollView(
+        child: NotificationListener<ScrollNotification>(
+          onNotification: _onTestsScroll,
+          child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -661,7 +705,10 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                   children: [
                     // Special Offers chip (always first)
                     GestureDetector(
-                      onTap: () => setState(() => _showOffersOnly = !_showOffersOnly),
+                      onTap: () {
+                        setState(() => _showOffersOnly = !_showOffersOnly);
+                        _loadTests();
+                      },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
                         margin: const EdgeInsets.only(right: 8),
@@ -693,7 +740,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                     ..._categories.map((cat) {
                       final selected = _selectedCategory == cat;
                       return GestureDetector(
-                        onTap: () => setState(() => _selectedCategory = cat),
+                        onTap: () {
+                          if (_selectedCategory == cat) return;
+                          setState(() => _selectedCategory = cat);
+                          _loadTests();
+                        },
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 180),
                           margin: const EdgeInsets.only(right: 8),
@@ -757,7 +808,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 if (_filteredTests.isNotEmpty) ...[
                   _SectionHeader(
                     title: _searchQuery.isNotEmpty
-                        ? '${_filteredTests.length} result${_filteredTests.length == 1 ? "" : "s"}'
+                        ? '$_totalTests result${_totalTests == 1 ? "" : "s"}'
                         : 'Tests & Packages',
                   ),
                   const SizedBox(height: 10),
@@ -774,11 +825,33 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                       onTap: () => _showTestDetail(_filteredTests[i]),
                     ),
                   ),
+                  // Next page on its way (fetched by _onTestsScroll).
+                  if (_loadingMoreTests)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 20),
+                      child: Center(
+                        child: SizedBox(
+                          width: 24, height: 24,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+                        ),
+                      ),
+                    )
+                  // Fallback when the list is too short to scroll, or the
+                  // last page request failed.
+                  else if (_hasMoreTests)
+                    Center(
+                      child: TextButton(
+                        onPressed: _loadMoreTests,
+                        style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
+                        child: Text('Show more (${_totalTests - _filteredTests.length} more)'),
+                      ),
+                    ),
                 ],
               ],
 
               const SizedBox(height: 120),
             ],
+          ),
           ),
         ),
       ),
@@ -1072,7 +1145,11 @@ class _LocationSheet extends StatefulWidget {
   State<_LocationSheet> createState() => _LocationSheetState();
 }
 
-class _LocationSheetState extends State<_LocationSheet> {
+// Why the live location couldn't be used — drives the message and the
+// action button shown under the "Use Current Location" card.
+enum _LocationIssue { none, serviceOff, permissionDenied, permissionDeniedForever, approximate, failed }
+
+class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObserver {
   late String _mode;
   BranchModel? _branch;
   final _pincodeCtrl = TextEditingController();
@@ -1089,28 +1166,36 @@ class _LocationSheetState extends State<_LocationSheet> {
   // Pincode auto-detection
   String? _detectedArea;
   bool _detecting = false;
-  
+
   // Manual address mode flag
   bool _isManualMode = false;
-  
+
   // Address from GPS
+  // A GPS fix worse than this (in metres) is treated as approximate and
+  // refused — see _getCurrentLocation.
+  static const double _maxGpsAccuracyMeters = 1000;
   String? _gpsAddress;
   double? _gpsLat;
   double? _gpsLng;
   bool _gpsSelected = false;
-  
+  // Why the live location couldn't be used (location off, permission
+  // refused, ...) — shown with its own action under "Use Current Location".
+  _LocationIssue _locationIssue = _LocationIssue.none;
+  double? _approxAccuracyMeters;
+
   // Address from manual entry (pincode based)
   String? _manualAddress;
   double? _manualLat;
   double? _manualLng;
   bool _manualSelected = false;
-  
+
   // Pincode geocoding in progress
   bool _isGeocoding = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _mode   = widget.mode;
     _branch = widget.selectedBranch;
     _pincodeCtrl.text = widget.pincode ?? '';
@@ -1130,6 +1215,25 @@ class _LocationSheetState extends State<_LocationSheet> {
 
     if (_mode == 'Lab Test') {
       WidgetsBinding.instance.addPostFrameCallback((_) => _loadBranches());
+    } else if (!_manualSelected) {
+      // Home Collection with no location chosen yet: check that location is
+      // on and permission is given straight away, instead of waiting for
+      // the "Use Current Location" tap.
+      WidgetsBinding.instance.addPostFrameCallback((_) => _getCurrentLocation());
+    }
+  }
+
+  // Coming back from the phone's location or app settings — try again, so
+  // the customer doesn't have to tap anything after turning location on.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed &&
+        _mode == 'Home Collection' &&
+        !_gpsSelected &&
+        !_isGeocoding &&
+        (_locationIssue == _LocationIssue.serviceOff ||
+         _locationIssue == _LocationIssue.permissionDeniedForever)) {
+      _getCurrentLocation();
     }
   }
 
@@ -1156,55 +1260,111 @@ class _LocationSheetState extends State<_LocationSheet> {
     }
   }
 
+  // Home Collection live location, in order: location switched on →
+  // permission granted → an accurate GPS fix → reverse-geocoded address.
+  // Each failure sets _locationIssue, which shows its own message and
+  // action under the "Use Current Location" card.
   Future<void> _getCurrentLocation() async {
+    if (!mounted) return;
     setState(() {
-      _isGeocoding = true;
-      _gpsSelected = false;
+      _isGeocoding    = true;
+      _gpsSelected    = false;
       _manualSelected = false;
+      _locationError  = false;
+      _locationIssue  = _LocationIssue.none;
     });
-    
+
+    void fail(_LocationIssue issue) {
+      if (!mounted) return;
+      setState(() { _isGeocoding = false; _locationIssue = issue; });
+    }
+
     try {
+      // 1. Location (GPS) must be switched on.
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        debugPrint('[LocationSheet] location service is OFF');
+        return fail(_LocationIssue.serviceOff);
+      }
+
+      // 2. Permission — asked here; the customer cannot continue without it.
       LocationPermission perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied) {
         perm = await Geolocator.requestPermission();
       }
-      if (perm == LocationPermission.deniedForever || perm == LocationPermission.denied) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Location permission denied. Please enable location access.')),
-          );
-        }
-        setState(() => _isGeocoding = false);
-        return;
+      if (perm == LocationPermission.deniedForever) {
+        debugPrint('[LocationSheet] permission denied forever');
+        return fail(_LocationIssue.permissionDeniedForever);
       }
-      
+      if (perm == LocationPermission.denied) {
+        debugPrint('[LocationSheet] permission denied');
+        return fail(_LocationIssue.permissionDenied);
+      }
+
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-      ).timeout(const Duration(seconds: 10));
-      
+      ).timeout(const Duration(seconds: 15));
+
+      // 3. A browser (or a phone without a GPS fix) can return a location
+      // guessed from the IP address — accurate only to several km, sometimes
+      // a different city or country. The Home Collection fare is priced from
+      // this point, so an approximate location is refused instead of used.
+      debugPrint('[LocationSheet] GPS accuracy: ${pos.accuracy.toStringAsFixed(0)} m');
+      if (pos.accuracy > _maxGpsAccuracyMeters) {
+        _approxAccuracyMeters = pos.accuracy;
+        return fail(_LocationIssue.approximate);
+      }
+
       _gpsLat = pos.latitude;
       _gpsLng = pos.longitude;
-      
-      // Reverse geocode to get address
+
+      // 4. Reverse geocode to get the address (and its pincode, used to
+      // detect the branch).
       final address = await _reverseGeocode(pos.latitude, pos.longitude);
-      
+      if (!mounted) return;
+
       setState(() {
-        _gpsAddress = address;
+        _gpsAddress  = address;
         _gpsSelected = true;
         _isGeocoding = false;
       });
-      
+
       debugPrint('[LocationSheet] GPS Location: ${pos.latitude}, ${pos.longitude}');
       debugPrint('[LocationSheet] GPS Address: $address');
-      
     } catch (e) {
       debugPrint('[LocationSheet] GPS error: $e');
-      setState(() => _isGeocoding = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to get current location. Please try again.')),
-        );
-      }
+      fail(_LocationIssue.failed);
+    }
+  }
+
+  // Message + action for the current _locationIssue. Web can't open the
+  // device's settings, so it only gets "Try again" with browser wording.
+  ({String message, String action, VoidCallback onAction})? _locationIssueInfo() {
+    switch (_locationIssue) {
+      case _LocationIssue.none:
+        return null;
+      case _LocationIssue.serviceOff:
+        return kIsWeb
+            ? (message: 'Location is turned off on this device. Turn it on, then try again.',
+               action: 'Try again', onAction: _getCurrentLocation)
+            : (message: 'Location is turned off. Turn it on so we can use your current location.',
+               action: 'Turn on location', onAction: () => Geolocator.openLocationSettings());
+      case _LocationIssue.permissionDenied:
+        return (message: 'Allow location access so we can find your branch and calculate the service charge.',
+                action: 'Allow location', onAction: _getCurrentLocation);
+      case _LocationIssue.permissionDeniedForever:
+        return kIsWeb
+            ? (message: 'Location access is blocked in your browser. Allow it in the browser\'s site settings, then try again.',
+               action: 'Try again', onAction: _getCurrentLocation)
+            : (message: 'Location access is turned off for MicroLab. Allow it in the app settings.',
+               action: 'Open settings', onAction: () => Geolocator.openAppSettings());
+      case _LocationIssue.approximate:
+        final km = ((_approxAccuracyMeters ?? 0) / 1000).toStringAsFixed(1);
+        return (message: 'Your location is only approximate (about ±$km km). '
+                    'Turn on precise / high-accuracy location and try again, or enter your pincode below.',
+                action: 'Try again', onAction: _getCurrentLocation);
+      case _LocationIssue.failed:
+        return (message: 'Couldn\'t get your current location.',
+                action: 'Try again', onAction: _getCurrentLocation);
     }
   }
   
@@ -1452,6 +1612,7 @@ class _LocationSheetState extends State<_LocationSheet> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pincodeCtrl.removeListener(_filterBranches);
     _cityCtrl.removeListener(_filterBranches);
     _pincodeCtrl.removeListener(_onPincodeChanged);
@@ -1504,8 +1665,15 @@ class _LocationSheetState extends State<_LocationSheet> {
                         right: m == widget.modes.first ? 8 : 0),
                     child: GestureDetector(
                       onTap: () {
+                        final prev = _mode;
                         setState(() => _mode = m);
                         if (m == 'Lab Test' && _allBranches.isEmpty) _loadBranches();
+                        // Switching to Home Collection: check location
+                        // on/permission right away, as on opening the sheet.
+                        if (m == 'Home Collection' && prev != m &&
+                            !_gpsSelected && !_manualSelected && !_isGeocoding) {
+                          _getCurrentLocation();
+                        }
                       },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
@@ -1617,7 +1785,42 @@ class _LocationSheetState extends State<_LocationSheet> {
                   ),
                 ),
               ),
-              
+
+              // Location off / permission refused / approximate — what
+              // went wrong and the one action that fixes it.
+              if (_locationIssueInfo() case final issue? when !_gpsSelected && !_manualSelected) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF3E0),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFFFCC80)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.location_off_outlined, size: 18, color: Color(0xFFE65100)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(issue.message,
+                            style: const TextStyle(fontSize: 12, color: Color(0xFFE65100))),
+                      ),
+                      const SizedBox(width: 8),
+                      TextButton(
+                        onPressed: issue.onAction,
+                        style: TextButton.styleFrom(
+                          foregroundColor: AppColors.brandGreen,
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          minimumSize: const Size(0, 36),
+                        ),
+                        child: Text(issue.action,
+                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+
               const SizedBox(height: 16),
               
               // Option 2: Manual Address with Pincode

@@ -14,6 +14,7 @@ import 'package:webview_flutter_android/webview_flutter_android.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/utils/app_messages.dart';
 import 'yt_web_stub.dart' if (dart.library.html) 'yt_web_impl.dart';
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -871,7 +872,8 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           _addVoiceError("I couldn't hear you clearly. Please tap the mic and try speaking again.");
         }
       } else {
-        _addVoiceError(data['error'] as String? ?? 'Voice transcription failed. Please try again.');
+        _addVoiceError(AppMessages.serverMessage(data['error'],
+            fallback: 'Voice transcription failed. Please try again.'));
       }
     } on SocketException {
       if (mounted) _addVoiceError('No connection to server. Please check your internet and try again.');
@@ -2637,7 +2639,8 @@ class _BookingFormState extends State<_BookingForm> {
         widget.onBooked?.call();
       } else {
         final body = jsonDecode(res.body) as Map<String, dynamic>?;
-        setState(() => _error = body?['error'] as String? ?? 'Server error (${res.statusCode}).');
+        setState(() => _error = AppMessages.serverMessage(body?['error'],
+            fallback: 'We couldn\'t send your request. Please try again.'));
       }
     } on TimeoutException {
       if (mounted) setState(() => _error = 'Request timed out. Please try again.');
@@ -2852,7 +2855,8 @@ class _PatientLoginFormState extends State<_PatientLoginForm> {
       } else {
         setState(() {
           _loading = false;
-          _error = body['error'] as String? ?? 'Invalid credentials. Please try again.';
+          _error = AppMessages.serverMessage(body['error'],
+              fallback: 'The Patient ID or password is incorrect. Please try again.');
         });
       }
     } catch (_) {

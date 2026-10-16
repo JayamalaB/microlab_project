@@ -21,6 +21,7 @@ class AppColors {
   static const Color blueSurface = Color(0xFFEEF4FB);
   static const Color amber = Color(0xFFE65100);
   static const Color amberSurface = Color(0xFFFEF6EE);
+  static const Color error = Color(0xFFC62828);
 }
 
 class AppTheme {
@@ -33,5 +34,12 @@ class AppTheme {
         ),
         textTheme: GoogleFonts.dmSansTextTheme(),
         scaffoldBackgroundColor: AppColors.white,
+        // Same look for every snack bar, including ones not built through
+        // AppMessages (lib/utils/app_messages.dart).
+        snackBarTheme: SnackBarThemeData(
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          contentTextStyle: const TextStyle(color: Colors.white, fontSize: 13.5),
+        ),
       );
 }
