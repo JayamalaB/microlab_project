@@ -2940,19 +2940,6 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
     setState(() => _uploads.removeAt(index));
   }
 
-  void _callSupport() {
-    // TODO: launch('tel:+911800XXXXXX')
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: const Row(children: [
-        Icon(Icons.phone_outlined, color: Colors.white, size: 16),
-        SizedBox(width: 8),
-        Expanded(child: Text('Calling support…')),
-      ]),
-      backgroundColor: AppColors.brandGreen,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ));
-  }
 
   Future<void> _submit() async {
     if (_uploads.isEmpty || _isSubmitting) return;
@@ -3067,31 +3054,6 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                           style: const TextStyle(
                               fontSize: 13, color: AppColors.textSecondary)),
                     ],
-                  ),
-                ),
-                GestureDetector(
-                  onTap: _callSupport,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: AppColors.brandGreenLight),
-                    ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.support_agent_outlined,
-                            size: 16, color: AppColors.brandGreen),
-                        SizedBox(width: 6),
-                        Text('Support Call',
-                            style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.brandGreen)),
-                      ],
-                    ),
                   ),
                 ),
               ],

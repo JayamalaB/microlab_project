@@ -39,7 +39,7 @@ class _LoginScreenState extends State<LoginScreen> {
   // Matches authController.js's sendOtp/verifyOtp exactly — both endpoints
   // return this identical message for the single-active-session guard, so
   // one substring check here covers either one being what actually failed.
-  static const _alreadyLoggedInElsewhere = 'already logged in on another device';
+  static const _alreadyLoggedInElsewhere = 'Already logged in on another device';
 
   Future<void> _sendOtp({bool forceLogout = false}) async {
     if (!_isValid) return;

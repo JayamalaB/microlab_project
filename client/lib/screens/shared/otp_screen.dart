@@ -122,7 +122,7 @@ class _OtpScreenState extends State<OtpScreen> {
 
   // Matches authController.js's send-otp/verify-otp exactly — both return
   // this identical message for the single-active-session guard.
-  static const _alreadyLoggedInElsewhere = 'already logged in on another device';
+  static const _alreadyLoggedInElsewhere = 'Already logged in on another device';
 
   Future<void> _verify({bool? forceLogoutOverride}) async {
     if (!_isComplete) return;

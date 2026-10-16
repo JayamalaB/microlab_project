@@ -280,11 +280,6 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                     if (await canLaunchUrl(uri)) launchUrl(uri);
                   },
                 ),
-                IconButton(
-                  icon: const Icon(Icons.notifications_outlined,
-                      color: AppColors.textSecondary, size: 22),
-                  onPressed: () {},
-                ),
               ],
             )
           : null,
