@@ -464,7 +464,6 @@ class SocketService {
       io.OptionBuilder()
           .setTransports(['websocket'])
           .disableAutoConnect()
-          .setQuery({'userId': ipUserId.toString()})
           // No attempt limit — socket.io will keep retrying forever.
           // Delay starts at 2 s and doubles per attempt, capped at 10 s so the
           // technician reconnects quickly after a brief outage (tunnel, elevator).
@@ -475,7 +474,13 @@ class SocketService {
 
     _socket!.onConnect((_) {
       _connectedCtrl.add(true);
-      _log('CONNECT', 'socket connected  role=$role userId=$userId');
+      _log('CONNECT', 'socket connected  role=$role userId=$userId ipUserId=$ipUserId');
+
+      // Register this socket so the server can push force_logout if another
+      // device logs in with the same number (overwrites the auth token).
+      if (ipUserId > 0) {
+        _socket?.emit('register_user_socket', {'userId': ipUserId});
+      }
 
       if (role == 'technician') {
         _handleTechnicianReconnect();

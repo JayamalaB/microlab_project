@@ -1639,13 +1639,16 @@ module.exports = function bookingSocket(io, socket) {
 
   // Track userId → socket so authController can push force_logout immediately
   // when a new login on another device overwrites this session's token.
-  const connUserId = parseInt(socket.handshake.query.userId, 10);
-  if (connUserId) {
-    userSockets.set(connUserId, socket);
+  // Registered via explicit event (not handshake query) so it also fires on reconnect.
+  socket.on('register_user_socket', (data = {}) => {
+    const uid = parseInt(data.userId, 10);
+    if (!uid) return;
+    userSockets.set(uid, socket);
+    clog(`[register_user_socket] userId=${uid} socketId=${socket.id}`);
     socket.once('disconnect', () => {
-      if (userSockets.get(connUserId) === socket) userSockets.delete(connUserId);
+      if (userSockets.get(uid) === socket) userSockets.delete(uid);
     });
-  }
+  });
 
   // ════════════════════════════════════════════════════════════════════════════
   //  LAB — Technician events
@@ -3102,7 +3105,12 @@ module.exports = function bookingSocket(io, socket) {
 // window until an unrelated event (disconnect, next status change) clears it.
 module.exports.emitForceLogout = function(userId) {
   const sock = userSockets.get(userId);
-  if (sock && sock.connected) sock.emit('force_logout');
+  if (sock && sock.connected) {
+    sock.emit('force_logout');
+    clog(`[emitForceLogout] userId=${userId} — force_logout emitted to socketId=${sock.id}`);
+  } else {
+    clog(`[emitForceLogout] userId=${userId} — no active socket found (device offline or not yet registered)`);
+  }
 };
 module.exports.freeTechnician = _freeTechnician;
 module.exports.forceTechnicianOffline = _forceTechnicianOffline;
