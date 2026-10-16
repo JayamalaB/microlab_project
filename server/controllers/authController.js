@@ -41,7 +41,7 @@ exports.sendOtp = async (req, res) => {
   const elapsed = () => `${Date.now() - t0}ms`;
   let step = 'init';
   try {
-    const { mobile, role = 'customer' } = req.body;
+    const { mobile, role = 'customer', forceLogout = false } = req.body;
 
     if (!/^[6-9]\d{9}$/.test(mobile)) {
       return res.status(422).json({ success: false, message: 'Invalid mobile number' });
@@ -91,7 +91,7 @@ exports.sendOtp = async (req, res) => {
     step = 'select_user';
     writeLog(`[sendOtp] SELECT ip_users — ${elapsed()}`);
     const [existing] = await db.query(
-      'SELECT user_id, client_id, user_microlab_type, user_auth_token, user_token_expiry, deleted_at FROM ip_users WHERE user_mobile_no = ?',
+      'SELECT user_id, client_id, user_microlab_type, user_auth_token, user_token_expiry, is_logged_in, deleted_at FROM ip_users WHERE user_mobile_no = ?',
       [mobile]
     );
     writeLog(`[sendOtp] select done — found=${existing.length} — ${elapsed()}`);
@@ -120,16 +120,20 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    // An existing account with an active session no longer blocks a new OTP
-    // here — a device that's uninstalled (or just switched) has no way to
-    // log itself out first, so blocking at this step permanently locked
-    // that real, common case out of its own account. The single-active-
-    // session GUARANTEE is not weakened by removing this: it now lives
-    // entirely in verifyOtp, at the one point that's actually safe to make
-    // it — after a real OTP has proven who's asking (see verifyOtp's own
-    // comment on the atomic claim for exactly how). This was always only a
-    // fast-fail UX shortcut anyway (see the removed comment this replaces),
-    // never the real enforcement.
+    // Single-active-session guard at send-OTP — shows the message before the
+    // OTP screen so the user knows early. forceLogout=true (set when the user
+    // taps "Log out & continue") bypasses this and lets the OTP proceed.
+    // Demo accounts bypass unconditionally.
+    // Uses OR: fires if EITHER is_logged_in=1 OR user_auth_token is set —
+    // defensive against the DB having only one of the two updated.
+    if (!isDemo && !forceLogout && existing.length > 0
+        && (existing[0].is_logged_in || existing[0].user_auth_token)) {
+      writeLog(`[sendOtp] blocked — mobile=${mobile} already logged in on another device (user_id=${existing[0].user_id})`);
+      return res.status(409).json({
+        success: false,
+        message: 'Already logged in on another device. Tap "Log out & continue" to sign in here instead.',
+      });
+    }
 
     if (existing.length === 0) {
       step = 'insert_user';
@@ -275,7 +279,7 @@ async function _findLocalTechnicianUser(mobile) {
 
 exports.verifyOtp = async (req, res) => {
   try {
-    const { mobile, otp, role = 'customer' } = req.body;
+    const { mobile, otp, role = 'customer', forceLogout = false } = req.body;
 
     if (!mobile || !otp) {
       return res.status(422).json({ success: false, message: 'Mobile and OTP required' });
@@ -329,6 +333,25 @@ exports.verifyOtp = async (req, res) => {
     }
 
     const tokenExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    // ── Single-active-session guard ───────────────────────────────────────────
+    // After OTP proves ownership, before issuing a new token.
+    // Skip for demo logins and when the user explicitly confirmed force-logout.
+    // Uses OR (same reasoning as sendOtp's guard above): fires if EITHER
+    // is_logged_in=1 OR user_auth_token is set.
+    if (!isDemo && !forceLogout) {
+      const [[sessionRow]] = await db.query(
+        `SELECT is_logged_in, user_auth_token FROM ip_users WHERE user_id = ? LIMIT 1`,
+        [dbUser.user_id]
+      );
+      if (sessionRow?.is_logged_in || sessionRow?.user_auth_token) {
+        writeLog(`[verifyOtp] blocked — mobile=${mobile} already logged in on another device (user_id=${dbUser.user_id})`);
+        return res.status(409).json({
+          success: false,
+          message: 'Already logged in on another device. Tap "Log out & continue" to sign in here instead.',
+        });
+      }
+    }
 
     // ── Technician path ───────────────────────────────────────────────────────
     if (role === 'technician') {
