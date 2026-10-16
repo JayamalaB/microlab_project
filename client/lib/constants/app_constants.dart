@@ -9,7 +9,7 @@ class AppConstants {
   // test report for how it's used.
   static const String serverUrl = String.fromEnvironment(
     'MICROLAB_SERVER_URL',
-    defaultValue: 'https://chat.neuralarc.com', // Node.js — booking, socket, OTP
+    defaultValue: 'https://microlab.neuralarc.com', // Node.js — booking, socket, OTP
   );
   static const String phpServerUrl = 'https://jayamala.neuralarc.com'; // PHP — user registry
   static const String socketUrl    = serverUrl;
