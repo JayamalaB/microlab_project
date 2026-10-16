@@ -588,36 +588,50 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
         .replaceAll('@', ' at ')
         // Remove stray leading punctuation left after bullet stripping
         .replaceAll(RegExp(r'^\s*[.:;]\s+', multiLine: true), '')
-        .replaceAll(RegExp(r'\s{2,}'), ' ')
+        // Collapse blank lines but keep the break itself — a plain space here
+        // would merge the last field of one branch/booking into the next
+        // one's name, since formatBranchInfo() etc. separate entries with \n\n.
+        .replaceAll(RegExp(r'\n{2,}'), '\n')
+        .replaceAll(RegExp(r'[ \t]{2,}'), ' ')
         .trim();
   }
 
+  // Each \n-separated line (branch name / mobile / working hours / next
+  // branch / ...) is its own hard chunk boundary — never merged with a
+  // neighbouring line even if short — so the pause _playTts already applies
+  // between chunks lands after every field, not just once ~200 chars have
+  // piled up across several fields.
   static List<String> _splitTtsChunks(String text, {int maxLen = 200}) {
-    final sentences = RegExp(r'[^.!?\n]+[.!?\n]*')
-        .allMatches(text)
-        .map((m) => m.group(0)!.trim())
-        .where((s) => s.isNotEmpty)
-        .toList();
     final chunks = <String>[];
-    var cur = '';
-    for (final s in sentences) {
-      final joined = cur.isEmpty ? s : '$cur $s';
-      if (joined.length <= maxLen) {
-        cur = joined;
-      } else {
-        if (cur.isNotEmpty) chunks.add(cur);
-        if (s.length > maxLen) {
-          for (var i = 0; i < s.length; i += maxLen) {
-            final end = (i + maxLen) < s.length ? i + maxLen : s.length;
-            chunks.add(s.substring(i, end));
-          }
-          cur = '';
+    for (final line in text.split('\n')) {
+      final trimmedLine = line.trim();
+      if (trimmedLine.isEmpty) continue;
+
+      final sentences = RegExp(r'[^.!?]+[.!?]*')
+          .allMatches(trimmedLine)
+          .map((m) => m.group(0)!.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
+      var cur = '';
+      for (final s in sentences) {
+        final joined = cur.isEmpty ? s : '$cur $s';
+        if (joined.length <= maxLen) {
+          cur = joined;
         } else {
-          cur = s;
+          if (cur.isNotEmpty) chunks.add(cur);
+          if (s.length > maxLen) {
+            for (var i = 0; i < s.length; i += maxLen) {
+              final end = (i + maxLen) < s.length ? i + maxLen : s.length;
+              chunks.add(s.substring(i, end));
+            }
+            cur = '';
+          } else {
+            cur = s;
+          }
         }
       }
+      if (cur.isNotEmpty) chunks.add(cur);
     }
-    if (cur.isNotEmpty) chunks.add(cur);
     return chunks.where((c) => c.isNotEmpty).toList();
   }
 
@@ -765,31 +779,21 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           ? 'voice_${DateTime.now().millisecondsSinceEpoch}.wav'
           : '${(await getTemporaryDirectory()).path}/voice_${DateTime.now().millisecondsSinceEpoch}.wav';
 
-      // Try with audio enhancements first; fall back if device doesn't support them.
-      // autoGain/noiseSuppress/echoCancel require VOICE_COMMUNICATION audio source,
-      // which some Android devices reject — hence the fallback.
-      try {
-        await _recorder.start(
-          const RecordConfig(
-            encoder: AudioEncoder.wav,
-            sampleRate: 16000,
-            numChannels: 1,
-            autoGain: true,
-            noiseSuppress: true,
-            echoCancel: true,
-          ),
-          path: path,
-        );
-      } catch (_) {
-        await _recorder.start(
-          const RecordConfig(
-            encoder: AudioEncoder.wav,
-            sampleRate: 16000,
-            numChannels: 1,
-          ),
-          path: path,
-        );
-      }
+      // autoGain/noiseSuppress/echoCancel switch Android to the
+      // VOICE_COMMUNICATION audio source, which applies aggressive signal
+      // processing that was found to keep amplitude readings above the
+      // silence threshold indefinitely — the auto-stop-on-silence timer
+      // below never armed, so recording only ever stopped on a manual
+      // second tap (web, using a plain browser audio stream, never had
+      // this problem). Plain config restores reliable silence detection.
+      await _recorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.wav,
+          sampleRate: 16000,
+          numChannels: 1,
+        ),
+        path: path,
+      );
       if (mounted) setState(() => _micState = _MicState.recording);
 
       // Give the user 600 ms to start speaking, then watch amplitude.

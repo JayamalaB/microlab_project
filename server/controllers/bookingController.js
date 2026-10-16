@@ -1,9 +1,12 @@
-﻿const db       = require('../config/db');
+﻿const crypto = require('crypto');
+const db       = require('../config/db');
 const settings = require('../config/settings');
 const { calculateHomeCollectionFare, FareCalculationError } = require('../services/fareCalculator');
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { messaging } = require('../config/firebase');
+const { getSecret, refreshSecret } = require('../services/secretCache');
+const { logAsmx } = require('../services/asmxLogger');
 const fs    = require('fs');
 const path  = require('path');
 const https = require('https');
@@ -490,7 +493,11 @@ exports.getMyBookings = async (req, res) => {
          (SELECT COUNT(*)
           FROM ip_test_results tr
           WHERE tr.booking_id = b.booking_id
-            AND tr.result_status = 'released') AS released_results_count
+            AND tr.result_status = 'released') AS released_results_count,
+         (SELECT COUNT(*)
+          FROM ip_booking_test_status bts
+          WHERE bts.booking_id = b.booking_id
+            AND bts.report_status = 'report_ready') AS asmx_report_count
        FROM (
          -- Candidate booking_ids this account is allowed to see, computed
          -- FIRST and cheaply — client_id=? and patient_id=? are each a
@@ -1001,6 +1008,32 @@ exports.payBooking = async (req, res) => {
   }
 };
 
+// ── Proxy report log (written alongside client_sync.log) ─────────────────────
+const REPORT_LOG = path.join(__dirname, '..', 'logs', 'client_sync.log');
+function _logReport(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
+  const line = `[${ist}] [proxyReport] ${msg}\n`;
+  process.stdout.write(line);
+  try { fs.appendFileSync(REPORT_LOG, line, 'utf8'); } catch (_) {}
+}
+
+function _isGetReportSignatureError(parsed) {
+  const msg = (parsed?.msg ?? parsed?.message ?? parsed?.error ?? '').toLowerCase();
+  return msg.includes('sign') || msg.includes('secret') ||
+         msg.includes('unauthor') || msg.includes('invalid') || msg.includes('auth');
+}
+
+async function _callGetReport(getReportUrl, billId, secret) {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const secure_id = crypto.createHmac('sha256', secret).update(`${billId}|${timestamp}`).digest('hex');
+  const upstream  = await fetch(getReportUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ billId, timestamp: String(timestamp), secure_id }).toString(),
+  });
+  return { upstream, timestamp };
+}
+
 // ── GET /api/bookings/:bookingId/results/:resultId/proxy ─────────────────────
 exports.proxyReport = async (req, res) => {
   const bookingId = parseInt(req.params.bookingId, 10);
@@ -1014,22 +1047,129 @@ exports.proxyReport = async (req, res) => {
     );
     if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
 
+    // Check ASMX report first (ip_booking_test_status)
+    const [[asmxRow]] = await db.execute(
+      `SELECT bill_id FROM ip_booking_test_status
+       WHERE id = ? AND booking_id = ? AND report_status = 'report_ready' LIMIT 1`,
+      [resultId, bookingId]
+    );
+    if (asmxRow?.bill_id) {
+      const getReportUrl = process.env.NEURALARC_GET_REPORT_URL;
+      if (!getReportUrl) {
+        _logReport(`bill_id=${asmxRow.bill_id} ERROR: NEURALARC_GET_REPORT_URL not set`);
+        return res.status(503).json({ success: false, message: 'GetReport URL not configured' });
+      }
+      let secret = await getSecret();
+      _logReport(`bill_id=${asmxRow.bill_id} → calling ASMX GetReport`);
+      let { upstream, timestamp } = await _callGetReport(getReportUrl, asmxRow.bill_id, secret);
+      const contentType = upstream.headers.get('content-type') ?? '';
+      _logReport(`bill_id=${asmxRow.bill_id} ASMX response: status=${upstream.status} content-type=${contentType}`);
+      if (!upstream.ok) {
+        const errText = await upstream.text();
+        _logReport(`bill_id=${asmxRow.bill_id} ASMX error body: ${errText.slice(0, 300)}`);
+        await logAsmx('GetReport', {
+          bookingId,
+          mobileNo: null,
+          request:  { billId: asmxRow.bill_id, timestamp },
+          response: { body: errText.slice(0, 300) },
+          httpStatus: upstream.status,
+          success: false,
+          errorMessage: `HTTP ${upstream.status}`,
+        });
+        return res.status(502).json({ success: false, message: `ASMX GetReport error: ${upstream.status}` });
+      }
+
+      let buffer;
+      if (contentType.includes('xml')) {
+        // ASMX wraps the response in XML: <string>{"fileName":"...","pdfData":"<base64>"}</string>
+        const xmlText = await upstream.text();
+        const match = xmlText.match(/<string[^>]*>([\s\S]*?)<\/string>/);
+        if (!match) {
+          _logReport(`bill_id=${asmxRow.bill_id} ERROR: could not parse XML wrapper. body=${xmlText.slice(0, 300)}`);
+          await logAsmx('GetReport', { bookingId, mobileNo: null, request: { billId: asmxRow.bill_id, timestamp }, response: { raw: xmlText.slice(0, 300) }, httpStatus: upstream.status, success: false, errorMessage: 'XML parse failed' });
+          return res.status(502).json({ success: false, message: 'ASMX response parse failed' });
+        }
+        let parsed;
+        try { parsed = JSON.parse(match[1]); } catch (e) {
+          _logReport(`bill_id=${asmxRow.bill_id} ERROR: JSON parse failed inside XML. content=${match[1].slice(0, 200)}`);
+          await logAsmx('GetReport', { bookingId, mobileNo: null, request: { billId: asmxRow.bill_id, timestamp }, response: { raw: match[1].slice(0, 200) }, httpStatus: upstream.status, success: false, errorMessage: 'JSON parse failed' });
+          return res.status(502).json({ success: false, message: 'ASMX JSON parse failed' });
+        }
+        if (!parsed.pdfData) {
+          if (_isGetReportSignatureError(parsed)) {
+            _logReport(`bill_id=${asmxRow.bill_id} signature error — refreshing secret and retrying`);
+            secret = await refreshSecret();
+            const retry = await _callGetReport(getReportUrl, asmxRow.bill_id, secret);
+            const retryText = await retry.upstream.text();
+            const retryMatch = retryText.match(/<string[^>]*>([\s\S]*?)<\/string>/);
+            let retryParsed = {};
+            try { retryParsed = retryMatch ? JSON.parse(retryMatch[1]) : {}; } catch (_) {}
+            if (retryParsed.pdfData) {
+              _logReport(`bill_id=${asmxRow.bill_id} ✅ retry succeeded`);
+              parsed = retryParsed;
+              timestamp = retry.timestamp;
+            } else {
+              _logReport(`bill_id=${asmxRow.bill_id} retry also failed: ${JSON.stringify(retryParsed).slice(0, 200)}`);
+              await logAsmx('GetReport', { bookingId, mobileNo: null, request: { billId: asmxRow.bill_id, timestamp: retry.timestamp }, response: retryParsed, httpStatus: retry.upstream.status, success: false, errorMessage: 'signature error after retry' });
+              return res.status(502).json({ success: false, message: 'ASMX signature error' });
+            }
+          } else {
+            _logReport(`bill_id=${asmxRow.bill_id} ERROR: no pdfData in response. keys=${Object.keys(parsed).join(',')}`);
+            await logAsmx('GetReport', { bookingId, mobileNo: null, request: { billId: asmxRow.bill_id, timestamp }, response: { keys: Object.keys(parsed) }, httpStatus: upstream.status, success: false, errorMessage: 'missing pdfData' });
+            return res.status(502).json({ success: false, message: 'ASMX response missing pdfData' });
+          }
+        }
+        buffer = Buffer.from(parsed.pdfData, 'base64');
+        _logReport(`bill_id=${asmxRow.bill_id} ✅ decoded base64 PDF bytes=${buffer.length} file=${parsed.fileName ?? ''}`);
+        await logAsmx('GetReport', {
+          bookingId,
+          mobileNo: null,
+          request:  { billId: asmxRow.bill_id, timestamp },
+          response: { fileName: parsed.fileName, pdfData: '<binary omitted>' },
+          httpStatus: upstream.status,
+          success: true,
+        });
+      } else {
+        buffer = Buffer.from(await upstream.arrayBuffer());
+        _logReport(`bill_id=${asmxRow.bill_id} ✅ binary PDF bytes=${buffer.length}`);
+        await logAsmx('GetReport', {
+          bookingId,
+          mobileNo: null,
+          request:  { billId: asmxRow.bill_id, timestamp },
+          response: { bytes: buffer.length },
+          httpStatus: upstream.status,
+          success: true,
+        });
+      }
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="report_${asmxRow.bill_id}.pdf"`);
+      return res.send(buffer);
+    }
+
+    // Fall back to legacy ip_test_results
+    _logReport(`resultId=${resultId} bookingId=${bookingId} — no ASMX row, trying legacy ip_test_results`);
     const [[result]] = await db.execute(
       `SELECT report_url FROM ip_test_results
        WHERE result_id = ? AND booking_id = ? AND result_status = 'released' LIMIT 1`,
       [resultId, bookingId]
     );
-    if (!result?.report_url) return res.status(404).json({ success: false, message: 'Report not found' });
-
+    if (!result?.report_url) {
+      _logReport(`resultId=${resultId} bookingId=${bookingId} ERROR: not found in ip_test_results`);
+      return res.status(404).json({ success: false, message: 'Report not found' });
+    }
     const upstream = await fetch(result.report_url);
+    _logReport(`resultId=${resultId} legacy fetch status=${upstream.status} url=${result.report_url}`);
     if (!upstream.ok) {
       return res.status(502).json({ success: false, message: `Upstream error: ${upstream.status}` });
     }
     const buffer = Buffer.from(await upstream.arrayBuffer());
+    _logReport(`resultId=${resultId} ✅ legacy PDF received bytes=${buffer.length}`);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="report_${resultId}.pdf"`);
     res.send(buffer);
   } catch (err) {
+    _logReport(`ERROR bookingId=${bookingId} resultId=${resultId}: ${err.message}`);
     console.error('proxyReport error:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -1049,18 +1189,72 @@ exports.getBookingResults = async (req, res) => {
     );
     if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
 
-    const [rows] = await db.execute(
+    const [oldRows] = await db.execute(
       `SELECT result_id, test_name, test_code, result_value, result_unit,
               reference_range, result_flag, result_remarks, report_url,
-              result_file_path, released_at
+              result_file_path, released_at, 'legacy' AS source
        FROM ip_test_results
        WHERE booking_id = ? AND result_status = 'released'
        ORDER BY result_id ASC`,
       [bookingId]
     );
-    res.json({ success: true, results: rows });
+    const [asmxRows] = await db.execute(
+      `SELECT id AS result_id,
+              CONCAT('Report (', bill_id, ')') AS test_name,
+              test_code, bill_id, updated_at AS released_at,
+              'asmx' AS source
+       FROM ip_booking_test_status
+       WHERE booking_id = ? AND report_status = 'report_ready'
+       ORDER BY id ASC`,
+      [bookingId]
+    );
+    res.json({ success: true, results: [...oldRows, ...asmxRows] });
   } catch (err) {
     console.error('❌ getBookingResults FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── POST /api/bookings/report-status (webhook — ASMX client posts when report ready) ──
+exports.reportStatusWebhook = async (req, res) => {
+  const { bill_id, report_status } = req.body ?? {};
+  if (!bill_id || !report_status) {
+    return res.status(400).json({ success: false, message: 'bill_id and report_status are required' });
+  }
+  try {
+    const [upd] = await db.execute(
+      `UPDATE ip_booking_test_status
+          SET report_status = ?, updated_at = NOW()
+        WHERE bill_id = ?`,
+      [report_status, String(bill_id)]
+    );
+    if (upd.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'bill_id not found' });
+    }
+
+    // Fire FCM push to patient if report is now ready
+    if (report_status === 'report_ready') {
+      const [[row]] = await db.execute(
+        `SELECT bts.booking_id, b.patient_id
+           FROM ip_booking_test_status bts
+           JOIN ip_bookings b ON b.booking_id = bts.booking_id
+          WHERE bts.bill_id = ? LIMIT 1`,
+        [String(bill_id)]
+      );
+      if (row) {
+        sendToBookingOwner(
+          row.booking_id,
+          'Report Ready',
+          'Your lab report is ready. Tap to view.',
+          { type: 'report_ready' }
+        ).catch(err => console.error('[reportStatusWebhook] FCM failed:', err.message));
+        _pushToPatient(row.booking_id, 'report_ready', { bookingId: row.booking_id });
+      }
+    }
+
+    res.json({ success: true, affected: upd.affectedRows });
+  } catch (err) {
+    console.error('❌ reportStatusWebhook FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
@@ -2228,14 +2422,12 @@ exports.createFamilyBooking = async (req, res) => {
 
     if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, totalAmount);
 
-    if (isPaid) {
-      for (const { bookingId } of createdBookings) {
-        syncBookingToClient(bookingId, {
-          mobile: req.user.mobile,
-          type:   req.user.user_type ?? 'customer',
-          action: 'new_booking',
-        }).catch(err => console.error('[clientSync] unhandled:', err.message));
-      }
+    for (const { bookingId } of createdBookings) {
+      syncBookingToClient(bookingId, {
+        mobile: req.user.mobile,
+        type:   req.user.user_type ?? 'customer',
+        action: 'new_booking',
+      }).catch(err => console.error('[clientSync] unhandled:', err.message));
     }
 
     res.status(201).json({ success: true, visitGroupId, bookings: createdBookings });

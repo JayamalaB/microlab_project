@@ -291,6 +291,28 @@ class NotificationService {
       return;
     }
 
+    if (type == 'report_ready') {
+      final title = message.notification?.title ?? 'Report Ready';
+      final body  = message.notification?.body  ?? 'Your lab report is ready. Tap to view.';
+      _localNotifs.show(
+        message.data['booking_id']?.hashCode ?? 'report_ready'.hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _updatesChannelId,
+            _updatesChannelName,
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+        ),
+      );
+      CustomerRefreshNotifier.instance.fire(CustomerRefreshEvent.reportReady);
+      return;
+    }
+
     if (type == 'booking_confirmed' ||
         type == 'technician_assigned' ||
         type == 'technician_en_route' ||
