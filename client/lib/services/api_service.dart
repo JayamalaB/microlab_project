@@ -51,6 +51,11 @@ class ApiService {
     });
   }
 
+  /// Called by SocketService when the server pushes `force_logout` — same
+  /// redirect as a 401, but triggered immediately via socket instead of waiting
+  /// for the next HTTP call.
+  static void handleForceLogout() => _handle401();
+
   // forceLogout: set only after the user has explicitly confirmed, in
   // response to "already logged in on another device", that they want to
   // release that other session and continue. Must also be passed to

@@ -119,6 +119,7 @@ const onlineDrivers     = new Map();
 
 // ── Booking state ──────────────────────────────────────────────────────────────
 const patientSockets   = new Map(); // patientId  → socketId
+const userSockets      = new Map(); // userId     → socket  (for force_logout)
 const bookingRooms     = new Map(); // bookingId  → patientId
 const dispatchQueues   = new Map(); // bookingId  → dispatch-state object
 const lastTechLocation = new Map(); // trackingId → { ...data, _cachedAt }
@@ -1636,6 +1637,16 @@ async function _handleBookingRequest(io, socket, data = {}) {
 module.exports = function bookingSocket(io, socket) {
   _io = io; // capture for triggerScheduledDispatch
 
+  // Track userId → socket so authController can push force_logout immediately
+  // when a new login on another device overwrites this session's token.
+  const connUserId = parseInt(socket.handshake.query.userId, 10);
+  if (connUserId) {
+    userSockets.set(connUserId, socket);
+    socket.once('disconnect', () => {
+      if (userSockets.get(connUserId) === socket) userSockets.delete(connUserId);
+    });
+  }
+
   // ════════════════════════════════════════════════════════════════════════════
   //  LAB — Technician events
   // ════════════════════════════════════════════════════════════════════════════
@@ -3089,6 +3100,10 @@ module.exports = function bookingSocket(io, socket) {
 // reconcile the live dispatch engine's in-memory state — without this, a
 // technician stays marked busy/occupied for a cancelled appointment's slot
 // window until an unrelated event (disconnect, next status change) clears it.
+module.exports.emitForceLogout = function(userId) {
+  const sock = userSockets.get(userId);
+  if (sock && sock.connected) sock.emit('force_logout');
+};
 module.exports.freeTechnician = _freeTechnician;
 module.exports.forceTechnicianOffline = _forceTechnicianOffline;
 module.exports.markTechnicianOfflineStale = _markTechnicianOfflineStale;

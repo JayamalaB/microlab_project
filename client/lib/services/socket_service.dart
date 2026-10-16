@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:socket_io_client/socket_io_client.dart' as io;
 import '../constants/app_constants.dart';
+import 'api_service.dart';
 import 'notification_service.dart';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -460,6 +461,7 @@ class SocketService {
       io.OptionBuilder()
           .setTransports(['websocket'])
           .disableAutoConnect()
+          .setQuery({'userId': userId.toString()})
           // No attempt limit — socket.io will keep retrying forever.
           // Delay starts at 2 s and doubles per attempt, capped at 10 s so the
           // technician reconnects quickly after a brief outage (tunnel, elevator).
@@ -713,6 +715,11 @@ class SocketService {
       _tripCompletedCtrl.add(id);
       // Clear active ride once the trip is done
       if (activeRide.value?.bookingId == id) clearActiveRide();
+    });
+
+    _socket!.on('force_logout', (_) {
+      _log('EVENT', 'force_logout received — another device claimed this session');
+      ApiService.handleForceLogout();
     });
   }
 

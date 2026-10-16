@@ -3,7 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { forceTechnicianOffline } = require('../socket/bookingSocket');
+const { forceTechnicianOffline, emitForceLogout } = require('../socket/bookingSocket');
 const { getSecret, refreshSecret } = require('../services/secretCache');
 const dbLogger = require('../utils/dbLogger');
 const { logAsmx } = require('../services/asmxLogger');
@@ -684,6 +684,7 @@ exports.verifyOtp = async (req, res) => {
         [token, tokenExpiry, dbUser.user_id]
       );
       writeLog(`[verifyOtp] technician_id=${dbTechnicianId} — new session claimed for mobile=${mobile}, any previous session on this number is now invalid`);
+      try { emitForceLogout(dbUser.user_id); } catch (_) {}
 
       // Create session + live_location rows
       let sessionId = null;
@@ -878,6 +879,7 @@ exports.verifyOtp = async (req, res) => {
       [token, tokenExpiry, dbUser.user_id]
     );
     writeLog(`[verifyOtp] client_id=${dbUser.client_id} — new session claimed for mobile=${mobile}, any previous session on this number is now invalid`);
+    try { emitForceLogout(dbUser.user_id); } catch (_) {}
 
     return res.json({
       success: true,
