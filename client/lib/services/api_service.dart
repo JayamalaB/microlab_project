@@ -1,13 +1,48 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show GlobalKey, MaterialPageRoute, NavigatorState, ScaffoldMessenger, SnackBar, Text, WidgetsBinding;
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/models.dart';
 import 'package:microlab/constants/app_constants.dart';
+import 'package:microlab/screens/shared/onboarding_screen.dart';
 
 class ApiService {
   static const String baseUrl = AppConstants.serverUrl;
+
+  // Global navigator key — wire into MaterialApp so _handle401 can navigate
+  // without a BuildContext.
+  static final GlobalKey<NavigatorState> navigatorKey =
+      GlobalKey<NavigatorState>();
+
+  static final _client = _AuthClient();
+  static bool _redirecting401 = false;
+
+  // Called by _AuthClient when any authenticated response comes back 401.
+  // Clears stored credentials and pushes OnboardingScreen, replacing the
+  // entire stack so the user cannot go back to a now-invalid screen.
+  static void _handle401() {
+    if (_redirecting401) return;
+    _redirecting401 = true;
+    clearToken(); // unawaited — fire-and-forget; navigation is the priority
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _redirecting401 = false;
+      navigatorKey.currentState?.pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+        (_) => false,
+      );
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null) {
+        ScaffoldMessenger.of(ctx).showSnackBar(
+          const SnackBar(
+            content: Text('Signed out — another device logged in with your number.'),
+            duration: Duration(seconds: 5),
+          ),
+        );
+      }
+    });
+  }
 
   // forceLogout: set only after the user has explicitly confirmed, in
   // response to "already logged in on another device", that they want to
@@ -49,7 +84,7 @@ class ApiService {
     try {
       final authToken = await getToken();
       if (authToken == null) return;
-      await http.post(
+      await _client.post(
         Uri.parse('$baseUrl/api/auth/fcm-token'),
         headers: {
           'Content-Type': 'application/json',
@@ -61,7 +96,7 @@ class ApiService {
   }
 
   static Future<void> logout(String token) async {
-    await http
+    await _client
         .post(
           Uri.parse('$baseUrl/api/auth/logout'),
           headers: {
@@ -120,7 +155,7 @@ class ApiService {
   static Future<List<PatientModel>> getPatients() async {
     final token = await getToken();
     if (token == null) return [];
-    final res = await http
+    final res = await _client
         .get(
           Uri.parse('$baseUrl/api/patients'),
           headers: {'Authorization': 'Bearer $token'},
@@ -137,7 +172,7 @@ class ApiService {
 
   static Future<Map<String, dynamic>> savePatient(Map<String, dynamic> body) async {
     final token = await getToken();
-    final res = await http
+    final res = await _client
         .post(
           Uri.parse('$baseUrl/api/patients'),
           headers: {
@@ -152,7 +187,7 @@ class ApiService {
 
   static Future<Map<String, dynamic>> updatePatient(String id, Map<String, dynamic> body) async {
     final token = await getToken();
-    final res = await http
+    final res = await _client
         .put(
           Uri.parse('$baseUrl/api/patients/$id'),
           headers: {
@@ -167,7 +202,7 @@ class ApiService {
 
   static Future<Map<String, dynamic>> deletePatient(String id) async {
     final token = await getToken();
-    final res = await http
+    final res = await _client
         .delete(
           Uri.parse('$baseUrl/api/patients/$id'),
           headers: {'Authorization': 'Bearer $token'},
@@ -185,7 +220,7 @@ class ApiService {
           'photo', bytes,
           filename: filename,
           contentType: MediaType('image', 'jpeg')));
-    final streamed = await req.send().timeout(const Duration(seconds: 30));
+    final streamed = await _client.send(req).timeout(const Duration(seconds: 30));
     final raw = await streamed.stream.bytesToString();
     if (streamed.statusCode != 200 && streamed.statusCode != 201) return null;
     try {
@@ -203,7 +238,7 @@ class ApiService {
     }
     try {
       debugPrint('[getMyBookings] GET $baseUrl/api/bookings/mine');
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/bookings/mine'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -223,7 +258,7 @@ class ApiService {
 
   static Future<Map<String, dynamic>> createBooking(Map<String, dynamic> body) async {
     final token = await getToken();
-    final res = await http.post(
+    final res = await _client.post(
       Uri.parse('$baseUrl/api/bookings'),
       headers: {
         'Content-Type': 'application/json',
@@ -313,7 +348,7 @@ class ApiService {
         'lat': lat.toString(),
         'lng': lng.toString(),
       });
-      final res = await http.get(
+      final res = await _client.get(
         uri,
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -332,7 +367,7 @@ class ApiService {
       final req = http.MultipartRequest('POST', uri)
         ..headers['Authorization'] = 'Bearer $token'
         ..files.add(http.MultipartFile.fromBytes('photo', bytes, filename: fileName));
-      final streamed = await req.send().timeout(const Duration(seconds: 30));
+      final streamed = await _client.send(req).timeout(const Duration(seconds: 30));
       final res  = await http.Response.fromStream(streamed);
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       if (body['success'] == true) return body['url'] as String?;
@@ -354,7 +389,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return false;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/prescriptions'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -383,7 +418,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return [];
     try {
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/bookings/$bookingId/items'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -405,7 +440,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/bookings/$bookingId/items'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -429,7 +464,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return false;
     try {
-      final res = await http.delete(
+      final res = await _client.delete(
         Uri.parse('$baseUrl/api/bookings/$bookingId/items/$bookingItemId'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -452,7 +487,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return false;
     try {
-      final res = await http.patch(
+      final res = await _client.patch(
         Uri.parse('$baseUrl/api/bookings/$bookingId/items/$bookingItemId/collected'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -481,7 +516,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return false;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/bookings/$bookingId/collection-photo'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -504,7 +539,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/bookings/$bookingId/collection-photo'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -529,7 +564,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return false;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/collect-payment'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -563,7 +598,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return {'success': false, 'message': 'Not logged in'};
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/cancel-booking'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -593,7 +628,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/bookings/$bookingId'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 10));
@@ -618,7 +653,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return [];
     try {
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/bookings/$bookingId/linked-patients'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -661,7 +696,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return [];
     try {
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/prescriptions/$bookingId'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -683,7 +718,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/prescriptions'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -711,7 +746,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return false;
     try {
-      final res = await http.patch(
+      final res = await _client.patch(
         Uri.parse('$baseUrl/api/prescriptions/$docId/verify'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -727,7 +762,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return false;
     try {
-      final res = await http.delete(
+      final res = await _client.delete(
         Uri.parse('$baseUrl/api/prescriptions/$docId'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -748,7 +783,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return false;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/bookings/$bookingId/pay'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -774,7 +809,7 @@ class ApiService {
   /// Returns null on error or if no technician row exists yet.
   static Future<Uint8List> getReportProxy(int bookingId, int resultId) async {
     final token = await getToken();
-    final res = await http.get(
+    final res = await _client.get(
       Uri.parse('$baseUrl/api/bookings/$bookingId/results/$resultId/proxy'),
       headers: {'Authorization': 'Bearer $token'},
     ).timeout(const Duration(seconds: 30));
@@ -788,7 +823,7 @@ class ApiService {
     try {
       final token = await getToken();
       if (token == null) return [];
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/bookings/$bookingId/results'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -803,7 +838,7 @@ class ApiService {
   static Future<Map<String, dynamic>?> fetchBookingStatus(int bookingId) async {
     try {
       final token = await getToken();
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/bookings/$bookingId'),
         headers: token != null ? {'Authorization': 'Bearer $token'} : {},
       ).timeout(const Duration(seconds: 10));
@@ -840,7 +875,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/add-customer'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -877,7 +912,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/technicians/patient-lookup?mobile=$mobile&bookingId=$bookingId'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 10));
@@ -909,7 +944,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/add-visit-member'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -947,7 +982,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/add-visit-member'),
         headers: {
           'Authorization': 'Bearer $token',
@@ -971,7 +1006,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return [];
     try {
-      final res = await http.get(
+      final res = await _client.get(
         Uri.parse('$baseUrl/api/technicians/booking-family?bookingId=$bookingId'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 10));
@@ -991,7 +1026,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/booking-otp/generate'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
         body: jsonEncode({'bookingId': bookingId}),
@@ -1010,7 +1045,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/booking-otp/verify'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
         body: jsonEncode({'bookingId': bookingId, 'otp': otp}),
@@ -1026,7 +1061,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/booking-otp/resend'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
         body: jsonEncode({'bookingId': bookingId}),
@@ -1046,7 +1081,7 @@ class ApiService {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final res = await http.put(
+      final res = await _client.put(
         Uri.parse('$baseUrl/api/bookings/$bookingId/items'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
         body: jsonEncode({'items': items, 'serviceCharge': serviceCharge}),
@@ -1091,7 +1126,7 @@ class ApiService {
         if (razorpayPaymentId   != null) 'razorpayPaymentId':  razorpayPaymentId,
         if (razorpayOrderId     != null) 'razorpayOrderId':    razorpayOrderId,
       };
-      final res = await http.post(
+      final res = await _client.post(
         Uri.parse('$baseUrl/api/bookings/family'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
         body: jsonEncode(body),
@@ -1107,7 +1142,7 @@ class ApiService {
       List<String> filePaths, {String? patientId, String? notes}) async {
     final token = await getToken();
     if (token == null) throw Exception('Not authenticated');
-    final res = await http.post(
+    final res = await _client.post(
       Uri.parse('$baseUrl/api/prescription-requests'),
       headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
       body: jsonEncode({
@@ -1125,7 +1160,7 @@ class ApiService {
     try {
       final uri = Uri.parse('$baseUrl/api/prescription-requests/mine')
           .replace(queryParameters: patientId != null ? {'patient_id': patientId} : null);
-      final res = await http.get(
+      final res = await _client.get(
         uri,
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 15));
@@ -1141,7 +1176,7 @@ class ApiService {
       int bookingIdNum, {required String collectionDate, required int availableSlotId}) async {
     final token = await getToken();
     if (token == null) throw Exception('Not authenticated');
-    final res = await http.post(
+    final res = await _client.post(
       Uri.parse('$baseUrl/api/bookings/$bookingIdNum/reschedule'),
       headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
       body: jsonEncode({'collectionDate': collectionDate, 'availableSlotId': availableSlotId}),
@@ -1152,7 +1187,7 @@ class ApiService {
   static Future<Map<String, dynamic>> cancelBooking(int bookingIdNum, {String? reason}) async {
     final token = await getToken();
     if (token == null) throw Exception('Not authenticated');
-    final res = await http.post(
+    final res = await _client.post(
       Uri.parse('$baseUrl/api/bookings/$bookingIdNum/cancel'),
       headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
       body: jsonEncode({'reason': reason}),
@@ -1173,7 +1208,7 @@ class ApiService {
     if (razorpayPaymentId != null) body['razorpayPaymentId'] = razorpayPaymentId;
     if (payDiffLater) body['payDiffLater'] = true;
     if (topUpAmount != null) body['topUpAmount'] = topUpAmount;
-    final res = await http.post(
+    final res = await _client.post(
       Uri.parse('$baseUrl/api/bookings/$bookingIdNum/self-edit'),
       headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
       body: jsonEncode(body),
@@ -1185,7 +1220,7 @@ class ApiService {
       int bookingIdNum, int rating, String comment) async {
     final token = await getToken();
     if (token == null) throw Exception('Not authenticated');
-    final res = await http.post(
+    final res = await _client.post(
       Uri.parse('$baseUrl/api/feedback'),
       headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
       body: jsonEncode({
@@ -1226,5 +1261,22 @@ class ApiService {
       if (data['success'] == true) return data;
     } catch (_) {}
     return null;
+  }
+}
+
+// Intercepts every HTTP response that carries an Authorization header.
+// If the server returns 401, the stored session is cleared and the app
+// is sent back to the onboarding/login screen.
+class _AuthClient extends http.BaseClient {
+  final http.Client _inner = http.Client();
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final response = await _inner.send(request);
+    if (response.statusCode == 401 &&
+        request.headers.containsKey('Authorization')) {
+      ApiService._handle401();
+    }
+    return response;
   }
 }

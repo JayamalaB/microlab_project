@@ -9,6 +9,7 @@ import 'package:microlab/services/booking_notification_service.dart';
 import 'package:microlab/services/notification_service.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/screens/shared/splash_screen.dart';
+import 'package:microlab/services/api_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -56,6 +57,7 @@ class MicroLabApp extends StatelessWidget {
       title: 'MicroLab',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.theme,
+      navigatorKey: ApiService.navigatorKey,
       home: const SplashScreen(),
     );
   }
