@@ -204,12 +204,13 @@ exports.logoutTechnician = async (req, res) => {
       [technicianId]
     );
 
-    // Clear auth token in ip_users
+    // Clear auth token and logged-in flag in ip_users
     await connection.query(
       `UPDATE ip_users u
        JOIN ip_technicians t ON t.user_id = u.user_id
        SET u.user_auth_token    = NULL,
            u.user_token_expiry  = NULL,
+           u.is_logged_in       = 0,
            u.user_date_modified = NOW()
        WHERE t.technician_id = ?`,
       [technicianId]
