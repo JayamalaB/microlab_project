@@ -3,7 +3,8 @@ const router = express.Router();
 const bookingController = require('../controllers/bookingController');
 const auth        = require('../middleware/auth');
 const adminAuth   = require('../middleware/adminAuth');
-const adminSecret = require('../middleware/adminSecret');
+const adminSecret    = require('../middleware/adminSecret');
+const adminBodyAuth  = require('../middleware/adminBodyAuth');
 
 // POST /api/bookings — create booking (returns bookingId)
 router.post('/', auth, bookingController.createBooking);
@@ -36,7 +37,7 @@ router.post('/:bookingId/results/:resultId/released', adminSecret, bookingContro
 
 // POST /api/bookings/report-status — ASMX client posts when a report is ready
 // Must be above /:bookingId routes so "report-status" is not parsed as a bookingId
-router.post('/report-status', adminSecret, bookingController.reportStatusWebhook);
+router.post('/report-status', adminBodyAuth('bill_id'), bookingController.reportStatusWebhook);
 
 // GET  /api/bookings/:bookingId/items   — list booking test items
 router.get('/:bookingId/items',                    auth, bookingController.getItems);

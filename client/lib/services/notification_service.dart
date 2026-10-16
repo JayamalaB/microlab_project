@@ -291,6 +291,28 @@ class NotificationService {
       return;
     }
 
+    if (type == 'refund_processed') {
+      final title = message.notification?.title ?? 'Refund Initiated';
+      final body  = message.notification?.body  ?? 'Your refund has been initiated and will be credited within 5–7 working days.';
+      _localNotifs.show(
+        message.data['booking_id']?.hashCode ?? 'refund_processed'.hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _updatesChannelId,
+            _updatesChannelName,
+            importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+        ),
+      );
+      CustomerRefreshNotifier.instance.fire(CustomerRefreshEvent.bookingStatusChanged);
+      return;
+    }
+
     if (type == 'report_ready') {
       final title = message.notification?.title ?? 'Report Ready';
       final body  = message.notification?.body  ?? 'Your lab report is ready. Tap to view.';

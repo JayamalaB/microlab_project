@@ -13,10 +13,16 @@ function log(msg) {
 }
 
 exports.handleWebhook = async (req, res) => {
+  log(`📥 request received — ip=${req.ip} method=${req.method} content-type=${req.headers['content-type'] ?? 'none'}`);
+
   // req.body is a Buffer (express.raw middleware applied by the route)
   const rawBody  = req.body;
   const sig      = req.headers['x-razorpay-signature'];
   const secret   = process.env.RAZORPAY_WEBHOOK_SECRET;
+
+  log(`   body type=${Buffer.isBuffer(rawBody) ? 'Buffer' : typeof rawBody} length=${rawBody?.length ?? 0}`);
+  log(`   x-razorpay-signature=${sig ?? 'MISSING'}`);
+  log(`   RAZORPAY_WEBHOOK_SECRET set=${!!secret}`);
 
   if (!secret) {
     log('❌ RAZORPAY_WEBHOOK_SECRET not set in .env');
@@ -25,10 +31,13 @@ exports.handleWebhook = async (req, res) => {
 
   // Verify signature
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  log(`   expected=${expected}`);
+  log(`   received=${sig}`);
   if (sig !== expected) {
     log(`❌ Signature mismatch — received: ${sig}`);
     return res.status(400).json({ error: 'Invalid signature' });
   }
+  log('✅ Signature verified');
 
   let event;
   try {
@@ -103,7 +112,7 @@ async function markSettled(txn, refundId, amount) {
 
   await db.execute(
     `UPDATE ip_bookings
-     SET refund_status = 'processed', updated_at = NOW()
+     SET refund_status = 'initiated', updated_at = NOW()
      WHERE booking_id = ?`,
     [booking_id]
   );
@@ -112,11 +121,12 @@ async function markSettled(txn, refundId, amount) {
 
   // Push notification to customer
   try {
-    await sendToBookingOwner(booking_id, {
-      title: 'Refund Processed',
-      body:  `Your refund of ₹${amount} has been credited to your account.`,
-      data:  { type: 'refund_processed', bookingId: String(booking_id) },
-    });
+    await sendToBookingOwner(
+      booking_id,
+      'Refund Initiated',
+      `Your refund of ₹${amount} has been initiated and will be credited to your account within 5–7 working days.`,
+      { type: 'refund_processed', bookingId: String(booking_id) },
+    );
   } catch (err) {
     log(`⚠️  Push notification failed: ${err.message}`);
   }

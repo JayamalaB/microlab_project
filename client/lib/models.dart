@@ -258,6 +258,7 @@ class BookingModel {
   final double? patientLat;         // collection_latitude  — patient's home coordinates
   final double? patientLng;         // collection_longitude
   final double? refundAmount;
+  final double? actualRefundAmount; // sum of confirmed refund rows from ip_payment_transactions
   final String? refundStatus;       // null | 'initiated' | 'processed'
   final int rescheduleCount;
   final bool canReschedule;
@@ -303,6 +304,7 @@ class BookingModel {
     this.patientLat,
     this.patientLng,
     this.refundAmount,
+    this.actualRefundAmount,
     this.refundStatus,
     this.rescheduleCount = 0,
     this.canReschedule = true,

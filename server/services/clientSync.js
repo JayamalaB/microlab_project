@@ -508,8 +508,8 @@ async function syncBookingToClient(bookingId, initiator) {
           blood_test_list: bloodTestList,
           payment_details: paymentDetails,
         };
-        // Cancel/reschedule/payment_update always send patient_id — patient already exists on ASMX side
-        if (isNewPatient && !['cancel', 'reschedule', 'payment_update'].includes(action)) {
+        // Cancel/reschedule/payment_update/package_update always send patient_id — patient already exists on ASMX side
+        if (isNewPatient && !['cancel', 'reschedule', 'payment_update', 'package_update'].includes(action)) {
           payload.patient_details = patientDetails;
         } else {
           payload.patient_id = patient.patient_id_ref;
@@ -520,28 +520,30 @@ async function syncBookingToClient(bookingId, initiator) {
 
     
     // 6. POST to client server
-    const asmxUrl           = process.env.NEURALARC_BOOKING_URL;
-    const existingAsmxUrl   = process.env.NEURALARC_EXISTING_BOOKING_URL;
-    const cancelAsmxUrl     = process.env.NEURALARC_CANCEL_URL;
-    const rescheduleAsmxUrl = process.env.NEURALARC_RESCHEDULE_URL;
-    const paymentAsmxUrl    = process.env.NEURALARC_PAYMENT_URL;
-    const useAsmx           = action === 'new_booking'    && payload.patient_details != null && !!asmxUrl;
-    const useExistingAsmx   = action === 'new_booking'    && payload.patient_details == null && payload.patient_id != null && !!existingAsmxUrl;
-    const useCancelAsmx     = action === 'cancel'         && !!cancelAsmxUrl;
-    const useRescheduleAsmx = action === 'reschedule'     && !!rescheduleAsmxUrl;
-    const usePaymentAsmx    = action === 'payment_update' && !!paymentAsmxUrl;
+    const asmxUrl              = process.env.NEURALARC_BOOKING_URL;
+    const existingAsmxUrl      = process.env.NEURALARC_EXISTING_BOOKING_URL;
+    const cancelAsmxUrl        = process.env.NEURALARC_CANCEL_URL;
+    const rescheduleAsmxUrl    = process.env.NEURALARC_RESCHEDULE_URL;
+    const paymentAsmxUrl       = process.env.NEURALARC_PAYMENT_URL;
+    const packageUpdateAsmxUrl = process.env.NEURALARC_PACKAGE_UPDATE_URL;
+    const useAsmx              = action === 'new_booking'      && payload.patient_details != null && !!asmxUrl;
+    const useExistingAsmx      = action === 'new_booking'      && payload.patient_details == null && payload.patient_id != null && !!existingAsmxUrl;
+    const useCancelAsmx        = action === 'cancel'           && !!cancelAsmxUrl;
+    const useRescheduleAsmx    = action === 'reschedule'       && !!rescheduleAsmxUrl;
+    const usePaymentAsmx       = action === 'payment_update'   && !!paymentAsmxUrl;
+    const usePackageUpdateAsmx = action === 'package_update'   && !!packageUpdateAsmxUrl;
 
     // Skip these actions if booking was never synced to ASMX (no bill_id).
-    if (['cancel', 'reschedule', 'payment_update'].includes(action) && !booking.reference_no) {
+    if (['cancel', 'reschedule', 'payment_update', 'package_update'].includes(action) && !booking.reference_no) {
       writeLog(`[clientSync] ${action} skipped — no reference_no, booking was never synced to ASMX`);
       return;
     }
 
     const timeoutMs    = parseInt(settings.get('client_sync_timeout_ms', '10000'), 10);
-    const routeLabel   = useAsmx ? 'ASMX:new_booking' : useExistingAsmx ? 'ASMX:existing_booking' : useCancelAsmx ? 'ASMX:cancel' : useRescheduleAsmx ? 'ASMX:reschedule' : usePaymentAsmx ? 'ASMX:payment_update' : 'php';
-    const asmxEndpoint = useAsmx ? 'NewPatientNewBooking' : useExistingAsmx ? 'ExistingPatientNewBooking' : useCancelAsmx ? 'BookingCancellation' : useRescheduleAsmx ? 'ReScheduleAppointment' : usePaymentAsmx ? 'PaymentUpdate' : null;
+    const routeLabel   = useAsmx ? 'ASMX:new_booking' : useExistingAsmx ? 'ASMX:existing_booking' : useCancelAsmx ? 'ASMX:cancel' : useRescheduleAsmx ? 'ASMX:reschedule' : usePaymentAsmx ? 'ASMX:payment_update' : usePackageUpdateAsmx ? 'ASMX:package_update' : 'php';
+    const asmxEndpoint = useAsmx ? 'NewPatientNewBooking' : useExistingAsmx ? 'ExistingPatientNewBooking' : useCancelAsmx ? 'BookingCancellation' : useRescheduleAsmx ? 'ReScheduleAppointment' : usePaymentAsmx ? 'PaymentUpdate' : usePackageUpdateAsmx ? 'PackageUpdate' : null;
     writeLog(`[clientSync] route=${routeLabel} action=${action}`);
-    if (useAsmx || useExistingAsmx || useCancelAsmx || useRescheduleAsmx || usePaymentAsmx) writeLog(`[clientSync] ASMX payload — ${JSON.stringify(payload)}`);
+    if (useAsmx || useExistingAsmx || useCancelAsmx || useRescheduleAsmx || usePaymentAsmx || usePackageUpdateAsmx) writeLog(`[clientSync] ASMX payload — ${JSON.stringify(payload)}`);
     let httpStatus, result;
     try {
       ({ httpStatus, body: result } = useAsmx
@@ -554,7 +556,9 @@ async function syncBookingToClient(bookingId, initiator) {
               ? await postAsmx(rescheduleAsmxUrl, payload, timeoutMs)
               : usePaymentAsmx
                 ? await postAsmx(paymentAsmxUrl, payload, timeoutMs)
-                : await postJson(clientUrl, payload, timeoutMs));
+                : usePackageUpdateAsmx
+                  ? await postAsmx(packageUpdateAsmxUrl, payload, timeoutMs)
+                  : await postJson(clientUrl, payload, timeoutMs));
     } catch (postErr) {
       // Log the request block even when no response came back (timeout,
       // network error, non-JSON body) — httpStatus/result stay null, the
@@ -584,7 +588,9 @@ async function syncBookingToClient(bookingId, initiator) {
                 ? await postAsmx(rescheduleAsmxUrl, payload, timeoutMs)
                 : usePaymentAsmx
                   ? await postAsmx(paymentAsmxUrl, payload, timeoutMs)
-                  : await postJson(clientUrl, payload, timeoutMs));
+                  : usePackageUpdateAsmx
+                    ? await postAsmx(packageUpdateAsmxUrl, payload, timeoutMs)
+                    : await postJson(clientUrl, payload, timeoutMs));
         _logRequestResponseBlock({ payload, tests, httpStatus, result });
         writeLog(`[clientSync] retry response — ${JSON.stringify(result)}`);
       } catch (retryErr) {

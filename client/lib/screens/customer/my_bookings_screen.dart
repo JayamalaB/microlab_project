@@ -216,6 +216,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       feedbackComment:     b['feedback_comments'] as String?,
       reportUrl:           b['report_url'] as String?,
       refundAmount:        b['refund_amount'] != null ? double.tryParse(b['refund_amount'].toString()) : null,
+      actualRefundAmount:  b['actual_refund_amount'] != null ? double.tryParse(b['actual_refund_amount'].toString()) : null,
       refundStatus:        b['refund_status'] as String?,
       rescheduleCount:     b['reschedule_count'] != null ? (b['reschedule_count'] as num).toInt() : 0,
       canReschedule:       b['can_reschedule'] as bool? ?? true,
@@ -1212,13 +1213,17 @@ class _BookingCard extends StatelessWidget {
                             if (booking.paymentType == 'service_charge')
                               Text('Due at collection: ₹${(booking.grandTotal - booking.paidAmount).toInt()}',
                                   style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                            if ((booking.refundAmount ?? 0) > 0)
-                              Text(
+                            if ((booking.refundAmount ?? 0) > 0 || (booking.actualRefundAmount ?? 0) > 0)
+                              Builder(builder: (context) {
+                                final displayRefund = (booking.actualRefundAmount != null && booking.actualRefundAmount! > 0)
+                                    ? booking.actualRefundAmount!
+                                    : booking.refundAmount!;
+                                return Text(
                                 booking.refundStatus == 'processed'
-                                    ? 'Refund of ₹${booking.refundAmount!.toInt()} credited'
+                                    ? 'Refund of ₹${displayRefund.toInt()} credited'
                                     : booking.refundStatus == 'initiated'
-                                        ? 'Refund of ₹${booking.refundAmount!.toInt()} initiated · 5–7 days'
-                                        : 'Refund of ₹${booking.refundAmount!.toInt()} pending',
+                                        ? 'Refund of ₹${displayRefund.toInt()} initiated · 5–7 days'
+                                        : 'Refund of ₹${displayRefund.toInt()} pending',
                                 style: TextStyle(
                                   fontSize: 11,
                                   color: booking.refundStatus == 'processed'
@@ -1227,7 +1232,8 @@ class _BookingCard extends StatelessWidget {
                                           ? AppColors.brandGreen
                                           : const Color(0xFFE65100),
                                 ),
-                              ),
+                              );
+                              }),
                           ],
                         ),
                         Row(
@@ -2082,15 +2088,15 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                         _DetailRow(Icons.pending_outlined,
                             b.mode == 'Home Collection' ? 'Due at Collection' : 'Due at Lab',
                             '₹${b.amountDue.toInt()}', valueColor: const Color(0xFFE65100)),
-                      if ((b.refundAmount ?? 0) > 0)
+                      if ((b.refundAmount ?? 0) > 0 || (b.actualRefundAmount ?? 0) > 0)
                         _DetailRow(
                           Icons.currency_rupee_rounded,
                           'Refund',
                           b.refundStatus == 'processed'
-                              ? '₹${b.refundAmount!.toInt()} credited'
+                              ? '₹${((b.actualRefundAmount ?? 0) > 0 ? b.actualRefundAmount! : b.refundAmount!).toInt()} credited'
                               : b.refundStatus == 'initiated'
-                                  ? '₹${b.refundAmount!.toInt()} initiated · 5–7 days'
-                                  : '₹${b.refundAmount!.toInt()} pending',
+                                  ? '₹${((b.actualRefundAmount ?? 0) > 0 ? b.actualRefundAmount! : b.refundAmount!).toInt()} initiated · 5–7 days'
+                                  : '₹${((b.actualRefundAmount ?? 0) > 0 ? b.actualRefundAmount! : b.refundAmount!).toInt()} pending',
                           valueColor: b.refundStatus == 'processed'
                               ? AppColors.brandGreen
                               : b.refundStatus == 'initiated'

@@ -434,6 +434,12 @@ exports.getMyBookings = async (req, res) => {
          b.discount_amount,
          b.refund_amount,
          b.refund_status,
+         (SELECT COALESCE(SUM(pt.amount_paid), 0)
+          FROM ip_payment_transactions pt
+          WHERE pt.booking_id = b.booking_id
+            AND pt.is_refund = 1
+            AND (pt.gateway_status = 'refunded' OR pt.transaction_status = 'completed')
+         ) AS actual_refund_amount,
          b.created_at,
          b.branch_id,
          b.patient_id,
@@ -782,31 +788,37 @@ exports.cancelBooking = async (req, res) => {
     }
 
     // ── Razorpay refund (fire if paid online) ──────────────────────────────────
+    // Loop all non-refund paid transactions LIFO so that top-up payments are
+    // refunded first (newest → oldest) and the total refundAmount is covered
+    // across multiple Razorpay payment IDs when the customer had edited packages.
     let finalRefundStatus = refundStatus;
     if (refundAmount > 0) {
-      const [[txn]] = await db.execute(
-        `SELECT gateway_transaction_id FROM ip_payment_transactions
+      const rzpKeyId     = process.env.RAZORPAY_KEY_ID;
+      const rzpKeySecret = process.env.RAZORPAY_KEY_SECRET;
+      const authHeader   = 'Basic ' + Buffer.from(`${rzpKeyId}:${rzpKeySecret}`).toString('base64');
+      const [txns] = await db.execute(
+        `SELECT gateway_transaction_id, amount_paid AS captured_amount
+         FROM ip_payment_transactions
          WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)
            AND gateway_transaction_id IS NOT NULL
-         ORDER BY created_at DESC LIMIT 1`,
+         ORDER BY created_at DESC`,
         [bookingId]
       );
-      if (txn?.gateway_transaction_id) {
+      let remaining = refundAmount;
+      for (const txn of txns) {
+        if (remaining <= 0) break;
+        const toRefund = Math.min(remaining, txn.captured_amount);
         try {
-          const rzpKeyId     = process.env.RAZORPAY_KEY_ID;
-          const rzpKeySecret = process.env.RAZORPAY_KEY_SECRET;
-          const authHeader   = 'Basic ' + Buffer.from(`${rzpKeyId}:${rzpKeySecret}`).toString('base64');
           const rzpRes = await fetch(
             `https://api.razorpay.com/v1/payments/${txn.gateway_transaction_id}/refund`,
             {
               method:  'POST',
               headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
-              body:    JSON.stringify({ amount: Math.round(refundAmount * 100) }),
+              body:    JSON.stringify({ amount: Math.round(toRefund * 100) }),
             }
           );
           const rzpBody = await rzpRes.json();
           if (rzpRes.ok && rzpBody.id) {
-            const refundTxnRef = `RFN${Date.now()}`;
             await db.execute(
               `INSERT INTO ip_payment_transactions
                  (transaction_ref, booking_id, patient_id, payment_type,
@@ -814,21 +826,24 @@ exports.cancelBooking = async (req, res) => {
                   currency, payment_status, transaction_status, is_refund,
                   gateway_transaction_id, gateway_status, paid_at)
                VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'pending', 1, ?, 'refunded', NULL)`,
-              [refundTxnRef, bookingId, booking.patient_id ?? null,
-               refundAmount, refundAmount, refundAmount,
+              [`RFN${Date.now()}`, bookingId, booking.patient_id ?? null,
+               toRefund, toRefund, toRefund,
                rzpBody.id]
             );
-            await db.execute(
-              `UPDATE ip_bookings SET refund_status = 'initiated' WHERE booking_id = ?`,
-              [bookingId]
-            );
-            finalRefundStatus = 'initiated';
-            logRefund(`✅ SUCCESS — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} refund_id=${rzpBody.id} amount=₹${refundAmount}`);
+            remaining -= toRefund;
+            if (finalRefundStatus !== 'initiated') {
+              await db.execute(
+                `UPDATE ip_bookings SET refund_status = 'initiated' WHERE booking_id = ?`,
+                [bookingId]
+              );
+              finalRefundStatus = 'initiated';
+            }
+            logRefund(`✅ SUCCESS — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} refund_id=${rzpBody.id} amount=₹${toRefund}`);
           } else {
-            logRefund(`❌ FAILED — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} amount=₹${refundAmount} response=${JSON.stringify(rzpBody)}`);
+            logRefund(`❌ FAILED — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} amount=₹${toRefund} response=${JSON.stringify(rzpBody)}`);
           }
         } catch (rzpErr) {
-          logRefund(`❌ ERROR — booking_id=${bookingId} error=${rzpErr.message}`);
+          logRefund(`❌ ERROR — booking_id=${bookingId} payment_id=${txn.gateway_transaction_id} error=${rzpErr.message}`);
         }
       }
     }
@@ -1215,10 +1230,25 @@ exports.getBookingResults = async (req, res) => {
   }
 };
 
+async function _logReportStatusCall(bill_id, report_status, ip, authResult, httpStatus) {
+  try {
+    await db.execute(
+      `INSERT INTO ip_report_status_log
+         (bill_id, report_status, ip_address, auth_result, http_status)
+       VALUES (?, ?, ?, ?, ?)`,
+      [bill_id ?? null, report_status ?? null, ip ?? null, authResult, httpStatus]
+    );
+  } catch (e) {
+    console.error('[reportStatusWebhook] log insert failed:', e.message);
+  }
+}
+
 // ── POST /api/bookings/report-status (webhook — ASMX client posts when report ready) ──
 exports.reportStatusWebhook = async (req, res) => {
   const { bill_id, report_status } = req.body ?? {};
+  const ip = req.ip ?? null;
   if (!bill_id || !report_status) {
+    await _logReportStatusCall(bill_id, report_status, ip, 'ok', 400);
     return res.status(400).json({ success: false, message: 'bill_id and report_status are required' });
   }
   try {
@@ -1229,6 +1259,7 @@ exports.reportStatusWebhook = async (req, res) => {
       [report_status, String(bill_id)]
     );
     if (upd.affectedRows === 0) {
+      await _logReportStatusCall(bill_id, report_status, ip, 'ok', 404);
       return res.status(404).json({ success: false, message: 'bill_id not found' });
     }
 
@@ -1252,9 +1283,11 @@ exports.reportStatusWebhook = async (req, res) => {
       }
     }
 
+    await _logReportStatusCall(bill_id, report_status, ip, 'ok', 200);
     res.json({ success: true, affected: upd.affectedRows });
   } catch (err) {
     console.error('❌ reportStatusWebhook FAILED:', err.message);
+    await _logReportStatusCall(bill_id, report_status, ip, 'ok', 500);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
@@ -2126,43 +2159,65 @@ exports.selfEditItems = async (req, res) => {
       // Always insert the refund record so the DB stays accurate.
       // Attempt the Razorpay API call to get a real refund ID; fall back to a
       // local reference if it fails (test-mode payments, network error, etc.).
-      let rzpRefundId = null;
-      const [[txn]] = await conn.execute(
-        `SELECT gateway_transaction_id FROM ip_payment_transactions
+      // Loop all non-refund paid transactions LIFO — newest payment first
+      // (top-up from a prior selfEditItems) so each Razorpay payment ID is
+      // only refunded up to its own captured amount, covering the total
+      // refundAmount across multiple transactions when needed.
+      const auth = 'Basic ' + Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64');
+      const [txns] = await conn.execute(
+        `SELECT gateway_transaction_id, amount_paid AS captured_amount
+         FROM ip_payment_transactions
          WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)
            AND gateway_transaction_id IS NOT NULL AND payment_status = 'paid'
-         ORDER BY created_at DESC LIMIT 1`,
+         ORDER BY created_at DESC`,
         [bookingId]
       );
-      if (txn?.gateway_transaction_id) {
+      let remaining = refundAmount;
+      for (const txn of txns) {
+        if (remaining <= 0.5) break;
+        const toRefund = Math.min(remaining, txn.captured_amount);
+        let rzpRefundId = null;
         try {
-          const auth   = 'Basic ' + Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64');
           const rzpRes = await fetch(
             `https://api.razorpay.com/v1/payments/${txn.gateway_transaction_id}/refund`,
             { method: 'POST', headers: { Authorization: auth, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ amount: Math.round(refundAmount * 100) }) }
+              body: JSON.stringify({ amount: Math.round(toRefund * 100) }) }
           );
           const rzpBody = await rzpRes.json();
           if (rzpRes.ok && rzpBody.id) rzpRefundId = rzpBody.id;
-          else console.warn(`[selfEditItems] Razorpay refund skipped:`, rzpBody);
+          else console.warn(`[selfEditItems] Razorpay refund skipped payment_id=${txn.gateway_transaction_id}:`, rzpBody);
         } catch (err) {
-          console.error(`[selfEditItems] Razorpay refund error booking_id=${bookingId}:`, err.message);
+          console.error(`[selfEditItems] Razorpay refund error booking_id=${bookingId} payment_id=${txn.gateway_transaction_id}:`, err.message);
         }
+        await conn.execute(
+          `INSERT INTO ip_payment_transactions
+             (transaction_ref, booking_id, patient_id, payment_type,
+              gross_amount, net_amount, amount_paid, amount_due,
+              currency, payment_status, transaction_status, is_refund,
+              gateway_transaction_id, gateway_status, paid_at)
+           VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, ?, NULL)`,
+          [`RFN${Date.now()}`, bookingId, booking.patient_id,
+           toRefund, toRefund, toRefund,
+           rzpRefundId ?? `RFN_MANUAL_${Date.now()}`, rzpRefundId ? 'refunded' : 'pending']
+        );
+        remaining -= toRefund;
+        refundIssued = true;
       }
-
-      const refundRef = rzpRefundId ?? `RFN_MANUAL_${Date.now()}`;
-      await conn.execute(
-        `INSERT INTO ip_payment_transactions
-           (transaction_ref, booking_id, patient_id, payment_type,
-            gross_amount, net_amount, amount_paid, amount_due,
-            currency, payment_status, transaction_status, is_refund,
-            gateway_transaction_id, gateway_status, paid_at)
-         VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, ?, NULL)`,
-        [`RFN${Date.now()}`, bookingId, booking.patient_id,
-         refundAmount, refundAmount, refundAmount,
-         refundRef, rzpRefundId ? 'refunded' : 'pending']
-      );
-      refundIssued = true;
+      // No Razorpay payment found — insert a manual pending record so DB stays accurate
+      if (!refundIssued) {
+        await conn.execute(
+          `INSERT INTO ip_payment_transactions
+             (transaction_ref, booking_id, patient_id, payment_type,
+              gross_amount, net_amount, amount_paid, amount_due,
+              currency, payment_status, transaction_status, is_refund,
+              gateway_transaction_id, gateway_status, paid_at)
+           VALUES (?, ?, ?, 'RAZORPAY', ?, ?, ?, 0, 'INR', 'refunded', 'completed', 1, ?, 'pending', NULL)`,
+          [`RFN${Date.now()}`, bookingId, booking.patient_id,
+           refundAmount, refundAmount, refundAmount,
+           `RFN_MANUAL_${Date.now()}`]
+        );
+        refundIssued = true;
+      }
     }
 
     // Swap booking items
@@ -2209,6 +2264,12 @@ exports.selfEditItems = async (req, res) => {
         ? `Tests updated. ₹${Math.round(Math.abs(diffAmount))} refund in 5–7 days.`
         : 'Tests updated successfully.',
     });
+
+    syncBookingToClient(Number(bookingId), {
+      mobile: req.user.mobile,
+      type:   req.user.user_type ?? 'customer',
+      action: 'package_update',
+    }).catch(err => console.error(`[clientSync] selfEditItems sync failed booking_id=${bookingId}:`, err.message));
   } catch (err) {
     await conn.rollback();
     console.error('❌ selfEditItems FAILED:', err.message);
