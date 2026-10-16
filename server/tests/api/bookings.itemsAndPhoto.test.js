@@ -142,3 +142,47 @@ describe('POST /api/bookings/:bookingId/collection-photo', () => {
     expect(clientSync.syncBookingToClient).not.toHaveBeenCalled();
   });
 });
+
+describe('DELETE /api/bookings/:bookingId/collection-photo', () => {
+  test('rejects an unauthenticated request', async () => {
+    const res = await request(app).delete('/api/bookings/900/collection-photo');
+    expect(res.status).toBe(401);
+  });
+
+  test('a booking that does not exist is rejected', async () => {
+    primeAuthCheck(db, token);
+    db.execute.mockResolvedValueOnce([[]]);
+    const res = await request(app).delete('/api/bookings/900/collection-photo')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(404);
+  });
+
+  test('retires every current photo for the booking, keeping the rows for audit', async () => {
+    primeAuthCheck(db, token);
+    db.execute
+      .mockResolvedValueOnce([[{ booking_id: 900, collection_status: 'sample_collected' }]])
+      .mockResolvedValueOnce([{ affectedRows: 2 }]);
+
+    const res = await request(app).delete('/api/bookings/900/collection-photo')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, removed: 2 });
+    const [sql, params] = db.execute.mock.calls[2];
+    expect(sql).toMatch(/UPDATE ip_booking_documents/);
+    expect(sql).toMatch(/file_description = 'collection_proof_removed'/);
+    expect(sql).toMatch(/WHERE booking_id = \? AND file_description = 'collection_proof'/);
+    expect(sql).not.toMatch(/DELETE/);
+    expect(params).toEqual(['900']);
+  });
+
+  test.each(['otp_verified', 'handed_to_lab_pending', 'handed_to_lab'])(
+    'is refused once the visit is %s', async (status) => {
+      primeAuthCheck(db, token);
+      db.execute.mockResolvedValueOnce([[{ booking_id: 900, collection_status: status }]]);
+      const res = await request(app).delete('/api/bookings/900/collection-photo')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(409);
+      expect(db.execute).toHaveBeenCalledTimes(2); // auth check + lookup, no UPDATE
+    });
+});

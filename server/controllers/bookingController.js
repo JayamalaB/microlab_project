@@ -25,6 +25,7 @@ function logRefund(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(REFUND_LOG, line, 'utf8');
+
 }
 
 // ── Notification log ──────────────────────────────────────────────────────────
@@ -1495,6 +1496,49 @@ exports.getCollectionProofPhoto = async (req, res) => {
     res.json({ success: true, doc: doc ?? null });
   } catch (err) {
     console.error('❌ getCollectionProofPhoto FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── DELETE /api/bookings/:bookingId/collection-photo ──────────────────────────
+// Technician removes the sample-collection proof photo (e.g. wrong picture).
+// Every current collection_proof row for the booking is retired — not just
+// the newest — otherwise an earlier retake would reappear as "the" photo.
+// Rows are kept for audit: file_description becomes 'collection_proof_removed',
+// which neither getCollectionProofPhoto nor the visit_completed sync
+// (clientSync.js) reads. Not allowed once the visit is OTP-verified or handed
+// over, because by then the photo belongs to the completed visit.
+const PHOTO_LOCKED_STATUSES = new Set(['otp_verified', 'handed_to_lab_pending', 'handed_to_lab']);
+exports.removeCollectionProofPhoto = async (req, res) => {
+  const { bookingId } = req.params;
+  try {
+    const [[booking]] = await db.execute(
+      `SELECT b.booking_id, tc.collection_status
+       FROM ip_bookings b
+       LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+       WHERE b.booking_id = ? AND b.deleted_at IS NULL
+       LIMIT 1`,
+      [bookingId]
+    );
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    if (PHOTO_LOCKED_STATUSES.has(booking.collection_status)) {
+      return res.status(409).json({
+        success: false,
+        message: 'This visit is already verified, so its collection photo can’t be removed.',
+      });
+    }
+    const [result] = await db.execute(
+      `UPDATE ip_booking_documents
+          SET file_description = 'collection_proof_removed', doc_status = 'removed'
+        WHERE booking_id = ? AND file_description = 'collection_proof'`,
+      [bookingId]
+    );
+    console.log(`🗑️  [collection-photo] removed booking_id=${bookingId} rows=${result.affectedRows} by user=${req.user.user_id ?? req.user.userId ?? '?'}`);
+    res.json({ success: true, removed: result.affectedRows });
+  } catch (err) {
+    console.error('❌ removeCollectionProofPhoto FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

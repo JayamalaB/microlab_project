@@ -53,6 +53,8 @@ router.patch('/:bookingId/items/:bookingItemId/collected', auth, bookingControll
 router.post('/:bookingId/collection-photo', auth, bookingController.saveCollectionProofPhoto);
 // GET  /api/bookings/:bookingId/collection-photo — current proof photo (if any)
 router.get('/:bookingId/collection-photo', auth, bookingController.getCollectionProofPhoto);
+// DELETE /api/bookings/:bookingId/collection-photo — technician removes the photo (before OTP)
+router.delete('/:bookingId/collection-photo', auth, bookingController.removeCollectionProofPhoto);
 
 // POST /api/bookings/:bookingId/cancel — customer cancels a booking
 router.post('/:bookingId/cancel', auth, bookingController.cancelBooking);

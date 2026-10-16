@@ -614,6 +614,24 @@ class ApiService {
     return false;
   }
 
+  // Removes the sample-collection proof photo for a booking (before OTP).
+  // Returns {success, message}; the server refuses once the visit is
+  // OTP-verified or handed over.
+  static Future<Map<String, dynamic>> deleteCollectionProofPhoto(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return {'success': false};
+    try {
+      final res = await http.delete(
+        Uri.parse('$baseUrl/api/bookings/$bookingId/collection-photo'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[deleteCollectionProofPhoto] ERROR: $e');
+      return {'success': false, 'error': e};
+    }
+  }
+
   // Fetches the current sample-collection proof photo for a booking, if any
   // — used to render "Added"/"Not Added" and the thumbnail when the Manage
   // Booking screen loads (a retake replaces this with the newest photo).
