@@ -175,9 +175,16 @@ class _TechnicianBookingDetailScreenState
   // Document — multi-image upload
   final List<_TechPresDoc> _docUploads = [];
   bool _docIsPicking = false;
-  // Which patient's photo is currently being captured/uploaded, if any —
-  // only one camera capture can be in flight at a time.
-  int? _capturingCollectionProofForPatientId;
+  // Which booking's photo is currently being captured/uploaded, if any —
+  // only one camera capture can be in flight at a time. Keyed by BOOKING id,
+  // not patient id: every patient on a visit has their own booking id and
+  // it is always known, while the primary patient's patient id can be
+  // missing (e.g. this screen opened from the live map). Comparing a null
+  // patient id against "nothing capturing" (null == null) made that box
+  // spin on "Opening camera…" forever with its tap disabled.
+  int? _capturingProofBookingId;
+  // Booking whose photo is being removed (✕ on the thumbnail), if any.
+  int? _removingProofBookingId;
   // Which part of the capture is running — drives the box's label
   // ("Opening camera…" / "Uploading photo…" / "Saving photo…").
   _ProofStep _proofStep = _ProofStep.camera;
@@ -185,11 +192,11 @@ class _TechnicianBookingDetailScreenState
   // upload that finishes for an older value is ignored.
   int _proofCaptureToken = 0;
   // Sample-collection proof photo — one per patient on this visit (primary +
-  // family members), keyed by patient_id. Each family member has their own
-  // booking_id server-side (see ip_booking_documents), so this must never be
-  // a single shared value — otherwise the last patient photographed
-  // overwrites every other patient's display.
-  final Map<int, String?> _patientCollectionProofUrl = {};
+  // family members), keyed by that patient's own booking_id (the photo is
+  // stored per booking server-side, see ip_booking_documents). Never a
+  // single shared value — otherwise the last patient photographed would
+  // overwrite every other patient's display.
+  final Map<int, String?> _proofUrlByBookingId = {};
   bool _collectionProofLoading = true;
   bool _docVerified  = false;
   bool _docsLoading  = true;
@@ -368,11 +375,11 @@ class _TechnicianBookingDetailScreenState
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) return;
-    if (_capturingCollectionProofForPatientId == null || _proofStep != _ProofStep.camera) return;
+    if (_capturingProofBookingId == null || _proofStep != _ProofStep.camera) return;
     final token = _proofCaptureToken;
     Future.delayed(const Duration(seconds: 5), () {
       if (!mounted || token != _proofCaptureToken) return;
-      if (_capturingCollectionProofForPatientId == null || _proofStep != _ProofStep.camera) return;
+      if (_capturingProofBookingId == null || _proofStep != _ProofStep.camera) return;
       debugPrint('[CollectionProof] no camera result 5s after resume — trying lost-data recovery');
       _recoverLostProofPhoto(fromResume: true);
     });
@@ -468,9 +475,7 @@ class _TechnicianBookingDetailScreenState
       final doc = await ApiService.getCollectionProofPhoto(bookingId);
       if (!mounted) return;
       setState(() {
-        if (widget.booking.patientId != null) {
-          _patientCollectionProofUrl[widget.booking.patientId!] = doc?['file_path'] as String?;
-        }
+        _proofUrlByBookingId[bookingId] = doc?['file_path'] as String?;
         _collectionProofLoading = false;
       });
     } catch (e) {
@@ -485,16 +490,15 @@ class _TechnicianBookingDetailScreenState
   // happened to load last.
   Future<void> _loadFamilyCollectionProofs(List<Map<String, dynamic>> patients) async {
     for (final p in patients) {
-      final pid = (p['patient_id'] as num?)?.toInt();
       final bid = (p['booking_id'] as num?)?.toInt();
-      if (pid == null || bid == null) continue;
+      if (bid == null) continue;
       try {
         final doc = await ApiService.getCollectionProofPhoto(bid);
         if (mounted) {
-          setState(() => _patientCollectionProofUrl[pid] = doc?['file_path'] as String?);
+          setState(() => _proofUrlByBookingId[bid] = doc?['file_path'] as String?);
         }
       } catch (e) {
-        debugPrint('[_loadFamilyCollectionProofs] patient=$pid ERROR: $e');
+        debugPrint('[_loadFamilyCollectionProofs] booking=$bid ERROR: $e');
       }
     }
   }
@@ -1662,19 +1666,16 @@ void _resumeJourney() {
   //      are quicker on mobile data.
   static const String _pendingProofKey = 'pending_collection_proof_capture';
 
-  Future<void> _captureAndUploadCollectionProof({
-    required int patientId,
-    required int bookingId,
-  }) async {
-    if (_capturingCollectionProofForPatientId != null) return;
+  Future<void> _captureAndUploadCollectionProof({required int bookingId}) async {
+    if (_capturingProofBookingId != null) return;
     if (bookingId <= 0) return;
 
     final token = ++_proofCaptureToken;
     setState(() {
-      _capturingCollectionProofForPatientId = patientId;
+      _capturingProofBookingId = bookingId;
       _proofStep = _ProofStep.camera;
     });
-    await _rememberPendingProof(patientId: patientId, bookingId: bookingId);
+    await _rememberPendingProof(bookingId: bookingId);
 
     XFile? image;
     try {
@@ -1707,14 +1708,13 @@ void _resumeJourney() {
     }
 
     await _forgetPendingProof();
-    await _uploadProofPhoto(image: image, patientId: patientId, bookingId: bookingId, token: token);
+    await _uploadProofPhoto(image: image, bookingId: bookingId, token: token);
   }
 
   // Upload + link to the booking, shared by a normal capture and a recovered
   // one. Shows "Uploading photo…" then "Saving photo…" on the box.
   Future<void> _uploadProofPhoto({
     required XFile image,
-    required int patientId,
     required int bookingId,
     required int token,
   }) async {
@@ -1741,7 +1741,7 @@ void _resumeJourney() {
       }
 
       if (mounted) {
-        setState(() => _patientCollectionProofUrl[patientId] = url);
+        setState(() => _proofUrlByBookingId[bookingId] = url);
         AppMessages.success(context, 'Collection photo added');
       }
     } catch (e) {
@@ -1754,10 +1754,48 @@ void _resumeJourney() {
     }
   }
 
+  // ✕ on a collection photo: confirm, then remove it on the server and show
+  // the empty "Take Collection Photo" box again.
+  Future<void> _confirmRemoveCollectionProof({required int bookingId, required String patientName}) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Remove photo?', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        content: Text('The collection photo for $patientName will be removed. You can take a new one afterwards.',
+            style: const TextStyle(fontSize: 14, height: 1.5)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Remove', style: TextStyle(color: Color(0xFFD32F2F), fontWeight: FontWeight.w700))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    setState(() => _removingProofBookingId = bookingId);
+    final result = await ApiService.deleteCollectionProofPhoto(bookingId);
+    if (!mounted) return;
+    if (result['success'] == true) {
+      setState(() {
+        _proofUrlByBookingId[bookingId] = null;
+        _removingProofBookingId = null;
+      });
+      AppMessages.success(context, 'Photo removed');
+    } else {
+      setState(() => _removingProofBookingId = null);
+      AppMessages.error(context, result['error'] != null
+          ? 'We couldn\'t remove the photo. ${AppMessages.friendlyError(result['error'])}'
+          : AppMessages.serverMessage(result['message'],
+              fallback: 'We couldn\'t remove the photo. Please try again.'));
+    }
+  }
+
   // Tapping the box while it waits (camera or upload). A result that turns
   // up later is ignored because the token has moved on.
   Future<void> _cancelProofCapture() async {
-    if (_capturingCollectionProofForPatientId == null || _proofStep == _ProofStep.saving) return;
+    if (_capturingProofBookingId == null || _proofStep == _ProofStep.saving) return;
     debugPrint('[CollectionProof] cancelled by technician at step=$_proofStep');
     _proofCaptureToken++;
     await _forgetPendingProof();
@@ -1769,7 +1807,7 @@ void _resumeJourney() {
   // setState() call needs the mounted guard. (Gating the reset itself on
   // mounted previously left the flag stuck and every later tap a no-op.)
   void _endProofCapture() {
-    _capturingCollectionProofForPatientId = null;
+    _capturingProofBookingId = null;
     _proofStep = _ProofStep.camera;
     if (mounted) setState(() {});
   }
@@ -1805,23 +1843,23 @@ void _resumeJourney() {
     }
     await _forgetPendingProof();
 
-    debugPrint('[CollectionProof] recovered lost photo for patient=${pending.patientId} booking=${pending.bookingId}');
+    debugPrint('[CollectionProof] recovered lost photo for booking=${pending.bookingId}');
     final token = ++_proofCaptureToken;
     if (mounted) {
       setState(() {
-        _capturingCollectionProofForPatientId = pending.patientId;
+        _capturingProofBookingId = pending.bookingId;
         _proofStep = _ProofStep.uploading;
       });
     }
     await _uploadProofPhoto(
-      image: file, patientId: pending.patientId, bookingId: pending.bookingId, token: token,
+      image: file, bookingId: pending.bookingId, token: token,
     );
   }
 
-  Future<void> _rememberPendingProof({required int patientId, required int bookingId}) async {
+  Future<void> _rememberPendingProof({required int bookingId}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(_pendingProofKey, '${widget.booking.id}|$patientId|$bookingId');
+      await prefs.setString(_pendingProofKey, '${widget.booking.id}|$bookingId');
     } catch (_) {}
   }
 
@@ -1832,15 +1870,17 @@ void _resumeJourney() {
     } catch (_) {}
   }
 
-  Future<({String screenBookingId, int patientId, int bookingId})?> _readPendingProof() async {
+  // Stored as "<screen booking id>|<photo booking id>". An entry from the
+  // previous build ("<screen>|<patient id>|<booking id>") still reads: the
+  // booking id is always the last part.
+  Future<({String screenBookingId, int bookingId})?> _readPendingProof() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final parts = prefs.getString(_pendingProofKey)?.split('|');
-      if (parts == null || parts.length != 3) return null;
-      final pid = int.tryParse(parts[1]);
-      final bid = int.tryParse(parts[2]);
-      if (pid == null || bid == null) return null;
-      return (screenBookingId: parts[0], patientId: pid, bookingId: bid);
+      if (parts == null || parts.length < 2) return null;
+      final bid = int.tryParse(parts.last);
+      if (bid == null) return null;
+      return (screenBookingId: parts.first, bookingId: bid);
     } catch (_) {
       return null;
     }
@@ -3148,18 +3188,23 @@ void _resumeJourney() {
                     child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
                   )
                 // One block per patient in this visit (primary + any family
-                // members) — each keyed to their own patient_id/booking_id
-                // via _patientCollectionProofUrl, so one patient's photo
-                // never overwrites or is shown for another patient.
+                // members) — each keyed to their own booking_id via
+                // _proofUrlByBookingId, so one patient's photo never
+                // overwrites or is shown for another patient.
                 : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     for (final patient in _visitPatients) ...[
                       Builder(builder: (context) {
-                        final pid           = patient['id'] as int?;
+                        // Everything here is keyed by this patient's own
+                        // booking id (always known — the primary patient's
+                        // patient id is not, e.g. when opened from the live
+                        // map). isCapturing must never be true for "no id":
+                        // that left a box spinning on "Opening camera…"
+                        // forever with its tap disabled.
                         final patientBookingId = patient['bookingId'] as int?;
                         final pname         = patient['name'] as String;
-                        final proofUrl      = pid != null ? _patientCollectionProofUrl[pid] : null;
-                        final isCapturing   = _capturingCollectionProofForPatientId == pid;
-                        final canCapture    = pid != null && patientBookingId != null;
+                        final proofUrl      = patientBookingId != null ? _proofUrlByBookingId[patientBookingId] : null;
+                        final isCapturing   = patientBookingId != null && _capturingProofBookingId == patientBookingId;
+                        final canCapture    = patientBookingId != null;
                         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           Row(children: [
                             Text(pname,
@@ -3196,10 +3241,10 @@ void _resumeJourney() {
                                   ? null
                                   : isCapturing
                                       ? _cancelProofCapture
-                                      : (_capturingCollectionProofForPatientId != null
+                                      : (_capturingProofBookingId != null
                                           ? null // another patient's photo is in progress
                                           : () => _captureAndUploadCollectionProof(
-                                              patientId: pid, bookingId: patientBookingId)),
+                                              bookingId: patientBookingId)),
                               child: Container(
                                 width: double.infinity,
                                 padding: const EdgeInsets.symmetric(vertical: 22),
@@ -3236,28 +3281,56 @@ void _resumeJourney() {
                             )
                           else
                             Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                              GestureDetector(
-                                onTap: () => _viewCollectionProofImage(proofUrl),
-                                child: Container(
-                                  width: 88,
-                                  height: 88,
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: AppColors.divider),
-                                  ),
-                                  child: ClipRRect(
-                                    borderRadius: BorderRadius.circular(10),
-                                    child: Image.network(
-                                      proofUrl,
-                                      fit: BoxFit.cover,
-                                      loadingBuilder: (_, child, progress) => progress == null
-                                          ? child
-                                          : const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
-                                      errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: AppColors.textHint),
+                              // Thumbnail with a ✕ to remove the photo — the
+                              // same style as prescription thumbnails. Hidden
+                              // once the visit is OTP-verified (the server
+                              // also refuses then) and while any photo is
+                              // being captured or removed.
+                              Stack(clipBehavior: Clip.none, children: [
+                                GestureDetector(
+                                  onTap: () => _viewCollectionProofImage(proofUrl),
+                                  child: Container(
+                                    width: 88,
+                                    height: 88,
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(color: AppColors.divider),
+                                    ),
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(10),
+                                      child: _removingProofBookingId == patientBookingId
+                                          ? const Center(child: SizedBox(width: 22, height: 22,
+                                              child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
+                                          : Image.network(
+                                              proofUrl,
+                                              fit: BoxFit.cover,
+                                              loadingBuilder: (_, child, progress) => progress == null
+                                                  ? child
+                                                  : const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                                              errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: AppColors.textHint),
+                                            ),
                                     ),
                                   ),
                                 ),
-                              ),
+                                if (!_isFinalized && canCapture &&
+                                    _capturingProofBookingId == null && _removingProofBookingId == null)
+                                  Positioned(
+                                    top: -6, right: -6,
+                                    child: Semantics(
+                                      button: true,
+                                      label: 'Remove photo for $pname',
+                                      child: GestureDetector(
+                                        onTap: () => _confirmRemoveCollectionProof(
+                                            bookingId: patientBookingId, patientName: pname),
+                                        child: Container(
+                                          width: 24, height: 24,
+                                          decoration: const BoxDecoration(color: Color(0xFFD32F2F), shape: BoxShape.circle),
+                                          child: const Icon(Icons.close_rounded, size: 15, color: Colors.white),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                              ]),
                               const SizedBox(width: 12),
                               Expanded(
                                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -3266,7 +3339,7 @@ void _resumeJourney() {
                                   const SizedBox(height: 8),
                                   TextButton.icon(
                                     onPressed: (!canCapture || isCapturing) ? null : () =>
-                                        _captureAndUploadCollectionProof(patientId: pid, bookingId: patientBookingId),
+                                        _captureAndUploadCollectionProof(bookingId: patientBookingId),
                                     icon: isCapturing
                                         ? const SizedBox(
                                             width: 14, height: 14,
