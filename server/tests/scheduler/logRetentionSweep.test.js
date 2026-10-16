@@ -38,14 +38,14 @@ describe('purgeTableBatched', () => {
 });
 
 describe('runRetentionSweep', () => {
-  test('purges all 7 log tables', async () => {
+  test('purges all 8 log tables', async () => {
     db.execute.mockResolvedValue([{ affectedRows: 0 }]);
     await runRetentionSweep();
 
     expect(LOG_TABLES).toEqual([
       'ip_dispatch_logs', 'ip_collection_logs', 'ip_otpinfo_logs',
       'ip_technician_logs', 'ip_login_otp_logs', 'ip_client_sync_logs',
-      'ip_customer_push_logs',
+      'ip_customer_push_logs', 'ip_branch_lookup_logs',
     ]);
     const tablesTouched = db.execute.mock.calls.map(c => c[0].match(/DELETE FROM (\w+)/)[1]);
     expect(new Set(tablesTouched)).toEqual(new Set(LOG_TABLES));
@@ -73,7 +73,7 @@ describe('runRetentionSweep', () => {
     });
 
     await expect(runRetentionSweep()).resolves.toBeUndefined();
-    // All 7 tables still attempted despite the first one rejecting.
-    expect(db.execute).toHaveBeenCalledTimes(7);
+    // All 8 tables still attempted despite the first one rejecting.
+    expect(db.execute).toHaveBeenCalledTimes(8);
   });
 });

@@ -176,6 +176,7 @@ Rules:
 4. Be direct — no fluff or extra explanations
 5. Include prices/dates only if relevant to the question
 6. All prices are in Indian Rupees — always format them with ₹, never $ or USD
+7. Show prices as whole numbers with no decimal places — ₹35, not ₹35.00
 
 Response:`;
 

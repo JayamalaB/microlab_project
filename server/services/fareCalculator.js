@@ -78,6 +78,19 @@ async function getBranchCoordinates(branchId, dbConn = pool) {
   return branch ?? null;
 }
 
+// Used when the active ip_km_rates row leaves max_service_distance_km NULL,
+// so a wrong pickup location (e.g. a browser location taken from the IP
+// address) is refused instead of priced at thousands of km.
+const DEFAULT_MAX_SERVICE_DISTANCE_KM = 100;
+
+// Rough bounding box of India. A pickup outside it (or the 0,0 a failed
+// location lookup can produce) is a wrong location, not a real customer.
+const INDIA_BOUNDS = { minLat: 6, maxLat: 37.5, minLng: 68, maxLng: 97.5 };
+function _isInsideIndia(lat, lng) {
+  return lat >= INDIA_BOUNDS.minLat && lat <= INDIA_BOUNDS.maxLat &&
+         lng >= INDIA_BOUNDS.minLng && lng <= INDIA_BOUNDS.maxLng;
+}
+
 // Pure calculation given already-resolved inputs — no DB access, easy to
 // unit test directly against the spec's own worked examples (Scenarios A/B/C).
 function computeFare({ distanceKm, ratePerKm, baseFare, includedDistanceKm }) {
@@ -94,38 +107,54 @@ function computeFare({ distanceKm, ratePerKm, baseFare, includedDistanceKm }) {
 // Full flow: branch coords + pickup coords → priced, logged result.
 // Throws FareCalculationError (never returns a guessed/default fare) for:
 //   MISSING_COORDINATES        — pickup lat/lng not provided or not finite
+//   INVALID_COORDINATES        — pickup lat/lng outside India (or 0,0) —
+//                                a wrong location, not a real address
 //   BRANCH_LOCATION_UNAVAILABLE — branch missing/soft-deleted/no coordinates
 //   RATE_NOT_FOUND              — no active ip_km_rates row for today
 //   RATE_CONFIG_INCOMPLETE      — active row exists but base_fare/
 //                                 included_distance_km is NULL (not yet
 //                                 configured for Home Collection pricing)
-//   OUTSIDE_SERVICE_AREA        — active row's max_service_distance_km is
-//                                 set and the computed distance exceeds it
+//   OUTSIDE_SERVICE_AREA        — the distance exceeds the active row's
+//                                 max_service_distance_km (or
+//                                 DEFAULT_MAX_SERVICE_DISTANCE_KM when NULL)
 async function calculateHomeCollectionFare({ branchId, pickupLat, pickupLng, dbConn = pool }) {
   const latNum = Number(pickupLat);
   const lngNum = Number(pickupLng);
   if (pickupLat == null || pickupLng == null || !Number.isFinite(latNum) || !Number.isFinite(lngNum)) {
-    throw new FareCalculationError('MISSING_COORDINATES', 'Pickup location is required to calculate the Home Collection fare');
+    throw new FareCalculationError('MISSING_COORDINATES', 'Please set your pickup location to see the Home Collection charge.');
+  }
+  if (!_isInsideIndia(latNum, lngNum)) {
+    logFare(`HOME_COLLECTION_FARE branchId=${branchId} pickup=${latNum},${lngNum} result=INVALID_COORDINATES`);
+    throw new FareCalculationError('INVALID_COORDINATES', 'Your pickup location looks incorrect. Please set your location again or enter your pincode.');
   }
 
   const branch = await getBranchCoordinates(branchId, dbConn);
   if (!branch) {
-    throw new FareCalculationError('BRANCH_LOCATION_UNAVAILABLE', 'Assigned branch location is unavailable — cannot calculate fare');
+    logFare(`HOME_COLLECTION_FARE branchId=${branchId} result=BRANCH_LOCATION_UNAVAILABLE (branch missing, deleted or has no coordinates)`);
+    throw new FareCalculationError('BRANCH_LOCATION_UNAVAILABLE', 'We can\'t calculate the Home Collection charge for this branch right now. Please try again later.');
   }
 
+  // The two rate problems below are set-up issues on our side; the customer
+  // gets one plain message and the reason goes to logs/fare.log.
+  const RATE_UNAVAILABLE_MSG = 'Home Collection pricing isn\'t available right now. Please try again later.';
   const rate = await getActiveKmRate(dbConn);
   if (!rate) {
-    throw new FareCalculationError('RATE_NOT_FOUND', 'No active fare configuration found for today');
+    logFare(`HOME_COLLECTION_FARE branchId=${branchId} result=RATE_NOT_FOUND (no active ip_km_rates row for today)`);
+    throw new FareCalculationError('RATE_NOT_FOUND', RATE_UNAVAILABLE_MSG);
   }
   if (rate.base_fare == null || rate.included_distance_km == null) {
-    throw new FareCalculationError('RATE_CONFIG_INCOMPLETE', 'Fare configuration is incomplete (missing base fare or included distance)');
+    logFare(`HOME_COLLECTION_FARE branchId=${branchId} rateId=${rate.rate_id} result=RATE_CONFIG_INCOMPLETE (base_fare or included_distance_km is NULL)`);
+    throw new FareCalculationError('RATE_CONFIG_INCOMPLETE', RATE_UNAVAILABLE_MSG);
   }
 
   const distanceKm = haversineKm(branch.latitude, branch.longitude, latNum, lngNum);
 
-  if (rate.max_service_distance_km != null && distanceKm > Number(rate.max_service_distance_km)) {
-    logFare(`HOME_COLLECTION_FARE branchId=${branchId} pickupDistanceKm=${distanceKm.toFixed(2)} rateId=${rate.rate_id} result=OUTSIDE_SERVICE_AREA maxServiceDistanceKm=${rate.max_service_distance_km}`);
-    throw new FareCalculationError('OUTSIDE_SERVICE_AREA', `Pickup location is outside the service area for the assigned branch (${distanceKm.toFixed(1)} km, max ${rate.max_service_distance_km} km)`);
+  const maxServiceDistanceKm = rate.max_service_distance_km != null
+    ? Number(rate.max_service_distance_km)
+    : DEFAULT_MAX_SERVICE_DISTANCE_KM;
+  if (distanceKm > maxServiceDistanceKm) {
+    logFare(`HOME_COLLECTION_FARE branchId=${branchId} pickup=${latNum},${lngNum} pickupDistanceKm=${distanceKm.toFixed(2)} rateId=${rate.rate_id} result=OUTSIDE_SERVICE_AREA maxServiceDistanceKm=${maxServiceDistanceKm}`);
+    throw new FareCalculationError('OUTSIDE_SERVICE_AREA', `Home Collection isn't available at your location — it is ${distanceKm.toFixed(1)} km from the branch, and we cover up to ${maxServiceDistanceKm} km.`);
   }
 
   const ratePerKm          = Number(rate.rate_per_km);
@@ -136,7 +165,7 @@ async function calculateHomeCollectionFare({ branchId, pickupLat, pickupLng, dbC
     computeFare({ distanceKm, ratePerKm, baseFare, includedDistanceKm });
 
   logFare(
-    `HOME_COLLECTION_FARE branchId=${branchId} pickupDistanceKm=${distKm} ratePerKm=${ratePerKm} ` +
+    `HOME_COLLECTION_FARE branchId=${branchId} pickup=${latNum},${lngNum} pickupDistanceKm=${distKm} ratePerKm=${ratePerKm} ` +
     `includedDistanceKm=${includedDistanceKm} baseFare=${baseFare} extraDistanceKm=${extraDistanceKm} ` +
     `extraCharge=${extraCharge} finalFare=${finalFare} rateId=${rate.rate_id}`
   );
@@ -153,4 +182,7 @@ async function calculateHomeCollectionFare({ branchId, pickupLat, pickupLng, dbC
   };
 }
 
-module.exports = { calculateHomeCollectionFare, getActiveKmRate, getBranchCoordinates, computeFare, FareCalculationError };
+module.exports = {
+  calculateHomeCollectionFare, getActiveKmRate, getBranchCoordinates, computeFare,
+  FareCalculationError, DEFAULT_MAX_SERVICE_DISTANCE_KM,
+};

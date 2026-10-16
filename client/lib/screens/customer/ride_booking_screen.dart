@@ -6,6 +6,7 @@ import 'package:geocoding/geocoding.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/constants/app_constants.dart';
+import 'package:microlab/utils/app_messages.dart';
 import 'patient_ride_tracking_screen.dart';
 
 // ── State machine phases ───────────────────────────────────────────────────────
@@ -113,11 +114,10 @@ class _RideBookingScreenState extends State<RideBookingScreen> {
         _fetchingGps = false;
       });
     } catch (e) {
+      debugPrint('[RideBooking] location failed: $e');
       if (!mounted) return;
       setState(() => _fetchingGps = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not get location: $e')),
-      );
+      AppMessages.error(context, 'We couldn\'t get your location. ${AppMessages.friendlyError(e)}');
     }
   }
 

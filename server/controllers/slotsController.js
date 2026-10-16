@@ -86,7 +86,7 @@ exports.getSlots = async (req, res) => {
         writeLog(`[getSlots] validation failed — branch_id missing for lab_visit`);
         return res.status(400).json({
           success: false,
-          message: 'branch_id is required for lab_visit',
+          message: 'Please choose a branch to see lab visit slots.',
         });
       }
       writeLog(`[getSlots] querying ip_available_slots for lab_visit date=${date} branch_id=${branch_id}`);

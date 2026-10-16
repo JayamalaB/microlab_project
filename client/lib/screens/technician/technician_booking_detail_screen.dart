@@ -1,6 +1,8 @@
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/razorpay_service.dart';
@@ -8,6 +10,7 @@ import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/models.dart' show BranchModel;
+import 'package:microlab/utils/app_messages.dart';
 import 'technician_active_job_screen.dart';
 
 // Popped by TechnicianBookingDetailScreen (see _exitScreen) when the
@@ -58,6 +61,9 @@ class _TechPresDoc {
 // (Test catalogue is now loaded from the server — see _loadItems)
 
 // ─── Journey steps ────────────────────────────────────────────────────────────
+
+// Parts of the sample-collection photo flow, shown on the photo box.
+enum _ProofStep { camera, uploading, saving }
 
 class _JourneyStep {
   final String status;
@@ -149,7 +155,7 @@ class TechnicianBookingDetailScreen extends StatefulWidget {
 }
 
 class _TechnicianBookingDetailScreenState
-    extends State<TechnicianBookingDetailScreen> {
+    extends State<TechnicianBookingDetailScreen> with WidgetsBindingObserver {
 
   late String _currentStatus;
   List<Map<String, String>> _selectedTests = [];
@@ -172,6 +178,12 @@ class _TechnicianBookingDetailScreenState
   // Which patient's photo is currently being captured/uploaded, if any —
   // only one camera capture can be in flight at a time.
   int? _capturingCollectionProofForPatientId;
+  // Which part of the capture is running — drives the box's label
+  // ("Opening camera…" / "Uploading photo…" / "Saving photo…").
+  _ProofStep _proofStep = _ProofStep.camera;
+  // Bumped whenever a capture starts or is cancelled; a camera result or
+  // upload that finishes for an older value is ignored.
+  int _proofCaptureToken = 0;
   // Sample-collection proof photo — one per patient on this visit (primary +
   // family members), keyed by patient_id. Each family member has their own
   // booking_id server-side (see ip_booking_documents), so this must never be
@@ -308,6 +320,26 @@ class _TechnicianBookingDetailScreenState
     return _journeySteps[idx + 1].status;
   }
 
+  // The one action available right now — used by BOTH the button in the
+  // Journey Status card and the bottom bar button, so the two always show
+  // the same name and do the same thing. null when there is nothing to do.
+  //   • Journey Started → Resume (reopens the live map)
+  //   • otherwise       → the next step (OTP step reads "Enter OTP")
+  //   • Handed to Lab   → no step left (the bottom button shows "Done")
+  ({String label, VoidCallback onTap})? get _currentAction {
+    if (!_canAdvance) return null;
+    if (_currentStatus == 'Journey Started') {
+      return (label: 'Resume Journey', onTap: _resumeJourney);
+    }
+    final idx = _currentStepIndex;
+    if (_nextStatus == null || idx < 0) return null;
+    final nextLabel = _journeySteps[idx + 1].label;
+    return (
+      label: nextLabel == 'OTP Verified' ? 'Enter OTP' : nextLabel,
+      onTap: _advanceStatus,
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -318,11 +350,32 @@ class _TechnicianBookingDetailScreenState
     if (widget.booking.patientId != null) {
       _patientDocRequired[widget.booking.patientId!] = _docRequired;
     }
+    WidgetsBinding.instance.addObserver(this);
     _loadItems();
     _loadDocs();
     _loadCollectionProof();
     _loadLinkedPatients();
     _refreshPaymentInfo();
+    // A collection photo taken just before Android closed the app (see
+    // _recoverLostProofPhoto) is uploaded now instead of being lost.
+    _recoverLostProofPhoto();
+  }
+
+  // Coming back from the camera app. Normally the photo arrives right
+  // away; if it hasn't a few seconds later, Android closed our screen while
+  // the camera was open and the result went missing — recover it instead of
+  // leaving "Opening camera…" spinning.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    if (_capturingCollectionProofForPatientId == null || _proofStep != _ProofStep.camera) return;
+    final token = _proofCaptureToken;
+    Future.delayed(const Duration(seconds: 5), () {
+      if (!mounted || token != _proofCaptureToken) return;
+      if (_capturingCollectionProofForPatientId == null || _proofStep != _ProofStep.camera) return;
+      debugPrint('[CollectionProof] no camera result 5s after resume — trying lost-data recovery');
+      _recoverLostProofPhoto(fromResume: true);
+    });
   }
 
   // Fetches fresh payment_status + amount_paid from the server so the screen
@@ -587,6 +640,7 @@ class _TechnicianBookingDetailScreenState
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     clearRazorpay();
     for (final c in _otpControllers) c.dispose();
     for (final f in _otpFocusNodes) f.dispose();
@@ -955,11 +1009,20 @@ Future<void> _showHandOverToLabDialog() async {
 
                 if (result['success'] == true) {
                   if (dialogCtx.mounted) Navigator.pop(dialogCtx);
-                  if (mounted) setState(() => _currentStatus = 'Handed to Lab');
+                  if (mounted) {
+                    setState(() => _currentStatus = 'Handed to Lab');
+                    // Job finished — confirm and go back to the Dashboard
+                    // (once the dialog has closed).
+                    AppMessages.success(context, 'Sample handed over to the lab. Job complete.');
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted) _exitScreen();
+                    });
+                  }
                 } else if (dialogCtx.mounted) {
                   setDialogState(() {
                     isSubmitting = false;
-                    submitError  = result['message'] as String? ?? 'Failed to submit — please try again.';
+                    submitError  = AppMessages.serverMessage(result['message'],
+                        fallback: 'We couldn\'t record the handover. Please try again.');
                   });
                 }
               },
@@ -1023,13 +1086,8 @@ void _resumeJourney() {
     if (!mounted) return;
 
     if (genResult == null || genResult['success'] != true) {
-      final msg = genResult?['message'] as String? ?? 'Failed to send OTP. Please try again.';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(msg),
-        backgroundColor: Colors.redAccent,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.error(context, AppMessages.serverMessage(genResult?['message'],
+          fallback: 'We couldn\'t send the OTP to the patient. Please try again.'));
       return;
     }
 
@@ -1228,11 +1286,11 @@ void _resumeJourney() {
         duration: const Duration(seconds: 3),
       ));
     } else {
-      final msg = result?['message'] as String? ?? 'Invalid OTP. Please try again.';
       setState(() {
         _isVerifyingOtp = false;
         _otpError       = true;
-        _otpErrorText   = msg;
+        _otpErrorText   = AppMessages.serverMessage(result?['message'],
+            fallback: 'Incorrect OTP. Please try again.');
       });
       setDialogState(() {});
     }
@@ -1260,13 +1318,8 @@ void _resumeJourney() {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ));
     } else {
-      final msg = result?['message'] as String? ?? 'Failed to resend OTP. Please try again.';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(msg),
-        backgroundColor: Colors.redAccent,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.error(context, AppMessages.serverMessage(result?['message'],
+          fallback: 'We couldn\'t resend the OTP. Please try again.'));
     }
   }
 
@@ -1591,6 +1644,24 @@ void _resumeJourney() {
   // primary patient's own booking, or one family member's own booking_id.
   // Never assume widget.booking.id here, or every family member's photo
   // would overwrite the primary's (or each other's).
+  // Why this photo used to get stuck on "Opening camera…": the camera is a
+  // separate app, and on low-memory / aggressive-battery phones Android
+  // closes MicroLab's screen while it is open. The photo result then never
+  // reaches this await, so it only cleared after the timeout, and the photo
+  // was lost. The flow below handles that in four ways:
+  //   1. The capture is recorded in SharedPreferences before the camera
+  //      opens; on return (didChangeAppLifecycleState) or reopening the
+  //      screen (initState), _recoverLostProofPhoto fetches the lost photo
+  //      with ImagePicker.retrieveLostData() and uploads it.
+  //   2. The box shows the real step: Opening camera… / Uploading photo… /
+  //      Saving photo….
+  //   3. Tapping the box while it waits for the camera or the upload
+  //      cancels it (_cancelProofCapture); a late result is ignored via
+  //      _proofCaptureToken.
+  //   4. Smaller photo (1280px, quality 70 → roughly 200–500KB) so uploads
+  //      are quicker on mobile data.
+  static const String _pendingProofKey = 'pending_collection_proof_capture';
+
   Future<void> _captureAndUploadCollectionProof({
     required int patientId,
     required int bookingId,
@@ -1598,74 +1669,180 @@ void _resumeJourney() {
     if (_capturingCollectionProofForPatientId != null) return;
     if (bookingId <= 0) return;
 
-    setState(() => _capturingCollectionProofForPatientId = patientId);
-    try {
-      // maxWidth/maxHeight cap the resolution the camera hands back, not just
-      // the JPEG quality — on modern high-megapixel phones a full-resolution
-      // photo can exceed the server's 5MB upload cap (routes/upload.js) even
-      // at imageQuality: 80, and a large file is also far more likely to blow
-      // past ApiService.uploadFile's 30s timeout on weak mobile upload speeds.
-      // 1600px on the long edge is comfortably legible for a proof photo and
-      // keeps the JPEG in the low hundreds of KB to ~1MB range.
-      // On some real devices the native camera intent occasionally never
-      // hands a result back to Flutter (low memory, OEM camera quirks,
-      // activity recreation) — without a timeout that leaves this await
-      // pending forever, so neither the success path nor the catch/finally
-      // ever runs and the button is stuck showing "Opening camera…"
-      // permanently, with no exception to recover from. Timing out and
-      // treating it as a cancel (same as the user backing out of the camera)
-      // guarantees the busy state always eventually clears.
-      final image = await _picker.pickImage(
-        source: ImageSource.camera,
-        imageQuality: 80,
-        maxWidth: 1600,
-        maxHeight: 1600,
-      ).timeout(const Duration(seconds: 90), onTimeout: () => null);
-      if (image == null) return; // technician cancelled — fine, it's optional
+    final token = ++_proofCaptureToken;
+    setState(() {
+      _capturingCollectionProofForPatientId = patientId;
+      _proofStep = _ProofStep.camera;
+    });
+    await _rememberPendingProof(patientId: patientId, bookingId: bookingId);
 
+    XFile? image;
+    try {
+      // The timeout is only a last resort now — a lost result is normally
+      // picked up a few seconds after returning (see didChangeAppLifecycleState).
+      image = await _picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 70,
+        maxWidth: 1280,
+        maxHeight: 1280,
+      ).timeout(const Duration(seconds: 60), onTimeout: () => null);
+    } catch (e) {
+      debugPrint('[CollectionProof] camera error: $e');
+      if (token == _proofCaptureToken) {
+        await _forgetPendingProof();
+        _endProofCapture();
+        if (mounted) AppMessages.error(context, AppMessages.friendlyError(e));
+      }
+      return;
+    }
+
+    // Cancelled from the box, or already handled by the recovery path.
+    if (token != _proofCaptureToken) return;
+
+    if (image == null) {
+      // Technician backed out of the camera — fine, the photo is optional.
+      await _forgetPendingProof();
+      _endProofCapture();
+      return;
+    }
+
+    await _forgetPendingProof();
+    await _uploadProofPhoto(image: image, patientId: patientId, bookingId: bookingId, token: token);
+  }
+
+  // Upload + link to the booking, shared by a normal capture and a recovered
+  // one. Shows "Uploading photo…" then "Saving photo…" on the box.
+  Future<void> _uploadProofPhoto({
+    required XFile image,
+    required int patientId,
+    required int bookingId,
+    required int token,
+  }) async {
+    void step(_ProofStep s) {
+      if (mounted && token == _proofCaptureToken) setState(() => _proofStep = s);
+    }
+
+    try {
+      step(_ProofStep.uploading);
       final bytes = await image.readAsBytes();
       final url = await ApiService.uploadFile(bytes.toList(), image.name);
+      if (token != _proofCaptureToken) return; // cancelled meanwhile
       if (url == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Could not upload photo — please try again'),
-            backgroundColor: Colors.red,
-          ));
-        }
+        if (mounted) AppMessages.error(context, 'We couldn\'t upload the photo. Please check your connection and try again.');
         return;
       }
 
+      step(_ProofStep.saving);
       final saved = await ApiService.saveCollectionProofPhoto(bookingId: bookingId, imageUrl: url);
+      if (token != _proofCaptureToken) return;
       if (!saved) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Could not save photo — please try again'),
-            backgroundColor: Colors.red,
-          ));
-        }
+        if (mounted) AppMessages.error(context, 'We couldn\'t save the photo. Please try again.');
         return;
       }
 
-      if (mounted) setState(() => _patientCollectionProofUrl[patientId] = url);
-    } catch (e) {
-      debugPrint('Error capturing collection proof photo: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Could not capture proof photo — continuing without it'),
-          backgroundColor: Colors.orange,
-        ));
+        setState(() => _patientCollectionProofUrl[patientId] = url);
+        AppMessages.success(context, 'Collection photo added');
+      }
+    } catch (e) {
+      debugPrint('[CollectionProof] upload error: $e');
+      if (mounted && token == _proofCaptureToken) {
+        AppMessages.error(context, 'We couldn\'t upload the photo. ${AppMessages.friendlyError(e)}');
       }
     } finally {
-      // Always clear the busy flag itself, even if the widget has since
-      // unmounted (e.g. tab-based keep-alive navigation away mid-capture) —
-      // only the setState() *call* needs the mounted guard to avoid a
-      // Flutter error on a disposed widget. Gating the flag reset itself on
-      // mounted left it permanently stuck non-null when the awaits above
-      // (camera/upload/save) outlived the widget's mounted lifetime, which
-      // both froze the button in its spinner state forever and made every
-      // future tap silently no-op via the early-return guard above.
-      _capturingCollectionProofForPatientId = null;
-      if (mounted) setState(() {});
+      if (token == _proofCaptureToken) _endProofCapture();
+    }
+  }
+
+  // Tapping the box while it waits (camera or upload). A result that turns
+  // up later is ignored because the token has moved on.
+  Future<void> _cancelProofCapture() async {
+    if (_capturingCollectionProofForPatientId == null || _proofStep == _ProofStep.saving) return;
+    debugPrint('[CollectionProof] cancelled by technician at step=$_proofStep');
+    _proofCaptureToken++;
+    await _forgetPendingProof();
+    _endProofCapture();
+    if (mounted) AppMessages.info(context, 'Photo cancelled. Tap the box to take it again.');
+  }
+
+  // Always clears the busy flag, even if the widget has unmounted — only the
+  // setState() call needs the mounted guard. (Gating the reset itself on
+  // mounted previously left the flag stuck and every later tap a no-op.)
+  void _endProofCapture() {
+    _capturingCollectionProofForPatientId = null;
+    _proofStep = _ProofStep.camera;
+    if (mounted) setState(() {});
+  }
+
+  // Recovers a photo whose camera result was lost because Android closed
+  // this screen while the camera was open (Android only). Runs on opening
+  // the screen, and a few seconds after returning from the camera if no
+  // result came. Only acts on a capture that this flow recorded, and only
+  // for this visit's booking — so it never picks up a prescription photo.
+  // When nothing is recoverable, a normal (just slow) camera result can
+  // still arrive, so the box keeps waiting — the technician can tap to
+  // cancel, and the 60s timeout is the final fallback.
+  Future<void> _recoverLostProofPhoto({bool fromResume = false}) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    final pending = await _readPendingProof();
+    if (pending == null || pending.screenBookingId != widget.booking.id) return;
+
+    LostDataResponse lost;
+    try {
+      lost = await _picker.retrieveLostData();
+    } catch (e) {
+      debugPrint('[CollectionProof] retrieveLostData failed: $e');
+      return;
+    }
+
+    final file = (lost.files != null && lost.files!.isNotEmpty) ? lost.files!.first : lost.file;
+    if (lost.isEmpty || file == null) {
+      debugPrint('[CollectionProof] no lost photo to recover (fromResume=$fromResume exception=${lost.exception?.code})');
+      // Opening the screen fresh: a recorded capture with nothing to recover
+      // is stale (the app was closed mid-camera and the photo is gone).
+      if (!fromResume) await _forgetPendingProof();
+      return;
+    }
+    await _forgetPendingProof();
+
+    debugPrint('[CollectionProof] recovered lost photo for patient=${pending.patientId} booking=${pending.bookingId}');
+    final token = ++_proofCaptureToken;
+    if (mounted) {
+      setState(() {
+        _capturingCollectionProofForPatientId = pending.patientId;
+        _proofStep = _ProofStep.uploading;
+      });
+    }
+    await _uploadProofPhoto(
+      image: file, patientId: pending.patientId, bookingId: pending.bookingId, token: token,
+    );
+  }
+
+  Future<void> _rememberPendingProof({required int patientId, required int bookingId}) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_pendingProofKey, '${widget.booking.id}|$patientId|$bookingId');
+    } catch (_) {}
+  }
+
+  Future<void> _forgetPendingProof() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_pendingProofKey);
+    } catch (_) {}
+  }
+
+  Future<({String screenBookingId, int patientId, int bookingId})?> _readPendingProof() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final parts = prefs.getString(_pendingProofKey)?.split('|');
+      if (parts == null || parts.length != 3) return null;
+      final pid = int.tryParse(parts[1]);
+      final bid = int.tryParse(parts[2]);
+      if (pid == null || bid == null) return null;
+      return (screenBookingId: parts[0], patientId: pid, bookingId: bid);
+    } catch (_) {
+      return null;
     }
   }
 
@@ -2196,10 +2373,8 @@ void _resumeJourney() {
       ));
       Navigator.pop(context, true);
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(result['message']?.toString() ?? 'Failed to release job'),
-        backgroundColor: Colors.red,
-      ));
+      AppMessages.error(context, AppMessages.serverMessage(result['message'],
+          fallback: 'We couldn\'t release this job. Please try again.'));
     }
   }
 
@@ -2247,12 +2422,7 @@ void _resumeJourney() {
           _sessionPaymentCollected += paidAmount;
           _livePaymentStatus       = stillDue ? 'partial' : 'paid';
         });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Payment of ₹${paidAmount.toInt()} received · $paymentId'),
-          backgroundColor: AppColors.brandGreen,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.success(context, 'Payment of ₹${paidAmount.toInt()} received. Ref: $paymentId');
         onDone?.call();
         // Persist to DB and refresh live payment state from server
         () async {
@@ -2264,23 +2434,17 @@ void _resumeJourney() {
           );
           if (mounted) _refreshPaymentInfo();
           if (!ok && mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('Payment saved locally but server sync failed — contact support'),
-              backgroundColor: Colors.orange,
-              behavior: SnackBarBehavior.floating,
-              duration: Duration(seconds: 6),
-            ));
+            AppMessages.warning(context,
+                'Payment received, but it didn\'t save to MicroLab. Note the ref $paymentId and tell support.',
+                duration: const Duration(seconds: 8));
           }
         }();
       },
       onError: (msg) {
         setState(() => _isProcessingPayment = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Failed: $msg'),
-          backgroundColor: Colors.red[700],
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.isPaymentCancelled(msg)
+            ? AppMessages.info(context, AppMessages.paymentError(msg))
+            : AppMessages.error(context, AppMessages.paymentError(msg));
       },
     );
   }
@@ -2349,12 +2513,7 @@ void _resumeJourney() {
           return p;
         }).toList();
       });
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('₹${amount.toInt()} received for $patientName · $paymentId'),
-        backgroundColor: AppColors.brandGreen,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.success(context, '₹${amount.toInt()} received for $patientName. Ref: $paymentId');
     }
 
     if (method == 'CASH') {
@@ -2404,24 +2563,18 @@ void _resumeJourney() {
           paymentMethod: 'RAZORPAY',
         );
         if (!ok && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Payment saved locally but server sync failed — contact support'),
-            backgroundColor: Colors.orange,
-            behavior: SnackBarBehavior.floating,
-            duration: Duration(seconds: 6),
-          ));
+          AppMessages.warning(context,
+              'Payment received, but it didn\'t save to MicroLab. Note the ref $paymentId and tell support.',
+              duration: const Duration(seconds: 8));
         }
         // Refresh the list to get accurate server state
         if (mounted) _loadLinkedPatients();
       },
       onError: (msg) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Failed: $msg'),
-            backgroundColor: Colors.red[700],
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
+          AppMessages.isPaymentCancelled(msg)
+              ? AppMessages.info(context, AppMessages.paymentError(msg))
+              : AppMessages.error(context, AppMessages.paymentError(msg));
         }
       },
     );
@@ -2534,12 +2687,9 @@ void _resumeJourney() {
       if (!mounted) return;
       applySuccessState('cash');
       if (!allOk) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Some cash payments failed to sync — contact support'),
-          backgroundColor: Colors.orange,
-          behavior: SnackBarBehavior.floating,
-          duration: Duration(seconds: 6),
-        ));
+        AppMessages.warning(context,
+            'Some cash payments didn\'t save to MicroLab. Please tell support which patients paid.',
+            duration: const Duration(seconds: 8));
       }
       _refreshPaymentInfo();
       _loadLinkedPatients();
@@ -2584,12 +2734,9 @@ void _resumeJourney() {
       onError: (msg) {
         if (mounted) {
           setState(() => _isProcessingPayment = false);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content:         Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Failed: $msg'),
-            backgroundColor: Colors.red[700],
-            behavior:        SnackBarBehavior.floating,
-            shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
+          AppMessages.isPaymentCancelled(msg)
+              ? AppMessages.info(context, AppMessages.paymentError(msg))
+              : AppMessages.error(context, AppMessages.paymentError(msg));
         }
       },
     );
@@ -2737,50 +2884,28 @@ void _resumeJourney() {
                           ),
                         ),
                       ),
-          if (isCurrent && _canAdvance) ...[
+          // Same action as the bottom bar button (see _currentAction).
+          if (isCurrent && _currentAction != null) ...[
   const SizedBox(width: 8),
-  if (_currentStatus == 'Journey Started') 
-    // Show Resume button only if not completed
-    GestureDetector(
-      onTap: _resumeJourney,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1565C0),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: const Text(
-          'Resume ▸',
-          style: TextStyle(
-            fontSize: 11, 
-            fontWeight: FontWeight.w700, 
-            color: Colors.white
-          ),
-        ),
+  GestureDetector(
+    onTap: _currentAction!.onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: _currentStatus == 'Journey Started' ? const Color(0xFF1565C0) : step.color,
+        borderRadius: BorderRadius.circular(20),
       ),
-    )
-  else if (_currentStatus != 'Handed to Lab' && _nextStatus != null)
-    GestureDetector(
-      onTap: _advanceStatus,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: step.color,
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Text(
-          _journeySteps[i + 1].label == 'OTP Verified'
-              ? 'Enter OTP ▸'
-              : '${_journeySteps[i + 1].label} ▸',
-          style: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            color: Colors.white
-          ),
+      child: Text(
+        '${_currentAction!.label} ▸',
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: Colors.white
         ),
       ),
     ),
-],          
+  ),
+],
                     ],
                   ));
                 }),
@@ -3065,8 +3190,16 @@ void _resumeJourney() {
                           const SizedBox(height: 10),
                           if (proofUrl == null)
                             GestureDetector(
-                              onTap: (!canCapture || isCapturing) ? null : () =>
-                                  _captureAndUploadCollectionProof(patientId: pid, bookingId: patientBookingId),
+                              // While busy, a tap cancels (camera or upload
+                              // step) — see _cancelProofCapture.
+                              onTap: !canCapture
+                                  ? null
+                                  : isCapturing
+                                      ? _cancelProofCapture
+                                      : (_capturingCollectionProofForPatientId != null
+                                          ? null // another patient's photo is in progress
+                                          : () => _captureAndUploadCollectionProof(
+                                              patientId: pid, bookingId: patientBookingId)),
                               child: Container(
                                 width: double.infinity,
                                 padding: const EdgeInsets.symmetric(vertical: 22),
@@ -3084,9 +3217,20 @@ void _resumeJourney() {
                                       : const Icon(Icons.camera_alt_outlined, size: 22, color: AppColors.textHint),
                                   const SizedBox(height: 6),
                                   Text(
-                                    isCapturing ? 'Opening camera…' : 'Take Collection Photo',
+                                    !isCapturing
+                                        ? 'Take Collection Photo'
+                                        : switch (_proofStep) {
+                                            _ProofStep.camera    => 'Opening camera…',
+                                            _ProofStep.uploading => 'Uploading photo…',
+                                            _ProofStep.saving    => 'Saving photo…',
+                                          },
                                     style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
                                   ),
+                                  if (isCapturing && _proofStep != _ProofStep.saving) ...[
+                                    const SizedBox(height: 2),
+                                    const Text('Tap to cancel',
+                                        style: TextStyle(fontSize: 10.5, color: AppColors.textHint)),
+                                  ],
                                 ]),
                               ),
                             )
@@ -3777,29 +3921,26 @@ void _resumeJourney() {
                 color: Colors.white,
                 border: Border(top: BorderSide(color: AppColors.divider)),
               ),
+              // Main action of the screen: the same next step as the Journey
+              // Status card's button (_currentAction), with the same checks
+              // and dialogs. Everything on this screen already saves as it
+              // happens, so there is no separate "save". After Handed to Lab
+              // it reads "Done" and returns to the Dashboard.
               child: SizedBox(
                 height: 50,
                 child: ElevatedButton(
-                  onPressed: () {
-                    if (!_isCompleted) {
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                        content: const Text('Changes saved'),
-                        backgroundColor: AppColors.brandGreen,
-                        behavior: SnackBarBehavior.floating,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ));
-                    }
-                    _exitScreen();
-                  },
+                  onPressed: _isCompleted ? _exitScreen : (_currentAction?.onTap ?? _exitScreen),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.brandGreen,
                     foregroundColor: Colors.white,
+                    disabledBackgroundColor: AppColors.divider,
+                    disabledForegroundColor: AppColors.textSecondary,
                     elevation: 0,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
                   child: Text(
-                    _isCompleted ? 'Done' : 'Save Changes',
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+                    _isCompleted ? 'Done' : (_currentAction?.label ?? 'Done'),
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
                   ),
                 ),
               ),

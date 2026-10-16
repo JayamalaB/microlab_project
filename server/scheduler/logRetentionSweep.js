@@ -1,7 +1,7 @@
 'use strict';
 // logRetentionSweep.js
 //
-// Daily purge of rows older than LOG_RETENTION_DAYS (default 90) from the 7
+// Daily purge of rows older than LOG_RETENTION_DAYS (default 90) from the 8
 // database log tables added alongside the existing .log files (see
 // server/utils/dbLogger.js and migrations/create_log_tables.sql). The .log
 // files themselves are untouched by this — file rotation/retention, if any,
@@ -19,7 +19,7 @@ const db   = require('../config/db');
 const LOG_TABLES = [
   'ip_dispatch_logs', 'ip_collection_logs', 'ip_otpinfo_logs',
   'ip_technician_logs', 'ip_login_otp_logs', 'ip_client_sync_logs',
-  'ip_customer_push_logs',
+  'ip_customer_push_logs', 'ip_branch_lookup_logs',
 ];
 
 const BATCH_SIZE = 5000;

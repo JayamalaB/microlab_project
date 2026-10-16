@@ -18,6 +18,7 @@ import 'package:flutter/services.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/models.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/utils/app_messages.dart';
 import 'package:http/http.dart' as http;
 import 'checkout_screen.dart';
 
@@ -139,7 +140,7 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
         // Server returned non-JSON (unexpected HTML error page etc.)
         setState(() {
           _state    = _LookupState.error;
-          _errorMsg = 'Server returned an unexpected response (${res.statusCode}).';
+          _errorMsg = AppMessages.serverError;
         });
         return;
       }
@@ -153,20 +154,22 @@ class _BranchSelectionScreenState extends State<BranchSelectionScreen> {
       } else if (res.statusCode == 404) {
         setState(() {
           _state    = _LookupState.notFound;
-          _errorMsg = body!['message'] as String? ??
-              'No branch found for this location.';
+          _errorMsg = AppMessages.serverMessage(body!['message'],
+              fallback: 'We don\'t have a branch serving this location yet.');
         });
       } else {
         setState(() {
           _state    = _LookupState.error;
-          _errorMsg = body!['message'] as String? ?? 'Something went wrong.';
+          _errorMsg = AppMessages.serverMessage(body!['message'],
+              fallback: 'We couldn\'t find a branch for your location. Please try again.');
         });
       }
     } catch (e) {
+      debugPrint('[BranchSelection] lookup failed: $e');
       if (!mounted) return;
       setState(() {
         _state    = _LookupState.error;
-        _errorMsg = 'Could not reach the server. Check your connection.';
+        _errorMsg = AppMessages.friendlyError(e);
       });
     }
   }

@@ -1,13 +1,13 @@
 // Tests POST /api/technicians/booking-otp/{generate,verify,resend} —
 // technicianController.js: generateBookingOtp, verifyBookingOtp, resendBookingOtp
 //
-// This is the "OTP verification → consolidated visit_completed sync" flow
-// from the task brief. verifyBookingOtp's success path fires
-// syncVisitCompletionToClient (services/clientSync.js) fire-and-forget; that
-// function's own payload-building logic (package/payment/family/photo
-// content) is covered separately in tests/integration/visitCompletedSync —
-// this file mocks the whole clientSync module, since here we're only
-// verifying verifyBookingOtp's own DB writes and status-machine rules.
+// verifyBookingOtp no longer sends the consolidated visit_completed sync —
+// that moved to the Handed to Lab step (socket/bookingSocket.js
+// 'handed_to_lab'), so the success path asserts it is NOT called. The sync's
+// own payload-building logic is covered separately in
+// tests/integration/visitCompletedSync — this file mocks the whole clientSync
+// module, since here we're only verifying verifyBookingOtp's own DB writes
+// and status-machine rules.
 jest.mock('../../config/db');
 jest.mock('../../utils/sms');
 jest.mock('../../services/clientSync');
@@ -133,9 +133,10 @@ describe('POST /api/technicians/booking-otp/verify', () => {
 
   // TC-OTP-05 — the full success path for a single (non-family) booking:
   // status flips to otp_verified, the ip_patient_bookings mirror runs, no
-  // visit_group_id means the sibling cascade is skipped, and the
-  // consolidated visit_completed sync fires.
-  test('a correct OTP verifies a standalone booking and triggers the visit_completed sync', async () => {
+  // visit_group_id means the sibling cascade is skipped. The ASMX
+  // visit_completed sync is NOT sent here any more — it moved to the Handed
+  // to Lab step (socket/bookingSocket.js 'handed_to_lab').
+  test('a correct OTP verifies a standalone booking and does NOT send the visit_completed sync', async () => {
     primeAuthCheck(db, token);
     db.execute
       .mockResolvedValueOnce([[{ collection_otp: '1234', otp_attempts: 0, is_expired: 0 }]]) // OTP check
@@ -148,9 +149,7 @@ describe('POST /api/technicians/booking-otp/verify', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(db.execute).toHaveBeenCalledTimes(5); // auth check + the 4 above
-    expect(clientSync.syncVisitCompletionToClient).toHaveBeenCalledWith(
-      900, expect.objectContaining({ type: 'technician', technicianId: 17 })
-    );
+    expect(clientSync.syncVisitCompletionToClient).not.toHaveBeenCalled();
   });
 
   // TC-OTP-06 — a family visit: verifying OTP on ONE sibling cascades

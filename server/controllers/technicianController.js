@@ -10,7 +10,6 @@ const fs   = require('fs');
 const path = require('path');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
-const { syncVisitCompletionToClient } = require('../services/clientSync');
 const dbLogger = require('../utils/dbLogger');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
@@ -1414,18 +1413,10 @@ exports.verifyBookingOtp = async (req, res) => {
       console.error(`❌ [verifyBookingOtp] sibling cascade failed booking=${bookingId}: ${e.message}`);
     }
 
-    // Sync the whole visit to the client server in one consolidated request
-    // — primary booking + every sibling in the same visit_group_id, each
-    // with their own tests/payment/photo. This is now the only Jayamala
-    // sync point for a technician-run visit; the individual package_added /
-    // payment_update / family_member_added / collection_photo_added syncs
-    // were removed from their respective actions. Fire-and-forget — must
-    // never affect the OTP-verification response already being sent below.
-    syncVisitCompletionToClient(Number(bookingId), {
-      mobile:       req.user.mobile,
-      type:         'technician',
-      technicianId: technicianId,
-    }).catch(err => console.error(`[clientSync] verifyBookingOtp visit_completed sync failed booking_id=${bookingId}:`, err.message));
+    // The ASMX visit sync (TechnicianVisitCompleted) is no longer sent here —
+    // it is sent at the Handed to Lab step instead, together with the
+    // handover branch and received-by name (socket/bookingSocket.js,
+    // 'handed_to_lab' → syncVisitCompletionToClient).
 
     console.log(`✅ verifyBookingOtp — booking_id=${bookingId} OTP verified by technician_id=${technicianId}`);
     res.json({ success: true });

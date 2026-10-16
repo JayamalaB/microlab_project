@@ -20,8 +20,10 @@
 
 'use strict';
 const db              = require('../config/db');
+const { branchCodeKey } = require('../services/branchCodes');
 const { messaging }   = require('../config/firebase');
 const { sendToBookingOwner } = require('../services/customerPush');
+const { syncVisitCompletionToClient } = require('../services/clientSync');
 const {
   findEligibleBranches,
   technicianActiveSlots,
@@ -344,13 +346,187 @@ async function _cascadeTcStatus(bookingId, status, timestampCol) {
 // point of per-slot dispatch. apptCtx is null only for bookings with no slot
 // context whatsoever (rare/legacy path) — there we fall back to the plain global
 // isAvailable flag, since there is no time window to check against.
+// ── Branch eligibility: default branch + assigned branches ──────────────────
+// A technician is allowed at a booking's branch when it is the branch the app
+// sent in technician_online (actor.branchId) or one of their matched branches
+// (actor.branchIds — a Set of branch_ids whose ip_branches.branch_code matches
+// ip_technicians.default_branch_id / branch_ids, see _loadTechnicianBranchIds).
+// Everyone allowed at the branch is then ranked together by distance — the
+// default branch gets no priority over an assigned one.
+//   • branches loaded, nothing matched, no app branch → excluded from
+//     branch-specific offers (still reachable via the any-branch fallback,
+//     which passes no branch)
+//   • branches not loaded yet (the moment after going online) and no app
+//     branch → eligible, as before
+//   • booking with no branch → everyone, as before
+// Compared as numbers, so 7 and "7" are the same branch.
+function _toBranchNum(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isInteger(n) ? n : null;
+}
+
+function _isAllowedAtBranch(actor, branchId) {
+  const target = _toBranchNum(branchId);
+  if (target == null) return true;
+  const own   = _toBranchNum(actor?.branchId);
+  const extra = actor?.branchIds instanceof Set ? actor.branchIds : null;
+  if (own === target) return true;
+  if (extra != null) return extra.has(target); // loaded: only matched branches
+  return own == null;                          // not loaded yet: no branch info → eligible
+}
+
+// Sends the visit to the ASMX at the Handed to Lab step (see the
+// 'handed_to_lab' handler). Once per visit: skipped only when a successful
+// TechnicianVisitCompleted call is already logged in ip_asmx_logs for any
+// booking in the visit, so a repeated handover never creates duplicate bills
+// on the ASMX side. client_sync_status is NOT used for this — the booking-time
+// sync (new_booking) also sets it to 'synced', which would wrongly skip the
+// visit. A failed or never-sent visit is sent normally. Never throws.
+async function _syncVisitAtHandover(bookingId, technicianId, handoverBranchId, receivedByName, visitGroupId) {
+  try {
+    let visitBookingIds = [Number(bookingId)];
+    if (visitGroupId) {
+      const [rows] = await db.execute(
+        `SELECT booking_id FROM ip_bookings WHERE visit_group_id = ? AND deleted_at IS NULL`,
+        [visitGroupId]
+      );
+      if (rows.length) visitBookingIds = rows.map(r => Number(r.booking_id));
+    }
+    const [[already]] = await db.execute(
+      `SELECT log_id FROM ip_asmx_logs
+       WHERE endpoint = 'TechnicianVisitCompleted' AND success = 1
+         AND booking_id IN (${visitBookingIds.map(() => '?').join(',')})
+       ORDER BY log_id DESC LIMIT 1`,
+      visitBookingIds
+    );
+    if (already) {
+      clog(`[handed_to_lab] ASMX visit sync skipped — booking_id=${bookingId} visit already completed on ASMX (ip_asmx_logs log_id=${already.log_id})`);
+      return;
+    }
+
+    const [[techUser]] = await db.execute(
+      `SELECT u.user_mobile_no FROM ip_technicians t
+       JOIN ip_users u ON u.user_id = t.user_id
+       WHERE t.technician_id = ? LIMIT 1`,
+      [technicianId]
+    );
+
+    clog(`[handed_to_lab] ASMX visit sync — booking_id=${bookingId} handover_branch_id=${handoverBranchId ?? '—'} received_by=${receivedByName ?? '—'}`);
+    await syncVisitCompletionToClient(Number(bookingId), {
+      mobile:       techUser?.user_mobile_no ?? null,
+      type:         'technician',
+      technicianId: Number(technicianId),
+      handover:     { branchId: handoverBranchId ?? null, receivedByName: receivedByName ?? null },
+    });
+  } catch (e) {
+    clog(`[handed_to_lab] ASMX visit sync ERROR — booking_id=${bookingId} error="${e.message}"`);
+  }
+}
+
+// Technician branch-matching results → logs/technician.log + ip_technician_logs
+// (event = the [TAG], technician_id parsed from the message by dbLogger).
+const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
+function _techBranchLog(msg) {
+  try {
+    const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }).replace(',', '') + ' IST';
+    fs.appendFileSync(TECH_LOG, `[${ist}] ${msg}\n`, 'utf8');
+  } catch (_) {}
+  dbLogger.logTechnicianEvent(msg);
+}
+
+// Reads a technician's branches from ip_technicians and returns them as a Set
+// of our branch_ids (may be empty). Only the ASMX codes are used, each
+// matched against ip_branches.branch_code:
+//   • default_branch_id — the ASMX default branch CODE ("07")
+//   • branch_ids        — every ASMX branch CODE (["03","04","07"])
+// ip_technicians.branch_id is NOT used here. Only non-deleted branches count;
+// codes with no match are ignored and logged. An empty result means the
+// technician has no matched branch (see _isAllowedAtBranch).
+async function _loadTechnicianBranchIds(technicianId) {
+  const [[row]] = await db.execute(
+    'SELECT branch_ids, default_branch_id FROM ip_technicians WHERE technician_id = ? LIMIT 1',
+    [technicianId]
+  );
+  if (!row) return new Set();
+
+  let codes = row.branch_ids;
+  if (typeof codes === 'string') {
+    try { codes = JSON.parse(codes); } catch { codes = []; }
+  }
+  codes = (Array.isArray(codes) ? codes : []).map(c => String(c ?? '').trim()).filter(Boolean);
+  const defaultCode = row.default_branch_id != null ? String(row.default_branch_id).trim() : '';
+  if (defaultCode !== '') codes.unshift(defaultCode);
+  if (codes.length === 0) return new Set();
+
+  const [branches] = await db.execute(
+    'SELECT branch_id, branch_code FROM ip_branches WHERE deleted_at IS NULL'
+  );
+  const idByCode = new Map();
+  for (const b of branches) {
+    const key = branchCodeKey(b.branch_code);
+    if (key != null && !idByCode.has(key)) idByCode.set(key, Number(b.branch_id));
+  }
+
+  const allowed = new Set();
+  const dropped = new Set();
+  for (const code of codes) {
+    const id = idByCode.get(branchCodeKey(code));
+    if (id != null) allowed.add(id);
+    else dropped.add(code);
+  }
+  if (dropped.size > 0) {
+    log('⚠️', 'TECH_BRANCH_IGNORED', '-',
+      `tech_id=${technicianId} no active ip_branches.branch_code match for: ${[...dropped].join(', ')}`);
+    _techBranchLog(`[TECH_BRANCH_IGNORED] ⚠️ technician_id=${technicianId} no active ip_branches.branch_code match for: ${[...dropped].join(', ')}`);
+  }
+  _techBranchLog(
+    `[TECH_BRANCHES] technician_id=${technicianId} default_branch_id=${defaultCode || 'none'} ` +
+    `branch_ids=[${codes.slice(defaultCode !== '' ? 1 : 0).join(',')}] allowed_branch_ids=[${[...allowed].join(',')}]`
+  );
+  return allowed;
+}
+
+// One-line report of every technician currently in the online pool and
+// whether they are eligible for this booking's branch — and why not when
+// they aren't. Mirrors the checks in _sortedAvailableActors exactly, so the
+// log explains the queue that follows. Written to dispatch.log and
+// ip_dispatch_logs (tag SHORTLIST) once per dispatch.
+//   ✔ eligible (via app-branch | assigned | no-branch-info)
+//   ✘ offline | not-at-branch(allowed=[…]) | busy
+function _shortlistReport(actorMap, branchId, apptCtx, patientLat, patientLng) {
+  const target = _toBranchNum(branchId);
+  const parts  = [];
+  let eligible = 0;
+  actorMap.forEach((actor, id) => {
+    const label   = `${actor.name ?? '?'}(${id})`;
+    const allowed = actor.branchIds instanceof Set ? `[${[...actor.branchIds].join(',')}]` : 'not-loaded';
+    if (!actor.isOnline) { parts.push(`✘${label}:offline`); return; }
+    if (!_isAllowedAtBranch(actor, branchId)) {
+      parts.push(`✘${label}:not-at-branch(app=${actor.branchId ?? '-'},allowed=${allowed})`);
+      return;
+    }
+    if (!apptCtx && !actor.isAvailable) { parts.push(`✘${label}:busy`); return; }
+    const own = _toBranchNum(actor.branchId);
+    const via = target == null ? 'any-branch'
+      : own === target ? 'app-branch'
+      : (actor.branchIds instanceof Set && actor.branchIds.has(target)) ? 'assigned'
+      : 'no-branch-info';
+    const dist = actor.lat != null && actor.lng != null && patientLat != null && patientLng != null
+      ? `${haversine(patientLat, patientLng, actor.lat, actor.lng).toFixed(1)}km` : 'noGPS';
+    parts.push(`✔${label}:${via},${dist}`);
+    eligible++;
+  });
+  return `branch=${branchId ?? 'none'} online=${actorMap.size} eligible=${eligible} | ${parts.join(' ') || 'nobody online'}`;
+}
+
 function _sortedAvailableActors(patientLat, patientLng, actorMap, branchId = null, apptCtx = null) {
   const withGps = [];
   const noGps   = [];
 
   actorMap.forEach((actor, id) => {
     if (!actor.isOnline) return;
-    if (branchId != null && actor.branchId != null && actor.branchId !== branchId) return;
+    if (!_isAllowedAtBranch(actor, branchId)) return;
 
     // Business-rule change: an overlapping committed appointment window no
     // longer excludes a technician from receiving this offer — they decide
@@ -395,7 +571,7 @@ function buildFcmQueue(patientLat, patientLng, branchId = null) {
   const entries = [];
   fcmOnlineTechnicians.forEach((tech, id) => {
     if (onlineTechnicians.has(id)) return; // Lane 1 already covers them
-    if (branchId != null && tech.branchId != null && tech.branchId !== branchId) return;
+    if (!_isAllowedAtBranch(tech, branchId)) return;
     const dist =
       tech.lat != null && patientLat != null
         ? haversine(patientLat, patientLng, tech.lat, tech.lng)
@@ -422,6 +598,7 @@ function _registerFcmTechs(fcmQueue) {
         name:        tech.name,
         sessionId:   null,
         branchId:    tech.branchId ?? null,
+        branchIds:   tech.branchIds ?? null,
         isOnline:    true,
         isAvailable: true,
       });
@@ -1233,6 +1410,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
   // Priority 3: slot-based fallback (tech offline / all busy).
   // apptCtx passed so _sortedAvailableActors can include appointment-busy techs
   // who have no overlapping window for this booking's appointment time.
+  dlog(bookingId, 'SHORTLIST', _shortlistReport(actorMap, branchId, apptCtx, patientLat, patientLng));
   let queue = buildQueue(patientLat, patientLng, actorMap, branchId, apptCtx);
 
   if (queue.length === 0 && branchId != null) {
@@ -1318,6 +1496,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
              AND ias.slot_time = ?`,
           [slotId, bookingDate, `${appointmentTime}:00`]
         );
+        
         const timeTechIds = new Set(availRows.map(r => r.technician_id));
         slotTechIds = new Set([...slotTechIds].filter(id => timeTechIds.has(id)));
         log('🕐', 'APPT_TIME_FILTER', bookingId,
@@ -1495,6 +1674,13 @@ module.exports = function bookingSocket(io, socket) {
       return false;
     })();
 
+    // Assigned branches already known from an earlier connection are kept, so a
+    // reconnect is immediately eligible for them; the fresh list is loaded
+    // from ip_technicians below (_loadTechnicianBranchIds).
+    const cachedBranchIds =
+      fcmOnlineTechnicians.get(technicianId)?.branchIds ??
+      onlineTechnicians.get(technicianId)?.branchIds ?? null;
+
     onlineTechnicians.set(technicianId, {
       socketId:    socket.id,
       lat:         lat       ?? null,
@@ -1502,6 +1688,7 @@ module.exports = function bookingSocket(io, socket) {
       name:        technicianName,
       sessionId:   sessionId ?? null,
       branchId:    branchId  ?? null,
+      branchIds:   cachedBranchIds,
       fcmToken:    fcmToken  ?? null,
       isOnline:    true,
       isAvailable: !hasActiveApptToday,
@@ -1509,11 +1696,12 @@ module.exports = function bookingSocket(io, socket) {
 
     // Lane 2 pool — survives socket disconnects; cleared only on technician_offline.
     fcmOnlineTechnicians.set(technicianId, {
-      fcmToken: fcmToken  ?? null,
-      lat:      lat       ?? null,
-      lng:      lng       ?? null,
-      name:     technicianName,
-      branchId: branchId  ?? null,
+      fcmToken:  fcmToken  ?? null,
+      lat:       lat       ?? null,
+      lng:       lng       ?? null,
+      name:      technicianName,
+      branchId:  branchId  ?? null,
+      branchIds: cachedBranchIds,
     });
 
     // Persist FCM token so it survives server restarts (next dispatchAttempt reads from Map).
@@ -1586,60 +1774,84 @@ module.exports = function bookingSocket(io, socket) {
       console.error(`❌ [SESSION INSERT FAILED] tech=${technicianId}: ${e.message}`)
     );
 
-    dispatchQueues.forEach((dispatch, bookingId) => {
-      if (dispatch.bookingType !== 'lab') return;
-      const bookingBranchId = dispatch.bookingData.branchId ?? null;
-      if (bookingBranchId != null && branchId != null && bookingBranchId !== branchId) return;
+    // Inject this technician into running dispatches for branches they are
+    // allowed at. Runs now with what is already known (default branch +
+    // cached list), then once more after the fresh list is loaded — for
+    // newly-allowed branches only, so nothing is injected twice.
+    const knownBranches = { branchId, branchIds: cachedBranchIds };
+    _injectIntoRunningDispatches(b => _isAllowedAtBranch(knownBranches, b));
 
-      const existingIdx = dispatch.queue.findIndex(q => q.id === technicianId);
-      if (existingIdx !== -1) {
-        const prev = dispatch.queue[existingIdx];
-        dispatch.queue[existingIdx] = {
-          ...prev,
-          socketId: socket.id,
-          lat: lat ?? prev.lat,
-          lng: lng ?? prev.lng,
-        };
-        log('🔄', 'QUEUE_ENTRY_REFRESHED', bookingId,
-          `tech=${technicianName} (ID: ${technicianId}) socketId+GPS updated`);
-        return;
+    _loadTechnicianBranchIds(technicianId).then((branchIds) => {
+      for (const map of [onlineTechnicians, fcmOnlineTechnicians]) {
+        const entry = map.get(technicianId);
+        if (entry) map.set(technicianId, { ...entry, branchIds });
       }
+      log('🏢', 'TECH_BRANCHES', '-',
+        `tech=${technicianName} (ID: ${technicianId}) default=${branchId ?? 'none'} allowed=[${[...branchIds].join(',')}]`);
+      if (!onlineTechnicians.has(technicianId)) return; // went offline meanwhile
+      const freshBranches = { branchId, branchIds };
+      _injectIntoRunningDispatches(b =>
+        !_isAllowedAtBranch(knownBranches, b) && _isAllowedAtBranch(freshBranches, b));
+    }).catch(e =>
+      console.error(`❌ [TECH_BRANCHES] load failed tech=${technicianId}: ${e.message}`)
+    );
 
-      // Slot-aware guard: if this booking is slot-filtered, only inject techs who
-      // declared that slot. A tech from the right branch but wrong slot must not
-      // receive this booking request.
-      if (dispatch.slotTechIds != null && !dispatch.slotTechIds.has(technicianId)) {
-        log('🚫', 'INJECT_SLOT_MISMATCH', bookingId,
-          `tech=${technicianName} (ID: ${technicianId}) — not in slot set, skipping inject`);
-        return;
-      }
+    function _injectIntoRunningDispatches(isAllowedAtBookingBranch) {
+      dispatchQueues.forEach((dispatch, bookingId) => {
+        if (dispatch.bookingType !== 'lab') return;
+        const bookingBranchId = dispatch.bookingData.branchId ?? null;
+        if (!isAllowedAtBookingBranch(bookingBranchId)) return;
 
-      const { patientLat, patientLng } = dispatch.bookingData;
-      const dist =
-        lat != null && patientLat != null
-          ? haversine(patientLat, patientLng, lat, lng)
-          : Infinity;
+        const existingIdx = dispatch.queue.findIndex(q => q.id === technicianId);
+        if (existingIdx !== -1) {
+          const prev = dispatch.queue[existingIdx];
+          dispatch.queue[existingIdx] = {
+            ...prev,
+            socketId: socket.id,
+            lat: lat ?? prev.lat,
+            lng: lng ?? prev.lng,
+          };
+          log('🔄', 'QUEUE_ENTRY_REFRESHED', bookingId,
+            `tech=${technicianName} (ID: ${technicianId}) socketId+GPS updated`);
+          return;
+        }
 
-      const futureStart = dispatch.techIdx + 1;
-      let insertAt = dispatch.queue.length;
-      for (let i = futureStart; i < dispatch.queue.length; i++) {
-        if (dist < (dispatch.queue[i].dist ?? Infinity)) { insertAt = i; break; }
-      }
+        // Slot-aware guard: if this booking is slot-filtered, only inject techs who
+        // declared that slot. A tech from the right branch but wrong slot must not
+        // receive this booking request.
+        if (dispatch.slotTechIds != null && !dispatch.slotTechIds.has(technicianId)) {
+          log('🚫', 'INJECT_SLOT_MISMATCH', bookingId,
+            `tech=${technicianName} (ID: ${technicianId}) — not in slot set, skipping inject`);
+          return;
+        }
 
-      dispatch.queue.splice(insertAt, 0, {
-        id: technicianId, socketId: socket.id,
-        lat: lat ?? null, lng: lng ?? null,
-        name: technicianName,
-        isOnline: true, isAvailable: true,
-        dist,
+        const { patientLat, patientLng } = dispatch.bookingData;
+        const dist =
+          lat != null && patientLat != null
+            ? haversine(patientLat, patientLng, lat, lng)
+            : Infinity;
+
+        const futureStart = dispatch.techIdx + 1;
+        let insertAt = dispatch.queue.length;
+        for (let i = futureStart; i < dispatch.queue.length; i++) {
+          if (dist < (dispatch.queue[i].dist ?? Infinity)) { insertAt = i; break; }
+        }
+
+        dispatch.queue.splice(insertAt, 0, {
+          id: technicianId, socketId: socket.id,
+          lat: lat ?? null, lng: lng ?? null,
+          name: technicianName,
+          isOnline: true, isAvailable: true,
+          dist,
+        });
+
+        logBlock('🆕', `Queue Injection  booking=${bookingId}`, [
+          `Technician : ${technicianName} (ID: ${technicianId})`,
+          `Distance   : ${dist === Infinity ? 'no GPS' : `${dist.toFixed(1)} km`}`,
+          `Slot       : #${insertAt + 1} of ${dispatch.queue.length}`,
+        ]);
       });
-
-      logBlock('🆕', `Queue Injection  booking=${bookingId}`, [
-        `Technician : ${technicianName} (ID: ${technicianId})`,
-        `Distance   : ${dist === Infinity ? 'no GPS' : `${dist.toFixed(1)} km`}`,
-        `Slot       : #${insertAt + 1} of ${dispatch.queue.length}`,
-      ]);
-    });
+    }
   });
 
   // Heartbeat sent every 20 s by the client while online.
@@ -2379,6 +2591,11 @@ module.exports = function bookingSocket(io, socket) {
           );
           clog(`[handed_to_lab] sibling cascade — visit_group=${vgId} booking=${bookingId}`);
         }
+
+        // ASMX visit sync (TechnicianVisitCompleted) — sent here, at Handed
+        // to Lab, with the handover branch + received-by name (moved from
+        // OTP verification). Never affects the handover itself.
+        await _syncVisitAtHandover(bookingId, technicianId, resolvedBranchId, receivedByName, parentRow?.visit_group_id ?? null);
       } catch (e) {
         console.error(`[handed_to_lab] sibling cascade / handover-tracking error: ${e.message}`);
       }

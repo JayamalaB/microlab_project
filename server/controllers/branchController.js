@@ -2,6 +2,21 @@ const db   = require('../config/db');
 const fs   = require('fs');
 const path = require('path');
 const { haversineKm, _technicianSummaries, _hasAvailableSlots } = require('../services/branchEligibility');
+const dbLogger = require('../utils/dbLogger');
+const { getBranchCode } = require('../services/branchCodes');
+
+// One ip_branch_lookup_logs row per lookup (see utils/dbLogger.logBranchLookup).
+// Fire-and-forget: never delays or changes the customer's response. The
+// branch_code lookup failing (e.g. column not added yet) only leaves it NULL.
+function _logLookupResult(fields) {
+  (async () => {
+    let branchCode = null;
+    if (fields.branchId != null) {
+      try { branchCode = await getBranchCode(fields.branchId); } catch (_) {}
+    }
+    dbLogger.logBranchLookup({ ...fields, branchCode });
+  })().catch(() => {});
+}
 
 // ── File logging — same pattern as otp.log (authController.js) and
 //    dispatch.log/collection.log (socket/bookingSocket.js): timestamped,
@@ -326,6 +341,10 @@ exports.lookupBranch = async (req, res) => {
       // the eligibility walk (online tech + slots) — distinct message from the
       // plain "nothing matched at all" case. Only the GPS path can set this;
       // manual pincode/place 404s are completely unaffected.
+      _logLookupResult({
+        result: 'no_match', inputMethod, pincode, place, lat: patientLat, lng: patientLng,
+        message: gpsExhausted ? 'GPS candidates found but none had an available slot' : 'no branch matched',
+      });
       return res.status(404).json({
         success: false,
         message: gpsExhausted
@@ -341,6 +360,11 @@ exports.lookupBranch = async (req, res) => {
       `✅ [BRANCH LOOKUP] RESOLVED — method=${inputMethod} reason=${matchReason} isFallback=${isFallback} ` +
       `→ branch id=${b.branch_id} name=${b.name} pincode=${b.pincode ?? '—'}`
     );
+    _logLookupResult({
+      result: 'resolved', inputMethod, matchReason, pincode, place, lat: patientLat, lng: patientLng,
+      branchId: b.branch_id, branchName: b.name, isFallback,
+      message: isFallback ? `nearest branch had no slot for ${lookupDate} — next nearest returned` : null,
+    });
 
     return res.json({
       success: true,
@@ -364,6 +388,10 @@ exports.lookupBranch = async (req, res) => {
   } catch (err) {
     blog(`❌ [BRANCH LOOKUP] ERROR — ${err.message}`);
     console.error('❌ lookupBranch FAILED:', err.message);
+    _logLookupResult({
+      result: 'error', inputMethod, pincode, place, lat: patientLat, lng: patientLng,
+      message: err.code ? `error code=${err.code}` : 'error',
+    });
     return res.status(500).json({ success: false, message: 'Server error', detail: err.message });
   }
 };

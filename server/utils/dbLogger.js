@@ -252,10 +252,26 @@ function logCustomerPushEvent(message) {
   } catch (_) {}
 }
 
+// branchController.lookupBranch — one row per customer branch lookup. Takes
+// structured fields (not a pre-formatted message) since every value is
+// already known at the call site.
+function logBranchLookup(f = {}) {
+  try {
+    const num = (v) => (v === null || v === undefined || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+    const str = (v, max) => (v === null || v === undefined || v === '' ? null : String(v).slice(0, max));
+    insertLog('ip_branch_lookup_logs',
+      ['result', 'input_method', 'match_reason', 'input_pincode', 'input_place',
+       'input_lat', 'input_lng', 'branch_id', 'branch_code', 'branch_name', 'is_fallback', 'message'],
+      [f.result, str(f.inputMethod, 30), str(f.matchReason, 20), str(f.pincode, 10), str(f.place, 150),
+       num(f.lat), num(f.lng), num(f.branchId), str(f.branchCode, 20), str(f.branchName, 150),
+       f.isFallback ? 1 : 0, f.message != null ? maskMobilesInText(String(f.message)) : null]);
+  } catch (_) {}
+}
+
 module.exports = {
-  // per-table entry points — what the 7 logger functions call
+  // per-table entry points — what the logger functions call
   logDispatchEvent, logCollectionEvent, logOtpInfoEvent, logTechnicianEvent,
-  logOtpEvent, logClientSyncEvent, logCustomerPushEvent,
+  logOtpEvent, logClientSyncEvent, logCustomerPushEvent, logBranchLookup,
   // exposed for tests / retention sweep / shutdown handling
   insertLog, bufferLog, flushTable, flushAll, _setEnabledForTesting,
   maskMobile, maskMobilesInText, extractBookingId, extractTechnicianId,

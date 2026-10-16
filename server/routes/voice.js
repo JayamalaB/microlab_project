@@ -9,14 +9,16 @@ const SARVAM_TTS_PATH = '/text-to-speech';
 const SARVAM_STT_PATH = '/speech-to-text';
 const SARVAM_TRANSLATE_PATH = '/translate';
 
-const TTS_SPEAKER      = 'anushka';
-const TTS_MODEL        = 'bulbul:v2';
+// bulbul:v2 was deprecated by Sarvam (400 invalid_request_err) — v3 also
+// renames some request fields and drops pitch/loudness entirely (tone now
+// comes from speaker choice instead). 'anushka' doesn't exist as a v3
+// speaker; 'shubh' is v3's documented default.
+const TTS_SPEAKER      = 'shubh';
+const TTS_MODEL        = 'bulbul:v3';
 const TTS_DEFAULT_LANG = 'en-IN';
 const TTS_TAMIL_LANG   = 'ta-IN';
 const TTS_SAMPLE_RATE  = 22050;
 const TTS_PACE         = 0.92;
-const TTS_PITCH        = 0;
-const TTS_LOUDNESS     = 1.1;
 
 const TAMIL_RE = /[஀-௿]/;
 
@@ -61,6 +63,14 @@ function cleanText(text) {
     .replace(/₹/g, 'rupees ')
     .replace(/[—–]/g, ', ')
     .replace(/@/g, ' at ')
+    // Tamil TTS auto-narrates a raw "H:MM" digit pattern as "<number>
+    // மணிக்கு" on its own — with the written "மணி" that already follows it
+    // (e.g. "9:00 மணி") also being read, the result is "9 மணிக்கு மணி".
+    // Times in this app are always on the hour, so dropping the ":00"
+    // leaves no colon-time pattern for that auto-narration to trigger on —
+    // just a plain "9" followed by the already-correct written "மணி",
+    // read once as "ஒன்பது மணி".
+    .replace(/(\d{1,2}):00(?=\s*மணி)/g, '$1')
     .replace(/^\s*[.:;]\s+/gm, '')      // remove stray leading punctuation
     .replace(/\s{2,}/g, ' ')
     .trim();
@@ -76,14 +86,11 @@ function ttsSarvam(text) {
 
   const lang = detectLang(text);
   const body = JSON.stringify({
-    inputs:               [text],
-    target_language_code: lang,
+    text:                 text,
+    language_code:        lang,
     speaker:              TTS_SPEAKER,
-    pitch:                TTS_PITCH,
     pace:                 TTS_PACE,
-    loudness:             TTS_LOUDNESS,
     speech_sample_rate:   TTS_SAMPLE_RATE,
-    enable_preprocessing: true,
     model:                TTS_MODEL,
   });
 
@@ -135,8 +142,10 @@ function ttsSarvam(text) {
   });
 }
 
-// POST audio buffer to Sarvam STT; returns { transcript } or { error } on failure
-function sttSarvam(buffer) {
+// POST audio buffer to Sarvam STT with an explicit language_code (or
+// 'unknown' for full auto-detect). Returns { transcript, languageCode } or
+// { error } on failure.
+function _sttSarvamCall(buffer, languageCode) {
   const apiKey = process.env.SARVAM_API_KEY;
   if (!apiKey) {
     console.error('[Sarvam STT] SARVAM_API_KEY is not set in environment');
@@ -145,10 +154,7 @@ function sttSarvam(buffer) {
 
   const form = new FormData();
   form.append('file',          buffer, { filename: 'audio.wav', contentType: 'audio/wav' });
-  // 'unknown' asks Saaras to auto-detect the spoken language instead of
-  // assuming English — the response's own language_code field then tells us
-  // what was actually detected (see below), driving Tamil translation.
-  form.append('language_code', 'unknown');
+  form.append('language_code', languageCode);
   form.append('model',         'saaras:v3');
 
   return new Promise((resolve) => {
@@ -194,6 +200,29 @@ function sttSarvam(buffer) {
     });
     form.pipe(request);
   });
+}
+
+// Public entry point: auto-detects the spoken language first. Trusts that
+// transcript outright when it's en-IN or ta-IN — those are the only two
+// languages this app supports, and re-decoding audio the model already
+// transcribed correctly (via a second, language-forced call) was found to
+// make results *worse*, not better: a forced language_code makes Saaras
+// commit to that language's phonetics/vocabulary even when unsure, and it
+// tends to fall back to a short generic guess (e.g. "சரி") rather than the
+// actual words spoken. The retry is reserved for the one real failure case
+// observed — full auto-detect mis-decoding Tamil speech as some unrelated
+// third language entirely (e.g. Gujarati script, not just a wrong label) —
+// so it only re-runs (forcing ta-IN) when the detected language is neither
+// of the two this app understands. Returns { transcript, languageCode } or
+// { error }.
+async function sttSarvam(buffer) {
+  const auto = await _sttSarvamCall(buffer, 'unknown');
+  if (auto.error) return auto;
+  if (auto.languageCode === 'en-IN' || auto.languageCode === 'ta-IN') return auto;
+
+  const forced = await _sttSarvamCall(buffer, 'ta-IN');
+  if (forced.error) return forced;
+  return { transcript: forced.transcript, languageCode: 'ta-IN' };
 }
 
 // POST to Sarvam Translate; returns { text: translatedString } or { error } on failure.
@@ -256,6 +285,133 @@ function translateText(text, sourceLanguageCode, targetLanguageCode) {
     request.write(body);
     request.end();
   });
+}
+
+// Static, pre-verified Tamil labels for known "Label: Value" bullet lines.
+// Translating a short label word in isolation is unreliable — Sarvam has
+// been observed picking an unrelated meaning depending on what follows it
+// (e.g. "Mobile: N/A" → "ஊடறுதல்: இல்லை" instead of "கைபேசி", with the
+// SAME word translating correctly elsewhere in the same response as soon
+// as a real number follows it). Extend this map as new mistranslated
+// labels turn up; anything not listed here still falls through to the
+// normal per-line API translation below.
+const TAMIL_LABELS = {
+  'mobile':            'கைபேசி',
+  'working hours':     'வேலை நேரம்',
+  'gender':            'பாலினம்',
+  'age':               'வயது',
+  'dob':               'பிறந்த தேதி',
+  'email':             'மின்னஞ்சல்',
+  'city':              'நகரம்',
+  'health conditions': 'உடல் நிலை',
+  'blood group':       'இரத்த வகை',
+};
+
+// Common family-relation words shown in parens after a patient's name
+// (e.g. "kamalraj (Father)") — translated via lookup for the same
+// reliability reason as TAMIL_LABELS, while the name itself is never
+// touched (see the 👤 name-line handling below).
+const TAMIL_RELATIONS = {
+  father:   'தந்தை',
+  mother:   'தாய்',
+  spouse:   'துணைவர்',
+  wife:     'மனைவி',
+  husband:  'கணவர்',
+  son:      'மகன்',
+  daughter: 'மகள்',
+  brother:  'சகோதரர்',
+  sister:   'சகோதரி',
+  child:    'குழந்தை',
+  children: 'குழந்தைகள்',
+};
+
+// Sarvam's Translate API only accepts one string per call and doesn't
+// preserve line breaks/bullet layout when given a multi-line blob (it
+// reflows everything into a single paragraph — observed on translated
+// branch/booking listings, which formatBranchInfo()/formatBookingDetails()
+// etc. build with \n and "   • " bullets). Splitting here and rejoining
+// with the ORIGINAL line breaks afterward keeps that structure intact,
+// since the API is only ever asked to translate one line at a time and
+// never has a chance to reflow anything. Blank lines are preserved as-is
+// (not sent to the API) — the visual paragraph spacing survives untouched.
+// Calls run in parallel so wall-clock latency stays close to a single call.
+// A response with many entries (e.g. a 5-member family list) can mean 25-30
+// simultaneous Sarvam calls — if even one hit a transient error, aborting
+// the whole translation meant the ENTIRE answer fell back to English
+// instead of just that one line. Each line now falls back to its own
+// original English text on failure, so one bad call degrades gracefully
+// (a stray English field) rather than sinking the whole response.
+async function translateMultiline(text, sourceLanguageCode, targetLanguageCode) {
+  if (!text || !text.trim()) return { text: '' };
+
+  const lines = text.split('\n');
+  const results = await Promise.all(
+    lines.map(async (line) => {
+      if (!line.trim()) return { text: '' };
+      const r = await _translateLine(line, sourceLanguageCode, targetLanguageCode);
+      if (r.error) {
+        console.error('[Sarvam Translate] line failed, keeping original:', r.error);
+        return { text: line };
+      }
+      return r;
+    })
+  );
+
+  return { text: results.map(r => r.text).join('\n') };
+}
+
+// One "   • Label: Value" bullet line — uses the static TAMIL_LABELS
+// dictionary for the label when known (skipping the API for it entirely),
+// and skips translating values that don't need it (phone numbers, "N/A").
+// Falls back to translating the whole line via the API when the label
+// isn't recognized, or the target language isn't Tamil.
+async function _translateLine(line, sourceLanguageCode, targetLanguageCode) {
+  // Branch/place names are proper nouns — never translate them. Sarvam has
+  // been observed translating the brand name "MicroLab" literally into
+  // "சிறிய ஆய்வகம்" ("small laboratory") instead of preserving it.
+  // formatBranchInfo() always marks a name line with a leading 🏥.
+  if (targetLanguageCode === 'ta-IN' && line.trim().startsWith('🏥')) {
+    return { text: line };
+  }
+
+  // 👤 marks a patient name line (formatPatientProfile()) — the name is a
+  // proper noun and must never be machine-translated either. Observed
+  // turning "desigan" into "கருத்து" (the Tamil word for "opinion") and
+  // "sathesh" into an unrelated name entirely. Only the relation word in
+  // parens, if present and recognized, is translated — via TAMIL_RELATIONS,
+  // same reliability reasoning as TAMIL_LABELS.
+  if (targetLanguageCode === 'ta-IN' && line.trim().startsWith('👤')) {
+    const withRelation = line.match(/^(.*?)\s*\(([A-Za-z]+)\)\s*$/);
+    const relation = withRelation ? TAMIL_RELATIONS[withRelation[2].toLowerCase()] : null;
+    if (withRelation && relation) {
+      return { text: `${withRelation[1]} (${relation})` };
+    }
+    return { text: line };
+  }
+
+  const match = targetLanguageCode === 'ta-IN'
+    ? line.match(/^(\s*(?:•\s*)?)([A-Za-z][A-Za-z ]*?):\s*(.*)$/)
+    : null;
+  const knownLabel = match ? TAMIL_LABELS[match[2].trim().toLowerCase()] : null;
+
+  if (match && knownLabel) {
+    const [, prefix, , rawValue] = match;
+    const value = rawValue.trim();
+
+    if (!value || value.toUpperCase() === 'N/A') {
+      return { text: `${prefix}${knownLabel}: இல்லை` };
+    }
+    if (/^[\d\s+\-()]+$/.test(value) || /^[\w.+-]+@[\w-]+\.[a-zA-Z]{2,}$/.test(value)) {
+      // Phone numbers, email addresses etc. — nothing to translate, and
+      // translating digits risks the model "reading" them into words.
+      return { text: `${prefix}${knownLabel}: ${value}` };
+    }
+    const translatedValue = await translateText(value, sourceLanguageCode, targetLanguageCode);
+    if (translatedValue.error) return translatedValue;
+    return { text: `${prefix}${knownLabel}: ${translatedValue.text}` };
+  }
+
+  return translateText(line, sourceLanguageCode, targetLanguageCode);
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -343,3 +499,4 @@ router.post('/speak', async (req, res) => {
 
 module.exports = router;
 module.exports.translateText = translateText;
+module.exports.translateMultiline = translateMultiline;

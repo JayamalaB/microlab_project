@@ -16,6 +16,8 @@ import 'package:share_plus/share_plus.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/package_pager.dart';
+import 'package:microlab/utils/app_messages.dart';
 import 'package:microlab/services/customer_refresh_notifier.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/services/socket_service.dart';
@@ -733,12 +735,8 @@ void _showFeedback(BuildContext context, BookingModel booking, {VoidCallback? on
           ));
           onRefresh?.call();
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(result['message'] ?? 'Could not submit feedback'),
-            backgroundColor: const Color(0xFFD32F2F),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
+          AppMessages.error(context, AppMessages.serverMessage(result['message'],
+              fallback: 'We couldn\'t submit your feedback. Please try again.'));
         }
       },
     ),
@@ -767,20 +765,12 @@ void _showCancelSheet(BuildContext context, BookingModel booking, bool chargeApp
           } else if (charge > 0) {
             msg += ' ₹${charge.toInt()} service charge deducted.';
           }
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(msg),
-            backgroundColor: const Color(0xFFD32F2F),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
+          // The cancellation worked, so it is shown as a success, not an error.
+          AppMessages.success(context, msg);
           onCancelled?.call();
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(result['message'] ?? 'Could not cancel booking'),
-            backgroundColor: const Color(0xFFD32F2F),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
+          AppMessages.error(context, AppMessages.serverMessage(result['message'],
+              fallback: 'We couldn\'t cancel the booking. Please try again.'));
         }
       },
     ),
@@ -812,12 +802,8 @@ void _showRescheduleSheet(BuildContext context, BookingModel booking, VoidCallba
           ));
           onRescheduled?.call();
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(result['message'] ?? 'Could not reschedule'),
-            backgroundColor: const Color(0xFFD32F2F),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
+          AppMessages.error(context, AppMessages.serverMessage(result['message'],
+              fallback: 'We couldn\'t reschedule the booking. Please try again.'));
         }
       },
     ),
@@ -894,10 +880,11 @@ class _RescheduleSheetState extends State<_RescheduleSheet> {
           _slotError    = list.isEmpty ? 'No slots available for this date.' : '';
         });
       } else {
-        setState(() { _loadingSlots = false; _slotError = body['message'] as String? ?? 'Could not load slots.'; });
+        setState(() { _loadingSlots = false; _slotError = AppMessages.serverMessage(body['message'],
+            fallback: 'We couldn\'t load the available slots. Please try again.'); });
       }
-    } catch (_) {
-      if (mounted) setState(() { _loadingSlots = false; _slotError = 'Could not reach the server.'; });
+    } catch (e) {
+      if (mounted) setState(() { _loadingSlots = false; _slotError = AppMessages.friendlyError(e); });
     }
   }
 
@@ -1661,14 +1648,9 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
         }
       }
     } catch (e) {
+      debugPrint('[MyBookings] bill download failed: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Could not download bill: $e'),
-          backgroundColor: Colors.red.shade700,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 6),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.error(context, 'We couldn\'t download the bill. ${AppMessages.friendlyError(e)}');
       }
     } finally {
       if (mounted) setState(() => _billBusy = false);
@@ -1688,13 +1670,9 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
         subject: 'MicroLab Bill – ${widget.booking.id}',
       );
     } catch (e) {
+      debugPrint('[MyBookings] bill share failed: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Could not share bill: $e'),
-          backgroundColor: Colors.red.shade700,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.error(context, 'We couldn\'t share the bill. ${AppMessages.friendlyError(e)}');
       }
     } finally {
       if (mounted) setState(() => _billBusy = false);
@@ -2945,13 +2923,19 @@ class _EditTestsSheet extends StatefulWidget {
 }
 
 class _EditTestsSheetState extends State<_EditTestsSheet> {
-  List<TestModel> _allTests = [];
-  final Set<String> _selectedIds = {};
+  // Selected tests by id — the booking's current tests plus any the
+  // customer adds. Kept apart from the loaded catalog page, so totals and
+  // the saved items stay right whatever page or search is on screen.
+  final Map<String, TestModel> _selectedTests = {};
+  Iterable<String> get _selectedIds => _selectedTests.keys;
   Set<String> _initialIds = {};
   bool _loading = true;
   bool _saving = false;
   final TextEditingController _searchCtrl = TextEditingController();
   String _searchQuery = '';
+
+  // Catalog: one page at a time, searched on the server.
+  final PackagePager _pager = PackagePager();
 
   // Prescription upload (only shown when a selected test needs it)
   final List<Uint8List> _prescriptions = [];
@@ -2961,22 +2945,34 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
   @override
   void initState() {
     super.initState();
+    _pager.addListener(_onPagerChanged);
     _loadTests();
-    _searchCtrl.addListener(() => setState(() => _searchQuery = _searchCtrl.text));
+    _searchCtrl.addListener(() {
+      if (_searchCtrl.text == _searchQuery) return;
+      setState(() => _searchQuery = _searchCtrl.text);
+      _pager.setSearch(_searchCtrl.text);
+    });
+  }
+
+  void _onPagerChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    _pager.removeListener(_onPagerChanged);
+    _pager.dispose();
     _searchCtrl.dispose();
     clearRazorpay();
     super.dispose();
   }
 
+  // Loads the booking's current tests (by id) for preselection, and the
+  // first catalog page, together.
   Future<void> _loadTests() async {
     setState(() => _loading = true);
+    final firstPage = _pager.refresh();
     try {
-      final tests = await ApiService.getPackages();
-
       // Real product_id matches (id != '0')
       final realIds = widget.booking.tests
           .where((t) => t.id != '0')
@@ -2989,47 +2985,52 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
           .map((t) => t.name.toLowerCase())
           .toSet();
 
-      final preselected = <String>{};
-      preselected.addAll(tests.where((t) => realIds.contains(t.id)).map((t) => t.id));
+      final preselected = <String, TestModel>{};
+      for (final t in await ApiService.getPackagesByIds(realIds)) {
+        preselected[t.id] = t;
+      }
       for (final name in fallbackNames) {
-        final match = tests.cast<TestModel?>().firstWhere(
+        final page = await ApiService.getPackagesPage(search: name, limit: 10);
+        final match = page.items.cast<TestModel?>().firstWhere(
           (t) => t!.name.toLowerCase() == name,
           orElse: () => null,
         );
-        if (match != null) preselected.add(match.id);
+        if (match != null) preselected[match.id] = match;
       }
 
+      await firstPage;
+      if (!mounted) return;
       setState(() {
-        _allTests = tests;
-        _selectedIds.addAll(preselected);
-        _initialIds = Set.from(preselected);
+        _selectedTests.addAll(preselected);
+        _initialIds = Set.from(preselected.keys);
         _loading = false;
       });
     } catch (_) {
-      setState(() => _loading = false);
+      await firstPage;
+      if (mounted) setState(() => _loading = false);
     }
   }
 
+  // Without a search, the booking's selected tests come first (they may not
+  // be on the loaded page), then the catalog page. With a search, only the
+  // server's matches.
   List<TestModel> get _filtered {
-    if (_searchQuery.isEmpty) return _allTests;
-    final q = _searchQuery.toLowerCase();
-    return _allTests
-        .where((t) =>
-            t.name.toLowerCase().contains(q) ||
-            t.category.toLowerCase().contains(q))
-        .toList();
+    if (_searchQuery.trim().isNotEmpty) return _pager.items;
+    return [
+      ..._selectedTests.values,
+      ..._pager.items.where((t) => !_selectedTests.containsKey(t.id)),
+    ];
   }
 
   // Prescription is required only when the user added a NEW doc-required test
   // that was not part of the original booking.
   bool get _needsPrescription =>
-      _allTests
-          .where((t) => _selectedIds.contains(t.id) && !_initialIds.contains(t.id))
+      _selectedTests.values
+          .where((t) => !_initialIds.contains(t.id))
           .any((t) => t.docRequired);
 
-  double get _itemsTotal => _allTests
-      .where((t) => _selectedIds.contains(t.id))
-      .fold(0.0, (s, t) => s + t.finalPrice);
+  double get _itemsTotal =>
+      _selectedTests.values.fold(0.0, (s, t) => s + t.finalPrice);
 
   double get _serviceCharge =>
       widget.booking.mode == 'Home Collection' ? widget.booking.serviceCharge : 0.0;
@@ -3099,9 +3100,7 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
   }
 
   double get _diffAmount {
-    final newItemsTotal = _allTests
-        .where((t) => _selectedIds.contains(t.id))
-        .fold(0.0, (s, t) => s + t.finalPrice);
+    final newItemsTotal = _itemsTotal;
     return newItemsTotal - (widget.booking.testsTotal > 0 ? widget.booking.testsTotal : _itemsTotal);
   }
 
@@ -3132,7 +3131,7 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
   Future<void> _save() async {
     if (_selectedIds.isEmpty || _saving || widget.booking.bookingIdNum == null) return;
 
-    final selectedTests = _allTests.where((t) => _selectedIds.contains(t.id)).toList();
+    final selectedTests = _selectedTests.values.toList();
     final items = selectedTests.map((t) => {
       'packageId':  int.tryParse(t.id) ?? 0,
       'finalPrice': t.finalPrice,
@@ -3184,11 +3183,10 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
           onSuccess: (paymentId) => _doSelfEdit(items, razorpayPaymentId: paymentId, topUpAmount: topUp),
           onError: (msg) {
             if (mounted) setState(() => _saving = false);
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text(msg == 'Payment cancelled' ? 'Payment cancelled' : 'Payment failed: $msg'),
-              backgroundColor: Colors.red[700],
-              behavior: SnackBarBehavior.floating,
-            ));
+            if (!mounted) return;
+            AppMessages.isPaymentCancelled(msg)
+                ? AppMessages.info(context, AppMessages.paymentError(msg))
+                : AppMessages.error(context, AppMessages.paymentError(msg));
           },
         );
         return;
@@ -3262,22 +3260,17 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
         if (!mounted) return;
         Navigator.pop(context);
         widget.onSaved();
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(result['message'] as String? ?? 'Tests updated'),
-          backgroundColor: AppColors.brandGreen,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.success(context, AppMessages.serverMessage(result['message'], fallback: 'Tests updated'));
       } else {
         setState(() => _saving = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(result['message'] as String? ?? 'Failed to update booking'),
-          backgroundColor: Colors.red[700],
-          behavior: SnackBarBehavior.floating,
-        ));
+        AppMessages.error(context, AppMessages.serverMessage(result['message'],
+            fallback: 'We couldn\'t update your tests. Please try again.'));
       }
-    } catch (_) {
-      if (mounted) setState(() => _saving = false);
+    } catch (e) {
+      debugPrint('[EditTests] save failed: $e');
+      if (!mounted) return;
+      setState(() => _saving = false);
+      AppMessages.error(context, 'We couldn\'t update your tests. ${AppMessages.friendlyError(e)}');
     }
   }
 
@@ -3456,15 +3449,38 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                     ? const Center(
                         child: Text('No tests found',
                             style: TextStyle(color: AppColors.textSecondary)))
-                    : ListView.builder(
+                    : NotificationListener<ScrollNotification>(
+                      onNotification: _pager.onScroll,
+                      child: ListView.builder(
                         padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-                        itemCount: _filtered.length,
+                        // One extra row at the end while more pages exist:
+                        // the next page's spinner, or "Show more".
+                        itemCount: _filtered.length + (_pager.hasMore ? 1 : 0),
                         itemBuilder: (_, i) {
+                          if (i >= _filtered.length) {
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              child: Center(
+                                child: _pager.loadingMore
+                                    ? const SizedBox(width: 22, height: 22,
+                                        child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
+                                    : TextButton(
+                                        onPressed: _pager.loadMore,
+                                        style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
+                                        child: Text('Show more (${_pager.total - _pager.items.length} more)'),
+                                      ),
+                              ),
+                            );
+                          }
                           final t = _filtered[i];
-                          final selected = _selectedIds.contains(t.id);
+                          final selected = _selectedTests.containsKey(t.id);
                           return GestureDetector(
                             onTap: () => setState(() {
-                              selected ? _selectedIds.remove(t.id) : _selectedIds.add(t.id);
+                              if (selected) {
+                                _selectedTests.remove(t.id);
+                              } else {
+                                _selectedTests[t.id] = t;
+                              }
                               if (!_needsPrescription) _prescriptions.clear();
                             }),
                             child: Container(
@@ -3529,6 +3545,7 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                           );
                         },
                       ),
+                    ),
           ),
           if (!_loading && _needsPrescription) _buildPrescriptionSection(),
 
