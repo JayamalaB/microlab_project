@@ -96,7 +96,10 @@ class ApiService {
   }
 
   static Future<void> logout(String token) async {
-    await _client
+    // Use plain http (not _client) so a 401 response here — which is normal
+    // when the session was already invalidated — does not trigger the "another
+    // device signed in" redirect.
+    await http
         .post(
           Uri.parse('$baseUrl/api/auth/logout'),
           headers: {
