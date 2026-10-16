@@ -17,6 +17,13 @@ class ApiService {
       GlobalKey<NavigatorState>();
 
   static final _client = _AuthClient();
+
+  /// Use this for every authenticated HTTP call that lives outside ApiService
+  /// (e.g., in screen files). Routes through the global 401 handler so a
+  /// stale token redirects to login automatically.
+  // ignore: library_private_types_in_public_api
+  static http.Client get authClient => _client;
+
   static bool _redirecting401 = false;
 
   // Called by _AuthClient when any authenticated response comes back 401.

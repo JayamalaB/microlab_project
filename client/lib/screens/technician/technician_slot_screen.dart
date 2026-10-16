@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/constants/app_constants.dart';
+import 'package:microlab/services/api_service.dart';
 import 'package:microlab/theme/app_theme.dart';
 
 class TechnicianSlotScreen extends StatefulWidget {
@@ -96,7 +96,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
 
       if (techId == 0) { setState(() => _slotsLoading = false); return; }
 
-      final res = await http.get(
+      final res = await ApiService.authClient.get(
         Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/slots'),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 10));
@@ -244,7 +244,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
         };
       }).toList();
 
-      final res = await http.put(
+      final res = await ApiService.authClient.put(
         Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/slots'),
         headers: {
           'Content-Type':  'application/json',

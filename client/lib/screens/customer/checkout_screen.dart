@@ -871,7 +871,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     try {
       final url   = Uri.parse('${AppConstants.serverUrl}/api/bookings');
       final token = await ApiService.getToken();
-      final res = await http.post(
+      final res = await ApiService.authClient.post(
         url,
         headers: {
           'Content-Type':  'application/json',

@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
@@ -47,7 +46,7 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
       final url = '${AppConstants.serverUrl}/api/technicians/$techId/history';
       debugPrint('🔵 [HISTORY] GET $url');
 
-      final res = await http.get(
+      final res = await ApiService.authClient.get(
         Uri.parse(url),
         headers: {'Authorization': 'Bearer $token'},
       ).timeout(const Duration(seconds: 10));
