@@ -1182,6 +1182,21 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
   // refused, ...) — shown with its own action under "Use Current Location".
   _LocationIssue _locationIssue = _LocationIssue.none;
   double? _approxAccuracyMeters;
+  // True while waiting for a precise GPS fix (card reads "Getting your
+  // precise location…").
+  bool _waitingForFix = false;
+  // Only the newest lookup may change the sheet — an older one that
+  // finishes late is ignored (see _getCurrentLocation).
+  int _locRequestId = 0;
+  // Phone's "location switched on/off" events, and a short pause after the
+  // app returns to the front — together they replace retrying the instant
+  // the app resumes, which ran before GPS was ready and made the sheet
+  // flicker between "turned off" and the spinner.
+  StreamSubscription<ServiceStatus>? _serviceStatusSub;
+  Timer? _settleTimer;
+  StreamSubscription<Position>? _fixSub;
+  // How long to wait for an accurate fix after location is turned on.
+  static const Duration _fixTimeout = Duration(seconds: 12);
 
   // Address from manual entry (pincode based)
   String? _manualAddress;
@@ -1221,20 +1236,51 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
       // the "Use Current Location" tap.
       WidgetsBinding.instance.addPostFrameCallback((_) => _getCurrentLocation());
     }
+
+    // React when the customer switches location on (from settings, the
+    // quick panel or the notification shade). Not available on web.
+    if (!kIsWeb) {
+      try {
+        _serviceStatusSub = Geolocator.getServiceStatusStream().listen((status) {
+          if (status == ServiceStatus.enabled) _scheduleQuietRetry();
+        });
+      } catch (e) {
+        debugPrint('[LocationSheet] service status stream unavailable: $e');
+      }
+    }
   }
 
-  // Coming back from the phone's location or app settings — try again, so
-  // the customer doesn't have to tap anything after turning location on.
+  // Coming back from the phone's location or app settings. Nothing changes
+  // on screen here — _scheduleQuietRetry only starts a lookup once the
+  // problem is actually fixed.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed &&
-        _mode == 'Home Collection' &&
-        !_gpsSelected &&
-        !_isGeocoding &&
-        (_locationIssue == _LocationIssue.serviceOff ||
-         _locationIssue == _LocationIssue.permissionDeniedForever)) {
-      _getCurrentLocation();
-    }
+    if (state == AppLifecycleState.resumed) _scheduleQuietRetry();
+  }
+
+  // Waits a moment for the phone to settle, then checks — without touching
+  // the sheet — whether the reported problem is gone; only then runs the
+  // lookup. Several triggers in a row (resume + "location on" event) collapse
+  // into one check.
+  void _scheduleQuietRetry() {
+    if (_mode != 'Home Collection' || _gpsSelected || _manualSelected || _isGeocoding) return;
+    if (_locationIssue != _LocationIssue.serviceOff &&
+        _locationIssue != _LocationIssue.permissionDeniedForever) return;
+    _settleTimer?.cancel();
+    _settleTimer = Timer(const Duration(milliseconds: 900), () async {
+      if (!mounted || _isGeocoding || _gpsSelected || _manualSelected) return;
+      try {
+        if (_locationIssue == _LocationIssue.serviceOff) {
+          if (!await Geolocator.isLocationServiceEnabled()) return; // still off — leave the message as is
+        } else if (_locationIssue == _LocationIssue.permissionDeniedForever) {
+          final p = await Geolocator.checkPermission();
+          if (p != LocationPermission.always && p != LocationPermission.whileInUse) return;
+        }
+      } catch (_) {
+        return;
+      }
+      if (mounted) _getCurrentLocation();
+    });
   }
 
   Future<void> _loadBranches() async {
@@ -1264,26 +1310,35 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
   // permission granted → an accurate GPS fix → reverse-geocoded address.
   // Each failure sets _locationIssue, which shows its own message and
   // action under the "Use Current Location" card.
+  //
+  // No flicker: the current message (if any) stays where it is while the
+  // lookup runs — its button just reads "Checking…" — and is replaced only
+  // by the final outcome, so the sheet changes once instead of jumping
+  // between spinner and message.
   Future<void> _getCurrentLocation() async {
     if (!mounted) return;
+    _settleTimer?.cancel();
+    final id = ++_locRequestId;
+    bool stale() => !mounted || id != _locRequestId;
+
     setState(() {
       _isGeocoding    = true;
+      _waitingForFix  = false;
       _gpsSelected    = false;
       _manualSelected = false;
       _locationError  = false;
-      _locationIssue  = _LocationIssue.none;
     });
 
-    void fail(_LocationIssue issue) {
-      if (!mounted) return;
-      setState(() { _isGeocoding = false; _locationIssue = issue; });
+    void finish(_LocationIssue issue) {
+      if (stale()) return;
+      setState(() { _isGeocoding = false; _waitingForFix = false; _locationIssue = issue; });
     }
 
     try {
       // 1. Location (GPS) must be switched on.
       if (!await Geolocator.isLocationServiceEnabled()) {
         debugPrint('[LocationSheet] location service is OFF');
-        return fail(_LocationIssue.serviceOff);
+        return finish(_LocationIssue.serviceOff);
       }
 
       // 2. Permission — asked here; the customer cannot continue without it.
@@ -1291,27 +1346,29 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
       if (perm == LocationPermission.denied) {
         perm = await Geolocator.requestPermission();
       }
+      if (stale()) return;
       if (perm == LocationPermission.deniedForever) {
         debugPrint('[LocationSheet] permission denied forever');
-        return fail(_LocationIssue.permissionDeniedForever);
+        return finish(_LocationIssue.permissionDeniedForever);
       }
       if (perm == LocationPermission.denied) {
         debugPrint('[LocationSheet] permission denied');
-        return fail(_LocationIssue.permissionDenied);
+        return finish(_LocationIssue.permissionDenied);
       }
 
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-      ).timeout(const Duration(seconds: 15));
-
-      // 3. A browser (or a phone without a GPS fix) can return a location
-      // guessed from the IP address — accurate only to several km, sometimes
-      // a different city or country. The Home Collection fare is priced from
-      // this point, so an approximate location is refused instead of used.
+      // 3. Wait for a precise fix. Right after location is switched on the
+      // phone's first readings come from Wi-Fi / mobile towers (often several
+      // km off) and sharpen within seconds, so the first reading is not
+      // judged on its own. The Home Collection fare is priced from this
+      // point, so a location that never gets precise enough is refused.
+      setState(() => _waitingForFix = true);
+      final pos = await _waitForAccurateFix();
+      if (stale()) return;
+      if (pos == null) return finish(_LocationIssue.failed);
       debugPrint('[LocationSheet] GPS accuracy: ${pos.accuracy.toStringAsFixed(0)} m');
       if (pos.accuracy > _maxGpsAccuracyMeters) {
         _approxAccuracyMeters = pos.accuracy;
-        return fail(_LocationIssue.approximate);
+        return finish(_LocationIssue.approximate);
       }
 
       _gpsLat = pos.latitude;
@@ -1320,20 +1377,56 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
       // 4. Reverse geocode to get the address (and its pincode, used to
       // detect the branch).
       final address = await _reverseGeocode(pos.latitude, pos.longitude);
-      if (!mounted) return;
+      if (stale()) return;
 
       setState(() {
-        _gpsAddress  = address;
-        _gpsSelected = true;
-        _isGeocoding = false;
+        _gpsAddress    = address;
+        _gpsSelected   = true;
+        _isGeocoding   = false;
+        _waitingForFix = false;
+        _locationIssue = _LocationIssue.none;
       });
 
       debugPrint('[LocationSheet] GPS Location: ${pos.latitude}, ${pos.longitude}');
       debugPrint('[LocationSheet] GPS Address: $address');
     } catch (e) {
       debugPrint('[LocationSheet] GPS error: $e');
-      fail(_LocationIssue.failed);
+      finish(_LocationIssue.failed);
     }
+  }
+
+  // Listens to location updates until one is within _maxGpsAccuracyMeters,
+  // or _fixTimeout passes — then returns the best (most accurate) reading
+  // seen, or null if none arrived at all.
+  Future<Position?> _waitForAccurateFix() async {
+    await _fixSub?.cancel();
+    final done = Completer<Position?>();
+    Position? best;
+    void complete() {
+      if (done.isCompleted) return;
+      _fixSub?.cancel();
+      _fixSub = null;
+      done.complete(best);
+    }
+
+    final timer = Timer(_fixTimeout, complete);
+    try {
+      _fixSub = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 0),
+      ).listen((p) {
+        if (best == null || p.accuracy < best!.accuracy) best = p;
+        if (p.accuracy <= _maxGpsAccuracyMeters) complete();
+      }, onError: (Object e) {
+        debugPrint('[LocationSheet] position stream error: $e');
+        complete();
+      });
+    } catch (e) {
+      debugPrint('[LocationSheet] position stream unavailable: $e');
+      complete();
+    }
+    final result = await done.future;
+    timer.cancel();
+    return result;
   }
 
   // Message + action for the current _locationIssue. Web can't open the
@@ -1613,6 +1706,9 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _settleTimer?.cancel();
+    _serviceStatusSub?.cancel();
+    _fixSub?.cancel();
     _pincodeCtrl.removeListener(_filterBranches);
     _cityCtrl.removeListener(_filterBranches);
     _pincodeCtrl.removeListener(_onPincodeChanged);
@@ -1768,7 +1864,11 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                             Text(
                               _gpsSelected && _gpsAddress != null
                                   ? _gpsAddress!
-                                  : 'Get your real-time location using GPS',
+                                  : _isGeocoding && _waitingForFix
+                                      ? 'Getting your precise location…'
+                                      : _isGeocoding
+                                          ? 'Checking your location…'
+                                          : 'Get your real-time location using GPS',
                               style: TextStyle(
                                   fontSize: 12,
                                   color: _gpsSelected ? AppColors.brandGreen : AppColors.textSecondary),
@@ -1787,39 +1887,51 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
               ),
 
               // Location off / permission refused / approximate — what
-              // went wrong and the one action that fixes it.
-              if (_locationIssueInfo() case final issue? when !_gpsSelected && !_manualSelected) ...[
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFF3E0),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFFFFCC80)),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.location_off_outlined, size: 18, color: Color(0xFFE65100)),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(issue.message,
-                            style: const TextStyle(fontSize: 12, color: Color(0xFFE65100))),
+              // went wrong and the one action that fixes it. While a new
+              // lookup runs the message stays put (its button reads
+              // "Checking…") and is only replaced by the final outcome;
+              // AnimatedSize makes that single change smooth, so the sheet
+              // never jumps between spinner and message.
+              AnimatedSize(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOut,
+                alignment: Alignment.topCenter,
+                child: switch (_locationIssueInfo()) {
+                  final issue? when !_gpsSelected && !_manualSelected => Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF3E0),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFFFFCC80)),
                       ),
-                      const SizedBox(width: 8),
-                      TextButton(
-                        onPressed: issue.onAction,
-                        style: TextButton.styleFrom(
-                          foregroundColor: AppColors.brandGreen,
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          minimumSize: const Size(0, 36),
-                        ),
-                        child: Text(issue.action,
-                            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.location_off_outlined, size: 18, color: Color(0xFFE65100)),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(issue.message,
+                                style: const TextStyle(fontSize: 12, color: Color(0xFFE65100))),
+                          ),
+                          const SizedBox(width: 8),
+                          TextButton(
+                            onPressed: _isGeocoding ? null : issue.onAction,
+                            style: TextButton.styleFrom(
+                              foregroundColor: AppColors.brandGreen,
+                              padding: const EdgeInsets.symmetric(horizontal: 10),
+                              minimumSize: const Size(0, 36),
+                            ),
+                            child: Text(_isGeocoding ? 'Checking…' : issue.action,
+                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                          ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
-                ),
-              ],
+                  _ => const SizedBox(width: double.infinity),
+                },
+              ),
 
               const SizedBox(height: 16),
               
