@@ -727,6 +727,7 @@ class SocketService {
 
     _socket!.on('force_logout', (_) {
       _log('EVENT', 'force_logout received — another device claimed this session');
+      disconnect(); // tear down socket so it is removed from server's userSockets
       ApiService.handleForceLogout();
     });
   }

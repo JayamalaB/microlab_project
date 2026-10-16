@@ -3105,6 +3105,7 @@ module.exports = function bookingSocket(io, socket) {
 // window until an unrelated event (disconnect, next status change) clears it.
 module.exports.emitForceLogout = function(userId) {
   const sock = userSockets.get(userId);
+  userSockets.delete(userId); // session is now invalid — remove unconditionally
   if (sock && sock.connected) {
     sock.emit('force_logout');
     clog(`[emitForceLogout] userId=${userId} — force_logout emitted to socketId=${sock.id}`);
