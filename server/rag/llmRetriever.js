@@ -2,7 +2,7 @@
 
 const db             = require('../db/database');
 const llmService     = require('../services/llmService');
-const { resolveKnowledge } = require('../services/knowledgeService');
+const { resolveKnowledge, matchDefaultQA } = require('../services/knowledgeService');
 
 const PRONOUN_PATTERN = /\b(he|she|his|her|their|they|this (branch|test)|that (branch|test))\b/i;
 const SESSION_TTL_MS  = 30 * 60 * 1000;
@@ -50,6 +50,51 @@ const BARE_RELATION_PATTERN = new RegExp(`^\\s*(${RELATION_WORDS}|family)'?s?\\s
 // "my sister" or bare "sister" — used to extract which relation was asked about.
 const RELATION_PATTERN = new RegExp(`\\b(?:my\\s+)?(${RELATION_WORDS})'?s?\\b`, 'i');
 
+// GPT's person_name extraction sometimes captures more than the bare name —
+// "Kamalraj's father", "Kamalraj father's booking" — especially out of a
+// Tamil→English-translated phrase, where an extra possessive/relation word rides
+// along. resolveFamilyPatientId/buildPatientProfileQuery LIKE-match the DB's plain
+// stored name ("kamalraj"), so any of that leftover text makes the filter match
+// nothing — observed as "No family member matching 'father' found" for a question
+// that named an existing family member outright. Stripped here, once, right after
+// extraction, so both call sites see the cleaned name.
+const PERSON_NAME_NOISE = new RegExp(
+    `\\b(${RELATION_WORDS}|booking|bookings|technician|profile|information|details|data|records?)\\b`, 'gi'
+);
+function cleanPersonName(name) {
+    if (!name) return name;
+    const cleaned = name
+        .replace(/['']s\b/gi, '')
+        .replace(PERSON_NAME_NOISE, ' ')
+        .replace(/[^a-zA-Z\s]/g, ' ')
+        .trim()
+        .replace(/\s+/g, ' ');
+    return cleaned.length >= 2 ? cleaned : name;
+}
+// "<relation>'s booking"/"my <relation>'s booking" (or technician) — checked ahead of
+// PATIENT_PROFILE_PATTERN's broader "my <relation>'s" clause below, which would
+// otherwise swallow these into a full family-profile dump instead of routing to the
+// booking/technician handler (which already does its own relation disambiguation via
+// _resolveTargetPatient — see answerWithLLM). Without "my", e.g. plain "father's
+// booking", GPT's own classification already got this right; this only needed to
+// cover the "my ..." phrasing the generic profile pattern was intercepting.
+// Matched on the word STEM ("book\w*" / "techn\w*"), not the exact spelling — a
+// mobile chat keyboard typo like "bookong" still needs to route correctly, and a
+// strict exact-word match would silently fall back to the old profile-dump bug for
+// any misspelling.
+const RELATION_BOOKING_PATTERN = new RegExp(`\\b(my\\s+)?(${RELATION_WORDS})'?s?\\s+book\\w*`, 'i');
+const RELATION_TECHNICIAN_PATTERN = new RegExp(`\\b(my\\s+)?(${RELATION_WORDS})'?s?\\s+techn\\w*`, 'i');
+
+// Words that add no signal once we know a question is about ONE test's price
+// ("vitamin D price", "cbc test price", "price of cbc") — stripped to recover the
+// product name itself. Used below to fix two GPT entity-extraction failure modes:
+// product_name left empty (buildTestQuery then silently listed ALL tests, since
+// "price_query with no product_name" means "cheapest tests" generically) and
+// product_name over-captured with noise words still attached ("cbc test price" —
+// the literal DB column never contains "test price", so the LIKE filter matched
+// nothing and the user got a false "no information" answer).
+const PRICE_QUERY_NOISE_WORDS = /\b(price|prices|pricing|cost|costs|charge|charges|fee|fees|rate|rates|test|tests|of|for|the|a|an|is|what|whats|how|much|show|me|please)\b/gi;
+
 // Booking questions — "my booking(s)", "booking details/info/status", "latest/recent
 // booking(s)", "last/past/previous [N] bookings", "track my booking". Deliberately
 // excludes bare "book" / "book a test" so it doesn't collide with the Book Test flow.
@@ -84,6 +129,33 @@ const TECHNICIAN_COLS = [
 ];
 // "technician info", "who is my technician", "which technician", "assigned technician".
 const TECHNICIAN_QUERY_PATTERN = /\b(technician\s*(info(rmation)?|details|name|contact|status)|who(?:'s| is) my technician|which technician|assigned technician|my technician)\b/i;
+
+// "branch locations", "show all branches", "branches in Coimbatore" etc. Checked
+// unconditionally (not gated on intent === 'general') because GPT-3.5 was observed
+// misclassifying these directly as test_query, which skipped branch routing entirely
+// and returned an unrelated "all tests" list instead (see answerWithLLM below).
+const BRANCH_QUERY_PATTERN = /\bbranch(es)?\b/i;
+// Fallback city extraction for a direct typed branch question ("branches in
+// Coimbatore") when GPT's entity extraction comes back empty — only tried when
+// entities.city/branch_name are both unset, so it never overrides a real extraction.
+const BRANCH_CITY_FALLBACK_PATTERNS = [
+    /\bbranch(?:es)?\s+(?:in|at|near|around)\s+([a-zA-Z][a-zA-Z\s]{1,24}?)\s*[.?!]*$/i,
+    /\b(?:in|at|near|around)\s+([a-zA-Z][a-zA-Z\s]{1,24}?)\s+branch(?:es)?\b/i,
+];
+// A city/branch-name typed directly before "branch(es)" with no preposition
+// ("Coimbatore branch details", "Trichy branches") — tried only after the
+// prepositional patterns above miss. Filtered against a stopword list so generic
+// phrasing ("nearest branch", "show all branches", "any branch") isn't mistaken
+// for a city name.
+const BRANCH_CITY_BARE_PATTERN = /\b([a-zA-Z]{3,20})\s+branch(?:es)?\b/i;
+// Also used to reject the prepositional patterns' capture — "branch near me" would
+// otherwise extract "me" as a city.
+const BRANCH_CITY_STOPWORDS = new Set([
+    'the', 'a', 'an', 'all', 'any', 'some', 'every', 'each', 'other', 'another',
+    'nearest', 'near', 'nearby', 'local', 'your', 'our', 'my', 'this', 'that',
+    'these', 'those', 'which', 'what', 'show', 'list', 'find', 'locate',
+    'display', 'available', 'new', 'me', 'us', 'you', 'here', 'there', 'it',
+]);
 // A booking reference mentioned in the question — used to scope a technician
 // (or booking) lookup to that specific booking instead of the latest.
 // change_booking_ref_to_sequential.sql renumbers EVERY booking (old and
@@ -220,6 +292,29 @@ class LLMRetriever {
         }
         session.pendingClarification = null;
 
+        // ── 0. Static FAQ short-circuit ────────────────────────────────────────
+        // Pure in-memory substring matching — no LLM call, so it's cheap enough to
+        // run unconditionally, BEFORE intent classification. Previously this only
+        // ran after parseIntent and was skipped outright for any DB-shaped intent
+        // (isDBIntent below), so a misclassification (e.g. GPT guessing test_query
+        // for "is my report ready") silently swallowed the canned FAQ answer and
+        // fell through to an unrelated DB query instead.
+        if (!skipKnowledge) {
+            const staticAnswer = matchDefaultQA(question);
+            if (staticAnswer) {
+                this._updateSession(sessionId, 'default_qa', {});
+                llmService.saveToMemory(sessionId, question, staticAnswer);
+                return {
+                    question,
+                    answer: staticAnswer,
+                    context_used: {
+                        intent: 'default_qa', used_llm: false, is_general: true,
+                        from_cache: false, source: 'default_qa', session_id: sessionId
+                    }
+                };
+            }
+        }
+
         const isPronoun     = PRONOUN_PATTERN.test(question);
 
         // ── 1. Parse intent ────────────────────────────────────────────────────
@@ -264,7 +359,11 @@ class LLMRetriever {
         // intents as test_query outright (not just 'general'), so gating this behind
         // `intent === 'general'` let questions like "show my profile" fall through to
         // buildTestQuery and return a random test list instead of the patient's data.
-        if (PATIENT_PROFILE_PATTERN.test(question) || BARE_RELATION_PATTERN.test(question)) {
+        if (RELATION_BOOKING_PATTERN.test(question)) {
+            intent = 'booking_query';
+        } else if (RELATION_TECHNICIAN_PATTERN.test(question)) {
+            intent = 'technician_info_query';
+        } else if (PATIENT_PROFILE_PATTERN.test(question) || BARE_RELATION_PATTERN.test(question)) {
             intent = 'patient_profile_query';
         } else if (CLIENT_ACCOUNT_PATTERN.test(question)) {
             intent = 'client_account_query';
@@ -272,11 +371,11 @@ class LLMRetriever {
             intent = 'technician_info_query';
         } else if (BOOKING_QUERY_PATTERN.test(question)) {
             intent = 'booking_query';
+        } else if (BRANCH_QUERY_PATTERN.test(question)) {
+            intent = 'branch_query';
         } else if (intent === 'general') {
             if (/\b(package[s]?|test[s]?|panel|checkup|health screen)\b/.test(qLow)) {
                 intent = 'test_query';
-            } else if (/\b(branch|location|centre|center|address|coimbatore|trichy)\b/.test(qLow)) {
-                intent = 'branch_query';
             }
         }
 
@@ -288,6 +387,18 @@ class LLMRetriever {
         }
         if (intent === 'test_query' && GENERIC_LIST_TESTS.test(question) && !entities.product_name) {
             entities.keyword = null;
+        }
+
+        // Specific-test price safety-net — only when GPT flagged this as being about
+        // ONE test's price (or already attempted a product_name), never for a plain
+        // listing request, so "show all available tests" is untouched.
+        if (intent === 'test_query' && !entities.keyword && (entities.price_query || entities.product_name)) {
+            const cleaned = (entities.product_name || question)
+                .replace(PRICE_QUERY_NOISE_WORDS, ' ')
+                .replace(/[^a-zA-Z0-9\s]/g, ' ')
+                .trim()
+                .replace(/\s+/g, ' ');
+            if (cleaned.length >= 2) entities.product_name = cleaned;
         }
 
         // Personal-data intents require a verified patient — reject without patientId
@@ -311,6 +422,9 @@ class LLMRetriever {
         if (!entities.relation) {
             const relMatch = question.match(RELATION_PATTERN);
             if (relMatch) entities.relation = relMatch[1];
+        }
+        if (entities.person_name) {
+            entities.person_name = cleanPersonName(entities.person_name);
         }
 
         // Bookings span 3 tables (ip_bookings + ip_available_slots for the exact slot
@@ -366,6 +480,29 @@ class LLMRetriever {
         // fully generic question ("where are your branches") shows a state picker
         // instead of dumping every branch (see _answerBranchStatePicker).
         if (intent === 'branch_query') {
+            // GPT's entity extraction is unreliable for a direct typed location
+            // question, especially when `intent` itself just got corrected by the
+            // safety net above — fall back to pulling a city out of the question
+            // text so "show all branches in Coimbatore" doesn't silently drop to
+            // the generic state picker instead of the Coimbatore branch list.
+            if (!entities.city && !entities.branch_name) {
+                for (const pattern of BRANCH_CITY_FALLBACK_PATTERNS) {
+                    const m = question.match(pattern);
+                    if (m && !BRANCH_CITY_STOPWORDS.has(m[1].trim().toLowerCase())) {
+                        entities.city = m[1].trim();
+                        break;
+                    }
+                }
+            }
+            // No preposition in the question at all ("Coimbatore branch details") —
+            // try the bare "<word> branch(es)" pattern, rejecting generic words so
+            // "nearest branch" / "show all branches" still fall through to the picker.
+            if (!entities.city && !entities.branch_name) {
+                const m = question.match(BRANCH_CITY_BARE_PATTERN);
+                if (m && !BRANCH_CITY_STOPWORDS.has(m[1].toLowerCase())) {
+                    entities.city = m[1].trim();
+                }
+            }
             let result;
             if (entities.city || entities.branch_name) {
                 const sql = this.buildBranchQuery(entities);
@@ -898,7 +1035,21 @@ class LLMRetriever {
                 `WHERE branch_active = 1 AND branch_state IS NOT NULL AND branch_state <> '' ` +
                 `ORDER BY branch_state`
             );
-            states = rows.map(r => r.branch_state).filter(Boolean);
+            // branch_state sometimes stores the same state inconsistently (e.g. "Tamil
+            // Nadu" vs "Tamilnadu") — SQL DISTINCT treats those as different rows, so
+            // dedupe here on the whitespace-stripped, lowercased form and display
+            // whichever raw variant has proper word spacing.
+            const groups = new Map(); // normalized key -> raw variants seen
+            for (const row of rows) {
+                const raw = (row.branch_state || '').trim();
+                if (!raw) continue;
+                const key = raw.toLowerCase().replace(/\s+/g, '');
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(raw);
+            }
+            states = [...groups.values()]
+                .map(variants => (variants.find(v => /\s/.test(v)) || variants[0]).replace(/\s+/g, ' '))
+                .sort((a, b) => a.localeCompare(b));
         } catch (err) {
             console.error('Branch state list query error:', err);
             return {
