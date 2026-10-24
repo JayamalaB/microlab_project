@@ -84,7 +84,7 @@ router.post('/ask', async (req, res) => {
 
             result = answer
                 ? { question, answer, context_used: { intent, source: 'default_qa', used_llm: intent === 'default_qa_semantic', from_cache: false, session_id: sessionId } }
-                : { question, answer: "ℹ️ No static Q&A match found. Try a different question or call 1800-XXX-XXXX.", context_used: { intent: 'no_match', source: 'default_qa', session_id: sessionId } };
+                : { question, answer: "ℹ️ No static Q&A match found. Try a different question or call 1800 425 1316.", context_used: { intent: 'no_match', source: 'default_qa', session_id: sessionId } };
 
         } else if (searchLayer === 'db') {
             result = await llmRetriever.answerWithLLM(question, sessionId, { skipKnowledge: true, patientId });
@@ -120,7 +120,7 @@ async function handleWebsiteOnlyQuery(question, sessionId) {
     if (!pages || pages.length === 0) {
         return {
             question,
-            answer: "🌐 Couldn't retrieve relevant content from the website. Please call 1800-XXX-XXXX for live support.",
+            answer: "🌐 Couldn't retrieve relevant content from the website. Please call 1800 425 1316 for live support.",
             context_used: { intent: 'website_live', source: 'website_live', data_found: 0, session_id: sessionId }
         };
     }
@@ -131,7 +131,7 @@ async function handleWebsiteOnlyQuery(question, sessionId) {
     try {
         const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
         const apiRes = await openai.chat.completions.create({
-            model: 'gpt-3.5-turbo',
+            model: 'gpt-4.1-mini',
             messages: [
                 {
                     role: 'system',
@@ -140,7 +140,7 @@ Answer the user's question using ONLY the website content provided below.
 STRICT RULES:
 1. Use only what is in the provided content. No outside knowledge.
 2. If the content does not contain a clear answer, say:
-   "I don't have specific information about that. Please visit our website or call 1800-XXX-XXXX."
+   "I don't have specific information about that. Please visit our website or call 1800 425 1316."
 3. Be concise and natural — 2 to 5 sentences or a short bullet list.
 4. Never mention "context", "chunk", "source", or internal terms.
 5. Sound like a knowledgeable MicroLab team member.

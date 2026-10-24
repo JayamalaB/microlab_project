@@ -2704,7 +2704,7 @@ class _BookingFormState extends State<_BookingForm> {
                     ? const SizedBox(width: 14, height: 14,
                         child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
                     : const Icon(Icons.attach_file_rounded, size: 16, color: AppColors.brandGreen),
-                label: const Text('Attach image or PDF',
+                label: const Text('Attach prescription image or PDF',
                     style: TextStyle(fontSize: 12.5, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
                 style: OutlinedButton.styleFrom(
                   side: const BorderSide(color: AppColors.divider, width: 1.5),
