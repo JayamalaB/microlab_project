@@ -135,7 +135,7 @@ Respond with ONLY a JSON object (no extra text):
 }`;
 
             const response = await this.openai.chat.completions.create({
-                model: 'gpt-3.5-turbo',
+                model: 'gpt-4.1-mini',
                 messages: [{ role: 'user', content: prompt }],
                 temperature: 0.2,
                 max_tokens: 300
@@ -170,18 +170,23 @@ Intent: ${intent}
 Data: ${JSON.stringify(data, null, 2)}
 
 Rules:
-1. Cover ALL items in the data — do not truncate or summarise away results
-2. Use emojis sparingly (max 2)
-3. Focus ONLY on what was asked
-4. Be direct — no fluff or extra explanations
-5. Include prices/dates only if relevant to the question
+1. Cover ALL items in the data — do not truncate or omit any result
+2. Multiple tests: list each as "N. Test Name — ₹Price" on its own line, nothing else per line.
+   Do NOT include Description or Preparation text unless the question specifically asks about
+   preparation/fasting/what the test checks — and even then keep it to a few words after the
+   price, never a separate paragraph per item.
+3. Single test: give the name and price; add one short extra detail only if the question
+   explicitly asked for it (e.g. "preparation", "fasting", "what does it check").
+4. Use emojis sparingly (max 1, optional)
+5. Be direct — no fluff, no closing summary, no "Note:" section, no commentary about the data
+   itself (e.g. never mention that an item appears twice or explain a formatting quirk)
 6. All prices are in Indian Rupees — always format them with ₹, never $ or USD
 7. Show prices as whole numbers with no decimal places — ₹35, not ₹35.00
 
 Response:`;
 
             const response = await this.openai.chat.completions.create({
-                model: 'gpt-3.5-turbo',
+                model: 'gpt-4.1-mini',
                 messages: [{ role: 'user', content: prompt }],
                 temperature: 0.5,
                 max_tokens: 500
@@ -199,9 +204,12 @@ Response:`;
         if (!data || data.length === 0) return 'No results found.';
         if (data.length === 1) {
             const item = data[0];
-            if (item.product_name && item.product_price) return `${item.product_name}: ₹${item.product_price}`;
+            if (item.product_name && item.product_price != null) return `${item.product_name} — ₹${Math.round(item.product_price)}`;
             if (item.product_name) return item.product_name;
             if (item.branch_name)  return `${item.branch_name} — ${item.branch_city || ''} | ${item.branch_mobile || ''}`;
+        }
+        if (data.every(d => d.product_name)) {
+            return data.map((d, i) => `${i + 1}. ${d.product_name}${d.product_price != null ? ` — ₹${Math.round(d.product_price)}` : ''}`).join('\n');
         }
         const names = data.map(d => d.product_name || d.branch_name).filter(Boolean);
         return names.length ? `Found: ${names.join(', ')}.` : `Found ${data.length} results.`;

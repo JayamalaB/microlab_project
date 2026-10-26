@@ -52,7 +52,7 @@ async function matchDefaultQASemantic(question) {
     try {
         const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
         const res = await openai.chat.completions.create({
-            model: 'gpt-3.5-turbo',
+            model: 'gpt-4.1-mini',
             messages: [
                 {
                     role: 'system',
@@ -168,7 +168,7 @@ async function answerFromWebsite(question) {
         const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
         const res = await openai.chat.completions.create({
-            model: 'gpt-3.5-turbo',
+            model: 'gpt-4.1-mini',
             messages: [
                 {
                     role: 'system',
