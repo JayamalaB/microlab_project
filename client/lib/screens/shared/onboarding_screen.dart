@@ -23,6 +23,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           'Schedule your test in minutes. Choose your preferred time slot and a certified technician visits you.',
       bgColor: Color(0xFFE8F5F1),
       illustrationId: 0,
+      imagePath: 'assets/onboarding/onboarding_1.jpg',
     ),
     _OnboardData(
       title: 'Verified technicians\nat your door',
@@ -30,6 +31,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           'All technicians are certified, background-checked, and rated by other customers for your safety.',
       bgColor: Color(0xFFEEF4FB),
       illustrationId: 1,
+      imagePath: 'assets/onboarding/onboarding_2.jpg',
     ),
     _OnboardData(
       title: 'Fast results,\nright to you',
@@ -37,6 +39,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           'Receive your lab reports digitally within hours, reviewed by certified professionals.',
       bgColor: Color(0xFFFEF6EE),
       illustrationId: 2,
+      imagePath: 'assets/onboarding/onboarding_3.jpg',
     ),
   ];
 
@@ -146,12 +149,14 @@ class _OnboardData {
   final String subtitle;
   final Color bgColor;
   final int illustrationId;
+  final String imagePath;
 
   const _OnboardData({
     required this.title,
     required this.subtitle,
     required this.bgColor,
     required this.illustrationId,
+    required this.imagePath,
   });
 }
 
@@ -171,13 +176,6 @@ class _OnboardPage extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Center(
-            child: CustomPaint(
-              size: const Size(160, 100),
-              painter: _IllustrationPainter(id: data.illustrationId),
-            ),
-          ),
-          const SizedBox(height: 12),
           Text(
             data.title,
             style: const TextStyle(
@@ -186,6 +184,17 @@ class _OnboardPage extends StatelessWidget {
               color: AppColors.textPrimary,
               height: 1.25,
               letterSpacing: -0.2,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Center(
+            child: ClipOval(
+              child: Image.asset(
+                data.imagePath,
+                width: 150,
+                height: 150,
+                fit: BoxFit.cover,
+              ),
             ),
           ),
         ],

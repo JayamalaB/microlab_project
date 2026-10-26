@@ -965,91 +965,128 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
       child: Scaffold(
         backgroundColor: AppColors.background,
         appBar: _selectedIndex == 0
-            ? AppBar(
-                backgroundColor: AppColors.brandGreen,
-                elevation: 0,
-                automaticallyImplyLeading: false,
-                title: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('MicroLab',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600)),
-                    Text('Technician · +91 ${widget.mobile}',
-                        // ✅ FIXED: withValues → withOpacity
-                        style: TextStyle(
-                            color: Colors.white.withOpacity(0.75), fontSize: 11)),
-                  ],
-                ),
-                actions: [
-                  IconButton(
-                    icon: _isRefreshing
-                        ? const SizedBox(
-                            width: 18, height: 18,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white))
-                        : const Icon(Icons.refresh_rounded, color: Colors.white70),
-                    onPressed: _isRefreshing ? null : _manualRefresh,
-                    tooltip: 'Refresh bookings',
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(112),
+                child: Container(
+                  decoration: const BoxDecoration(
+                    color: AppColors.brandGreen,
+                    borderRadius: BorderRadius.only(
+                      bottomLeft: Radius.circular(24),
+                      bottomRight: Radius.circular(24),
+                    ),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: _isTogglingOnline
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : Row(
-                            mainAxisSize: MainAxisSize.min,
+                  child: SafeArea(
+                    bottom: false,
+                    child: Stack(
+                      children: [
+                        Positioned(
+                          right: -8,
+                          top: -16,
+                          child: Icon(Icons.science_outlined,
+                              size: 96, color: Colors.white.withOpacity(0.08)),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
+                          child: Row(
                             children: [
-                              AnimatedContainer(
-                                duration: const Duration(milliseconds: 400),
-                                width: 8,
-                                height: 8,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: _isOnline
-                                      ? Colors.greenAccent
-                                      : Colors.white38,
+                              const CircleAvatar(
+                                radius: 22,
+                                backgroundColor: Colors.white,
+                                child: Icon(Icons.person, color: AppColors.brandGreen, size: 24),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text('Welcome,',
+                                        style: TextStyle(
+                                            color: Colors.white.withOpacity(0.85),
+                                            fontSize: 13)),
+                                    Text(
+                                      '${SocketService.instance.userName.trim().isNotEmpty ? SocketService.instance.userName.trim().split(RegExp(r"\s+")).first : "Technician"}!',
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.w700),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    const Text(
+                                      'Keep up the great work!',
+                                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                                    ),
+                                  ],
                                 ),
                               ),
-                              const SizedBox(width: 5),
-                              Text(
-                                _isOnline ? 'Online' : 'Offline',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: _isOnline
-                                      ? Colors.greenAccent
-                                      : Colors.white60,
-                                ),
+                              IconButton(
+                                icon: _isRefreshing
+                                    ? const SizedBox(
+                                        width: 18, height: 18,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2, color: Colors.white))
+                                    : const Icon(Icons.refresh_rounded, color: Colors.white70),
+                                onPressed: _isRefreshing ? null : _manualRefresh,
+                                tooltip: 'Refresh bookings',
                               ),
-                              Transform.scale(
-                                scale: 0.78,
-                                child: Switch(
-                                  value: _isOnline,
-                                  onChanged: _isTogglingOnline
-                                      ? null
-                                      : (_) => _toggleAvailability(),
-                                  activeThumbColor: Colors.greenAccent,
-                                  // ✅ FIXED: withValues → withOpacity
-                                  activeTrackColor:
-                                      Colors.greenAccent.withOpacity(0.35),
-                                  inactiveThumbColor: Colors.white54,
-                                  inactiveTrackColor: Colors.white24,
-                                ),
-                              ),
+                              _isTogglingOnline
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white,
+                                      ),
+                                    )
+                                  : Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        AnimatedContainer(
+                                          duration: const Duration(milliseconds: 400),
+                                          width: 8,
+                                          height: 8,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: _isOnline
+                                                ? Colors.greenAccent
+                                                : Colors.white38,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 5),
+                                        Text(
+                                          _isOnline ? 'Online' : 'Offline',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            color: _isOnline
+                                                ? Colors.greenAccent
+                                                : Colors.white60,
+                                          ),
+                                        ),
+                                        Transform.scale(
+                                          scale: 0.78,
+                                          child: Switch(
+                                            value: _isOnline,
+                                            onChanged: _isTogglingOnline
+                                                ? null
+                                                : (_) => _toggleAvailability(),
+                                            activeThumbColor: Colors.greenAccent,
+                                            activeTrackColor:
+                                                Colors.greenAccent.withOpacity(0.35),
+                                            inactiveThumbColor: Colors.white54,
+                                            inactiveTrackColor: Colors.white24,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                             ],
                           ),
+                        ),
+                      ],
+                    ),
                   ),
-                ],
+                ),
               )
             : null,
         body: Stack(

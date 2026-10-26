@@ -332,7 +332,7 @@ class _OtpScreenState extends State<OtpScreen> {
                         'assets/icon/app_icon.png',
                         width: 36,
                         height: 36,
-                        fit: BoxFit.cover,
+                        fit: BoxFit.contain,
                       ),
                     ),
                     const SizedBox(width: 10),

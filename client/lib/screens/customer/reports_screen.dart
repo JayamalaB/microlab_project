@@ -629,7 +629,7 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
-                  colors: [AppColors.brandGreen, Color(0xFF2E7D32)],
+                  colors: [AppColors.brandGreen, AppColors.brandGreenMid],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),

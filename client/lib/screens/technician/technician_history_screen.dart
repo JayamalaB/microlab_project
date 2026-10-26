@@ -6,6 +6,7 @@ import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/skeleton_loader.dart';
 
 class TechnicianHistoryScreen extends StatefulWidget {
   final String mobile;
@@ -127,11 +128,7 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
 
     Widget body;
     if (_loading) {
-      body = const Center(
-        child: CircularProgressIndicator(
-            strokeWidth: 2,
-            valueColor: AlwaysStoppedAnimation<Color>(AppColors.brandGreen)),
-      );
+      body = const _HistoryListSkeleton();
     } else if (_error != null) {
       body = Center(
         child: Column(
@@ -608,6 +605,67 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ─── Skeleton loading state — shown while _loadHistory() is in flight ───────
+
+class _HistoryListSkeleton extends StatelessWidget {
+  const _HistoryListSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+      physics: const NeverScrollableScrollPhysics(),
+      children: List.generate(4, (_) => const _HistoryCardSkeleton()),
+    );
+  }
+}
+
+class _HistoryCardSkeleton extends StatelessWidget {
+  const _HistoryCardSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.divider),
+      ),
+      child: SkeletonShimmer(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Status strip
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              color: AppColors.divider.withOpacity(0.3),
+              child: Row(
+                children: [
+                  SkeletonBox(width: 70, height: 11, borderRadius: BorderRadius.circular(4)),
+                  const Spacer(),
+                  SkeletonBox(width: 50, height: 10, borderRadius: BorderRadius.circular(4)),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SkeletonBox(width: 140, height: 14, borderRadius: BorderRadius.circular(4)),
+                  const SizedBox(height: 10),
+                  SkeletonBox(width: 100, height: 11, borderRadius: BorderRadius.circular(4)),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

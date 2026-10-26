@@ -167,7 +167,7 @@ class _SplashScreenState extends State<SplashScreen>
                               'assets/icon/app_icon.png',
                               width: 88,
                               height: 88,
-                              fit: BoxFit.cover,
+                              fit: BoxFit.contain,
                             ),
                           ),
                         ),

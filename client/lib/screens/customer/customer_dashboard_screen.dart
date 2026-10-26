@@ -2710,7 +2710,7 @@ class _TestDetailSheet extends StatelessWidget {
                           Expanded(
                             child: Text(
                               'Preparation: ${test.preInstructions!}',
-                              style: const TextStyle(fontSize: 11, color: Color(0xFF2E7D32), height: 1.4),
+                              style: const TextStyle(fontSize: 11, color: AppColors.brandGreen, height: 1.4),
                             ),
                           ),
                         ],

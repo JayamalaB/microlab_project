@@ -1044,10 +1044,10 @@ class _BookingCard extends StatelessWidget {
   Color _statusColor(String s) {
     switch (s) {
       case 'Completed':             return AppColors.brandGreen;
-      case 'Sample Collected':      return const Color(0xFF2E7D32);
-      case 'Handed to Lab':         return const Color(0xFF2E7D32);
-      case 'Handed to Lab Pending': return const Color(0xFF2E7D32);
-      case 'Technician Arrived':    return const Color(0xFF2E7D32);
+      case 'Sample Collected':      return AppColors.brandGreen;
+      case 'Handed to Lab':         return AppColors.brandGreen;
+      case 'Handed to Lab Pending': return AppColors.brandGreen;
+      case 'Technician Arrived':    return AppColors.brandGreen;
       case 'Confirmed':             return const Color(0xFF1565C0);
       case 'Technician Allocated':  return const Color(0xFF1565C0);
       case 'In Progress':           return const Color(0xFF1565C0);
@@ -2306,10 +2306,10 @@ class _TechnicianCard extends StatelessWidget {
   Color get _statusColor {
     switch (collectionStatus) {
       case 'en_route':           return const Color(0xFF1565C0);
-      case 'arrived':            return const Color(0xFF2E7D32);
+      case 'arrived':            return AppColors.brandGreen;
       case 'collection_started': return const Color(0xFF6A1B9A);
-      case 'otp_verified':        return const Color(0xFF2E7D32);
-      case 'sample_collected':   return const Color(0xFF2E7D32);
+      case 'otp_verified':        return AppColors.brandGreen;
+      case 'sample_collected':   return AppColors.brandGreen;
       case 'handed_to_lab_pending': return AppColors.brandGreen;
       case 'handed_to_lab':      return AppColors.brandGreen;
       default:                   return AppColors.brandGreen;

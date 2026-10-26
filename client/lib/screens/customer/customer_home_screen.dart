@@ -13,6 +13,7 @@ import 'package:microlab/models.dart';
 import 'reports_screen.dart';
 import 'profile_screen.dart';
 import 'support_chatbot.dart';
+import 'package:microlab/widgets/skeleton_loader.dart';
 
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -76,6 +77,23 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       if (m.mobile == widget.mobile) return m.id;
     }
     return null;
+  }
+
+  // Same lookup as _selfPatientId, but returns the member itself — used by the
+  // welcome header to show the logged-in customer's own first name.
+  MemberModel? get _selfMember {
+    for (final m in _members) {
+      if (m.relation?.toLowerCase() == 'self') return m;
+    }
+    for (final m in _members) {
+      if (m.mobile == widget.mobile) return m;
+    }
+    return null;
+  }
+
+  static String? _firstName(String? full) {
+    if (full == null || full.trim().isEmpty) return null;
+    return full.trim().split(RegExp(r'\s+')).first;
   }
 
   static DateTime? _parseDob(String? s) {
@@ -244,43 +262,83 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       key: _scaffoldKey,
       backgroundColor: AppColors.background,
       appBar: (!_inDashboard && _selectedIndex == 0)
-          ? AppBar(
-              backgroundColor: AppColors.white,
-              elevation: 0,
-              scrolledUnderElevation: 0,
-              automaticallyImplyLeading: false,
-              title: Row(
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Image.asset(
-                      'assets/icon/app_icon.png',
-                      width: 28,
-                      height: 28,
-                      fit: BoxFit.cover,
-                    ),
+          ? PreferredSize(
+              preferredSize: const Size.fromHeight(112),
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: AppColors.brandGreen,
+                  borderRadius: BorderRadius.only(
+                    bottomLeft: Radius.circular(24),
+                    bottomRight: Radius.circular(24),
                   ),
-                  const SizedBox(width: 8),
-                  const Text(
-                    'MicroLab',
-                    style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary),
-                  ),
-                ],
-              ),
-              actions: [
-                IconButton(
-                  icon: const Icon(Icons.phone_outlined,
-                      color: AppColors.brandGreen, size: 22),
-                  tooltip: 'Call us',
-                  onPressed: () async {
-                    final uri = Uri(scheme: 'tel', path: '7339535472');
-                    if (await canLaunchUrl(uri)) launchUrl(uri);
-                  },
                 ),
-              ],
+                child: SafeArea(
+                  bottom: false,
+                  child: Stack(
+                    children: [
+                      Positioned(
+                        right: -8,
+                        top: -16,
+                        child: Icon(Icons.science_outlined,
+                            size: 96, color: Colors.white.withOpacity(0.08)),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 10, 12, 16),
+                        child: Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 22,
+                              backgroundColor: Colors.white,
+                              child: Text(
+                                (_firstName(_selfMember?.name) ?? 'U')[0].toUpperCase(),
+                                style: const TextStyle(
+                                    color: AppColors.brandGreen,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 18),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text('Welcome,',
+                                      style: TextStyle(
+                                          color: Colors.white.withOpacity(0.85),
+                                          fontSize: 13)),
+                                  Text(
+                                    '${_firstName(_selfMember?.name) ?? 'there'}!',
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.w700),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 2),
+                                  const Text(
+                                    "Your health matters. We're here to help.",
+                                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.phone_outlined,
+                                  color: Colors.white, size: 22),
+                              tooltip: 'Call us',
+                              onPressed: () async {
+                                final uri = Uri(scheme: 'tel', path: '7339535472');
+                                if (await canLaunchUrl(uri)) launchUrl(uri);
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             )
           : null,
       body: Stack(
@@ -289,12 +347,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
             index: _stackIndex,
             children: [
               _loadingPatients
-                  ? const Center(
-                      child: CircularProgressIndicator(
-                        valueColor: AlwaysStoppedAnimation<Color>(AppColors.brandGreen),
-                        strokeWidth: 2,
-                      ),
-                    )
+                  ? const _CustomerListSkeleton()
                   : _members.isEmpty ? _emptyState() : _memberList(),
               // Slot 1: embedded dashboard
               if (_activeMember != null)
@@ -465,6 +518,67 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   }
 }
 
+// ─── Skeleton loading state — shown while _loadPatients() is in flight ──────
+
+class _CustomerListSkeleton extends StatelessWidget {
+  const _CustomerListSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+      physics: const NeverScrollableScrollPhysics(),
+      children: [
+        SkeletonShimmer(
+          child: SkeletonBox(width: 90, height: 13, borderRadius: BorderRadius.circular(4)),
+        ),
+        const SizedBox(height: 12),
+        ...List.generate(3, (_) => const _CustomerCardSkeleton()),
+      ],
+    );
+  }
+}
+
+class _CustomerCardSkeleton extends StatelessWidget {
+  const _CustomerCardSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.divider),
+      ),
+      child: SkeletonShimmer(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+              child: Row(
+                children: [
+                  const SkeletonBox.circle(size: 44),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        SkeletonBox(width: 120, height: 14, borderRadius: BorderRadius.circular(4)),
+                        const SizedBox(height: 8),
+                        SkeletonBox(width: 80, height: 11, borderRadius: BorderRadius.circular(4)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SkeletonBox(height: 38, borderRadius: BorderRadius.zero),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 // ─── Reusable photo-aware avatar ─────────────────────────────────────────────
 
