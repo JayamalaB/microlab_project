@@ -265,13 +265,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
           ? PreferredSize(
               preferredSize: const Size.fromHeight(112),
               child: Container(
-                decoration: const BoxDecoration(
-                  color: AppColors.brandGreen,
-                  borderRadius: BorderRadius.only(
-                    bottomLeft: Radius.circular(24),
-                    bottomRight: Radius.circular(24),
-                  ),
-                ),
+                color: AppColors.brandGreen,
                 child: SafeArea(
                   bottom: false,
                   child: Stack(

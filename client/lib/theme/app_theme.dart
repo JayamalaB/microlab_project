@@ -3,10 +3,10 @@ import 'package:google_fonts/google_fonts.dart';
 
 class AppColors {
   // Brand
-  static const Color brandGreen = Color(0xFF59B762);
-  static const Color brandGreenLight = Color(0xFFCDE9D0);
-  static const Color brandGreenSurface = Color(0xFFEEF8EF);
-  static const Color brandGreenMid = Color(0xFF3E8045);
+  static const Color brandGreen = Color(0xFF127D3B);
+  static const Color brandGreenLight = Color(0xFFB8D8C4);
+  static const Color brandGreenSurface = Color(0xFFE7F2EB);
+  static const Color brandGreenMid = Color(0xFF0D5829);
 
   // Neutral
   static const Color white = Color(0xFFFFFFFF);
