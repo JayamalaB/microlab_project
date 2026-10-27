@@ -16,6 +16,12 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   int _currentPage = 0;
   Timer? _autoSlideTimer;
 
+  // Must match _UCurveClipper's `depth` in login_screen.dart — that clip path
+  // reveals this many pixels of whatever sits behind the login panel's top
+  // center, so the slide image is sized taller by exactly this much to fill
+  // that reveal with photo content instead of flat background color.
+  static const double curveDepth = 52.0;
+
   final List<_OnboardData> _pages = const [
     _OnboardData(
       title: 'Book a blood test\nfrom home',
@@ -23,6 +29,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           'Schedule your test in minutes. Choose your preferred time slot and a certified technician visits you.',
       bgColor: Color(0xFFE8F5F1),
       illustrationId: 0,
+      imagePath: 'assets/onboarding/onboarding_1.jpg',
     ),
     _OnboardData(
       title: 'Verified technicians\nat your door',
@@ -30,6 +37,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           'All technicians are certified, background-checked, and rated by other customers for your safety.',
       bgColor: Color(0xFFEEF4FB),
       illustrationId: 1,
+      imagePath: 'assets/onboarding/onboarding_2.jpg',
     ),
     _OnboardData(
       title: 'Fast results,\nright to you',
@@ -37,6 +45,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           'Receive your lab reports digitally within hours, reviewed by certified professionals.',
       bgColor: Color(0xFFFEF6EE),
       illustrationId: 2,
+      imagePath: 'assets/onboarding/onboarding_3.jpg',
     ),
   ];
 
@@ -85,7 +94,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 curve: Curves.easeInOut,
                 top: keyboardOpen ? -onboardH : 0,
                 left: 0, right: 0,
-                height: onboardH,
+                height: onboardH + curveDepth,
                 child: PageView.builder(
                   controller: _pageController,
                   itemCount: _pages.length,
@@ -146,12 +155,14 @@ class _OnboardData {
   final String subtitle;
   final Color bgColor;
   final int illustrationId;
+  final String imagePath;
 
   const _OnboardData({
     required this.title,
     required this.subtitle,
     required this.bgColor,
     required this.illustrationId,
+    required this.imagePath,
   });
 }
 
@@ -165,31 +176,50 @@ class _OnboardPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 16, 24, 48),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Center(
-            child: CustomPaint(
-              size: const Size(160, 100),
-              painter: _IllustrationPainter(id: data.illustrationId),
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Full-bleed photo — fills the whole slide area, including the extra
+        // _OnboardingScreenState.curveDepth strip at the bottom so the photo
+        // itself (not flat background color) shows through the login panel's
+        // U-curve cutout above it (see _UCurveClipper in login_screen.dart).
+        // BoxFit.cover + the percentage-based onboardH height (screenH * 0.35)
+        // keep this responsive across phone and tablet screen sizes alike.
+        Image.asset(
+          data.imagePath,
+          fit: BoxFit.cover,
+          alignment: Alignment.center,
+        ),
+        // Bottom scrim so the title stays readable over any photo content.
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Colors.transparent, Colors.black38],
+              stops: [0.4, 1.0],
             ),
           ),
-          const SizedBox(height: 12),
-          Text(
+        ),
+        Positioned(
+          left: 24,
+          right: 24,
+          // Sits just above the curve's bulge zone so the text is never
+          // clipped by the login panel dipping up into the center.
+          bottom: _OnboardingScreenState.curveDepth + 18,
+          child: Text(
             data.title,
             style: const TextStyle(
               fontSize: 17,
               fontWeight: FontWeight.w600,
-              color: AppColors.textPrimary,
+              color: Colors.white,
               height: 1.25,
               letterSpacing: -0.2,
+              shadows: [Shadow(color: Colors.black54, blurRadius: 6, offset: Offset(0, 1))],
             ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

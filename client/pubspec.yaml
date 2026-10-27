@@ -63,11 +63,25 @@ flutter:
     - assets/icon/49-years-badge.png
     - assets/icon/header-oneline-noline.png
     - assets/icon/microbiological-lab-header.png
+    - assets/onboarding/onboarding_1.jpg
+    - assets/onboarding/onboarding_2.jpg
+    - assets/onboarding/onboarding_3.jpg
 
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: "assets/icon/app_icon.png"
+  # Padded separately from assets/icon/app_icon.png (used in-app on the splash
+  # and OTP screens) so the home-screen icon's adaptive mask never clips the
+  # logo — see tool/build_launcher_icon.py for how the padding is built.
+  # Regenerate with: python tool/build_launcher_icon.py && dart run flutter_launcher_icons
+  image_path: "assets/icon/app_launcher_icon.png"
+  # Without these, Android API 26+ launchers treat this as a legacy (non-
+  # adaptive) icon and synthesize their own padded/framed version of it —
+  # the source "outer rounded rectangle" border reported on a real device,
+  # even though none of the generated files themselves contain one. Giving
+  # Android explicit background/foreground layers stops it from guessing.
+  adaptive_icon_background: "#437A41"
+  adaptive_icon_foreground: "assets/icon/app_launcher_icon.png"
   min_sdk_android: 21
   remove_alpha_ios: true
 

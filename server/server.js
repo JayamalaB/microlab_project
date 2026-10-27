@@ -31,6 +31,10 @@ require('./scheduler/dispatchScheduler')(io);
 // this is separate from the 45s dispatch grace period).
 require('./scheduler/technicianOfflineSweep')();
 
+// Pushes the assigned technician a reminder 60 min before a booking and late
+// alerts at +5 / +10 min while the journey hasn't started (see file).
+require('./scheduler/technicianReminderScheduler')();
+
 // Purges the 7 database log tables (server/utils/dbLogger.js) of rows older
 // than 90 days — the existing .log files themselves are untouched.
 require('./scheduler/logRetentionSweep')();

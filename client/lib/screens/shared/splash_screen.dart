@@ -138,6 +138,18 @@ class _SplashScreenState extends State<SplashScreen>
               child: CustomPaint(painter: _BgPatternPainter()),
             ),
 
+            // Soft corner glow accents
+            Positioned(
+              top: -90,
+              left: -90,
+              child: _CornerGlow(size: 260),
+            ),
+            Positioned(
+              bottom: -100,
+              right: -100,
+              child: _CornerGlow(size: 300),
+            ),
+
             // Center content
             Center(
               child: AnimatedBuilder(
@@ -145,36 +157,16 @@ class _SplashScreenState extends State<SplashScreen>
                 builder: (_, __) => Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Logo box
+                    // Logo card
                     FadeTransition(
                       opacity: _logoFade,
                       child: ScaleTransition(
                         scale: _logoScale,
-                        child: Container(
-                          width: 88,
-                          height: 88,
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.12),
-                            borderRadius: BorderRadius.circular(24),
-                            border: Border.all(
-                              color: Colors.white.withOpacity(0.2),
-                              width: 1,
-                            ),
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(24),
-                            child: Image.asset(
-                              'assets/icon/app_icon.png',
-                              width: 88,
-                              height: 88,
-                              fit: BoxFit.cover,
-                            ),
-                          ),
-                        ),
+                        child: const _MicrobesLogoCard(),
                       ),
                     ),
 
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 28),
 
                     // App name
                     FadeTransition(
@@ -261,3 +253,68 @@ class _BgPatternPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter old) => false;
 }
+
+// Soft radial glow used in the splash screen's corners.
+class _CornerGlow extends StatelessWidget {
+  final double size;
+  const _CornerGlow({required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: RadialGradient(
+            colors: [
+              Colors.white.withOpacity(0.14),
+              Colors.white.withOpacity(0.0),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Glassy rounded-square card framing the MICROBES logo on the splash screen.
+class _MicrobesLogoCard extends StatelessWidget {
+  const _MicrobesLogoCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(40),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Colors.white.withOpacity(0.22),
+            Colors.white.withOpacity(0.06),
+          ],
+        ),
+        border: Border.all(
+          color: Colors.white.withOpacity(0.35),
+          width: 1.4,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.white.withOpacity(0.16),
+            blurRadius: 28,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 24),
+      child: Image.asset(
+        'assets/icon/app_icon.png',
+        width: 116,
+        fit: BoxFit.contain,
+      ),
+    );
+  }
+}
+

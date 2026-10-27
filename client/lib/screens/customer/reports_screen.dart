@@ -107,6 +107,7 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
     final total      = double.tryParse(b['total_amount']?.toString() ?? '') ?? 0.0;
     final itemsTotal = double.tryParse(b['items_total']?.toString() ?? '') ?? total;
     final amountPaid = double.tryParse(b['amount_paid']?.toString() ?? '') ?? 0.0;
+    final additionalCharge = double.tryParse(b['additional_charge_amount']?.toString() ?? '') ?? 0.0;
     final bookingType = b['booking_type'] as String? ?? 'lab_visit';
     final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Visit';
     DateTime date;
@@ -132,7 +133,9 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
       city:         b['collection_city'] as String?,
       date: date, timeSlot: slotLabel ?? 'Not specified',
       paymentType:  amountPaid >= total && total > 0 ? 'full' : 'pay_later',
-      serviceCharge: (total - itemsTotal).clamp(0, double.infinity),
+      serviceCharge: (total - itemsTotal - additionalCharge).clamp(0, double.infinity),
+      additionalCharge: additionalCharge,
+      additionalChargeReason: b['additional_charge_reason'] as String?,
       testsTotal: itemsTotal, grandTotal: total, paidAmount: amountPaid,
       status:       _mapStatus(b['booking_status'] as String? ?? 'pending'),
       createdAt:    DateTime.tryParse(b['created_at'] as String? ?? '') ?? DateTime.now(),
@@ -629,7 +632,7 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
-                  colors: [AppColors.brandGreen, Color(0xFF2E7D32)],
+                  colors: [AppColors.brandGreen, AppColors.brandGreenMid],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),

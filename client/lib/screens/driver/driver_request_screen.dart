@@ -476,7 +476,7 @@ class _DriverRequestScreenState extends State<DriverRequestScreen> {
     );
     _patientMarkerIcon = await _renderIcon(
       icon: Icons.person_pin_circle_rounded,
-      bgColor: const Color(0xFF2E7D32),
+      bgColor: AppColors.brandGreen,
       iconColor: Colors.white,
       logicalSize: 34,
     );
@@ -1295,7 +1295,7 @@ class _IncomingRideSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     final progress = secondsLeft / totalSeconds;
     final ringColor = secondsLeft > 20
-        ? const Color(0xFF2E7D32)
+        ? AppColors.brandGreen
         : secondsLeft > 10
             ? const Color(0xFFF57C00)
             : const Color(0xFFD32F2F);

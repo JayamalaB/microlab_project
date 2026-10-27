@@ -90,6 +90,7 @@ async function sendFcmPush(fcmToken, bookingData) {
         slotId:          String(bookingData.slotId          ?? ''),
         slotLabel:       String(bookingData.slotLabel       ?? ''),
         appointmentTime: String(bookingData.appointmentTime ?? ''),
+        notes:          String(bookingData.notes          ?? ''),
         createdAt:      String(bookingData.createdAt      ?? new Date().toISOString()),
       },
       android: {
@@ -1353,15 +1354,20 @@ async function _handleBookingRequest(io, socket, data = {}) {
   // app seeds its local booking object from this payload (see SocketBooking),
   // so a stale/missing value here means the Manage Booking screen never finds
   // out the requirement until it independently re-fetches items.
+  // The customer's booking notes (ip_bookings.notes) are read in the same
+  // query, so the request popup can highlight them before the technician
+  // accepts.
   const [[docReqRow]] = await db.execute(
     `SELECT EXISTS(
        SELECT 1 FROM ip_booking_items bi
        JOIN ip_products pr ON pr.product_id = bi.product_id
        WHERE bi.booking_id = ? AND pr.document_required IN (1, '1', 'yes')
-     ) AS doc_required`,
-    [bookingId]
+     ) AS doc_required,
+     (SELECT b.notes FROM ip_bookings b WHERE b.booking_id = ?) AS notes`,
+    [bookingId, bookingId]
   );
   const docRequired = !!docReqRow?.doc_required;
+  const notes       = String(docReqRow?.notes ?? '').trim() || null;
 
   // Build the full booking payload now — needed by both normal dispatch
   // and the slot-based fallback (which sends the complete data to the tech).
@@ -1372,6 +1378,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
     ...(slotId          != null && { slotId }),
     ...(slotLabel       != null && { slotLabel }),
     ...(appointmentTime != null && { appointmentTime }),
+    ...(notes           != null && { notes }),
     createdAt: new Date().toISOString(),
   };
 
