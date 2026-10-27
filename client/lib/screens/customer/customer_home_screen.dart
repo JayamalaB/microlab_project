@@ -109,11 +109,11 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   Future<void> _startBooking() async {
     final m = _bookingFor;
     if (m != null) {
-      setState(() => _activeMember = m);
+      setState(() { _activeMember = m; _dashboardMember = m; });
       return;
     }
     final added = await _openAddMember(select: true);
-    if (added != null && mounted) setState(() => _activeMember = added);
+    if (added != null && mounted) setState(() { _activeMember = added; _dashboardMember = added; });
   }
 
   void _pickBookingFor() {
