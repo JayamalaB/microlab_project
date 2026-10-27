@@ -137,6 +137,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Notes ─────────────────────────────────────────────────
   final TextEditingController _notesController = TextEditingController();
 
+  // ── Address (mutable — user can edit in checkout) ─────────
+  late String? _address;
+  late String? _pincode;
+  late String? _city;
+
   // ── Payment ───────────────────────────────────────────────
   // 'full' = pay tests + service charge now via Razorpay
   // 'pay_later' = ₹0 now, everything collected at home by technician
@@ -207,6 +212,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   @override
   void initState() {
     super.initState();
+    _address = widget.address;
+    _pincode = widget.pincode;
+    _city    = widget.city;
     if (_anyDocRequired) _paymentType = 'pay_later';
 
     debugPrint('\n🧾 [CHECKOUT INIT] ──────────────────────────────────');
@@ -564,6 +572,86 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     setState(() => _prescriptions.removeAt(index));
   }
 
+  // ── Edit address (Home Collection) ───────────────────────
+  Future<void> _editAddress() async {
+    final addrCtrl    = TextEditingController(text: _address);
+    final pincodeCtrl = TextEditingController(text: _pincode);
+    final cityCtrl    = TextEditingController(text: _city);
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Center(child: Container(width: 40, height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)))),
+            const Text('Edit Address', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+            const SizedBox(height: 16),
+            const Text('Address', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            const SizedBox(height: 6),
+            TextField(controller: addrCtrl, maxLines: 2,
+                textCapitalization: TextCapitalization.sentences,
+                decoration: _addrInputDecor('Street / locality')),
+            const SizedBox(height: 12),
+            Row(children: [
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Pincode', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                const SizedBox(height: 6),
+                TextField(controller: pincodeCtrl, keyboardType: TextInputType.number,
+                    decoration: _addrInputDecor('6-digit pincode')),
+              ])),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('City', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                const SizedBox(height: 6),
+                TextField(controller: cityCtrl, textCapitalization: TextCapitalization.words,
+                    decoration: _addrInputDecor('City')),
+              ])),
+            ]),
+            const SizedBox(height: 20),
+            SizedBox(width: double.infinity, child: ElevatedButton(
+              onPressed: () {
+                final a = addrCtrl.text.trim();
+                final p = pincodeCtrl.text.trim();
+                final c = cityCtrl.text.trim();
+                setState(() {
+                  _address = a.isEmpty ? null : a;
+                  _pincode = p.isEmpty ? null : p;
+                  _city    = c.isEmpty ? null : c;
+                });
+                Navigator.pop(ctx);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.brandGreen, foregroundColor: Colors.white,
+                elevation: 0, padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              child: const Text('Save Address', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+            )),
+          ]),
+        ),
+      ),
+    );
+    addrCtrl.dispose(); pincodeCtrl.dispose(); cityCtrl.dispose();
+  }
+
+  InputDecoration _addrInputDecor(String hint) => InputDecoration(
+    hintText: hint,
+    hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
+    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
+    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+  );
+
   // ── Family: open add-member sheet (it loads tests page by page itself) ──
   Future<void> _showAddMemberSheet() async {
     final excludedIds = {widget.patientId, ..._familyMembers.map((m) => m.patient.patientId)};
@@ -616,9 +704,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       availableSlotId:     slotId,
       collectionDate:      dateStr,
       bookingType:         widget.mode == 'Home Collection' ? 'home_collection' : 'lab_visit',
-      collectionAddress:   widget.address,
-      collectionPincode:   widget.pincode,
-      collectionCity:      widget.city,
+      collectionAddress:   _address,
+      collectionPincode:   _pincode,
+      collectionCity:      _city,
       collectionLatitude:  widget.patientLat,
       collectionLongitude: widget.patientLng,
       branchId:            widget.branchId,
@@ -694,7 +782,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final primaryBookingId = bookings.isNotEmpty ? bookings[0]['bookingId'] as int? : null;
 
     if (primaryBookingId != null && widget.mode == 'Home Collection') {
-      final address = [widget.address, widget.city, widget.pincode]
+      final address = [_address, _city, _pincode]
           .where((s) => s != null && s.isNotEmpty).join(', ');
       final socket = SocketService.instance;
       socket.registerPatientSocket(patientId: widget.patientId, bookingId: primaryBookingId);
@@ -722,9 +810,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       member:        widget.member,
       tests:         widget.cart,
       mode:          widget.mode,
-      address:       widget.address,
-      pincode:       widget.pincode,
-      city:          widget.city,
+      address:       _address,
+      pincode:       _pincode,
+      city:          _city,
       branch:        widget.branch,
       date:          _selectedDate!,
       timeSlot:      _selectedSlot?.label ?? '',
@@ -820,7 +908,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       return;
     }
 
-    final address = [widget.address, widget.city, widget.pincode]
+    final address = [_address, _city, _pincode]
         .where((s) => s != null && s.isNotEmpty)
         .join(', ');
 
@@ -844,9 +932,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'paymentType':    isPayNow ? 'full' : 'pay_later',
       if (isPayNow) 'razorpayPaymentId': razorpayPaymentId,
       if (widget.branchId   != null) 'branchId': widget.branchId,
-      if (widget.address    != null && widget.address!.isNotEmpty)   'collectionAddress': widget.address,
-      if (widget.pincode    != null && widget.pincode!.isNotEmpty)   'collectionPincode': widget.pincode,
-      if (widget.city       != null && widget.city!.isNotEmpty)      'collectionCity':    widget.city,
+      if (_address    != null && _address!.isNotEmpty)   'collectionAddress': _address,
+      if (_pincode    != null && _pincode!.isNotEmpty)   'collectionPincode': _pincode,
+      if (_city       != null && _city!.isNotEmpty)      'collectionCity':    _city,
       if (_selectedDate     != null) 'collectionDate':
           '${_selectedDate!.year}-${_selectedDate!.month.toString().padLeft(2, '0')}-${_selectedDate!.day.toString().padLeft(2, '0')}',
       if (widget.patientLat != null) 'collectionLatitude':  widget.patientLat,
@@ -942,9 +1030,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       member: widget.member,
       tests: widget.cart,
       mode: widget.mode,
-      address: widget.address,
-      pincode: widget.pincode,
-      city: widget.city,
+      address: _address,
+      pincode: _pincode,
+      city: _city,
       branch: widget.branch,
       date: _selectedDate!,
       timeSlot: _selectedSlot?.label ?? '',
@@ -1073,19 +1161,29 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           _SectionCard(
             title: widget.mode == 'Lab Test' ? 'Lab Appointment' : widget.mode,
             icon: widget.mode == 'Home Collection' ? Icons.home_outlined : Icons.local_hospital_outlined,
+            trailing: widget.mode == 'Home Collection'
+                ? GestureDetector(
+                    onTap: _editAddress,
+                    child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.edit_outlined, size: 14, color: AppColors.brandGreen),
+                      SizedBox(width: 3),
+                      Text('Edit', style: TextStyle(fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
+                    ]),
+                  )
+                : null,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (widget.mode == 'Home Collection') ...[
-                  if (widget.address != null && widget.address!.isNotEmpty)
-                    _InfoLine(Icons.home_outlined, widget.address!),
+                  if (_address != null && _address!.isNotEmpty)
+                    _InfoLine(Icons.home_outlined, _address!),
                   Row(children: [
-                    if (widget.pincode != null)
-                      Expanded(child: _InfoLine(Icons.pin_outlined, widget.pincode!)),
-                    if (widget.pincode != null && widget.city != null)
+                    if (_pincode != null)
+                      Expanded(child: _InfoLine(Icons.pin_outlined, _pincode!)),
+                    if (_pincode != null && _city != null)
                       const SizedBox(width: 12),
-                    if (widget.city != null)
-                      Expanded(child: _InfoLine(Icons.location_city_outlined, widget.city!)),
+                    if (_city != null)
+                      Expanded(child: _InfoLine(Icons.location_city_outlined, _city!)),
                   ]),
                   if (widget.patientLat == null) ...[
                     const SizedBox(height: 8),
@@ -2333,7 +2431,8 @@ class _SectionCard extends StatelessWidget {
   final IconData icon;
   final Widget child;
   final bool required;
-  const _SectionCard({required this.title, required this.icon, required this.child, this.required = false});
+  final Widget? trailing;
+  const _SectionCard({required this.title, required this.icon, required this.child, this.required = false, this.trailing});
 
   @override
   Widget build(BuildContext context) => Container(
@@ -2349,9 +2448,10 @@ class _SectionCard extends StatelessWidget {
             Row(children: [
               Icon(icon, size: 16, color: AppColors.brandGreen),
               const SizedBox(width: 8),
-              Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+              Expanded(child: Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary))),
               if (required)
                 const Text(' *', style: TextStyle(color: Color(0xFFD32F2F), fontSize: 14)),
+              if (trailing != null) ...[const SizedBox(width: 8), trailing!],
             ]),
             const SizedBox(height: 12),
             child,
