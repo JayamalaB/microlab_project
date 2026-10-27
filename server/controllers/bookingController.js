@@ -456,6 +456,7 @@ exports.getMyBookings = async (req, res) => {
          TIME_FORMAT(av.slot_time, '%h:%i %p') AS slot_time_formatted,
          COALESCE(bpt.payment_status,
            IF(bpt.transaction_status='completed','paid','pending')) AS payment_status,
+         bpt.payment_mode,
          b.amount_paid,
          b.amount_due,
          (SELECT bd.doc_status
@@ -2346,6 +2347,7 @@ exports.createFamilyBooking = async (req, res) => {
     paymentType       = 'pay_later',
     razorpayPaymentId = null,
     razorpayOrderId   = null,
+    notes             = null,
   } = req.body;
 
   if (!Array.isArray(members) || members.length < 2) {
@@ -2418,10 +2420,10 @@ exports.createFamilyBooking = async (req, res) => {
             collection_address, postal_code, city,
             patient_id, patient_id_ref, product_id,
             payment_status, visit_group_id, start_datetime, end_datetime, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, 'mobile_app', NULL,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, 'mobile_app', ?,
                  ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), ?, NOW())`,
         [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
-         bookingType, totalAmount, amountPaid, amountDue,
+         bookingType, totalAmount, amountPaid, amountDue, notes ?? null,
          collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
          patientId, resolvedPatientIdRef,
          isPaid ? 'paid' : 'unpaid',

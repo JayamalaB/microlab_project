@@ -1207,6 +1207,7 @@ class ApiService {
     required String paymentType,
     String? razorpayPaymentId,
     String? razorpayOrderId,
+    String? notes,
   }) async {
     final token = await getToken();
     if (token == null) return null;
@@ -1225,6 +1226,7 @@ class ApiService {
         if (branchId            != null) 'branchId':           branchId,
         if (razorpayPaymentId   != null) 'razorpayPaymentId':  razorpayPaymentId,
         if (razorpayOrderId     != null) 'razorpayOrderId':    razorpayOrderId,
+        if (notes != null && notes.isNotEmpty) 'notes': notes,
       };
       final res = await _client.post(
         Uri.parse('$baseUrl/api/bookings/family'),

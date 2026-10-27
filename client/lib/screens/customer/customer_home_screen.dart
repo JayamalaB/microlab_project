@@ -34,7 +34,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   int _selectedIndex = 0;
   MemberModel? _activeMember;
+  MemberModel? _dashboardMember; // kept alive in IndexedStack even when back is pressed
   List<MemberModel> _members = [];
+  final Map<String, BookingDraft> _drafts = {};
   bool _loadingPatients = true;
   final _bookingsRefresh = ValueNotifier<int>(0);
   final _reportsRefresh  = ValueNotifier<int>(0);
@@ -296,17 +298,21 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                       ),
                     )
                   : _members.isEmpty ? _emptyState() : _memberList(),
-              // Slot 1: embedded dashboard
-              if (_activeMember != null)
+              // Slot 1: embedded dashboard — kept alive via _dashboardMember so
+              // back-press (which only clears _activeMember) does not destroy state.
+              if (_dashboardMember != null)
                 SafeArea(
                   top: false,
                   bottom: false,
                   child: CustomerDashboardScreen(
-                    key: ValueKey(_activeMember!.id),
-                    member: _activeMember!,
+                    key: ValueKey(_dashboardMember!.id),
+                    member: _dashboardMember!,
                     isVip: widget.isVip,
                     embedded: true,
                     onBack: () => setState(() => _activeMember = null),
+                    initialDraft: _drafts[_dashboardMember!.id],
+                    onDraftSave: (draft) => _drafts[_dashboardMember!.id] = draft,
+                    onMemberAdded: _loadPatients,
                   ),
                 )
               else
@@ -458,7 +464,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
               onView: () => _viewMember(m),
               onEdit: () => _openEditMember(m),
               onDelete: () => _confirmDelete(m.id, m.name),
-              onBook: () => setState(() => _activeMember = m),
+              onBook: () => setState(() { _activeMember = m; _dashboardMember = m; }),
             )),
       ],
     );

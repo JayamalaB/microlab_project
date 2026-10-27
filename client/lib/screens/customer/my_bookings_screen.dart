@@ -200,6 +200,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       paidAmount:          amountPaid,
       amountDue:           amountDue,
       paymentStatus:       b['payment_status'] as String?,
+      paymentMode:         b['payment_mode']   as String?,
       status:              _mapStatus(b['booking_status'] as String? ?? 'pending'),
       createdAt:           DateTime.tryParse(b['created_at'] as String? ?? '') ?? DateTime.now(),
       docRequired:         presImages.isNotEmpty,
@@ -1528,12 +1529,13 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
 
                   pw.Table(
                     columnWidths: {
-                      0: const pw.FixedColumnWidth(70),
+                      0: const pw.FixedColumnWidth(110),
                       1: const pw.FlexColumnWidth(),
                     },
                     children: [
-                      _infoRow('Patient', b.member.name, base: base),
-                      _infoRow('Mode',    b.mode,         base: base),
+                      _infoRow('Patient',        b.member.name, base: base),
+                      _infoRow('Booking Type',   b.mode,         base: base),
+                      _infoRow('Payment Method', b.paymentMode == 'RAZORPAY' ? 'Online' : b.paymentMode == 'CASH' ? 'Cash' : 'Pay Later', base: base),
                       _infoRow('Date',    '${b.date.day}/${b.date.month}/${b.date.year}', base: base),
                       _infoRow('Slot',    b.timeSlot,     base: base),
                       if (b.address != null) _infoRow('Address', b.address!, base: base),
