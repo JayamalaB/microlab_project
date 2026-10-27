@@ -432,6 +432,8 @@ exports.getMyBookings = async (req, res) => {
          b.booking_type,
          b.booking_date            AS collection_date,
          b.total_amount,
+         b.additional_charge_amount,
+         b.additional_charge_reason,
          b.discount_amount,
          b.refund_amount,
          b.refund_status,
@@ -1706,7 +1708,8 @@ exports.getLinkedPatients = async (req, res) => {
     const [rows] = await db.execute(
       `SELECT p.patient_id, p.patient_name, p.patient_mobile,
               NULL AS booking_ref, NULL AS booking_id,
-              NULL AS total_amount, NULL AS amount_due, NULL AS payment_status
+              NULL AS total_amount, NULL AS amount_due, NULL AS payment_status,
+              NULL AS additional_charge_amount, NULL AS additional_charge_reason
        FROM ip_patient_bookings pb
        JOIN ip_patients p ON p.patient_id = pb.patient_id
        WHERE pb.booking_id = ?
@@ -1718,7 +1721,8 @@ exports.getLinkedPatients = async (req, res) => {
 
        SELECT p.patient_id, p.patient_name, p.patient_mobile,
               b2.booking_ref, b2.booking_id,
-              b2.total_amount, b2.amount_due, b2.payment_status
+              b2.total_amount, b2.amount_due, b2.payment_status,
+              b2.additional_charge_amount, b2.additional_charge_reason
        FROM ip_bookings b1
        JOIN ip_bookings b2 ON b2.visit_group_id = b1.visit_group_id
                            AND b2.booking_id != b1.booking_id

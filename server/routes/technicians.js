@@ -6,6 +6,7 @@ const auth = require('../middleware/auth');
 // Static POST/GET routes must be registered BEFORE /:technicianId to avoid path collision
 router.post('/add-customer',            auth, technicianController.addCustomerBooking);
 router.post('/collect-payment',         auth, technicianController.collectPayment);
+router.put('/bookings/:bookingId/additional-charge', auth, technicianController.setAdditionalCharge);
 router.post('/add-visit-member',        auth, technicianController.addVisitMember);
 router.get('/patient-lookup',           auth, technicianController.lookupPatient);
 router.get('/booking-family',           auth, technicianController.getBookingFamily);

@@ -686,6 +686,38 @@ class ApiService {
     return false;
   }
 
+  // Sets the booking's additional charge (amount + reason) entered by the
+  // technician on site — replaces any earlier one, amount 0 removes it. The
+  // server adds it to total_amount / amount_due. Returns the server reply:
+  // {success, totalAmount, amountDue, paymentStatus, ...} or {success:false, message}.
+  static Future<Map<String, dynamic>> setAdditionalCharge({
+    required int bookingId,
+    required double amount,
+    required String reason,
+  }) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await _client.put(
+        Uri.parse('$baseUrl/api/technicians/bookings/$bookingId/additional-charge'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'amount': amount, 'reason': reason}),
+      ).timeout(const Duration(seconds: 15));
+      // A server without this route answers with an HTML 404 page, not JSON.
+      if (!res.body.trimLeft().startsWith('{')) {
+        debugPrint('[setAdditionalCharge] HTTP ${res.statusCode} — not a JSON reply (server not updated?)');
+        return {'success': false, 'message': 'Additional charges aren\'t available on the server yet. Please try again later.'};
+      }
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[setAdditionalCharge] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
   // Technician hands off an already-accepted job before starting travel — the
   // booking is released and re-dispatched to another technician, not cancelled
   // for the patient. Server only allows this while the job is still 'assigned'.
@@ -741,6 +773,8 @@ class ApiService {
           'amount_due':     b['amount_due'],
           'total_amount':   b['total_amount'],
           'items_total':    b['items_total'],
+          'additional_charge_amount': b['additional_charge_amount'],
+          'additional_charge_reason': b['additional_charge_reason'],
         };
       }
     } catch (e) {
@@ -1347,6 +1381,9 @@ class ApiService {
         address: b['address'] as String,
         location: b['location'] as String?,
         pincode: b['pincode']?.toString(),
+        // Used by the Lab Test sheet to sort branches by distance.
+        lat: double.tryParse(b['latitude']?.toString() ?? ''),
+        lng: double.tryParse(b['longitude']?.toString() ?? ''),
       )).toList();
     }
     return [];

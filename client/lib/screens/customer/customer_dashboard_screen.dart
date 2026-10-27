@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show FilteringTextInputFormatter;
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
@@ -1162,6 +1163,16 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
   List<BranchModel> _allBranches      = [];
   List<BranchModel> _filteredBranches = [];
   bool _searchingBranches = false;
+  // Lab Test PIN lookup: a 6-digit PIN is looked up once (district + map
+  // point); branches are then listed nearest first, and one matching the
+  // PIN or city is selected automatically. City and Branch are disabled
+  // while the lookup runs.
+  bool _labPinLookup = false;
+  String? _labLookedUpPin;
+  double? _labPinLat;
+  double? _labPinLng;
+  final Map<String, double> _branchDistKm = {};
+  String? _branchMatchNote;
 
   // Pincode auto-detection
   String? _detectedArea;
@@ -1206,6 +1217,9 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
 
   // Pincode geocoding in progress
   bool _isGeocoding = false;
+  // True only while a typed pincode is being looked up (not during GPS) —
+  // Location and Address stay disabled until the lookup finishes.
+  bool _isPincodeLookup = false;
 
   @override
   void initState() {
@@ -1301,9 +1315,110 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
           );
         }
       });
+      // Re-opened with a PIN/city already filled in: rank straight away,
+      // keeping a branch the customer chose earlier.
+      _rankBranches(autoSelect: _branch == null);
+      final pin = _pincodeCtrl.text.trim();
+      if (pin.length == 6) _labLookupPin(pin);
     } catch (_) {
       if (mounted) setState(() => _searchingBranches = false);
     }
+  }
+
+  // Lab Test: orders ALL branches — ones matching the PIN or city first,
+  // then nearest first (when the PIN's map point is known), then by name —
+  // and selects the first match automatically. Never hides a branch, so the
+  // dropdown is never empty while branches exist.
+  void _rankBranches({bool autoSelect = true}) {
+    if (_mode != 'Lab Test' || !mounted) return;
+    final pin  = _pincodeCtrl.text.trim();
+    final city = _cityCtrl.text.trim().toLowerCase();
+
+    _branchDistKm.clear();
+    if (_labPinLat != null && _labPinLng != null) {
+      for (final b in _allBranches) {
+        if (b.lat != null && b.lng != null) {
+          _branchDistKm[b.id] = Geolocator.distanceBetween(_labPinLat!, _labPinLng!, b.lat!, b.lng!) / 1000;
+        }
+      }
+    }
+
+    bool pinMatch(BranchModel b)  => pin.length == 6 && b.pincode?.trim() == pin;
+    bool cityMatch(BranchModel b) => city.length >= 3 && [b.location, b.address, b.name]
+        .any((s) => s != null && s.toLowerCase().contains(city));
+    int rank(BranchModel b) => pinMatch(b) ? 0 : cityMatch(b) ? 1 : 2;
+
+    final ranked = [..._allBranches]..sort((a, b) {
+      final r = rank(a).compareTo(rank(b));
+      if (r != 0) return r;
+      final da = _branchDistKm[a.id], db = _branchDistKm[b.id];
+      if (da != null && db != null) return da.compareTo(db);
+      if (da != null) return -1;
+      if (db != null) return 1;
+      return a.name.compareTo(b.name);
+    });
+
+    setState(() {
+      _filteredBranches = ranked;
+      final best = ranked.isNotEmpty && rank(ranked.first) < 2 ? ranked.first : null;
+      if (autoSelect && best != null) {
+        _branch = best;
+        _branchError = false;
+        _branchMatchNote = pinMatch(best)
+            ? 'Branch selected for your pincode — you can change it'
+            : 'Branch selected for your city — you can change it';
+      } else if (best == null) {
+        _branchMatchNote = null;
+      }
+    });
+  }
+
+  // Lab Test: district + map point for a 6-digit PIN (same India Post +
+  // Google geocode lookups Home Collection uses). Results for a PIN the
+  // customer has since changed are ignored.
+  Future<void> _labLookupPin(String pin) async {
+    if (_labLookedUpPin == pin) return;
+    _labLookedUpPin = pin;
+    setState(() => _labPinLookup = true);
+    String? district;
+    double? lat, lng;
+    try {
+      final res = await http
+          .get(Uri.parse('https://api.postalpincode.in/pincode/$pin'))
+          .timeout(const Duration(seconds: 8));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body) as List;
+        if (data.isNotEmpty && data[0]['Status'] == 'Success') {
+          final offices = data[0]['PostOffice'] as List;
+          if (offices.isNotEmpty) district = offices[0]['District'] as String?;
+        }
+      }
+      final geoRes = await http.get(Uri.parse(
+        'https://maps.googleapis.com/maps/api/geocode/json'
+        '?address=$pin,India&key=${AppConstants.googleMapsApiKey}',
+      )).timeout(const Duration(seconds: 8));
+      if (geoRes.statusCode == 200) {
+        final geo = jsonDecode(geoRes.body) as Map<String, dynamic>;
+        final results = geo['results'] as List?;
+        if (geo['status'] == 'OK' && results != null && results.isNotEmpty) {
+          final loc = (results[0]['geometry'] as Map)['location'] as Map;
+          lat = (loc['lat'] as num).toDouble();
+          lng = (loc['lng'] as num).toDouble();
+        }
+      }
+    } catch (e) {
+      debugPrint('[LocationSheet] Lab PIN lookup error: $e');
+    }
+    if (!mounted || _pincodeCtrl.text.trim() != pin) return;
+    setState(() {
+      _labPinLookup = false;
+      _labPinLat = lat;
+      _labPinLng = lng;
+    });
+    // Filling the city re-ranks through its listener; rank once more so
+    // the new distances apply either way.
+    if (district != null && _cityCtrl.text.trim().isEmpty) _cityCtrl.text = district;
+    _rankBranches();
   }
 
   // Home Collection live location, in order: location switched on →
@@ -1497,11 +1612,20 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
     
     setState(() {
       _isGeocoding = true;
+      _isPincodeLookup = true;
       _gpsSelected = false;
       _manualSelected = false;
       _locationError = false;
     });
-    
+
+    try {
+      await _lookupPincode(pincode);
+    } finally {
+      if (mounted) setState(() => _isPincodeLookup = false);
+    }
+  }
+
+  Future<void> _lookupPincode(String pincode) async {
     try {
       // First detect area from pincode API
       final res = await http
@@ -1620,22 +1744,20 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
     }
   }
 
+  // Lab Test: runs on every PIN / city keystroke. Re-ranks the branches
+  // (keeps the chosen branch unless a match is found) and looks up a PIN
+  // once it has 6 digits. A shorter PIN drops the previous map point.
   void _filterBranches() {
     if (_mode != 'Lab Test') return;
-    final query = '${_pincodeCtrl.text} ${_cityCtrl.text}'.trim().toLowerCase();
-    setState(() {
-      _branch = null;
-      if (query.isEmpty) {
-        _filteredBranches = _allBranches;
-      } else {
-        _filteredBranches = _allBranches.where((b) =>
-          b.name.toLowerCase().contains(query) ||
-          b.address.toLowerCase().contains(query) ||
-          (b.pincode?.contains(query) ?? false) ||
-          (b.location?.toLowerCase().contains(query) ?? false)
-        ).toList();
-      }
-    });
+    final pin = _pincodeCtrl.text.trim();
+    if (pin.length != 6 && (_labPinLat != null || _labLookedUpPin != null || _labPinLookup)) {
+      _labLookedUpPin = null;
+      _labPinLat = null;
+      _labPinLng = null;
+      _labPinLookup = false;
+    }
+    _rankBranches();
+    if (pin.length == 6) _labLookupPin(pin);
   }
 
   void _apply() {
@@ -1763,7 +1885,11 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                       onTap: () {
                         final prev = _mode;
                         setState(() => _mode = m);
-                        if (m == 'Lab Test' && _allBranches.isEmpty) _loadBranches();
+                        if (m == 'Lab Test' && _allBranches.isEmpty) {
+                          _loadBranches();
+                        } else if (m == 'Lab Test') {
+                          _filterBranches(); // rank + PIN lookup for what is already typed
+                        }
                         // Switching to Home Collection: check location
                         // on/permission right away, as on opening the sheet.
                         if (m == 'Home Collection' && prev != m &&
@@ -2004,26 +2130,11 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                         const Divider(),
                         const SizedBox(height: 12),
                         
-                        // Full address
-                        TextField(
-                          controller: _addressCtrl,
-                          maxLines: 2,
-                          style: const TextStyle(fontSize: 14),
-                          decoration: InputDecoration(
-                            hintText: 'House no, Street, Area (optional)',
-                            hintStyle: const TextStyle(color: AppColors.textHint),
-                            prefixIcon: const Icon(Icons.home_outlined, size: 18, color: AppColors.textHint),
-                            filled: true,
-                            fillColor: AppColors.background,
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
-                            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
-                            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        
-                        // Pincode (required for manual detection)
+                        // PIN Code (left) + Location (right). Location and
+                        // Address below stay disabled while the PIN is
+                        // being looked up.
                         Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Expanded(
                               child: TextField(
@@ -2048,24 +2159,46 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                             Expanded(
                               child: TextField(
                                 controller: _cityCtrl,
+                                enabled: !_isPincodeLookup,
                                 style: const TextStyle(fontSize: 14),
                                 decoration: InputDecoration(
-                                  hintText: 'City',
+                                  hintText: 'Location',
                                   hintStyle: const TextStyle(color: AppColors.textHint),
                                   prefixIcon: const Icon(Icons.location_city_outlined, size: 18, color: AppColors.textHint),
                                   filled: true,
-                                  fillColor: AppColors.background,
+                                  fillColor: _isPincodeLookup ? AppColors.divider.withValues(alpha: 0.5) : AppColors.background,
                                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
                                   enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                                  disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
                                   focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
                                 ),
                               ),
                             ),
                           ],
                         ),
-                        
-                        // Geocoding indicator
-                        if (_isGeocoding && _manualSelected == false) ...[
+
+                        // Full address (bottom)
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _addressCtrl,
+                          enabled: !_isPincodeLookup,
+                          maxLines: 2,
+                          style: const TextStyle(fontSize: 14),
+                          decoration: InputDecoration(
+                            hintText: 'House no, Street, Area (optional)',
+                            hintStyle: const TextStyle(color: AppColors.textHint),
+                            prefixIcon: const Icon(Icons.home_outlined, size: 18, color: AppColors.textHint),
+                            filled: true,
+                            fillColor: _isPincodeLookup ? AppColors.divider.withValues(alpha: 0.5) : AppColors.background,
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                            disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                          ),
+                        ),
+
+                        // Pincode lookup indicator — only for a typed PIN, not GPS
+                        if (_isPincodeLookup) ...[
                           const SizedBox(height: 8),
                           const Row(children: [
                             SizedBox(
@@ -2161,6 +2294,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                   child: TextField(
                     controller: _pincodeCtrl,
                     keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     maxLength: 6,
                     style: const TextStyle(fontSize: 14),
                     decoration: InputDecoration(
@@ -2179,19 +2313,34 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                 Expanded(
                   child: TextField(
                     controller: _cityCtrl,
+                    enabled: !_labPinLookup,
                     style: const TextStyle(fontSize: 14),
                     decoration: InputDecoration(
                       hintText: 'City',
                       hintStyle: const TextStyle(color: AppColors.textHint),
                       prefixIcon: const Icon(Icons.location_city_outlined, size: 18, color: AppColors.textHint),
-                      filled: true, fillColor: AppColors.background,
+                      filled: true,
+                      fillColor: _labPinLookup ? AppColors.divider.withValues(alpha: 0.5) : AppColors.background,
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
                       enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
+                      disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.divider)),
                       focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
                     ),
                   ),
                 ),
               ]),
+              if (_labPinLookup) ...[
+                const SizedBox(height: 8),
+                const Row(children: [
+                  SizedBox(
+                    width: 14, height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 1.5, color: AppColors.brandGreen),
+                  ),
+                  SizedBox(width: 8),
+                  Text('Detecting location from pincode...',
+                      style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ]),
+              ],
               const SizedBox(height: 16),
               RichText(
                 text: const TextSpan(
@@ -2216,6 +2365,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                   ]),
                 )
               else if (_filteredBranches.isEmpty)
+                // Only when no branch exists at all — the list is never
+                // filtered down to nothing.
                 Container(
                   padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
                   decoration: BoxDecoration(
@@ -2226,7 +2377,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                   child: const Row(children: [
                     Icon(Icons.search_off_rounded, size: 16, color: AppColors.textHint),
                     SizedBox(width: 8),
-                    Text('No branches found for this location', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                    Text('No branches available right now', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
                   ]),
                 )
               else
@@ -2245,15 +2396,33 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                   dropdownColor: AppColors.white,
                   borderRadius: BorderRadius.circular(12),
                   isExpanded: true,
-                  items: _filteredBranches.map((b) => DropdownMenuItem(
-                    value: b,
-                    child: Text(b.name,
-                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  )).toList(),
-                  onChanged: (b) => setState(() { _branch = b; _branchError = false; }),
+                  items: _filteredBranches.map((b) {
+                    final km = _branchDistKm[b.id];
+                    return DropdownMenuItem(
+                      value: b,
+                      child: Text(
+                        km != null ? '${b.name}  ·  ${km < 1 ? '<1' : km.toStringAsFixed(1)} km' : b.name,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    );
+                  }).toList(),
+                  // Disabled while the PIN is being looked up.
+                  onChanged: _labPinLookup
+                      ? null
+                      : (b) => setState(() { _branch = b; _branchError = false; _branchMatchNote = null; }),
                 ),
+              if (_branchMatchNote != null && _branch != null && !_labPinLookup) ...[
+                const SizedBox(height: 6),
+                Row(children: [
+                  const Icon(Icons.check_circle_outline_rounded, size: 13, color: AppColors.brandGreen),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(_branchMatchNote!,
+                        style: const TextStyle(fontSize: 12, color: AppColors.brandGreen)),
+                  ),
+                ]),
+              ],
               if (_branchError) ...[
                 const SizedBox(height: 6),
                 const Row(children: [

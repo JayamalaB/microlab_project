@@ -230,6 +230,9 @@ class BookingModel {
   final String timeSlot;
   final String paymentType; // 'service_charge' | 'full'
   final double serviceCharge;
+  // Added by the technician on site (with a reason) — part of grandTotal.
+  final double additionalCharge;
+  final String? additionalChargeReason;
   final double testsTotal;
   final double grandTotal;
   final double paidAmount;
@@ -277,6 +280,8 @@ class BookingModel {
     required this.timeSlot,
     required this.paymentType,
     required this.serviceCharge,
+    this.additionalCharge = 0,
+    this.additionalChargeReason,
     required this.testsTotal,
     required this.grandTotal,
     required this.paidAmount,

@@ -143,6 +143,9 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
     final itemsTotal = double.tryParse(b['items_total']?.toString() ?? '') ?? total;
     final amountPaid = double.tryParse(b['amount_paid']?.toString() ?? '') ?? 0.0;
     final amountDue  = double.tryParse(b['amount_due']?.toString() ?? '') ?? (total - amountPaid).clamp(0, double.infinity);
+    // Technician's on-site additional charge — inside total, so it is backed
+    // out of the service charge below and shown as its own line.
+    final additionalCharge = double.tryParse(b['additional_charge_amount']?.toString() ?? '') ?? 0.0;
 
     final presImages = _parsePresImages(b['presc_image_url']);
     final presStatus = b['prescription_status'] as String?;
@@ -194,7 +197,9 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       date:                date,
       timeSlot:            slotLabel ?? 'Not specified',
       paymentType:         amountPaid >= total && total > 0 ? 'full' : 'pay_later',
-      serviceCharge:       (total - itemsTotal).clamp(0, double.infinity),
+      serviceCharge:       (total - itemsTotal - additionalCharge).clamp(0, double.infinity),
+      additionalCharge:    additionalCharge,
+      additionalChargeReason: b['additional_charge_reason'] as String?,
       testsTotal:          itemsTotal,
       grandTotal:          total,
       paidAmount:          amountPaid,
@@ -1574,6 +1579,8 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                         _pdfSummaryRow('Tests Total', 'Rs.${b.testsTotal.toInt()}', base: base),
                         if (b.serviceCharge > 0)
                           _pdfSummaryRow('Service Charge', 'Rs.${b.serviceCharge.toInt()}', base: base),
+                        if (b.additionalCharge > 0)
+                          _pdfSummaryRow('Additional Charge', 'Rs.${b.additionalCharge.toInt()}', base: base),
                         pw.Divider(thickness: 0.8),
                         _pdfSummaryRow('Grand Total', 'Rs.${b.grandTotal.toInt()}', bold: true, base: base),
                         _pdfSummaryRow('Paid', 'Rs.${b.paidAmount.toInt()}', color: green, base: base),
@@ -2059,6 +2066,10 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                       _DetailRow(Icons.receipt_outlined, 'Tests Total', '₹${b.testsTotal.toInt()}'),
                       if (b.serviceCharge > 0)
                         _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${b.serviceCharge.toInt()}'),
+                      if (b.additionalCharge > 0)
+                        _DetailRow(Icons.add_circle_outline,
+                            'Additional Charge${(b.additionalChargeReason ?? '').isNotEmpty ? ' (${b.additionalChargeReason})' : ''}',
+                            '+ ₹${b.additionalCharge.toInt()}'),
                       _DetailRow(Icons.calculate_outlined, 'Grand Total', '₹${b.grandTotal.toInt()}', valueBold: true),
                       _DetailRow(Icons.check_circle_outline, 'Paid',
                           '₹${b.paidAmount.toInt()}', valueColor: AppColors.brandGreen),

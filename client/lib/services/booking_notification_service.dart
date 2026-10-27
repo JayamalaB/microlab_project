@@ -157,6 +157,7 @@ class BookingNotificationService {
       'bookingType':    booking.bookingType,
       'branchId':       booking.branchId,
       'branchName':     booking.branchName,
+      'notes':          booking.notes,
       'createdAt':      booking.createdAt.toIso8601String(),
     });
 
@@ -176,7 +177,8 @@ class BookingNotificationService {
           styleInformation: BigTextStyleInformation(
             '$name · Booking #${booking.bookingId}\n'
             '📍 $address\n'
-            '🕐 ${formatBookingTime(booking.createdAt)}',
+            '🕐 ${formatBookingTime(booking.createdAt)}'
+            '${booking.notes != null ? '\n📝 Note: ${booking.notes}' : ''}',
           ),
           actions: const [
             AndroidNotificationAction(

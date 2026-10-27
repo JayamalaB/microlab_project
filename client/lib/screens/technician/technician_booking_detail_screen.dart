@@ -216,6 +216,10 @@ class _TechnicianBookingDetailScreenState
 
   // Payment — live values fetched from server in initState, overriding immutable widget.booking fields
   bool _isProcessingPayment = false;
+  // Family visit with 2+ members still owing: how the customer chose to pay
+  // — null (not asked yet), 'combined' (one payment for everyone) or
+  // 'individual' (each member separately, in any order). See _startPayment.
+  String? _familyPayMode;
   bool _isReloading = false;
   double _sessionPaymentCollected = 0.0;
   late String _livePaymentStatus;  // refreshed from server; starts from widget value
@@ -223,6 +227,12 @@ class _TechnicianBookingDetailScreenState
   // Fixed at booking creation (tests + service charge at that time) — used to
   // back out the true service charge amount via _serviceCharge below.
   double _totalAmount = 0.0;
+  // Additional charge the technician entered on site (amount + reason) —
+  // already inside _totalAmount on the server, so it is backed out of
+  // _serviceCharge and added back as its own line in _amountDue.
+  double _additionalCharge = 0.0;
+  String? _additionalChargeReason;
+  bool _savingAdditionalCharge = false;
 
   // Visit members linked to this booking (refreshed after each add)
   List<Map<String, dynamic>> _linkedPatients = [];
@@ -261,14 +271,21 @@ class _TechnicianBookingDetailScreenState
   // charge). Subtracting the original tests' total isolates the service
   // charge — stable regardless of tests added/removed after that point.
   double get _serviceCharge {
-    final sc = _totalAmount - _originalItemsTotal;
+    final sc = _totalAmount - _originalItemsTotal - _additionalCharge;
     return sc < 0.0 ? 0.0 : sc;
   }
 
   double get _amountDue {
-    final due = (_testsTotal + _serviceCharge) - (_liveAmountPaid + _sessionPaymentCollected);
+    final due = (_testsTotal + _serviceCharge + _additionalCharge) - (_liveAmountPaid + _sessionPaymentCollected);
     return due < 0.0 ? 0.0 : due;
   }
+
+  // Additional charges can be entered on site — from Destination Reached up
+  // to Sample Collected (same window the server allows). From OTP Verified
+  // the visit is finalised.
+  bool get _canEditAdditionalCharge => const [
+        'Destination Reached', 'Collection Started', 'Sample Collected',
+      ].contains(_currentStatus);
 
   bool get _paymentDone => _amountDue <= 0.0;
 
@@ -299,12 +316,19 @@ class _TechnicianBookingDetailScreenState
   bool get _paymentInitiated =>
       _paymentDone || _liveAmountPaid > 0 || _sessionPaymentCollected > 0;
 
-  // True when any sibling booking added this session has NO payment recorded
-  // at all yet (fully pending) — a partial payment on a sibling is enough.
-  bool get _hasUnsettledSiblings => _linkedPatients.any((c) {
-    final status = c['payment_status'] as String?;
-    return status != 'paid' && status != 'partial';
-  });
+  // Gate for Enter OTP / Handed to Lab on a visit (single or family): open
+  // once ANY payment has been recorded toward the visit — the main booking or
+  // any family member, full or partial, in single or individual payment mode.
+  // Remaining balances are collected later, the same rule as a single
+  // booking. (Previously every family member had to have paid something,
+  // so a partial single payment that only reached the main patient kept the
+  // OTP step locked.)
+  bool get _visitPaymentStarted =>
+      _paymentInitiated ||
+      _linkedPatients.any((c) {
+        final status = c['payment_status'] as String?;
+        return status == 'paid' || status == 'partial';
+      });
 
   int get _currentStepIndex =>
       _journeySteps.indexWhere((s) => s.status == _currentStatus);
@@ -385,6 +409,203 @@ class _TechnicianBookingDetailScreenState
     });
   }
 
+  // Every booking on this visit that can carry an additional charge — this
+  // screen's own booking plus family members with their own booking.
+  List<({int bookingId, String name, double amount, String? reason, bool isMain})>
+      get _additionalChargeTargets {
+    final mainId = int.tryParse(widget.booking.id);
+    return [
+      if (mainId != null)
+        (bookingId: mainId, name: widget.booking.customerName,
+         amount: _additionalCharge, reason: _additionalChargeReason, isMain: true),
+      for (final p in _linkedPatients)
+        if ((p['booking_id'] as num?) != null)
+          (bookingId: (p['booking_id'] as num).toInt(),
+           name: p['patient_name'] as String? ?? 'Visit Member',
+           amount: double.tryParse(p['additional_charge_amount']?.toString() ?? '') ?? 0.0,
+           reason: p['additional_charge_reason'] as String?,
+           isMain: false),
+    ];
+  }
+
+  // "Add additional charge": a family visit first picks whose booking it
+  // goes on (one charge per booking), then the amount + reason sheet.
+  Future<void> _addAdditionalCharge() async {
+    final targets = _additionalChargeTargets;
+    if (targets.isEmpty) return;
+    var target = targets.first;
+    if (targets.length > 1) {
+      final picked = await showDialog<int>(
+        context: context,
+        builder: (ctx) => SimpleDialog(
+          title: const Text('Add charge for', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          children: [
+            for (var i = 0; i < targets.length; i++)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, i),
+                child: Text(
+                  targets[i].amount > 0
+                      ? '${targets[i].name}  ·  ₹${targets[i].amount.toInt()} added'
+                      : targets[i].name,
+                  style: const TextStyle(fontSize: 14),
+                ),
+              ),
+          ],
+        ),
+      );
+      if (picked == null || !mounted) return;
+      target = targets[picked];
+    }
+    await _editAdditionalCharge(target);
+  }
+
+  // Amount + reason sheet. Saving replaces the booking's charge; "Remove"
+  // saves 0. The server recalculates total_amount / amount_due.
+  Future<void> _editAdditionalCharge(
+      ({int bookingId, String name, double amount, String? reason, bool isMain}) target) async {
+    final amountCtrl = TextEditingController(
+        text: target.amount > 0 ? target.amount.toStringAsFixed(target.amount % 1 == 0 ? 0 : 2) : '');
+    final reasonCtrl = TextEditingController(text: target.reason ?? '');
+    String? formError;
+
+    final result = await showModalBottomSheet<double>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          void submit() {
+            final amount = double.tryParse(amountCtrl.text.trim());
+            if (amount == null || amount <= 0) {
+              setSheet(() => formError = 'Enter an amount greater than ₹0');
+              return;
+            }
+            if (reasonCtrl.text.trim().isEmpty) {
+              setSheet(() => formError = 'Enter a reason for the charge');
+              return;
+            }
+            Navigator.pop(ctx, amount);
+          }
+
+          return Padding(
+            padding: EdgeInsets.fromLTRB(20, 16, 20, MediaQuery.of(ctx).viewInsets.bottom + 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(child: Container(
+                  width: 40, height: 4,
+                  margin: const EdgeInsets.only(bottom: 14),
+                  decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+                )),
+                Text(target.amount > 0 ? 'Edit additional charge' : 'Add additional charge',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text(target.name, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: amountCtrl,
+                  autofocus: true,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d{0,5}(\.\d{0,2})?'))],
+                  decoration: const InputDecoration(
+                    labelText: 'Amount',
+                    prefixText: '₹ ',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  onChanged: (_) { if (formError != null) setSheet(() => formError = null); },
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: reasonCtrl,
+                  maxLength: 255,
+                  maxLines: 2,
+                  minLines: 1,
+                  textCapitalization: TextCapitalization.sentences,
+                  decoration: const InputDecoration(
+                    labelText: 'Reason',
+                    hintText: 'e.g. Waited 30 minutes, extra distance',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                  onChanged: (_) { if (formError != null) setSheet(() => formError = null); },
+                ),
+                if (formError != null) ...[
+                  Text(formError!, style: const TextStyle(fontSize: 12, color: AppColors.error)),
+                  const SizedBox(height: 8),
+                ],
+                Row(children: [
+                  if (target.amount > 0) ...[
+                    Expanded(child: OutlinedButton(
+                      onPressed: () => Navigator.pop(ctx, 0.0),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.error,
+                        side: const BorderSide(color: AppColors.error),
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text('Remove'),
+                    )),
+                    const SizedBox(width: 10),
+                  ],
+                  Expanded(flex: 2, child: ElevatedButton(
+                    onPressed: submit,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.brandGreen,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    child: const Text('Save', style: TextStyle(fontWeight: FontWeight.w600)),
+                  )),
+                ]),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    final reason = reasonCtrl.text.trim();
+    // Disposed after the sheet's closing animation, which still reads them.
+    Future.delayed(const Duration(milliseconds: 400), () {
+      amountCtrl.dispose();
+      reasonCtrl.dispose();
+    });
+    if (result == null || !mounted) return;
+
+    setState(() => _savingAdditionalCharge = true);
+    final res = await ApiService.setAdditionalCharge(
+      bookingId: target.bookingId,
+      amount: result,
+      reason: result > 0 ? reason : '',
+    );
+    if (!mounted) return;
+    setState(() => _savingAdditionalCharge = false);
+
+    if (res['success'] != true) {
+      AppMessages.error(context, AppMessages.serverMessage(res['message'],
+          fallback: 'We couldn\'t save the additional charge. Please try again.'));
+      return;
+    }
+    if (target.isMain) {
+      setState(() {
+        _totalAmount            = double.tryParse(res['totalAmount']?.toString() ?? '') ?? _totalAmount;
+        _additionalCharge       = double.tryParse(res['additionalChargeAmount']?.toString() ?? '') ?? 0.0;
+        _additionalChargeReason = res['additionalChargeReason'] as String?;
+        _livePaymentStatus      = res['paymentStatus'] as String? ?? _livePaymentStatus;
+      });
+    } else {
+      await _loadLinkedPatients();
+      if (!mounted) return;
+    }
+    AppMessages.success(context, result > 0
+        ? 'Additional charge ₹${result.toInt()} added for ${target.name}'
+        : 'Additional charge removed');
+  }
+
   // Fetches fresh payment_status + amount_paid from the server so the screen
   // never shows stale data from the time the dashboard last loaded bookings.
   Future<void> _refreshPaymentInfo() async {
@@ -397,6 +618,8 @@ class _TechnicianBookingDetailScreenState
         _livePaymentStatus = data['payment_status'] as String? ?? _livePaymentStatus;
         _liveAmountPaid    = double.tryParse(data['amount_paid']?.toString() ?? '') ?? _liveAmountPaid;
         _totalAmount       = double.tryParse(data['total_amount']?.toString() ?? '') ?? _totalAmount;
+        _additionalCharge  = double.tryParse(data['additional_charge_amount']?.toString() ?? '') ?? 0.0;
+        _additionalChargeReason = data['additional_charge_reason'] as String?;
       });
     } catch (e) {
       debugPrint('[_refreshPaymentInfo] $e');
@@ -408,7 +631,7 @@ class _TechnicianBookingDetailScreenState
   // made on their own phone shows up without leaving/reopening the screen.
   // Deliberately does NOT touch _currentStatus/docs/session-collected-amount —
   // only the server-sourced payment fields that _paymentInitiated/
-  // _hasUnsettledSiblings read, so the technician's in-progress journey state
+  // _visitPaymentStarted read, so the technician's in-progress journey state
   // is never reset by a reload.
   Future<void> _reloadBookingData() async {
     if (_isReloading) return;
@@ -685,11 +908,11 @@ void _advanceStatus() {
   final next = _nextStatus;
   if (next == null) return;
 
-  // OTP step: some payment (full or partial) must be recorded first for
-  // both the parent booking and any siblings — a remaining balance no
-  // longer blocks this, only a complete absence of payment does.
+  // OTP step: some payment (full or partial) must be recorded toward the
+  // visit first — see _visitPaymentStarted. A remaining balance doesn't
+  // block this, only a complete absence of payment does.
   if (next == 'OTP Verified') {
-    if (!_paymentInitiated || _hasUnsettledSiblings) {
+    if (!_visitPaymentStarted) {
       _showCompleteSheet();
     } else {
       _showOtpDialog();
@@ -699,7 +922,7 @@ void _advanceStatus() {
 
   // Final step: payment check, then confirm, then emit handed_to_lab
   if (next == 'Handed to Lab') {
-    if (!_paymentInitiated || _hasUnsettledSiblings) {
+    if (!_visitPaymentStarted) {
       _showCompleteSheet();
       return;
     }
@@ -2113,20 +2336,28 @@ void _resumeJourney() {
               _CompleteStep(
                 number: '1',
                 title: 'Collect Payment',
-                subtitle: _paymentDone
+                // Same figures as the button below: everyone on the visit
+                // who still owes (main patient + family members).
+                subtitle: _unpaidMembers.isEmpty
                     ? 'All payments collected'
-                    : _livePaymentStatus == 'paid'
-                        ? 'Original ₹${_liveAmountPaid.toInt()} paid. Collect additional: ₹${_amountDue.toInt()}'
-                        : 'Collect ₹${_amountDue.toInt()} from customer (tests amount)',
-                done: _paymentDone,
+                    : _unpaidMembers.length > 1
+                        ? 'Collect ₹${_unpaidTotal.toInt()} for ${_unpaidMembers.length} members. Part payment is fine to continue.'
+                        : _livePaymentStatus == 'paid'
+                            ? 'Original ₹${_liveAmountPaid.toInt()} paid. Collect additional: ₹${_unpaidTotal.toInt()}'
+                            : 'Collect ₹${_unpaidTotal.toInt()} from customer (tests amount)',
+                done: _unpaidMembers.isEmpty,
                 locked: false,
-                buttonLabel: _paymentDone ? 'Paid ✓' : 'Make Payment  ₹${_amountDue.toInt()}',
-                buttonColor: _paymentDone ? AppColors.brandGreen : const Color(0xFF1565C0),
-                onTap: _paymentDone
+                buttonLabel: _unpaidMembers.isEmpty
+                    ? 'Paid ✓'
+                    : 'Make Payment  ₹${_unpaidTotal.toInt()}',
+                buttonColor: _unpaidMembers.isEmpty ? AppColors.brandGreen : const Color(0xFF1565C0),
+                // Same entry point as the Collect Payment card: a family with
+                // 2+ members owing is asked single vs individual payment.
+                onTap: _unpaidMembers.isEmpty
                     ? null
                     : () {
                         Navigator.pop(ctx);
-                        _collectPayment(onDone: () {
+                        _startPayment(onDone: () {
                           Future.delayed(
                               const Duration(milliseconds: 300), _showCompleteSheet);
                         });
@@ -2141,10 +2372,10 @@ void _resumeJourney() {
                 title: 'Verify OTP',
                 subtitle: 'Ask customer for the OTP sent to their phone',
                 done: _currentStatus == 'OTP Verified' || _isCompleted,
-                locked: !_paymentInitiated || _hasUnsettledSiblings,
+                locked: !_visitPaymentStarted,
                 buttonLabel: (_currentStatus == 'OTP Verified' || _isCompleted) ? 'Verified ✓' : 'Verify OTP',
                 buttonColor: AppColors.brandGreen,
-                onTap: (!_paymentInitiated || _hasUnsettledSiblings || _currentStatus == 'OTP Verified' || _isCompleted)
+                onTap: (!_visitPaymentStarted || _currentStatus == 'OTP Verified' || _isCompleted)
                     ? null
                     : () {
                         Navigator.pop(ctx);
@@ -2154,7 +2385,9 @@ void _resumeJourney() {
 
               const SizedBox(height: 20),
 
-              if (!_paymentDone)
+              // Only while nothing has been paid toward the visit — once any
+              // payment (even partial) is recorded, Verify OTP is open.
+              if (!_visitPaymentStarted)
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -2166,7 +2399,7 @@ void _resumeJourney() {
                     Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFE65100)),
                     SizedBox(width: 8),
                     Expanded(child: Text(
-                      'Complete payment first, then verify OTP to finish the booking.',
+                      'Collect a payment first (part payment is fine), then verify OTP to finish the booking.',
                       style: TextStyle(fontSize: 12, color: Color(0xFF795548), height: 1.4),
                     )),
                   ]),
@@ -2629,7 +2862,7 @@ void _resumeJourney() {
   // individually using the same Razorpay payment ID — existing per-booking
   // data structure is not changed. For Cash, each booking gets its own
   // separate collectPayment call (no shared gateway reference to reuse).
-  void _collectAllPayment() async {
+  void _collectAllPayment({VoidCallback? onDone}) async {
     final unpaidItems = <Map<String, dynamic>>[];
 
     if (!_paymentDone && _amountDue > 0) {
@@ -2733,6 +2966,7 @@ void _resumeJourney() {
       }
       _refreshPaymentInfo();
       _loadLinkedPatients();
+      onDone?.call();
       return;
     }
 
@@ -2740,7 +2974,8 @@ void _resumeJourney() {
 
     openRazorpay(
       options: {
-        'key':         'rzp_test_SonqjjPurqlLci',
+        // Same configured key as every other payment (was a hard-coded test key).
+        'key':         AppConstants.razorpayKeyId,
         'amount':      (enteredAmount * 100).toInt(),
         'name':        'MicroLab',
         'description': 'Combined payment · ${unpaidItems.length} members',
@@ -2758,17 +2993,25 @@ void _resumeJourney() {
         if (!mounted) return;
         applySuccessState(paymentId);
         // Persist each booking's record individually with the same Razorpay ID
+        var allOk = true;
         for (final a in toCharge) {
-          await ApiService.collectPayment(
+          final ok = await ApiService.collectPayment(
             bookingId:         a['bookingId'] as int,
             razorpayPaymentId: paymentId,
             amount:            a['allocated'] as double,
             paymentMethod:     'RAZORPAY',
           );
+          if (!ok) allOk = false;
         }
         if (mounted) {
+          if (!allOk) {
+            AppMessages.warning(context,
+                'Payment received, but it didn\'t save to MicroLab for every member. Note the ref $paymentId and tell support.',
+                duration: const Duration(seconds: 8));
+          }
           _refreshPaymentInfo();
           _loadLinkedPatients();
+          onDone?.call();
         }
       },
       onError: (msg) {
@@ -2779,6 +3022,135 @@ void _resumeJourney() {
               : AppMessages.error(context, AppMessages.paymentError(msg));
         }
       },
+    );
+  }
+
+  // ── Family payment choice ─────────────────────────────────
+  // Everyone on this visit who still owes something: the main patient (if
+  // their booking isn't fully paid) and each family member with an amount due.
+  List<({int bookingId, String name, double amount, bool isParent})> get _unpaidMembers => [
+        if (!_paymentDone && _amountDue > 0)
+          (bookingId: int.tryParse(widget.booking.id) ?? 0,
+           name: widget.booking.customerName, amount: _amountDue, isParent: true),
+        for (final p in _linkedPatients)
+          if ((p['booking_id'] as num?) != null &&
+              (double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0) > 0)
+            (bookingId: (p['booking_id'] as num).toInt(),
+             name: p['patient_name'] as String? ?? 'Visit Member',
+             amount: double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0,
+             isParent: false),
+      ];
+
+  double get _unpaidTotal => _unpaidMembers.fold(0.0, (s, m) => s + m.amount);
+
+  // Collect one member's payment (Cash or Razorpay, full or partial).
+  void _collectForMember(({int bookingId, String name, double amount, bool isParent}) m,
+      {VoidCallback? onDone}) {
+    if (m.isParent) {
+      _collectPayment(onDone: onDone);
+    } else {
+      _collectVisitMemberPayment(siblingBookingId: m.bookingId, amountDue: m.amount, patientName: m.name);
+    }
+  }
+
+  // Entry point for every "collect payment" tap. One member owing → that
+  // payment directly. A family with 2+ members owing → ask once how they want
+  // to pay: one combined payment, or individually in any order. Partial
+  // amounts are allowed either way (entered in the payment sheet).
+  Future<void> _startPayment({VoidCallback? onDone}) async {
+    final members = _unpaidMembers;
+    if (members.isEmpty) return;
+    if (members.length == 1) {
+      _collectForMember(members.first, onDone: onDone);
+      return;
+    }
+
+    final mode = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('How would the family like to pay?',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          _PayModeOption(
+            icon: Icons.payments_outlined,
+            title: 'Single payment',
+            subtitle: 'One payment of ₹${_unpaidTotal.toInt()} for all ${members.length} members',
+            onTap: () => Navigator.pop(ctx, 'combined'),
+          ),
+          const SizedBox(height: 10),
+          _PayModeOption(
+            icon: Icons.people_alt_outlined,
+            title: 'Individual payments',
+            subtitle: 'Each member pays their own amount, in any order',
+            onTap: () => Navigator.pop(ctx, 'individual'),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary))),
+        ],
+      ),
+    );
+    if (mode == null || !mounted) return;
+    setState(() => _familyPayMode = mode);
+
+    if (mode == 'combined') {
+      _collectAllPayment(onDone: onDone);
+    } else {
+      _showIndividualPaySheet(onDone: onDone);
+    }
+  }
+
+  // Individual mode: every member who still owes, each with their own
+  // "Collect" button — the technician picks whoever is paying now.
+  void _showIndividualPaySheet({VoidCallback? onDone}) {
+    final members = _unpaidMembers;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Center(child: Container(width: 40, height: 4,
+              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)))),
+          const SizedBox(height: 14),
+          const Text('Individual payments',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          const SizedBox(height: 4),
+          const Text('Choose who is paying now. Partial amounts are allowed.',
+              style: TextStyle(fontSize: 12.5, color: AppColors.textSecondary)),
+          const SizedBox(height: 14),
+          for (final m in members)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _collectForMember(m, onDone: onDone);
+                  },
+                  icon: const Icon(Icons.payment_outlined, size: 18),
+                  label: Text('Collect ₹${m.amount.toInt()} · ${m.name}',
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1565C0),
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+            ),
+        ]),
+      ),
     );
   }
 
@@ -3162,6 +3534,10 @@ void _resumeJourney() {
                     '₹${_serviceCharge.toInt()}${_livePaymentStatus == 'paid' ? ' (paid at booking)' : ' (due now)'}',
                     sub: true,
                   ),
+                  if (_additionalCharge > 0) ...[
+                    const SizedBox(height: 4),
+                    _BillRow('Additional Charge', '₹${_additionalCharge.toInt()}', sub: true),
+                  ],
                   const Divider(height: 16),
                   _BillRow('Amount Due Now', '₹${_amountDue.toInt()}', bold: true, green: true),
                 ],
@@ -3600,13 +3976,70 @@ void _resumeJourney() {
                               ? 'Service charge ₹${_serviceCharge.toInt()} paid at booking. All tests also paid.'
                               : 'All dues collected — service charge ₹${_serviceCharge.toInt()} + tests.')
                           : _livePaymentStatus == 'paid'
-                              ? 'Original booking (₹${_liveAmountPaid.toInt()}) paid. Collect additional tests: ₹${_amountDue.toInt()}'
+                              ? 'Original booking (₹${_liveAmountPaid.toInt()}) paid. Collect ${_additionalCharge > 0 ? 'balance due' : 'additional tests'}: ₹${_amountDue.toInt()}'
                               : 'Service charge ₹${_serviceCharge.toInt()} not yet paid. Collect total due: ₹${_amountDue.toInt()}',
                       style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
                     )),
                   ]),
                 ),
                 const SizedBox(height: 12),
+
+                // Additional charges entered on site (amount + reason), one
+                // per booking — already inside each booking's amount due.
+                ...() {
+                  final charged  = _additionalChargeTargets.where((t) => t.amount > 0).toList();
+                  final editable = _canEditAdditionalCharge;
+                  if (charged.isEmpty && !editable) return <Widget>[];
+                  return [
+                    ...charged.map<Widget>((t) => Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF8E1),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFFFE082)),
+                      ),
+                      child: Row(children: [
+                        const Icon(Icons.add_circle_outline, size: 16, color: Color(0xFFE65100)),
+                        const SizedBox(width: 8),
+                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(
+                            charged.length > 1 || _linkedPatients.isNotEmpty
+                                ? 'Additional charge · ${t.name}'
+                                : 'Additional charge',
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                          ),
+                          if ((t.reason ?? '').isNotEmpty)
+                            Text(t.reason!, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                        ])),
+                        Text('₹${t.amount.toInt()}',
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
+                        if (editable)
+                          IconButton(
+                            onPressed: _savingAdditionalCharge ? null : () => _editAdditionalCharge(t),
+                            icon: const Icon(Icons.edit_outlined, size: 18),
+                            color: AppColors.textSecondary,
+                            tooltip: 'Edit additional charge',
+                            visualDensity: VisualDensity.compact,
+                          ),
+                      ]),
+                    )),
+                    if (editable)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: _savingAdditionalCharge ? null : _addAdditionalCharge,
+                          icon: _savingAdditionalCharge
+                              ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                              : const Icon(Icons.add_rounded, size: 18),
+                          label: const Text('Add additional charge',
+                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                          style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                  ];
+                }(),
 
                 // Billing Summary — per-person breakdown before collect buttons
                 ...() {
@@ -3670,30 +4103,45 @@ void _resumeJourney() {
                   ];
                 }(),
 
-                // Collect All — single Razorpay transaction when 2+ bookings are unpaid
+                // Family visit, 2+ members owing: one "Collect Payment" button
+                // that asks how they want to pay (_startPayment). Once they
+                // chose individual payments, the per-member buttons below are
+                // shown instead, with a link back to a single payment.
                 ...() {
-                  final parentUnpaid    = !_paymentDone && _amountDue > 0;
-                  final unpaidSiblings  = _linkedPatients.where((c) {
-                    final due = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
-                    return (c['booking_id'] as num?) != null && due > 0;
-                  }).toList();
-                  final totalUnpaid     = (parentUnpaid ? 1 : 0) + unpaidSiblings.length;
+                  final members     = _unpaidMembers;
+                  final totalUnpaid = members.length;
                   if (totalUnpaid < 2) return <Widget>[];
-                  final totalAmount     = (parentUnpaid ? _amountDue : 0.0) +
-                      unpaidSiblings.fold<double>(0, (s, c) =>
-                          s + (double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0));
+                  final totalAmount = _unpaidTotal;
+                  if (_familyPayMode == 'individual') {
+                    return [
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          onPressed: _isProcessingPayment ? null : () {
+                            setState(() => _familyPayMode = 'combined');
+                            _collectAllPayment();
+                          },
+                          icon: const Icon(Icons.payments_outlined, size: 16),
+                          label: Text('Pay together instead · ₹${totalAmount.toInt()}',
+                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                          style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                    ];
+                  }
                   return [
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton.icon(
-                        onPressed: _isProcessingPayment ? null : _collectAllPayment,
+                        onPressed: _isProcessingPayment ? null : () => _startPayment(),
                         icon: _isProcessingPayment
                             ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                             : const Icon(Icons.payments_outlined, size: 18),
                         label: Text(
                           _isProcessingPayment
                               ? 'Processing…'
-                              : 'Collect All ₹${totalAmount.toInt()} · $totalUnpaid members',
+                              : 'Collect Payment · ₹${totalAmount.toInt()} · $totalUnpaid members',
                           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                         ),
                         style: ElevatedButton.styleFrom(
@@ -3708,8 +4156,10 @@ void _resumeJourney() {
                   ];
                 }(),
 
-                // Single-booking button — shown only when exactly one booking is unpaid
-                // (Collect All handles the 2+ case above)
+                // Per-member buttons — shown when exactly one booking is unpaid,
+                // or for a family that chose individual payments (any order).
+                // A family that hasn't chosen yet gets the single "Collect
+                // Payment" button above instead.
                 ...() {
                   final parentUnpaid   = !_paymentDone && _amountDue > 0;
                   final unpaidSiblings = _linkedPatients.where((c) {
@@ -3717,7 +4167,8 @@ void _resumeJourney() {
                     final due   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
                     return sibId != null && due > 0;
                   }).toList();
-                  if ((parentUnpaid ? 1 : 0) + unpaidSiblings.length >= 2) return <Widget>[];
+                  if ((parentUnpaid ? 1 : 0) + unpaidSiblings.length >= 2 &&
+                      _familyPayMode != 'individual') return <Widget>[];
 
                   final widgets = <Widget>[];
 
@@ -5593,6 +6044,49 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
           const SizedBox(height: 8),
         ],
       ]),
+    );
+  }
+}
+// One choice in the family payment popup ("Single payment" / "Individual payments").
+class _PayModeOption extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+  const _PayModeOption({required this.icon, required this.title, required this.subtitle, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.background,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.divider),
+          ),
+          child: Row(children: [
+            Container(
+              width: 40, height: 40,
+              decoration: BoxDecoration(color: AppColors.brandGreenSurface, borderRadius: BorderRadius.circular(10)),
+              child: Icon(icon, color: AppColors.brandGreen, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                const SizedBox(height: 2),
+                Text(subtitle, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.3)),
+              ]),
+            ),
+            const Icon(Icons.chevron_right_rounded, color: AppColors.textHint),
+          ]),
+        ),
+      ),
     );
   }
 }

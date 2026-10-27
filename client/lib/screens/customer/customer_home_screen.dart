@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/auth_service.dart';
@@ -40,16 +41,157 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   final _bookingsRefresh = ValueNotifier<int>(0);
   final _reportsRefresh  = ValueNotifier<int>(0);
 
+  // Home: who "Book Test" books for (header "Booking for: … ▾"), remembered
+  // on this phone; null = Self. Falls back to Self when that member is gone.
+  static const _bookingForKey = 'home_booking_for_member_id';
+  String? _bookingForId;
+  // Home "Your Recent Bookings": the latest booking of anyone on the account.
+  Map<String, dynamic>? _recentBooking;
+  bool _loadingRecent = true;
+
   @override
   void initState() {
     super.initState();
     _loadPatients();
+    _loadBookingFor();
+    _loadRecentBooking();
     WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _loadPatients();
+    if (state == AppLifecycleState.resumed) {
+      _loadPatients();
+      _loadRecentBooking();
+    }
+  }
+
+  Future<void> _loadBookingFor() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final id = prefs.getString(_bookingForKey);
+      if (mounted && id != null) setState(() => _bookingForId = id);
+    } catch (_) {}
+  }
+
+  void _setBookingFor(MemberModel m) {
+    setState(() => _bookingForId = m.id);
+    SharedPreferences.getInstance()
+        .then((p) => p.setString(_bookingForKey, m.id))
+        .catchError((_) => false);
+  }
+
+  // The selected member, else Self, else the first member.
+  MemberModel? get _bookingFor {
+    for (final m in _members) {
+      if (m.id == _bookingForId) return m;
+    }
+    return _selfMember ?? (_members.isNotEmpty ? _members.first : null);
+  }
+
+  Future<void> _loadRecentBooking() async {
+    try {
+      final list = await ApiService.getMyBookings(); // newest first
+      if (!mounted) return;
+      setState(() {
+        _recentBooking = list.isNotEmpty ? list.first : null;
+        _loadingRecent = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loadingRecent = false);
+    }
+  }
+
+  // "Book Test" / "Book your next test": opens the usual booking screen for
+  // the selected member. No members yet → add one first, then book for them.
+  Future<void> _startBooking() async {
+    final m = _bookingFor;
+    if (m != null) {
+      setState(() => _activeMember = m);
+      return;
+    }
+    final added = await _openAddMember(select: true);
+    if (added != null && mounted) setState(() => _activeMember = added);
+  }
+
+  void _pickBookingFor() {
+    if (_loadingPatients) return;
+    final current = _bookingFor;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40, height: 4,
+                margin: const EdgeInsets.only(top: 10, bottom: 14),
+                decoration: BoxDecoration(
+                    color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: Text('Who is this test for?',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final m in [
+                    if (_selfMember != null) _selfMember!,
+                    ..._members.where((m) => m.id != _selfMember?.id),
+                  ])
+                    ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: AppColors.brandGreenSurface,
+                        child: Text(m.name.isNotEmpty ? m.name[0].toUpperCase() : '?',
+                            style: const TextStyle(
+                                color: AppColors.brandGreen, fontWeight: FontWeight.w700)),
+                      ),
+                      title: Text(m.name,
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                      subtitle: m.relation != null
+                          ? Text(m.relation!, style: const TextStyle(fontSize: 12))
+                          : null,
+                      trailing: m.id == current?.id
+                          ? const Icon(Icons.check_circle_rounded, color: AppColors.brandGreen)
+                          : null,
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _setBookingFor(m);
+                      },
+                    ),
+                  ListTile(
+                    leading: const CircleAvatar(
+                      backgroundColor: AppColors.brandGreenSurface,
+                      child: Icon(Icons.person_add_alt_1_rounded,
+                          color: AppColors.brandGreen, size: 20),
+                    ),
+                    title: const Text('Add member',
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.brandGreen)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _openAddMember(select: true);
+                    },
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _loadPatients() async {
@@ -152,12 +294,18 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
     }
   }
 
-  void _openAddMember() async {
+  // select: the new member becomes "Booking for" (added from the Home
+  // dropdown or before a first booking).
+  Future<MemberModel?> _openAddMember({bool select = false}) async {
     final result = await Navigator.push<MemberModel>(
       context,
       MaterialPageRoute(builder: (_) => const AddMemberScreen()),
     );
-    if (result != null) setState(() => _members.add(result));
+    if (result != null && mounted) {
+      setState(() => _members.add(result));
+      if (select) _setBookingFor(result);
+    }
+    return result;
   }
 
   void _openEditMember(MemberModel member) async {
@@ -256,14 +404,17 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        if (_activeMember != null) setState(() => _activeMember = null);
+        if (_activeMember != null) {
+          setState(() => _activeMember = null);
+          _loadRecentBooking();
+        }
       },
       child: Scaffold(
       key: _scaffoldKey,
       backgroundColor: AppColors.background,
       appBar: (!_inDashboard && _selectedIndex == 0)
           ? PreferredSize(
-              preferredSize: const Size.fromHeight(112),
+              preferredSize: const Size.fromHeight(172),
               child: Container(
                 color: AppColors.brandGreen,
                 child: SafeArea(
@@ -272,59 +423,109 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                     children: [
                       Positioned(
                         right: -8,
-                        top: -16,
+                        top: 30,
                         child: Icon(Icons.science_outlined,
-                            size: 96, color: Colors.white.withOpacity(0.08)),
+                            size: 110, color: Colors.white.withValues(alpha: 0.08)),
                       ),
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 10, 12, 16),
-                        child: Row(
+                        padding: const EdgeInsets.fromLTRB(16, 6, 6, 14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            CircleAvatar(
-                              radius: 22,
-                              backgroundColor: Colors.white,
-                              child: Text(
-                                (_firstName(_selfMember?.name) ?? 'U')[0].toUpperCase(),
-                                style: const TextStyle(
-                                    color: AppColors.brandGreen,
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 18),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text('Welcome,',
+                            // Logo row + call
+                            Row(
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Image.asset('assets/icon/app_icon.png',
+                                      width: 32, height: 32, fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => const Icon(
+                                          Icons.biotech_rounded, color: Colors.white, size: 28)),
+                                ),
+                                const SizedBox(width: 10),
+                                const Expanded(
+                                  child: Text('MicroLab',
                                       style: TextStyle(
-                                          color: Colors.white.withOpacity(0.85),
-                                          fontSize: 13)),
-                                  Text(
-                                    '${_firstName(_selfMember?.name) ?? 'there'}!',
-                                    style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.w700),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  const SizedBox(height: 2),
-                                  const Text(
-                                    "Your health matters. We're here to help.",
-                                    style: TextStyle(color: Colors.white70, fontSize: 12),
-                                  ),
-                                ],
-                              ),
+                                          color: Colors.white,
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.w700)),
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.phone_outlined,
+                                      color: Colors.white, size: 22),
+                                  tooltip: 'Call us',
+                                  onPressed: () async {
+                                    final uri = Uri(scheme: 'tel', path: '7339535472');
+                                    if (await canLaunchUrl(uri)) launchUrl(uri);
+                                  },
+                                ),
+                              ],
                             ),
-                            IconButton(
-                              icon: const Icon(Icons.phone_outlined,
-                                  color: Colors.white, size: 22),
-                              tooltip: 'Call us',
-                              onPressed: () async {
-                                final uri = Uri(scheme: 'tel', path: '7339535472');
-                                if (await canLaunchUrl(uri)) launchUrl(uri);
-                              },
+                            const SizedBox(height: 10),
+                            // Greeting = the account holder; "Booking for" =
+                            // who Book Test books for.
+                            Row(
+                              children: [
+                                CircleAvatar(
+                                  radius: 24,
+                                  backgroundColor: Colors.white,
+                                  child: Text(
+                                    (_firstName(_selfMember?.name) ?? 'U')[0].toUpperCase(),
+                                    style: const TextStyle(
+                                        color: AppColors.brandGreen,
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 18),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        'Welcome, ${_firstName(_selfMember?.name) ?? 'there'}!',
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 19,
+                                            fontWeight: FontWeight.w700),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      const SizedBox(height: 6),
+                                      GestureDetector(
+                                        onTap: _pickBookingFor,
+                                        child: Container(
+                                          padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white.withValues(alpha: 0.16),
+                                            borderRadius: BorderRadius.circular(20),
+                                            border: Border.all(color: Colors.white.withValues(alpha: 0.35)),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Flexible(
+                                                child: Text(
+                                                  _loadingPatients
+                                                      ? 'Booking for: …'
+                                                      : 'Booking for: ${_bookingFor == null ? 'Add member' : _bookingFor!.id == _selfMember?.id ? 'Self' : _firstName(_bookingFor!.name)}',
+                                                  style: const TextStyle(
+                                                      color: Colors.white,
+                                                      fontSize: 12.5,
+                                                      fontWeight: FontWeight.w600),
+                                                  overflow: TextOverflow.ellipsis,
+                                                ),
+                                              ),
+                                              const Icon(Icons.keyboard_arrow_down_rounded,
+                                                  color: Colors.white, size: 18),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
@@ -340,9 +541,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
           IndexedStack(
             index: _stackIndex,
             children: [
-              _loadingPatients
-                  ? const _CustomerListSkeleton()
-                  : _members.isEmpty ? _emptyState() : _memberList(),
+              _homeBody(),
               // Slot 1: embedded dashboard
               if (_activeMember != null)
                 SafeArea(
@@ -353,7 +552,10 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                     member: _activeMember!,
                     isVip: widget.isVip,
                     embedded: true,
-                    onBack: () => setState(() => _activeMember = null),
+                    onBack: () {
+                      setState(() => _activeMember = null);
+                      _loadRecentBooking(); // a booking may have just been made
+                    },
                   ),
                 )
               else
@@ -371,6 +573,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                   embedded: true,
                   onAddMember: _openAddMember,
                   onEditMember: _openEditMember,
+                  // Moved here from the old Customers tab.
+                  onViewMember: _viewMember,
+                  onRemoveMember: (m) => _confirmDelete(m.id, m.name),
                   onLogout: _logout,
                 ),
               ),
@@ -385,17 +590,6 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
           ),
         ],
       ),
-      floatingActionButton: (!_inDashboard && _selectedIndex == 0)
-          ? FloatingActionButton.extended(
-              onPressed: _openAddMember,
-              backgroundColor: AppColors.brandGreen,
-              foregroundColor: Colors.white,
-              elevation: 2,
-              icon: const Icon(Icons.person_add_outlined, size: 20),
-              label: const Text('Add Customer',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-            )
-          : null,
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
         onTap: _onNavTap,
@@ -409,9 +603,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
         elevation: 8,
         items: const [
           BottomNavigationBarItem(
-            icon: Icon(Icons.group_outlined),
-            activeIcon: Icon(Icons.group),
-            label: 'Customers',
+            icon: Icon(Icons.home_outlined),
+            activeIcon: Icon(Icons.home_rounded),
+            label: 'Home',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.calendar_month_outlined),
@@ -436,142 +630,275 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   }
 
 
-  Widget _emptyState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: const BoxDecoration(
-                color: AppColors.brandGreenSurface,
-                shape: BoxShape.circle,
+  // ── Home tab ───────────────────────────────────────────────────────────────
+  Widget _homeBody() {
+    return RefreshIndicator(
+      color: AppColors.brandGreen,
+      onRefresh: () => Future.wait([_loadPatients(), _loadRecentBooking()]),
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+        children: [
+          // Book your next test
+          _HomeCard(
+            color: AppColors.brandGreenSurface,
+            onTap: _startBooking,
+            child: Row(children: [
+              Container(
+                width: 48, height: 48,
+                decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                child: const Icon(Icons.water_drop_rounded, color: AppColors.brandGreen, size: 24),
               ),
-              child: const Icon(Icons.group_outlined,
-                  size: 36, color: AppColors.brandGreen),
-            ),
-            const SizedBox(height: 20),
-            const Text('No customers yet',
-                style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textPrimary)),
-            const SizedBox(height: 8),
-            const Text(
-              'Add customers to book blood tests for them',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                  fontSize: 14, color: AppColors.textSecondary, height: 1.5),
-            ),
-            const SizedBox(height: 28),
-            ElevatedButton.icon(
-              onPressed: _openAddMember,
-              icon: const Icon(Icons.person_add_outlined, size: 18),
-              label: const Text('Add Customer'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.brandGreen,
-                foregroundColor: Colors.white,
-                elevation: 0,
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 24, vertical: 12),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12)),
+              const SizedBox(width: 14),
+              const Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Book your next test',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                  SizedBox(height: 3),
+                  Text('Quick  •  Safe  •  Reliable',
+                      style: TextStyle(fontSize: 12.5, color: AppColors.brandGreen, fontWeight: FontWeight.w500)),
+                ]),
               ),
+              const Icon(Icons.chevron_right_rounded, color: AppColors.textSecondary),
+            ]),
+          ),
+          const SizedBox(height: 22),
+
+          // Your Recent Bookings — latest booking of anyone on the account
+          Row(children: [
+            const Expanded(
+              child: Text('Your Recent Bookings',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
             ),
-          ],
-        ),
+            GestureDetector(
+              onTap: () => _onNavTap(1),
+              child: const Row(children: [
+                Text('View All',
+                    style: TextStyle(fontSize: 13, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
+                Icon(Icons.chevron_right_rounded, size: 18, color: AppColors.brandGreen),
+              ]),
+            ),
+          ]),
+          const SizedBox(height: 10),
+          _recentBookingCard(),
+          const SizedBox(height: 22),
+
+          // Quick Actions
+          const Text('Quick Actions',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          const SizedBox(height: 10),
+          Row(children: [
+            _QuickAction(icon: Icons.event_available_rounded, label: 'Book Test',
+                color: AppColors.brandGreen, onTap: _startBooking),
+            const SizedBox(width: 10),
+            _QuickAction(icon: Icons.calendar_month_rounded, label: 'View Bookings',
+                color: const Color(0xFF1565C0), onTap: () => _onNavTap(1)),
+            const SizedBox(width: 10),
+            _QuickAction(icon: Icons.description_rounded, label: 'Reports',
+                color: const Color(0xFF6A4BC4), onTap: () => _onNavTap(2)),
+            const SizedBox(width: 10),
+            _QuickAction(icon: Icons.person_outline_rounded, label: 'Profile',
+                color: const Color(0xFFE07B39), onTap: () => _onNavTap(3)),
+          ]),
+          const SizedBox(height: 22),
+
+          // Trusted Diagnostics — information only
+          const _HomeCard(
+            color: AppColors.brandGreenSurface,
+            child: Row(children: [
+              Icon(Icons.verified_user_rounded, color: AppColors.brandGreen, size: 34),
+              SizedBox(width: 14),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Trusted Diagnostics',
+                      style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                  SizedBox(height: 3),
+                  Text('Accurate results for a healthier you',
+                      style: TextStyle(fontSize: 12.5, color: AppColors.textSecondary)),
+                ]),
+              ),
+            ]),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _memberList() {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-      children: [
-        Text(
-          '${_members.length} Customer${_members.length > 1 ? 's' : ''}',
-          style: const TextStyle(
-              fontSize: 13,
-              color: AppColors.textSecondary,
-              fontWeight: FontWeight.w500),
+  // Latest booking (getMyBookings is newest first). Tap → Bookings tab.
+  Widget _recentBookingCard() {
+    if (_loadingRecent) {
+      return SkeletonShimmer(
+        child: SkeletonBox(height: 92, borderRadius: BorderRadius.circular(14)),
+      );
+    }
+    final b = _recentBooking;
+    if (b == null) {
+      return _HomeCard(
+        onTap: _startBooking,
+        child: const Row(children: [
+          Icon(Icons.event_note_outlined, color: AppColors.textHint, size: 28),
+          SizedBox(width: 12),
+          Expanded(
+            child: Text('No bookings yet — book your first test',
+                style: TextStyle(fontSize: 13.5, color: AppColors.textSecondary)),
+          ),
+          Icon(Icons.chevron_right_rounded, color: AppColors.textSecondary),
+        ]),
+      );
+    }
+
+    // test_items: "id:::name:::price:::type:::instructions|||…"
+    final names = (b['test_items'] as String? ?? '')
+        .split('|||')
+        .map((t) => t.split(':::'))
+        .where((p) => p.length > 1 && p[1].trim().isNotEmpty)
+        .map((p) => p[1].trim())
+        .toList();
+    final title = names.isEmpty
+        ? 'Blood Test'
+        : names.length == 1 ? names.first : '${names.first} +${names.length - 1} more';
+    final date  = DateTime.tryParse(b['collection_date']?.toString() ?? '');
+    final time  = b['slot_time_formatted'] as String?;
+    final place = b['booking_type'] == 'home_collection'
+        ? (b['collection_city'] as String?)
+        : (b['branch_name'] as String?);
+    final patient = b['patient_name'] as String?;
+    final status  = _statusLabel(b['booking_status'] as String? ?? '');
+    final (Color fg, Color bg) = switch (b['booking_status']) {
+      'cancelled' => (const Color(0xFFD32F2F), const Color(0xFFFFEBEE)),
+      'completed' => (AppColors.brandGreen, AppColors.brandGreenSurface),
+      _           => (const Color(0xFF1565C0), const Color(0xFFE3F2FD)),
+    };
+
+    return _HomeCard(
+      onTap: () => _onNavTap(1),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(
+          width: 48, height: 48,
+          decoration: const BoxDecoration(color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+          child: const Icon(Icons.science_outlined, color: AppColors.brandGreen, size: 24),
         ),
-        const SizedBox(height: 12),
-        ..._members.map((m) => _MemberCard(
-              member: m,
-              isVip: widget.isVip,
-              onView: () => _viewMember(m),
-              onEdit: () => _openEditMember(m),
-              onDelete: () => _confirmDelete(m.id, m.name),
-              onBook: () => setState(() => _activeMember = m),
-            )),
-      ],
-    );
-  }
-}
-
-// ─── Skeleton loading state — shown while _loadPatients() is in flight ──────
-
-class _CustomerListSkeleton extends StatelessWidget {
-  const _CustomerListSkeleton();
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
-      physics: const NeverScrollableScrollPhysics(),
-      children: [
-        SkeletonShimmer(
-          child: SkeletonBox(width: 90, height: 13, borderRadius: BorderRadius.circular(4)),
-        ),
-        const SizedBox(height: 12),
-        ...List.generate(3, (_) => const _CustomerCardSkeleton()),
-      ],
-    );
-  }
-}
-
-class _CustomerCardSkeleton extends StatelessWidget {
-  const _CustomerCardSkeleton();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.divider),
-      ),
-      child: SkeletonShimmer(
-        child: Column(
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
-              child: Row(
-                children: [
-                  const SkeletonBox.circle(size: 44),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        SkeletonBox(width: 120, height: 14, borderRadius: BorderRadius.circular(4)),
-                        const SizedBox(height: 8),
-                        SkeletonBox(width: 80, height: 11, borderRadius: BorderRadius.circular(4)),
-                      ],
-                    ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Expanded(
+                child: Text(title,
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+                    overflow: TextOverflow.ellipsis),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+                child: Text(status, style: TextStyle(fontSize: 11, color: fg, fontWeight: FontWeight.w600)),
+              ),
+            ]),
+            const SizedBox(height: 5),
+            Text(
+              [
+                if (date != null) _fmtDate(date),
+                if (time != null && time.isNotEmpty) time,
+              ].join('  •  '),
+              style: const TextStyle(fontSize: 12.5, color: AppColors.textSecondary),
+            ),
+            if ((place ?? '').isNotEmpty || (patient ?? '').isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Row(children: [
+                const Icon(Icons.location_on_outlined, size: 13, color: AppColors.textHint),
+                const SizedBox(width: 3),
+                Expanded(
+                  child: Text(
+                    [if ((place ?? '').isNotEmpty) place!, if ((patient ?? '').isNotEmpty) 'For ${_firstName(patient)}']
+                        .join('  •  '),
+                    style: const TextStyle(fontSize: 12.5, color: AppColors.textSecondary),
+                    overflow: TextOverflow.ellipsis,
                   ),
-                ],
-              ),
-            ),
-            const SkeletonBox(height: 38, borderRadius: BorderRadius.zero),
-          ],
+                ),
+              ]),
+            ],
+          ]),
         ),
-      ),
+        const Icon(Icons.chevron_right_rounded, color: AppColors.textSecondary),
+      ]),
     );
   }
+
+  // Same labels as My Bookings.
+  static String _statusLabel(String raw) => switch (raw) {
+        'pending'               => 'Pending',
+        'scheduled'             => 'Scheduled',
+        'confirmed'             => 'Confirmed',
+        'assigned'              => 'Technician Allocated',
+        'arrived'               => 'Technician Arrived',
+        'collected'             => 'Sample Collected',
+        'submitted'             => 'Handed to Lab',
+        'handed_to_lab_pending' => 'Handed to Lab',
+        'completed'             => 'Completed',
+        'cancelled'             => 'Cancelled',
+        _ => raw.isNotEmpty ? raw[0].toUpperCase() + raw.substring(1) : 'Unknown',
+      };
+
+  static const _months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  static String _fmtDate(DateTime d) => '${d.day} ${_months[d.month - 1]} ${d.year}';
+}
+
+// ─── Home building blocks ─────────────────────────────────────────────────────
+
+class _HomeCard extends StatelessWidget {
+  final Widget child;
+  final Color color;
+  final VoidCallback? onTap;
+  const _HomeCard({required this.child, this.color = Colors.white, this.onTap});
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: color,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppColors.divider),
+            ),
+            child: child,
+          ),
+        ),
+      );
+}
+
+class _QuickAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+  const _QuickAction({required this.icon, required this.label, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+        child: Material(
+          color: color.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(12),
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 4),
+              child: Column(children: [
+                Icon(icon, color: color, size: 28),
+                const SizedBox(height: 8),
+                Text(label,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textPrimary)),
+              ]),
+            ),
+          ),
+        ),
+      );
 }
 
 // ─── Reusable photo-aware avatar ─────────────────────────────────────────────
@@ -640,248 +967,6 @@ class _MemberAvatar extends StatelessWidget {
                 fontWeight: FontWeight.w600,
                 color: avatarColor)),
       );
-}
-
-// ─── Member Card (minimal) ────────────────────────────────────────────────────
-
-class _MemberCard extends StatelessWidget {
-  final MemberModel member;
-  final bool isVip;
-  final VoidCallback onView;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
-  final VoidCallback onBook;
-
-  const _MemberCard({
-    required this.member,
-    required this.isVip,
-    required this.onView,
-    required this.onEdit,
-    required this.onDelete,
-    required this.onBook,
-  });
-
-  Color get _avatarColor {
-    switch (member.gender) {
-      case 'Female': return const Color(0xFFAD1457);
-      case 'Other': return const Color(0xFF6A1B9A);
-      default: return AppColors.brandGreen;
-    }
-  }
-
-  String get _initials {
-    final parts = member.name.trim().split(' ').where((p) => p.isNotEmpty).toList();
-    if (parts.length >= 2) {
-      return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
-    }
-    return parts.isNotEmpty ? parts[0][0].toUpperCase() : '?';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final ageText = member.age != null ? ', ${member.age} yrs' : '';
-    final genderAge = '${member.gender}$ageText';
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.divider),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(13),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: onBook,
-            borderRadius: BorderRadius.circular(13),
-            child: Column(
-              children: [
-          ColoredBox(
-            color: AppColors.white,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 14, 6, 14),
-              child: Row(
-              children: [
-                // Avatar
-                _MemberAvatar(
-                  photoBytes: member.photoBytes,
-                  photoUrl: member.photoUrl,
-                  initials: _initials,
-                  avatarColor: _avatarColor,
-                  size: 44,
-                  fontSize: 16,
-                ),
-                const SizedBox(width: 12),
-
-                // Name + secondary info
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(member.name,
-                                style: const TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w600,
-                                    color: AppColors.textPrimary),
-                                overflow: TextOverflow.ellipsis),
-                          ),
-                          if (isVip) ...[
-                            const SizedBox(width: 6),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 7, vertical: 2),
-                              decoration: BoxDecoration(
-                                gradient: const LinearGradient(
-                                  colors: [Color(0xFFFFB300), Color(0xFFFF8F00)],
-                                ),
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: const Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.star_rounded,
-                                      size: 10, color: Colors.white),
-                                  SizedBox(width: 3),
-                                  Text('VIP',
-                                      style: TextStyle(
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.white,
-                                          letterSpacing: 0.5)),
-                                ],
-                              ),
-                            ),
-                          ],
-                          if (member.relation != null) ...[
-                            const SizedBox(width: 6),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 7, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: AppColors.brandGreenSurface,
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: Text(member.relation!,
-                                  style: const TextStyle(
-                                      fontSize: 10,
-                                      color: AppColors.brandGreen,
-                                      fontWeight: FontWeight.w500)),
-                            ),
-                          ],
-                        ],
-                      ),
-                      const SizedBox(height: 3),
-                      Text(genderAge,
-                          style: const TextStyle(
-                              fontSize: 12, color: AppColors.textSecondary)),
-                      if (member.location.isNotEmpty) ...[
-                        const SizedBox(height: 2),
-                        Row(
-                          children: [
-                            const Icon(Icons.location_on_outlined,
-                                size: 11, color: AppColors.textHint),
-                            const SizedBox(width: 2),
-                            Expanded(
-                              child: Text(member.location,
-                                  style: const TextStyle(
-                                      fontSize: 12,
-                                      color: AppColors.textSecondary),
-                                  overflow: TextOverflow.ellipsis),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-
-                // 3-dot menu
-                PopupMenuButton<String>(
-                  icon: const Icon(Icons.more_vert,
-                      size: 20, color: AppColors.textHint),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                  elevation: 3,
-                  onSelected: (v) {
-                    if (v == 'view') onView();
-                    if (v == 'edit') onEdit();
-                    if (v == 'delete') onDelete();
-                  },
-                  itemBuilder: (_) => [
-                    const PopupMenuItem(
-                      value: 'view',
-                      height: 44,
-                      child: Row(children: [
-                        Icon(Icons.visibility_outlined,
-                            size: 16, color: AppColors.textSecondary),
-                        SizedBox(width: 10),
-                        Text('View', style: TextStyle(fontSize: 14)),
-                      ]),
-                    ),
-                    if (!member.isReadOnly) ...[
-                      const PopupMenuItem(
-                        value: 'edit',
-                        height: 44,
-                        child: Row(children: [
-                          Icon(Icons.edit_outlined,
-                              size: 16, color: AppColors.textSecondary),
-                          SizedBox(width: 10),
-                          Text('Edit', style: TextStyle(fontSize: 14)),
-                        ]),
-                      ),
-                      const PopupMenuDivider(),
-                      const PopupMenuItem(
-                        value: 'delete',
-                        height: 44,
-                        child: Row(children: [
-                          Icon(Icons.person_remove_outlined,
-                              size: 16, color: Color(0xFFD32F2F)),
-                          SizedBox(width: 10),
-                          Text('Remove',
-                              style: TextStyle(
-                                  fontSize: 14, color: Color(0xFFD32F2F))),
-                        ]),
-                      ),
-                    ],
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-
-          // Book strip — purely visual, whole card tap handles navigation
-          Container(
-            color: AppColors.brandGreenSurface,
-            padding: const EdgeInsets.symmetric(vertical: 10),
-            child: const Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.calendar_today_outlined,
-                    size: 13, color: AppColors.brandGreen),
-                SizedBox(width: 6),
-                Text('Book Blood Test',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: AppColors.brandGreen,
-                        fontWeight: FontWeight.w500)),
-                SizedBox(width: 4),
-                Icon(Icons.arrow_forward_ios_rounded,
-                    size: 10, color: AppColors.brandGreen),
-              ],
-            ),
-          ),
-          ],
-        ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 // ─── Member Detail Bottom Sheet ───────────────────────────────────────────────

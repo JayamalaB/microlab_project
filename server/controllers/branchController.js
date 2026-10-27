@@ -22,6 +22,8 @@ function _logLookupResult(fields) {
 //    dispatch.log/collection.log (socket/bookingSocket.js): timestamped,
 //    appended to disk, mirrored to stdout. Purely additive — every call site
 //    below still logs to the console exactly as before.
+
+
 const LOG_DIR  = path.join(__dirname, '..', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'branch.log');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR);
@@ -585,7 +587,8 @@ exports.getBranches = async (req, res) => {
 
     let query = `SELECT branch_id AS id, branch_name AS name,
                         branch_address AS address, branch_city AS location,
-                        branch_pincode AS pincode
+                        branch_pincode AS pincode,
+                        branch_latitude AS latitude, branch_longitude AS longitude
                  FROM ip_branches
                  WHERE branch_active = 1 AND deleted_at IS NULL`;
     const params = [];

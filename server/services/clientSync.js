@@ -171,6 +171,10 @@ function _toAmount(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function _round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
 // Technician ID as a number when it is numeric ("262" → 262).
 function _toIdNumber(v) {
   if (v === null || v === undefined || v === '') return null;
@@ -782,6 +786,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     if (primaryBooking.visit_group_id) {
       [bookingRows] = await db.execute(
         `SELECT booking_id, booking_ref, booking_type, booking_date, total_amount,
+                additional_charge_amount, additional_charge_reason,
                 patient_id, client_id, status, reference_no, visit_group_id,
                 TIME_FORMAT(
                   (SELECT av.slot_time FROM ip_available_slots av
@@ -795,6 +800,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     } else {
       const [[b]] = await db.execute(
         `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date, b.total_amount,
+                b.additional_charge_amount, b.additional_charge_reason,
                 b.patient_id, b.client_id, b.status, b.reference_no, b.visit_group_id,
                 TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
          FROM ip_bookings b
@@ -858,8 +864,19 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
         time: b.slot_time ?? null,
       };
       entry.blood_test_list = data.bloodTestList;
+      // total_amount = test_amount + service_charge_amount +
+      // additional_charge_amount. The service charge (home-collection fare)
+      // isn't stored per booking on its own, so it is what remains of the
+      // total after the tests and the technician's additional charge.
+      const totalAmount      = _toAmount(data.paymentDetails.total_amount);
+      const additionalCharge = _toAmount(b.additional_charge_amount ?? 0);
+      const testAmount       = _round2(data.tests.reduce((s, t) => s + _toAmount(t.price), 0));
       entry.payment_details = {
-        total_amount:        _toAmount(data.paymentDetails.total_amount),
+        test_amount:              testAmount,
+        service_charge_amount:    Math.max(0, _round2(totalAmount - testAmount - additionalCharge)),
+        additional_charge_amount: additionalCharge,
+        additional_charge_reason: b.additional_charge_reason ?? '',
+        total_amount:             totalAmount,
         paid_amount:         _toAmount(data.paymentDetails.paid_amount),
         payment_type:        data.paymentDetails.payment_type,
         razorpay_payment_id: data.paymentDetails.razorpay_payment_id,

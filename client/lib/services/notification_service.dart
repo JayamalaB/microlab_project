@@ -69,7 +69,8 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
         styleInformation: BigTextStyleInformation(
           '$name · Booking #${booking.bookingId}\n'
           '📍 $address\n'
-          '🕐 ${formatBookingTime(booking.createdAt)}',
+          '🕐 ${formatBookingTime(booking.createdAt)}'
+          '${booking.notes != null ? '\n📝 Note: ${booking.notes}' : ''}',
         ),
         actions: const [
           AndroidNotificationAction(
@@ -235,6 +236,33 @@ class NotificationService {
             _updatesChannelId,
             _updatesChannelName,
             importance: Importance.high,
+            priority: Priority.high,
+            playSound: true,
+            enableVibration: true,
+          ),
+        ),
+      );
+      return;
+    }
+
+    // Technician alerts from the server's reminder scheduler: "Upcoming
+    // booking in 60 min" and "You're 5 / 10 minutes late". Same foreground
+    // gap as booking_cancelled — Android only auto-shows these in the
+    // background, so show them here too.
+    if (type == 'booking_reminder' || type == 'booking_late_alert') {
+      final isLate = type == 'booking_late_alert';
+      final title = message.notification?.title ?? (isLate ? 'You\'re running late' : 'Upcoming booking');
+      final body  = message.notification?.body  ??
+          (isLate ? 'Start your journey now — the customer is waiting.' : 'You have a booking coming up soon.');
+      _localNotifs.show(
+        '${message.data['booking_id']}_$type'.hashCode,
+        title,
+        body,
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            _updatesChannelId,
+            _updatesChannelName,
+            importance: Importance.max,
             priority: Priority.high,
             playSound: true,
             enableVibration: true,

@@ -745,6 +745,117 @@ exports.collectPayment = async (req, res) => {
   }
 };
 
+// ── PUT /api/technicians/bookings/:bookingId/additional-charge ───────────────
+// Sets the booking's one additional charge (amount + reason) entered by the
+// technician on site — saving again replaces it, amount 0 removes it.
+//   Updated Total = Existing Total + Additional Charge
+// The charge lives inside total_amount, so collectPayment, partial payments
+// and the family payment popup pick it up unchanged; it reaches the ASMX in
+// payment_details at Handed to Lab (clientSync.js). Only allowed from Arrived
+// up to Sample Collected — the visit is finalised from OTP Verified on.
+const ADDITIONAL_CHARGE_STATUSES = ['arrived', 'collection_started', 'sample_collected'];
+
+exports.setAdditionalCharge = async (req, res) => {
+  const technicianId = req.user.id;
+  const bookingId    = parseInt(req.params.bookingId, 10);
+  const amount       = Math.round(Number(req.body.amount) * 100) / 100;
+  const reason       = String(req.body.reason ?? '').trim();
+  const maxAmount    = parseFloat(settings.get('additional_charge_max', '1000')) || 1000;
+
+  if (!bookingId || !Number.isFinite(amount) || amount < 0) {
+    return res.status(400).json({ success: false, message: 'Enter a valid additional charge amount' });
+  }
+  if (amount > maxAmount) {
+    return res.status(400).json({ success: false, message: `Additional charge can be at most ₹${maxAmount}` });
+  }
+  if (amount > 0 && !reason) {
+    return res.status(400).json({ success: false, message: 'Please enter a reason for the additional charge' });
+  }
+  if (reason.length > 255) {
+    return res.status(400).json({ success: false, message: 'Reason must be 255 characters or fewer' });
+  }
+
+  try {
+    // Same ownership rule as collectPayment (the technician's own booking, or
+    // a family sibling of it), plus the visit's collection status.
+    const [[booking]] = await db.execute(
+      `SELECT b.booking_id, b.status, b.total_amount, b.amount_paid, b.payment_status,
+              b.additional_charge_amount,
+              (SELECT tc.collection_status
+                 FROM ip_technician_collection tc
+                 JOIN ip_bookings vb ON vb.booking_id = tc.booking_id
+                WHERE tc.technician_id = ?
+                  AND (vb.booking_id = b.booking_id
+                       OR (b.visit_group_id IS NOT NULL AND vb.visit_group_id = b.visit_group_id))
+                ORDER BY tc.booking_id ASC LIMIT 1) AS collection_status
+       FROM ip_bookings b
+       WHERE b.booking_id = ? AND b.deleted_at IS NULL
+         AND (
+           EXISTS (SELECT 1 FROM ip_technician_collection tc WHERE tc.booking_id = b.booking_id AND tc.technician_id = ?)
+           OR (b.visit_group_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM ip_bookings parent
+             INNER JOIN ip_technician_collection tc ON tc.booking_id = parent.booking_id AND tc.technician_id = ?
+             WHERE parent.visit_group_id = b.visit_group_id
+           ))
+         )`,
+      [technicianId, bookingId, technicianId, technicianId]
+    );
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
+    }
+    if (booking.status === 'cancelled' || !ADDITIONAL_CHARGE_STATUSES.includes(booking.collection_status)) {
+      return res.status(409).json({
+        success: false,
+        message: 'Additional charges can be added only after arrival and before OTP verification',
+      });
+    }
+
+    const oldCharge  = parseFloat(booking.additional_charge_amount) || 0;
+    const oldTotal   = parseFloat(booking.total_amount) || 0;
+    const amountPaid = parseFloat(booking.amount_paid) || 0;
+    const newTotal   = Math.round((oldTotal - oldCharge + amount) * 100) / 100;
+    if (newTotal < amountPaid - 0.01) {
+      return res.status(400).json({
+        success: false,
+        message: `₹${amountPaid} is already paid — the total can't go below that`,
+      });
+    }
+    const newAmountDue = Math.max(0, Math.round((newTotal - amountPaid) * 100) / 100);
+    // Nothing paid yet → payment status unchanged (still unpaid/pending).
+    const newPaymentStatus = amountPaid > 0
+      ? (newAmountDue <= 0 ? 'paid' : 'partial')
+      : booking.payment_status;
+
+    // Guarded on the values read above, so a payment or another edit landing
+    // in between is never overwritten with stale totals.
+    const [result] = await db.execute(
+      `UPDATE ip_bookings
+          SET additional_charge_amount = ?, additional_charge_reason = ?,
+              total_amount = ?, amount_due = ?, payment_status = ?, updated_at = NOW()
+        WHERE booking_id = ? AND additional_charge_amount = ? AND amount_paid = ? AND total_amount = ?`,
+      [amount, amount > 0 ? reason : null, newTotal, newAmountDue, newPaymentStatus,
+       bookingId, booking.additional_charge_amount, booking.amount_paid, booking.total_amount]
+    );
+    if (result.affectedRows !== 1) {
+      return res.status(409).json({ success: false, message: 'Booking was just updated — please refresh and try again' });
+    }
+
+    tlog(`[ADDITIONAL_CHARGE] technician_id=${technicianId} booking_id=${bookingId} charge=₹${oldCharge}→₹${amount} total=₹${oldTotal}→₹${newTotal} due=₹${newAmountDue} reason="${amount > 0 ? reason : ''}"`);
+
+    res.json({
+      success: true,
+      additionalChargeAmount: amount,
+      additionalChargeReason: amount > 0 ? reason : null,
+      totalAmount:   newTotal,
+      amountDue:     newAmountDue,
+      paymentStatus: newPaymentStatus,
+    });
+  } catch (err) {
+    console.error('❌ setAdditionalCharge FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 // in the same slot without requiring a fresh booking flow on the patient side.
 exports.addCustomerBooking = async (req, res) => {
   const technicianId = req.user.id;

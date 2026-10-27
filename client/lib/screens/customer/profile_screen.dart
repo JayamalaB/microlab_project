@@ -82,6 +82,9 @@ class ProfileScreen extends StatelessWidget {
   final List<MemberModel> members;
   final VoidCallback onAddMember;
   final void Function(MemberModel) onEditMember;
+  // Family-member View / Remove (moved here from the old Customers tab).
+  final void Function(MemberModel)? onViewMember;
+  final void Function(MemberModel)? onRemoveMember;
   final VoidCallback onLogout;
   final bool embedded;
 
@@ -91,6 +94,8 @@ class ProfileScreen extends StatelessWidget {
     required this.members,
     required this.onAddMember,
     required this.onEditMember,
+    this.onViewMember,
+    this.onRemoveMember,
     required this.onLogout,
     this.isVip = false,
     this.embedded = false,
@@ -334,6 +339,8 @@ class ProfileScreen extends StatelessWidget {
         ...patients.map((m) => _PatientCard(
               member: m,
               onEdit: m.isReadOnly ? null : () => onEditMember(m),
+              onView: onViewMember == null ? null : () => onViewMember!(m),
+              onRemove: m.isReadOnly || onRemoveMember == null ? null : () => onRemoveMember!(m),
             )),
       ],
     );
@@ -489,7 +496,9 @@ class _HDivider extends StatelessWidget {
 class _PatientCard extends StatelessWidget {
   final MemberModel member;
   final VoidCallback? onEdit;
-  const _PatientCard({required this.member, this.onEdit});
+  final VoidCallback? onView;   // tap the card
+  final VoidCallback? onRemove;
+  const _PatientCard({required this.member, this.onEdit, this.onView, this.onRemove});
 
   @override
   Widget build(BuildContext context) {
@@ -499,7 +508,7 @@ class _PatientCard extends StatelessWidget {
       if (member.age != null) '${member.age} yrs',
     ];
 
-    return Container(
+    final card = Container(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
       decoration: BoxDecoration(
@@ -600,8 +609,27 @@ class _PatientCard extends StatelessWidget {
                     size: 16, color: AppColors.brandGreen),
               ),
             ),
+          if (onRemove != null) ...[
+            const SizedBox(width: 6),
+            GestureDetector(
+              onTap: onRemove,
+              child: Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFEBEE),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.person_remove_outlined,
+                    size: 16, color: Color(0xFFD32F2F)),
+              ),
+            ),
+          ],
         ],
       ),
     );
+    return onView == null
+        ? card
+        : GestureDetector(behavior: HitTestBehavior.opaque, onTap: onView, child: card);
   }
 }

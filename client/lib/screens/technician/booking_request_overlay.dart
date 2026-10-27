@@ -668,6 +668,41 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                       const SizedBox(height: 14),
                     ],
 
+                    // ── Customer notes (ip_bookings.notes) — highlighted ─────
+                    if (widget.booking.notes != null) ...[
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFF8E1),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: _orange, width: 1.5),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Row(children: [
+                              Icon(Icons.sticky_note_2_rounded, size: 16, color: Color(0xFFE65100)),
+                              SizedBox(width: 6),
+                              Text('Customer Note',
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFFE65100))),
+                            ]),
+                            const SizedBox(height: 6),
+                            Text(widget.booking.notes!,
+                                style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.textPrimary,
+                                    height: 1.35)),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                    ],
+
                     // ── Patient info rows ─────────────────────────────────────
                     _DetailRow(
                       icon: Icons.person_rounded,
@@ -699,17 +734,6 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                       value: widget.booking.hospital.isEmpty
                           ? 'Home Collection'
                           : widget.booking.hospital,
-                    ),
-                    const SizedBox(height: 10),
-                    _DetailRow(
-                      icon: Icons.location_city_rounded,
-                      label: 'Branch',
-                      value: widget.booking.branchName?.isNotEmpty == true
-                          ? widget.booking.branchName!
-                          : widget.booking.branchId != null
-                              ? 'Branch #${widget.booking.branchId}'
-                              : 'Unassigned',
-                      highlight: true,
                     ),
                     if (widget.booking.slotLabel?.isNotEmpty == true) ...[
                       const SizedBox(height: 10),
