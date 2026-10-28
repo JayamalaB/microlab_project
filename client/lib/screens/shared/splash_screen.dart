@@ -157,12 +157,16 @@ class _SplashScreenState extends State<SplashScreen>
                 builder: (_, __) => Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Logo card
+                    // Logo
                     FadeTransition(
                       opacity: _logoFade,
                       child: ScaleTransition(
                         scale: _logoScale,
-                        child: const _MicrobesLogoCard(),
+                        child: Image.asset(
+                          'assets/icon/app_icon.png',
+                          width: 150,
+                          fit: BoxFit.contain,
+                        ),
                       ),
                     ),
 
@@ -274,45 +278,6 @@ class _CornerGlow extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-// Glassy rounded-square card framing the MICROBES logo on the splash screen.
-class _MicrobesLogoCard extends StatelessWidget {
-  const _MicrobesLogoCard();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(40),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Colors.white.withOpacity(0.22),
-            Colors.white.withOpacity(0.06),
-          ],
-        ),
-        border: Border.all(
-          color: Colors.white.withOpacity(0.35),
-          width: 1.4,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.white.withOpacity(0.16),
-            blurRadius: 28,
-            spreadRadius: 1,
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 24),
-      child: Image.asset(
-        'assets/icon/app_icon.png',
-        width: 116,
-        fit: BoxFit.contain,
       ),
     );
   }
