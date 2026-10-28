@@ -13,6 +13,7 @@ import 'package:microlab/utils/app_messages.dart';
 import 'my_bookings_screen.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
+import '../shared/location_picker_screen.dart';
 
 // ─── Family member added during checkout ──────────────────────────────────────
 
@@ -141,6 +142,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   late String? _address;
   late String? _pincode;
   late String? _city;
+  late double? _lat;
+  late double? _lng;
 
   // ── Payment ───────────────────────────────────────────────
   // 'full' = pay tests + service charge now via Razorpay
@@ -215,6 +218,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     _address = widget.address;
     _pincode = widget.pincode;
     _city    = widget.city;
+    _lat     = widget.patientLat;
+    _lng     = widget.patientLng;
     if (_anyDocRequired) _paymentType = 'pay_later';
 
     debugPrint('\n🧾 [CHECKOUT INIT] ──────────────────────────────────');
@@ -246,15 +251,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // values the earlier branch-lookup step already resolved, passed into
   // this screen as constructor params.
   Future<void> _loadHomeCollectionFare() async {
-    if (widget.branchId == null || widget.patientLat == null || widget.patientLng == null) {
+    if (widget.branchId == null || _lat == null || _lng == null) {
       setState(() => _fareErrorMessage = 'Pickup location unavailable — cannot calculate Home Collection charge');
       return;
     }
     setState(() { _fareLoading = true; _fareErrorMessage = null; });
     final body = await ApiService.getHomeCollectionFareQuote(
       branchId: widget.branchId!,
-      lat: widget.patientLat!,
-      lng: widget.patientLng!,
+      lat: _lat!,
+      lng: _lng!,
     );
     if (!mounted) return;
     if (body['success'] == true) {
@@ -577,66 +582,114 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final addrCtrl    = TextEditingController(text: _address);
     final pincodeCtrl = TextEditingController(text: _pincode);
     final cityCtrl    = TextEditingController(text: _city);
+    // Temp lat/lng updated by map picker, committed only on Save
+    double? tempLat = _lat;
+    double? tempLng = _lng;
+    bool pinChanged = false;
+
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-        child: Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Center(child: Container(width: 40, height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)))),
-            const Text('Edit Address', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-            const SizedBox(height: 16),
-            const Text('Address', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-            const SizedBox(height: 6),
-            TextField(controller: addrCtrl, maxLines: 2,
-                textCapitalization: TextCapitalization.sentences,
-                decoration: _addrInputDecor('Street / locality')),
-            const SizedBox(height: 12),
-            Row(children: [
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('Pincode', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                const SizedBox(height: 6),
-                TextField(controller: pincodeCtrl, keyboardType: TextInputType.number,
-                    decoration: _addrInputDecor('6-digit pincode')),
-              ])),
-              const SizedBox(width: 12),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('City', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                const SizedBox(height: 6),
-                TextField(controller: cityCtrl, textCapitalization: TextCapitalization.words,
-                    decoration: _addrInputDecor('City')),
-              ])),
-            ]),
-            const SizedBox(height: 20),
-            SizedBox(width: double.infinity, child: ElevatedButton(
-              onPressed: () {
-                final a = addrCtrl.text.trim();
-                final p = pincodeCtrl.text.trim();
-                final c = cityCtrl.text.trim();
-                setState(() {
-                  _address = a.isEmpty ? null : a;
-                  _pincode = p.isEmpty ? null : p;
-                  _city    = c.isEmpty ? null : c;
-                });
-                Navigator.pop(ctx);
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.brandGreen, foregroundColor: Colors.white,
-                elevation: 0, padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+            ),
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Center(child: Container(width: 40, height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)))),
+              const Text('Edit Address', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              const SizedBox(height: 16),
+              const Text('Address', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+              const SizedBox(height: 6),
+              TextField(controller: addrCtrl, maxLines: 2,
+                  textCapitalization: TextCapitalization.sentences,
+                  decoration: _addrInputDecor('Street / locality')),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('Pincode', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                  const SizedBox(height: 6),
+                  TextField(controller: pincodeCtrl, keyboardType: TextInputType.number,
+                      decoration: _addrInputDecor('6-digit pincode')),
+                ])),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('City', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                  const SizedBox(height: 6),
+                  TextField(controller: cityCtrl, textCapitalization: TextCapitalization.words,
+                      decoration: _addrInputDecor('City')),
+                ])),
+              ]),
+              const SizedBox(height: 14),
+              // Map pin picker
+              GestureDetector(
+                onTap: () async {
+                  final picked = await Navigator.push<PickedLocation>(
+                    ctx,
+                    MaterialPageRoute(builder: (_) => const LocationPickerScreen()),
+                  );
+                  if (picked != null) {
+                    setSheet(() { tempLat = picked.lat; tempLng = picked.lng; pinChanged = true; });
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+                  decoration: BoxDecoration(
+                    color: pinChanged ? AppColors.brandGreenSurface : AppColors.background,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: pinChanged ? AppColors.brandGreen : AppColors.divider,
+                      width: pinChanged ? 1.5 : 1,
+                    ),
+                  ),
+                  child: Row(children: [
+                    Icon(Icons.location_on_outlined, size: 16,
+                        color: pinChanged ? AppColors.brandGreen : AppColors.textSecondary),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(
+                      pinChanged ? 'Location pinned on map ✓' : 'Pin location on map (recommended)',
+                      style: TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.w500,
+                        color: pinChanged ? AppColors.brandGreen : AppColors.textSecondary,
+                      ),
+                    )),
+                    Icon(Icons.chevron_right, size: 16, color: AppColors.textHint),
+                  ]),
+                ),
               ),
-              child: const Text('Save Address', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-            )),
-          ]),
+              const SizedBox(height: 20),
+              SizedBox(width: double.infinity, child: ElevatedButton(
+                onPressed: () {
+                  final a = addrCtrl.text.trim();
+                  final p = pincodeCtrl.text.trim();
+                  final c = cityCtrl.text.trim();
+                  setState(() {
+                    _address = a.isEmpty ? null : a;
+                    _pincode = p.isEmpty ? null : p;
+                    _city    = c.isEmpty ? null : c;
+                    _lat     = tempLat;
+                    _lng     = tempLng;
+                  });
+                  Navigator.pop(ctx);
+                  // Recalculate fare with updated coordinates
+                  if (pinChanged && widget.mode == 'Home Collection') _loadHomeCollectionFare();
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.brandGreen, foregroundColor: Colors.white,
+                  elevation: 0, padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('Save Address', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+              )),
+            ]),
+          ),
         ),
       ),
     );
@@ -707,8 +760,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       collectionAddress:   _address,
       collectionPincode:   _pincode,
       collectionCity:      _city,
-      collectionLatitude:  widget.patientLat,
-      collectionLongitude: widget.patientLng,
+      collectionLatitude:  _lat,
+      collectionLongitude: _lng,
       branchId:            widget.branchId,
       paymentType:         isPayNow ? 'full' : 'pay_later',
       razorpayPaymentId:   isPayNow ? razorpayPaymentId : null,
@@ -792,8 +845,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         patientName:     widget.member.name,
         patientMobile:   widget.member.mobile,
         patientAddress:  address.isEmpty ? 'Home Collection' : address,
-        patientLat:      widget.patientLat,
-        patientLng:      widget.patientLng,
+        patientLat:      _lat,
+        patientLng:      _lng,
         hospital:        'MicroLab Home Collection',
         bookingType:     'lab',
         branchId:        widget.branchId,
@@ -937,8 +990,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (_city       != null && _city!.isNotEmpty)      'collectionCity':    _city,
       if (_selectedDate     != null) 'collectionDate':
           '${_selectedDate!.year}-${_selectedDate!.month.toString().padLeft(2, '0')}-${_selectedDate!.day.toString().padLeft(2, '0')}',
-      if (widget.patientLat != null) 'collectionLatitude':  widget.patientLat,
-      if (widget.patientLng     != null) 'collectionLongitude': widget.patientLng,
+      if (_lat != null) 'collectionLatitude':  _lat,
+      if (_lng != null) 'collectionLongitude': _lng,
       if (_selectedSlot != null && int.tryParse(_selectedSlot!.id) != null)
         'availableSlotId': int.parse(_selectedSlot!.id),
     };
@@ -1062,8 +1115,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           patientName:     widget.member.name,
           patientMobile:   widget.member.mobile,
           patientAddress:  address.isEmpty ? 'Home Collection' : address,
-          patientLat:      widget.patientLat,
-          patientLng:      widget.patientLng,
+          patientLat:      _lat,
+          patientLng:      _lng,
           hospital:        'MicroLab Home Collection',
           bookingType:     'lab',
           branchId:        widget.branchId,
@@ -1185,7 +1238,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     if (_city != null)
                       Expanded(child: _InfoLine(Icons.location_city_outlined, _city!)),
                   ]),
-                  if (widget.patientLat == null) ...[
+                  if (_lat == null) ...[
                     const SizedBox(height: 8),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
