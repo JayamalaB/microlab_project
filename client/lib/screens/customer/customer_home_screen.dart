@@ -414,7 +414,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       backgroundColor: AppColors.background,
       appBar: (!_inDashboard && _selectedIndex == 0)
           ? PreferredSize(
-              preferredSize: const Size.fromHeight(172),
+              preferredSize: const Size.fromHeight(142),
               child: Container(
                 color: AppColors.brandGreen,
                 child: SafeArea(
@@ -428,9 +428,10 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                             size: 110, color: Colors.white.withValues(alpha: 0.08)),
                       ),
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 6, 6, 14),
+                        padding: const EdgeInsets.fromLTRB(16, 4, 6, 12),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             // Logo row + call
                             Row(
@@ -461,7 +462,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 10),
+                            const SizedBox(height: 4),
                             // Greeting = the account holder; "Booking for" =
                             // who Book Test books for.
                             Row(
