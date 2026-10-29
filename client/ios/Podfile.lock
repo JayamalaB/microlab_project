@@ -1,0 +1,80 @@
+PODS:
+  - device_info_plus (0.0.1):
+    - Flutter
+  - Flutter (1.0.0)
+  - flutter_foreground_task (0.0.1):
+    - Flutter
+  - flutter_local_notifications (0.0.1):
+    - Flutter
+  - Google-Maps-iOS-Utils (6.1.0):
+    - GoogleMaps (~> 9.0)
+  - google_maps_flutter_ios (0.0.1):
+    - Flutter
+    - Google-Maps-iOS-Utils (< 7.0, >= 5.0)
+    - GoogleMaps (< 11.0, >= 8.4)
+  - GoogleMaps (9.4.0):
+    - GoogleMaps/Maps (= 9.4.0)
+  - GoogleMaps/Maps (9.4.0)
+  - open_filex (0.0.2):
+    - Flutter
+  - printing (1.0.0):
+    - Flutter
+  - razorpay-core-pod (1.0.9)
+  - razorpay-pod (1.5.9):
+    - razorpay-core-pod (= 1.0.9)
+  - razorpay_flutter (1.1.10):
+    - Flutter
+    - razorpay-pod
+
+DEPENDENCIES:
+  - device_info_plus (from `.symlinks/plugins/device_info_plus/ios`)
+  - Flutter (from `Flutter`)
+  - flutter_foreground_task (from `.symlinks/plugins/flutter_foreground_task/ios`)
+  - flutter_local_notifications (from `.symlinks/plugins/flutter_local_notifications/ios`)
+  - google_maps_flutter_ios (from `.symlinks/plugins/google_maps_flutter_ios/ios`)
+  - open_filex (from `.symlinks/plugins/open_filex/ios`)
+  - printing (from `.symlinks/plugins/printing/ios`)
+  - razorpay_flutter (from `.symlinks/plugins/razorpay_flutter/ios`)
+
+SPEC REPOS:
+  trunk:
+    - Google-Maps-iOS-Utils
+    - GoogleMaps
+    - razorpay-core-pod
+    - razorpay-pod
+
+EXTERNAL SOURCES:
+  device_info_plus:
+    :path: ".symlinks/plugins/device_info_plus/ios"
+  Flutter:
+    :path: Flutter
+  flutter_foreground_task:
+    :path: ".symlinks/plugins/flutter_foreground_task/ios"
+  flutter_local_notifications:
+    :path: ".symlinks/plugins/flutter_local_notifications/ios"
+  google_maps_flutter_ios:
+    :path: ".symlinks/plugins/google_maps_flutter_ios/ios"
+  open_filex:
+    :path: ".symlinks/plugins/open_filex/ios"
+  printing:
+    :path: ".symlinks/plugins/printing/ios"
+  razorpay_flutter:
+    :path: ".symlinks/plugins/razorpay_flutter/ios"
+
+SPEC CHECKSUMS:
+  device_info_plus: 97af1d7e84681a90d0693e63169a5d50e0839a0d
+  Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
+  flutter_foreground_task: 21ef182ab0a29a3005cc72cd70e5f45cb7f7f817
+  flutter_local_notifications: 4cde75091f6327eb8517fa068a0a5950212d2086
+  Google-Maps-iOS-Utils: 0a484b05ed21d88c9f9ebbacb007956edd508a96
+  google_maps_flutter_ios: 5f2ee3f5cc4fc2398574367f893e3f97bbbcea39
+  GoogleMaps: 0608099d4870cac8754bdba9b6953db543432438
+  open_filex: 6e26e659846ec990262224a12ef1c528bb4edbe4
+  printing: 233e1b73bd1f4a05615548e9b5a324c98588640b
+  razorpay-core-pod: 7ecea8ed3c47751e6a958f6c88126ea068f8c8fc
+  razorpay-pod: fc66d89a1f8a64d257b3d9281a8f7c9bcfe950ba
+  razorpay_flutter: 84b3bfd206ae9c9c2a9ba585524a1b3d8102b6c1
+
+PODFILE CHECKSUM: 53a6aebc29ccee84c41f92f409fc20cd4ca011f1
+
+COCOAPODS: 1.17.0
