@@ -2452,10 +2452,10 @@ class _SectionCard extends StatelessWidget {
             Row(children: [
               Icon(icon, size: 16, color: AppColors.brandGreen),
               const SizedBox(width: 8),
-              Expanded(child: Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary))),
+              Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
               if (required)
                 const Text(' *', style: TextStyle(color: Color(0xFFD32F2F), fontSize: 14)),
-              if (trailing != null) ...[const SizedBox(width: 8), trailing!],
+              if (trailing != null) ...[const Spacer(), trailing!],
             ]),
             const SizedBox(height: 12),
             child,

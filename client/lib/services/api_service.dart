@@ -686,6 +686,46 @@ class ApiService {
     return false;
   }
 
+  // Creates a Razorpay UPI QR code for on-site payment.
+  // Returns {success, qrId, imageUrl} on success, null on failure.
+  static Future<Map<String, dynamic>?> createQrCode({
+    required int bookingId,
+    required double amount,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await _client.post(
+        Uri.parse('$baseUrl/api/technicians/create-qr'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode({'bookingId': bookingId, 'amount': amount}),
+      ).timeout(const Duration(seconds: 20));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return body;
+      debugPrint('[createQrCode] failed: ${body['message']}');
+    } catch (e) {
+      debugPrint('[createQrCode] ERROR: $e');
+    }
+    return null;
+  }
+
+  // Polls whether a QR payment session has been paid.
+  // Returns {success, paid, paymentId} or null on error.
+  static Future<Map<String, dynamic>?> getQrStatus(String qrId) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await _client.get(
+        Uri.parse('$baseUrl/api/technicians/qr-status/$qrId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[getQrStatus] ERROR: $e');
+      return null;
+    }
+  }
+
   // Sets the booking's additional charge (amount + reason) entered by the
   // technician on site — replaces any earlier one, amount 0 removes it. The
   // server adds it to total_amount / amount_due. Returns the server reply:

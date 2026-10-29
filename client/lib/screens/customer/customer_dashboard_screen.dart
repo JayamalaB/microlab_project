@@ -430,14 +430,22 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         cart: _cart,
         onRemove: (t) => setState(() => _cart.removeWhere((x) => x.id == t.id)),
         onCheckout: () {
+          // Guard: branch detection still in flight — don't proceed with null branchId
+          if (_branchDetecting && _mode == 'Home Collection') {
+            debugPrint('🛑 [CHECKOUT BLOCKED] branch detection still running — showing wait message');
+            Navigator.pop(context); // close cart sheet
+            AppMessages.info(context, 'Finding your nearest branch... please wait a moment');
+            return;
+          }
           final branchId = _selectedBranch != null
               ? int.tryParse(_selectedBranch!.id)
               : null;
           debugPrint('\n🛒 [CHECKOUT] ────────────────────────────────────');
           debugPrint('   mode        : $_mode');
           debugPrint('   pincode     : ${_pincode ?? '—'}');
-          debugPrint('   branch      : ${_selectedBranch?.name ?? '⚠️ none — slots will be static'}');
+          debugPrint('   branch      : ${_selectedBranch?.name ?? '⚠️ none'}');
           debugPrint('   branchId    : ${branchId ?? '⚠️ null'}');
+          debugPrint('   detecting   : $_branchDetecting');
           debugPrint('   patientId   : $_patientId');
           debugPrint('   cart items  : ${_cart.length}');
           debugPrint('──────────────────────────────────────────────────\n');

@@ -8,6 +8,7 @@ const db       = require('../config/db');
 const settings = require('../config/settings');
 const fs   = require('fs');
 const path = require('path');
+const qrStore  = require('../services/qrSessionStore');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 const dbLogger = require('../utils/dbLogger');
@@ -743,6 +744,101 @@ exports.collectPayment = async (req, res) => {
     console.error('❌ collectPayment FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
+};
+
+// ── POST /api/technicians/create-qr ──────────────────────────────────────────
+// Creates a Razorpay UPI QR code for on-site payment collection.
+// Returns { qrId, imageUrl } on success; stores session in qrSessionStore so
+// the qr-status polling endpoint and the webhook handler can both find it.
+exports.createQrPayment = async (req, res) => {
+  const technicianId = req.user.id;
+  const { bookingId, amount } = req.body;
+
+  if (!bookingId || !amount || Number(amount) <= 0) {
+    return res.status(400).json({ success: false, message: 'bookingId and amount are required' });
+  }
+
+  try {
+    const [[booking]] = await db.execute(
+      `SELECT b.booking_id, b.total_amount, b.amount_paid
+       FROM ip_bookings b
+       WHERE b.booking_id = ?
+         AND (
+           EXISTS (SELECT 1 FROM ip_technician_collection tc WHERE tc.booking_id = b.booking_id AND tc.technician_id = ?)
+           OR (b.visit_group_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM ip_bookings parent
+             INNER JOIN ip_technician_collection tc ON tc.booking_id = parent.booking_id AND tc.technician_id = ?
+             WHERE parent.visit_group_id = b.visit_group_id
+           ))
+         )`,
+      [bookingId, technicianId, technicianId]
+    );
+
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
+    }
+
+    const amountDue = Math.max(0, parseFloat(booking.total_amount) - parseFloat(booking.amount_paid || 0));
+    if (Number(amount) > amountDue + 0.01) {
+      return res.status(400).json({ success: false, message: `Amount ₹${amount} exceeds amount due ₹${amountDue.toFixed(2)}` });
+    }
+
+    const keyId     = process.env.RAZORPAY_KEY_ID;
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    if (!keyId || !keySecret) {
+      return res.status(500).json({ success: false, message: 'Razorpay credentials not configured' });
+    }
+
+    const auth    = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+    const closeBy = Math.floor(Date.now() / 1000) + 600; // 10-minute expiry
+
+    const qrRes = await fetch('https://api.razorpay.com/v1/payments/qr_codes', {
+      method: 'POST',
+      headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'upi_qr',
+        name: 'MicroLab',
+        usage: 'single_use',
+        fixed_amount: true,
+        payment_amount: Math.round(Number(amount) * 100),
+        description: `Payment for booking ${bookingId}`,
+        close_by: closeBy,
+        notes: {
+          booking_id:    String(bookingId),
+          technician_id: String(technicianId),
+          amount:        String(amount),
+        },
+      }),
+    });
+
+    const qrData = await qrRes.json();
+    if (!qrRes.ok || !qrData.id) {
+      console.error('❌ Razorpay QR creation failed:', JSON.stringify(qrData));
+      return res.status(502).json({ success: false, message: qrData.error?.description || 'Failed to create QR code' });
+    }
+
+    qrStore.sessions.set(qrData.id, {
+      bookingId:    parseInt(bookingId, 10),
+      amount:       Number(amount),
+      technicianId,
+      paid:         false,
+      paymentId:    null,
+    });
+
+    console.log(`✅ QR created — qr_id=${qrData.id} booking_id=${bookingId} amount=₹${amount} by technician_id=${technicianId}`);
+    res.json({ success: true, qrId: qrData.id, imageUrl: qrData.image_url });
+  } catch (err) {
+    console.error('❌ createQrPayment FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── GET /api/technicians/qr-status/:qrId ─────────────────────────────────────
+// Polling endpoint: returns whether the QR session has been paid.
+exports.getQrStatus = (req, res) => {
+  const session = qrStore.sessions.get(req.params.qrId);
+  if (!session) return res.status(404).json({ success: false, message: 'QR session not found' });
+  res.json({ success: true, paid: session.paid, paymentId: session.paymentId });
 };
 
 // ── PUT /api/technicians/bookings/:bookingId/additional-charge ───────────────

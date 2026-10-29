@@ -36,6 +36,15 @@ function logNotify(msg) {
   process.stdout.write(line);
   fs.appendFileSync(NOTIFY_LOG, line, 'utf8');
 }
+
+// ── Booking log ───────────────────────────────────────────────────────────────
+const BOOKING_LOG = path.join(__dirname, '..', 'logs', 'booking.log');
+function blog(msg) {
+  const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+  const line = `[${ist}] ${msg}\n`;
+  process.stdout.write(line);
+  fs.appendFileSync(BOOKING_LOG, line, 'utf8');
+}
 const { triggerScheduledDispatch, freeTechnician, unassignAndRedispatch } = require('../socket/bookingSocket');
 
 // ── Razorpay capture (web checkout.js leaves payments as "Authorized") ─────────
@@ -77,8 +86,8 @@ function _pushToPatient(bookingId, event, payload) {
 
 // ── POST /api/bookings ─────────────────────────────────────────────────────────
 exports.createBooking = async (req, res) => {
-  console.log('\n🔵 [CREATE BOOKING] ─────────────────────────────');
-  console.log('📥 Request body:', JSON.stringify(req.body, null, 2));
+  blog('\n🔵 [CREATE BOOKING] ─────────────────────────────');
+  blog('📥 Request body: ' + JSON.stringify(req.body));
 
   const clientId = req.user.client_id;
   const userId   = req.user.user_id;
@@ -126,7 +135,12 @@ exports.createBooking = async (req, res) => {
   const todayIST      = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
   const bookingStatus = (collectionDate && collectionDate > todayIST) ? 'scheduled' : 'pending';
 
-  console.log(`👤 client_id=${clientId} | patient_id=${patientId} | type=${bookingType} | total=₹${totalAmount} | payment=${paymentType} | status=${bookingStatus}`);
+  blog(`👤 client_id=${clientId} | patient_id=${patientId} | type=${bookingType} | total=₹${totalAmount} | payment=${paymentType} | status=${bookingStatus}`);
+  if (bookingType === 'home_collection' && !branchId) {
+    blog('⚠️  [CREATE BOOKING] home_collection booking received with NO branchId — branch auto-detection may not have completed before checkout');
+  } else if (bookingType === 'home_collection') {
+    blog(`🏥 [CREATE BOOKING] branchId=${branchId} (home collection)`);
+  }
 
   const conn = await db.getConnection();
   try {
@@ -168,7 +182,7 @@ exports.createBooking = async (req, res) => {
       } else {
         totalAmount = Number((itemsTotal + homeCollectionFare.finalFare).toFixed(2));
       }
-      console.log(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} finalFare=₹${homeCollectionFare.finalFare} rateId=${homeCollectionFare.rateId} → totalAmount=₹${totalAmount}`);
+      blog(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} finalFare=₹${homeCollectionFare.finalFare} rateId=${homeCollectionFare.rateId} → totalAmount=₹${totalAmount}`);
     }
 
     const amountPaid = isPaid ? totalAmount : 0;
@@ -181,7 +195,7 @@ exports.createBooking = async (req, res) => {
       [patientId]
     );
     if (patientRow?.patient_id_ref) resolvedPatientIdRef = patientRow.patient_id_ref;
-    console.log(`👤 patientId=${patientId} → patient_id_ref=${resolvedPatientIdRef}`);
+    blog(`👤 patientId=${patientId} → patient_id_ref=${resolvedPatientIdRef}`);
 
     // Resolve slot → get lab_slot_id / technician_slot_id from ip_available_slots
     let labSlotId  = null;
@@ -196,7 +210,7 @@ exports.createBooking = async (req, res) => {
         labSlotId  = avSlot.lab_slot_id  ?? null;
         techSlotId = avSlot.technician_slot_id ?? null;
       }
-      console.log(`🗓  available_slot_id=${availableSlotId} → lab_slot_id=${labSlotId} tech_slot_id=${techSlotId}`);
+      blog(`🗓  available_slot_id=${availableSlotId} → lab_slot_id=${labSlotId} tech_slot_id=${techSlotId}`);
     }
 
     // 1. Master booking record (product_id updated after items loop). The
@@ -237,7 +251,7 @@ exports.createBooking = async (req, res) => {
     // rather than e.g. Date.now(), matters here).
     const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
     await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
-    console.log(`✅ ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef}`);
+    blog(`✅ ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef} branch_id=${branchId ?? 'NULL'}`);
 
     // 2. Patient → booking link
     await conn.execute(
@@ -341,8 +355,8 @@ exports.createBooking = async (req, res) => {
     }
 
     await conn.commit();
-    console.log(`🎉 Booking created — booking_id=${bookingId} ref=${bookingRef}`);
-    console.log('─────────────────────────────────────────────────\n');
+    blog(`🎉 Booking created — booking_id=${bookingId} ref=${bookingRef}`);
+    blog('─────────────────────────────────────────────────');
 
     if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, totalAmount);
 
@@ -372,10 +386,10 @@ exports.createBooking = async (req, res) => {
       // missing branch location, outside service area) is this specific
       // request being unable to be priced (422).
       const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
-      console.error(`❌ [CREATE BOOKING] fare calculation failed — code=${err.code} ${err.message}`);
+      blog(`❌ [CREATE BOOKING] fare calculation failed — code=${err.code} ${err.message}`);
       res.status(status).json({ success: false, code: err.code, message: err.message });
     } else {
-      console.error('❌ createBooking FAILED:', err.message);
+      blog(`❌ createBooking FAILED — ${err.message}`);
       res.status(500).json({
         success: false,
         message: 'Server error',
@@ -2333,7 +2347,7 @@ exports.selfEditItems = async (req, res) => {
 // members[] = [{ patientId, items, totalAmount, serviceCharge }, ...]
 // First member carries the service charge; additional members have serviceCharge = 0.
 exports.createFamilyBooking = async (req, res) => {
-  console.log('\n🔵 [CREATE FAMILY BOOKING] ──────────────────────────');
+  blog('\n🔵 [CREATE FAMILY BOOKING] ──────────────────────────');
   const clientId = req.user.client_id;
   const userId   = req.user.user_id;
 
@@ -2393,13 +2407,25 @@ exports.createFamilyBooking = async (req, res) => {
     } catch (_) {}
   }
 
+  // Calculate home collection fare once for the whole visit (only the primary
+  // member is charged; siblings carry 0). Done before the DB transaction so a
+  // fare error rejects the request cleanly without a partial rollback.
+  let familyFare = null; // set for home_collection only; null = lab_test
+  if (bookingType === 'home_collection') {
+    familyFare = await calculateHomeCollectionFare({
+      branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude,
+    });
+    blog(`💰 [CREATE FAMILY BOOKING] fare — distanceKm=${familyFare.distanceKm} finalFare=₹${familyFare.finalFare} rateId=${familyFare.rateId}`);
+  }
+
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
     const createdBookings = [];
+    let isFirstMember = true;
 
     for (const member of members) {
-      const { patientId, items = [], totalAmount = 0, serviceCharge = 0 } = member;
+      const { patientId, items = [], totalAmount = 0 } = member;
       if (!patientId) continue;
 
       // Resolve patient_id_ref
@@ -2409,9 +2435,11 @@ exports.createFamilyBooking = async (req, res) => {
       );
       if (patRow?.patient_id_ref) resolvedPatientIdRef = patRow.patient_id_ref;
 
-      // See createBooking's own comment above for why this is derived from
-      // the row's own auto-increment id instead of a timestamp+random tail —
-      // the random tail reduced collisions but never guaranteed against them.
+      // Primary member carries the service charge; additional members have 0.
+      const memberFare       = (isFirstMember && familyFare) ? familyFare.finalFare  : 0;
+      const memberDistanceKm = (isFirstMember && familyFare) ? familyFare.distanceKm : null;
+      const memberRateId     = (isFirstMember && familyFare) ? familyFare.rateId     : null;
+
       const amountPaid  = isPaid ? totalAmount : 0;
       const amountDue   = isPaid ? 0 : totalAmount;
       const txPayType   = isPaid ? 'RAZORPAY' : 'PAY_LATER';
@@ -2422,17 +2450,22 @@ exports.createFamilyBooking = async (req, res) => {
             booking_type, status, total_amount, discount_amount,
             amount_paid, amount_due, source_channel, notes,
             collection_address, postal_code, city,
+            collection_latitude, collection_longitude,
+            home_collection_fare, home_collection_distance_km, km_rate_id,
             patient_id, patient_id_ref, product_id,
             payment_status, visit_group_id, start_datetime, end_datetime, created_by, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, 'mobile_app', ?,
-                 ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), ?, NOW())`,
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), ?, NOW())`,
         [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
          bookingType, totalAmount, amountPaid, amountDue, notes ?? null,
          collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
+         collectionLatitude ?? null, collectionLongitude ?? null,
+         memberFare, memberDistanceKm, memberRateId,
          patientId, resolvedPatientIdRef,
          isPaid ? 'paid' : 'unpaid',
          visitGroupId, userId ?? null]
       );
+      isFirstMember = false;
       const bookingId  = bResult.insertId;
       // Same booking_id + offset scheme as createBooking above — see that
       // function's own comment. visit_group_id (below) intentionally keeps
@@ -2544,7 +2577,7 @@ exports.createFamilyBooking = async (req, res) => {
     res.status(201).json({ success: true, visitGroupId, bookings: createdBookings });
   } catch (err) {
     await conn.rollback();
-    console.error('❌ createFamilyBooking FAILED:', err.message);
+    blog(`❌ createFamilyBooking FAILED — ${err.message}`);
     res.status(500).json({ success: false, message: 'Server error', detail: err.message });
   } finally {
     conn.release();
