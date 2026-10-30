@@ -38,6 +38,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   MemberModel? _activeMember;
   MemberModel? _dashboardMember; // kept alive in IndexedStack even when back is pressed
   List<MemberModel> _members = [];
+  String? _accountName;
   final Map<String, BookingDraft> _drafts = {};
   bool _loadingPatients = true;
   final _bookingsRefresh = ValueNotifier<int>(0);
@@ -198,10 +199,13 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
 
   Future<void> _loadPatients() async {
     try {
+      final prefs   = await SharedPreferences.getInstance();
+      final accName = prefs.getString('user_name');
       final patients = await ApiService.getPatients();
       if (!mounted) return;
       setState(() {
-        _members = patients.map(_patientToMember).toList();
+        _members      = patients.map(_patientToMember).toList();
+        _accountName  = accName;
         _loadingPatients = false;
       });
     } catch (_) {
@@ -576,6 +580,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                   mobile: widget.mobile,
                   isVip: widget.isVip,
                   members: _members,
+                  accountName: _accountName,
                   embedded: true,
                   onAddMember: _openAddMember,
                   onEditMember: _openEditMember,

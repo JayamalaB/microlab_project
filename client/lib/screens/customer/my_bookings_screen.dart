@@ -490,7 +490,6 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
         child: CustomScrollView(
           slivers: [
             SliverToBoxAdapter(child: _buildSummaryHeader()),
-            SliverToBoxAdapter(child: _buildFilterPills()),
             if (views.isEmpty)
               SliverFillRemaining(hasScrollBody: false, child: _buildFilterEmptyState())
             else
@@ -529,51 +528,29 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
     final total = _bookings.length;
     final upcoming = _bookings.where((b) => _upcomingStatuses.contains(b.status)).length;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
       child: Row(
         children: [
-          const Expanded(
-            child: Text('Your appointments',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-          ),
-          _StatChip(icon: Icons.event_note_rounded, label: '$total total'),
-          const SizedBox(width: 8),
-          _StatChip(icon: Icons.schedule_rounded, label: '$upcoming upcoming'),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildFilterPills() {
-    const tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
-    return SizedBox(
-      height: 40,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-        itemCount: tabs.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (_, i) {
-          final t = tabs[i];
-          final selected = _bookingsFilter == t;
-          return GestureDetector(
-            onTap: () => setState(() => _bookingsFilter = t),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: selected ? AppColors.brandGreen : Colors.white,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: selected ? AppColors.brandGreen : AppColors.divider),
-              ),
-              child: Text(t,
-                  style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: selected ? Colors.white : AppColors.textSecondary)),
+          Expanded(
+            child: _StatCard(
+              count: total,
+              label: 'Total',
+              icon: Icons.event_note_rounded,
+              selected: _bookingsFilter == 'All',
+              onTap: () => setState(() => _bookingsFilter = 'All'),
             ),
-          );
-        },
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: _StatCard(
+              count: upcoming,
+              label: 'Upcoming',
+              icon: Icons.schedule_rounded,
+              selected: _bookingsFilter == 'Upcoming',
+              onTap: () => setState(() => _bookingsFilter = 'Upcoming'),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -631,27 +608,37 @@ class _PatientGroupView {
   });
 }
 
-class _StatChip extends StatelessWidget {
-  final IconData icon;
+class _StatCard extends StatelessWidget {
+  final int count;
   final String label;
-  const _StatChip({required this.icon, required this.label});
+  final IconData icon;
+  final bool selected;
+  final VoidCallback? onTap;
+  const _StatCard({required this.count, required this.label, required this.icon, this.selected = false, this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: AppColors.brandGreenSurface,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 13, color: AppColors.brandGreen),
-          const SizedBox(width: 5),
-          Text(label,
-              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-        ],
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.brandGreen : AppColors.brandGreenSurface,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: selected ? Colors.white : AppColors.brandGreen),
+            const SizedBox(height: 6),
+            Text('$count',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.brandGreen)),
+            const SizedBox(height: 2),
+            Text(label,
+                style: TextStyle(fontSize: 11, color: selected ? Colors.white70 : AppColors.textSecondary)),
+          ],
+        ),
       ),
     );
   }

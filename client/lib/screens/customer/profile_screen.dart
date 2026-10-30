@@ -80,6 +80,7 @@ class ProfileScreen extends StatelessWidget {
   final String mobile;
   final bool isVip;
   final List<MemberModel> members;
+  final String? accountName;
   final VoidCallback onAddMember;
   final void Function(MemberModel) onEditMember;
   // Family-member View / Remove (moved here from the old Customers tab).
@@ -92,6 +93,7 @@ class ProfileScreen extends StatelessWidget {
     super.key,
     required this.mobile,
     required this.members,
+    this.accountName,
     required this.onAddMember,
     required this.onEditMember,
     this.onViewMember,
@@ -105,7 +107,7 @@ class ProfileScreen extends StatelessWidget {
     try {
       return members.firstWhere((m) => m.relation == 'Self');
     } catch (_) {
-      return members.isNotEmpty ? members.first : null;
+      return null;
     }
   }
 
@@ -207,21 +209,23 @@ class ProfileScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          self?.name ?? '—',
+                          self?.name ?? accountName ?? mobile,
                           style: const TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.w700,
                               color: AppColors.textPrimary),
                         ),
-                        const SizedBox(height: 3),
-                        Text(
-                          [
-                            if (self?.relation != null) self!.relation,
-                            if (self?.location.isNotEmpty == true) self!.location,
-                          ].join(' · '),
-                          style: const TextStyle(
-                              fontSize: 12, color: AppColors.textSecondary),
-                        ),
+                        if (self != null) ...[
+                          const SizedBox(height: 3),
+                          Text(
+                            [
+                              if (self.relation != null) self.relation,
+                              if (self.location.isNotEmpty) self.location,
+                            ].join(' · '),
+                            style: const TextStyle(
+                                fontSize: 12, color: AppColors.textSecondary),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -234,48 +238,50 @@ class ProfileScreen extends StatelessWidget {
                   icon: Icons.phone_outlined,
                   label: 'Mobile',
                   value: '+91 $mobile'),
-              if (self?.email != null && self!.email!.isNotEmpty) ...[
-                const _HDivider(),
-                _InfoRow(
-                    icon: Icons.email_outlined,
-                    label: 'Email',
-                    value: self.email!),
-              ],
-              if (self?.gender.isNotEmpty == true) ...[
-                const _HDivider(),
-                _InfoRow(
-                    icon: Icons.person_outline_rounded,
-                    label: 'Gender',
-                    value: self!.gender),
-              ],
-              if (self?.dob != null) ...[
-                const _HDivider(),
-                _InfoRow(
-                    icon: Icons.cake_outlined,
-                    label: 'Date of Birth',
-                    value: _formatDob(self!.dob!, self.age)),
-              ],
-              if (self?.address.isNotEmpty == true) ...[
-                const _HDivider(),
-                _InfoRow(
-                    icon: Icons.location_on_outlined,
-                    label: 'Address',
-                    value: self!.address),
-              ],
-              if (self?.location.isNotEmpty == true) ...[
-                const _HDivider(),
-                _InfoRow(
-                    icon: Icons.map_outlined,
-                    label: 'Location',
-                    value: self!.location),
-              ],
-              if (self?.healthCondition != null &&
-                  self!.healthCondition!.isNotEmpty) ...[
-                const _HDivider(),
-                _InfoRow(
-                    icon: Icons.favorite_border_rounded,
-                    label: 'Health Info',
-                    value: self.healthCondition!),
+              if (self != null) ...[
+                if (self.email != null && self.email!.isNotEmpty) ...[
+                  const _HDivider(),
+                  _InfoRow(
+                      icon: Icons.email_outlined,
+                      label: 'Email',
+                      value: self.email!),
+                ],
+                if (self.gender.isNotEmpty) ...[
+                  const _HDivider(),
+                  _InfoRow(
+                      icon: Icons.person_outline_rounded,
+                      label: 'Gender',
+                      value: self.gender),
+                ],
+                if (self.dob != null) ...[
+                  const _HDivider(),
+                  _InfoRow(
+                      icon: Icons.cake_outlined,
+                      label: 'Date of Birth',
+                      value: _formatDob(self.dob!, self.age)),
+                ],
+                if (self.address.isNotEmpty) ...[
+                  const _HDivider(),
+                  _InfoRow(
+                      icon: Icons.location_on_outlined,
+                      label: 'Address',
+                      value: self.address),
+                ],
+                if (self.location.isNotEmpty) ...[
+                  const _HDivider(),
+                  _InfoRow(
+                      icon: Icons.map_outlined,
+                      label: 'Location',
+                      value: self.location),
+                ],
+                if (self.healthCondition != null &&
+                    self.healthCondition!.isNotEmpty) ...[
+                  const _HDivider(),
+                  _InfoRow(
+                      icon: Icons.favorite_border_rounded,
+                      label: 'Health Info',
+                      value: self.healthCondition!),
+                ],
               ],
             ],
           ),
