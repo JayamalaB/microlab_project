@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -615,11 +616,13 @@ class _TechnicianBookingDetailScreenState
       final data = await ApiService.getBookingPaymentInfo(bookingId);
       if (!mounted || data == null) return;
       setState(() {
-        _livePaymentStatus = data['payment_status'] as String? ?? _livePaymentStatus;
-        _liveAmountPaid    = double.tryParse(data['amount_paid']?.toString() ?? '') ?? _liveAmountPaid;
-        _totalAmount       = double.tryParse(data['total_amount']?.toString() ?? '') ?? _totalAmount;
-        _additionalCharge  = double.tryParse(data['additional_charge_amount']?.toString() ?? '') ?? 0.0;
+        _livePaymentStatus      = data['payment_status'] as String? ?? _livePaymentStatus;
+        _liveAmountPaid         = double.tryParse(data['amount_paid']?.toString() ?? '') ?? _liveAmountPaid;
+        _totalAmount            = double.tryParse(data['total_amount']?.toString() ?? '') ?? _totalAmount;
+        _additionalCharge       = double.tryParse(data['additional_charge_amount']?.toString() ?? '') ?? 0.0;
         _additionalChargeReason = data['additional_charge_reason'] as String?;
+        // Server value now includes everything paid — session tracking is redundant
+        _sessionPaymentCollected = 0.0;
       });
     } catch (e) {
       debugPrint('[_refreshPaymentInfo] $e');
@@ -2328,7 +2331,7 @@ void _resumeJourney() {
                   style: TextStyle(
                       fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
               const SizedBox(height: 4),
-              Text('${widget.booking.customerName} · ${widget.booking.id}',
+              Text('${widget.booking.customerName}${widget.booking.referenceNo != null ? ' · ${widget.booking.referenceNo}' : ''}',
                   style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
               const SizedBox(height: 20),
 
@@ -2499,7 +2502,16 @@ void _resumeJourney() {
                     onTap: () => setSheet(() => method = 'RAZORPAY'),
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _PaymentMethodChip(
+                    label: 'UPI QR',
+                    icon: Icons.qr_code_rounded,
+                    selected: method == 'QR',
+                    onTap: () => setSheet(() => method = 'QR'),
+                  ),
+                ),
+                const SizedBox(width: 8),
                 Expanded(
                   child: _PaymentMethodChip(
                     label: 'Cash',
@@ -2527,8 +2539,12 @@ void _resumeJourney() {
                     elevation: 0,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
-                  child: Text(method == 'CASH' ? 'Confirm Cash Received' : 'Continue to Razorpay',
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                  child: Text(
+                    method == 'CASH' ? 'Confirm Cash Received'
+                        : method == 'QR' ? 'Generate QR Code'
+                        : 'Continue to Razorpay',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
                 ),
               ),
             ],
@@ -2662,6 +2678,23 @@ void _resumeJourney() {
 
     if (method == 'CASH') {
       await _collectCashPayment(amount: amount, onDone: onDone);
+      return;
+    }
+
+    if (method == 'QR') {
+      final bookingId = int.tryParse(widget.booking.id) ?? 0;
+      final paymentId = await _showQrPaymentSheet(bookingId: bookingId, amount: amount);
+      if (!mounted) return;
+      if (paymentId != null) {
+        final stillDue = amount < _amountDue;
+        setState(() {
+          _sessionPaymentCollected += amount;
+          _livePaymentStatus       = stillDue ? 'partial' : 'paid';
+        });
+        AppMessages.success(context, 'UPI payment of ₹${amount.toInt()} received');
+        onDone?.call();
+        _refreshPaymentInfo();
+      }
       return;
     }
 
@@ -2808,6 +2841,15 @@ void _resumeJourney() {
       return;
     }
 
+    if (method == 'QR') {
+      final paymentId = await _showQrPaymentSheet(bookingId: siblingBookingId, amount: amount);
+      if (paymentId != null && mounted) {
+        applyLocalUpdate(paymentId);
+        _loadLinkedPatients();
+      }
+      return;
+    }
+
     final options = {
       'key': AppConstants.razorpayKeyId,
       'amount': (amount * 100).toInt(),
@@ -2850,6 +2892,21 @@ void _resumeJourney() {
               : AppMessages.error(context, AppMessages.paymentError(msg));
         }
       },
+    );
+  }
+
+  // Shows a QR code sheet and polls until the customer pays or cancels.
+  // Returns the Razorpay payment ID on success, null if dismissed without payment.
+  Future<String?> _showQrPaymentSheet({
+    required int bookingId,
+    required double amount,
+  }) async {
+    return showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _QrPaymentSheet(bookingId: bookingId, amount: amount),
     );
   }
 
@@ -3181,8 +3238,9 @@ void _resumeJourney() {
           children: [
             const Text('Manage Booking',
                 style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600)),
-            Text(widget.booking.id,
-                style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 11)),
+            if (widget.booking.referenceNo != null)
+              Text(widget.booking.referenceNo!,
+                  style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 11)),
           ],
         ),
         actions: [
@@ -4309,8 +4367,8 @@ void _resumeJourney() {
                                 '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
                                 style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                               ),
-                              if ((c['booking_ref'] as String?) != null)
-                                Text(c['booking_ref'] as String,
+                              if ((c['reference_no'] as String?) != null)
+                                Text(c['reference_no'] as String,
                                     style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
                             ],
                           )),
@@ -6088,5 +6146,295 @@ class _PayModeOption extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// ── QR Payment Sheet ──────────────────────────────────────────────────────────
+// Shows a Razorpay UPI QR code with a 5-minute countdown. Polls the server
+// every 4 s. Pops with the Razorpay payment ID on success, null on cancel.
+enum _QrState { loading, ready, paid, expired, error }
+
+class _QrPaymentSheet extends StatefulWidget {
+  final int bookingId;
+  final double amount;
+  const _QrPaymentSheet({required this.bookingId, required this.amount});
+
+  @override
+  State<_QrPaymentSheet> createState() => _QrPaymentSheetState();
+}
+
+class _QrPaymentSheetState extends State<_QrPaymentSheet> {
+  static const int _totalSeconds = 300; // 5 minutes
+
+  _QrState _state = _QrState.loading;
+  String? _qrId;
+  String? _imageUrl;
+  String? _errorMsg;
+  int _remaining = _totalSeconds;
+
+  Timer? _pollTimer;
+  Timer? _countdownTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _generateQr();
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    _countdownTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _generateQr() async {
+    _pollTimer?.cancel();
+    _countdownTimer?.cancel();
+    setState(() { _state = _QrState.loading; _remaining = _totalSeconds; _errorMsg = null; });
+
+    final data = await ApiService.createQrCode(bookingId: widget.bookingId, amount: widget.amount);
+    if (!mounted) return;
+    if (data == null) {
+      setState(() { _state = _QrState.error; _errorMsg = 'Could not generate QR. Check your connection and try again.'; });
+      return;
+    }
+
+    setState(() {
+      _state    = _QrState.ready;
+      _qrId     = data['qrId'] as String?;
+      _imageUrl = data['imageUrl'] as String?;
+    });
+
+    // Countdown — tick every second
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (_remaining <= 1) {
+        _countdownTimer?.cancel();
+        _pollTimer?.cancel();
+        if (mounted) setState(() => _state = _QrState.expired);
+      } else {
+        setState(() => _remaining--);
+      }
+    });
+
+    // Poll server every 4 s
+    _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
+      if (_qrId == null || !mounted) return;
+      final status = await ApiService.getQrStatus(_qrId!);
+      if (!mounted) return;
+      if (status != null && status['paid'] == true) {
+        _pollTimer?.cancel();
+        _countdownTimer?.cancel();
+        setState(() => _state = _QrState.paid);
+        await Future.delayed(const Duration(milliseconds: 1600));
+        if (mounted) Navigator.of(context).pop(status['paymentId'] as String?);
+      }
+    });
+  }
+
+  String get _timerLabel {
+    final m = _remaining ~/ 60;
+    final s = (_remaining % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final screenH = MediaQuery.of(context).size.height;
+    return Container(
+      height: screenH * 0.82,
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      child: Column(
+        children: [
+          // Drag handle
+          const SizedBox(height: 12),
+          Container(width: 36, height: 4,
+              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2))),
+          const SizedBox(height: 4),
+
+          Expanded(child: _buildBody()),
+
+          // Cancel / close button at bottom
+          if (_state != _QrState.paid)
+            Padding(
+              padding: EdgeInsets.fromLTRB(24, 0, 24,
+                  MediaQuery.of(context).padding.bottom + 20),
+              child: SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: OutlinedButton(
+                  onPressed: () => Navigator.of(context).pop(null),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textSecondary,
+                    side: const BorderSide(color: AppColors.divider),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    switch (_state) {
+      case _QrState.loading:
+        return const Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            CircularProgressIndicator(color: AppColors.brandGreen, strokeWidth: 3),
+            SizedBox(height: 20),
+            Text('Generating QR code…',
+                style: TextStyle(fontSize: 15, color: AppColors.textSecondary, fontWeight: FontWeight.w500)),
+          ]),
+        );
+
+      case _QrState.error:
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.wifi_off_rounded, size: 52, color: AppColors.textHint),
+              const SizedBox(height: 16),
+              Text(_errorMsg ?? 'Something went wrong',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 14, color: AppColors.textSecondary, height: 1.5)),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: _generateQr,
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('Try Again', style: TextStyle(fontWeight: FontWeight.w600)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.brandGreen,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
+                ),
+              ),
+            ]),
+          ),
+        );
+
+      case _QrState.expired:
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.timer_off_rounded, size: 52, color: AppColors.textHint),
+              const SizedBox(height: 16),
+              const Text('QR Code Expired',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              const SizedBox(height: 8),
+              const Text('The 5-minute window passed.\nGenerate a new code to try again.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5)),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: _generateQr,
+                icon: const Icon(Icons.qr_code_rounded, size: 18),
+                label: const Text('Generate New QR', style: TextStyle(fontWeight: FontWeight.w600)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.brandGreen,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
+                ),
+              ),
+            ]),
+          ),
+        );
+
+      case _QrState.paid:
+        return Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+              width: 80, height: 80,
+              decoration: BoxDecoration(
+                color: AppColors.brandGreen.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.check_rounded, color: AppColors.brandGreen, size: 44),
+            ),
+            const SizedBox(height: 20),
+            const Text('Payment Received!',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+            const SizedBox(height: 6),
+            Text('₹${widget.amount.toInt()} collected via UPI',
+                style: const TextStyle(fontSize: 14, color: AppColors.textSecondary)),
+          ]),
+        );
+
+      case _QrState.ready:
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
+          child: Column(
+            children: [
+              // Amount
+              Text('₹${widget.amount.toInt()}',
+                  style: const TextStyle(
+                      fontSize: 36, fontWeight: FontWeight.w800,
+                      color: AppColors.brandGreen, letterSpacing: -0.5)),
+
+              const SizedBox(height: 16),
+
+              // QR image — no card border, no padding, just the image
+              Expanded(
+                child: _imageUrl != null
+                    ? Image.network(
+                        _imageUrl!,
+                        fit: BoxFit.contain,
+                        loadingBuilder: (_, child, progress) => progress == null
+                            ? child
+                            : const Center(child: CircularProgressIndicator(
+                                color: AppColors.brandGreen, strokeWidth: 2)),
+                        errorBuilder: (_, __, ___) => const Center(
+                          child: Icon(Icons.qr_code_2_rounded,
+                              size: 100, color: AppColors.textHint)),
+                      )
+                    : const Center(child: CircularProgressIndicator(
+                        color: AppColors.brandGreen, strokeWidth: 2)),
+              ),
+
+              const SizedBox(height: 14),
+
+              // Timer pill only
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _remaining <= 60
+                      ? Colors.red.withValues(alpha: 0.08)
+                      : AppColors.background,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: _remaining <= 60
+                        ? Colors.red.withValues(alpha: 0.3)
+                        : AppColors.divider,
+                  ),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.timer_outlined,
+                      size: 14,
+                      color: _remaining <= 60 ? Colors.red : AppColors.textSecondary),
+                  const SizedBox(width: 5),
+                  Text(_timerLabel,
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: _remaining <= 60 ? Colors.red : AppColors.textPrimary)),
+                ]),
+              ),
+
+              const SizedBox(height: 16),
+            ],
+          ),
+        );
+    }
   }
 }

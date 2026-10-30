@@ -238,6 +238,7 @@ class BookingModel {
   final double paidAmount;
   final double amountDue;
   final String? paymentStatus;      // 'paid' | 'pending' | null
+  final String? paymentMode;        // 'RAZORPAY' | 'CASH' | null
   final String status;
   final DateTime createdAt;
   final bool docRequired;
@@ -265,6 +266,7 @@ class BookingModel {
   final String? refundStatus;       // null | 'initiated' | 'processed'
   final int rescheduleCount;
   final bool canReschedule;
+  final String? referenceNo;        // ASMX bill_id stored in ip_bookings.reference_no
 
   BookingModel({
     required this.id,
@@ -287,6 +289,7 @@ class BookingModel {
     required this.paidAmount,
     this.amountDue = 0,
     this.paymentStatus,
+    this.paymentMode,
     required this.status,
     required this.createdAt,
     required this.docRequired,
@@ -313,7 +316,36 @@ class BookingModel {
     this.refundStatus,
     this.rescheduleCount = 0,
     this.canReschedule = true,
+    this.referenceNo,
   });
+}
+
+// ─── Booking Draft (persisted across back-navigation) ────────────────────────
+
+class BookingDraft {
+  List<TestModel> cart;
+  String mode;
+  bool modeChosen;
+  String? address;
+  String? pincode;
+  String? city;
+  double? lat;
+  double? lng;
+  BranchModel? selectedBranch;
+
+  BookingDraft({
+    List<TestModel>? cart,
+    this.mode = 'Home Collection',
+    this.modeChosen = false,
+    this.address,
+    this.pincode,
+    this.city,
+    this.lat,
+    this.lng,
+    this.selectedBranch,
+  }) : cart = cart ?? [];
+
+  bool get isEmpty => cart.isEmpty && address == null && pincode == null;
 }
 
 // ─── Time Slot ────────────────────────────────────────────────────────────────

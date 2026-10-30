@@ -25,10 +25,12 @@ class TechnicianBooking {
   final double? patientLat;
   final double? patientLng;
   final String hospital;
+  final String? referenceNo;
 
   TechnicianBooking({
     required this.id,
     this.bookingRef,
+    this.referenceNo,
     this.patientId,
     required this.customerName,
     required this.customerPhone,

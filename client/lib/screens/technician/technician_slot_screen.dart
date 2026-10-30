@@ -4,7 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/models/technician_booking.dart';
+import 'technician_booking_detail_screen.dart';
 
 class TechnicianSlotScreen extends StatefulWidget {
   final String mobile;
@@ -35,6 +38,11 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
   bool _isSaving = false;
   Timer? _slotRefreshTimer;
 
+  // ── Today's appointments (actual assigned bookings, not availability) ──────
+  List<TechnicianBooking> _todayAppointments = [];
+  bool _appointmentsLoading = true;
+  bool _appointmentsExpanded = true;
+
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   String _key(DateTime d) =>
@@ -54,6 +62,28 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
   int get _totalSlots =>
       _days.fold(0, (s, d) => s + (_selectedSlots[_key(d)]?.length ?? 0));
 
+  // "08:00:00" → "8 AM"; combined into "8 AM – 10 AM" for a slot range.
+  String _timeRangeLabel(String? start, String? end) {
+    if (start == null || end == null) return '';
+    String fmt(String t) {
+      final parts = t.split(':');
+      if (parts.length < 2) return t;
+      final h = int.tryParse(parts[0]) ?? 0;
+      final m = parts[1];
+      final isPm = h >= 12;
+      final h12  = h % 12 == 0 ? 12 : h % 12;
+      return m == '00' ? '$h12 ${isPm ? 'PM' : 'AM'}' : '$h12:$m ${isPm ? 'PM' : 'AM'}';
+    }
+    return '${fmt(start)} – ${fmt(end)}';
+  }
+
+  IconData _slotTimeIcon(String? start) {
+    final h = int.tryParse((start ?? '').split(':').first) ?? 9;
+    if (h < 17) return Icons.wb_sunny_outlined;
+    if (h < 20) return Icons.wb_twilight_rounded;
+    return Icons.nightlight_round;
+  }
+
   // ── Init ───────────────────────────────────────────────────────────────────
 
   @override
@@ -67,6 +97,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
       _selectedDurations[_key(d)] = <int, int?>{};
     }
     _loadSlots();
+    _loadTodayAppointments();
     WidgetsBinding.instance.addObserver(this);
     // Rebuild every minute so past-slot locks apply without a network call.
     _slotRefreshTimer = Timer.periodic(
@@ -77,7 +108,10 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _loadSlots();
+    if (state == AppLifecycleState.resumed) {
+      _loadSlots();
+      _loadTodayAppointments();
+    }
   }
 
   @override
@@ -161,6 +195,80 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
       });
     } catch (_) {
       if (mounted) setState(() => _slotsLoading = false);
+    }
+  }
+
+  // Reuses the same /active-bookings endpoint the Dashboard tab already
+  // calls, filtered down to just today — no new backend functionality.
+  Future<void> _loadTodayAppointments() async {
+    setState(() => _appointmentsLoading = true);
+    try {
+      final prefs  = await SharedPreferences.getInstance();
+      final techId = prefs.getInt('user_id') ?? 0;
+      if (techId == 0) { setState(() => _appointmentsLoading = false); return; }
+
+      final res = await ApiService.authClient
+          .get(Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/active-bookings'))
+          .timeout(const Duration(seconds: 10));
+
+      if (!mounted) return;
+      if (res.statusCode != 200) { setState(() => _appointmentsLoading = false); return; }
+
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      final rows = body['data'] as List<dynamic>? ?? [];
+      final todayKey = _key(_days[0]);
+
+      final all = rows.map((r) {
+        final map = r as Map<String, dynamic>;
+        final dateStr = map['collection_date'] as String?;
+        final date = dateStr != null
+            ? (DateTime.tryParse(dateStr)?.toLocal() ?? DateTime.now())
+            : DateTime.now();
+        final cs = map['collection_status'] as String? ?? '';
+        final status = cs == 'en_route'               ? 'Journey Started'
+            : cs == 'arrived'               ? 'Destination Reached'
+            : cs == 'collection_started'    ? 'Collection Started'
+            : cs == 'collected'             ? 'Sample Collected'
+            : cs == 'sample_collected'      ? 'Sample Collected'
+            : cs == 'otp_verified'          ? 'OTP Verified'
+            : cs == 'handed_to_lab_pending' ? 'Handed to Lab'
+            : cs == 'handed_to_lab'         ? 'Handed to Lab'
+            : 'Confirmed';
+        return TechnicianBooking(
+          id:                map['booking_id']?.toString() ?? '',
+          bookingRef:        map['booking_ref']        as String?,
+          referenceNo:       map['reference_no']       as String?,
+          patientId:         int.tryParse(map['patient_id']?.toString() ?? ''),
+          customerName:      map['patient_name']       as String? ?? 'Patient',
+          customerPhone:     map['patient_mobile']     as String? ?? '',
+          address:           map['collection_address'] as String? ?? '',
+          city:              map['city']               as String? ?? '',
+          pincode:           map['postal_code']        as String? ?? '',
+          date:              date,
+          timeSlot:          (map['slot_time_formatted'] as String?) ??
+                             (map['slot_label']         as String?) ?? '—',
+          testNames:         const ['Home Collection'],
+          mode:              'Home Collection',
+          status:            status,
+          docRequired:       map['doc_required'] == 1,
+          docVerified:       map['doc_verified'] == 1,
+          serviceChargePaid: 0,
+          testsTotal:        double.tryParse(map['amount_paid']?.toString() ?? '') ?? 0,
+          amountPaid:        double.tryParse(map['booking_amount_paid']?.toString() ?? '') ?? 0.0,
+          paymentStatus:     map['payment_status'] as String? ?? 'pending',
+          assignedAt:        date,
+          visitGroupId:      map['visit_group_id'] as String?,
+          patientLat:        double.tryParse(map['patient_lat']?.toString() ?? ''),
+          patientLng:        double.tryParse(map['patient_lng']?.toString() ?? ''),
+        );
+      }).toList();
+
+      setState(() {
+        _todayAppointments = all.where((b) => _key(b.date) == todayKey).toList();
+        _appointmentsLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _appointmentsLoading = false);
     }
   }
 
@@ -374,6 +482,66 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
         ),
       );
 
+  // ── Today's appointments (actual assigned bookings) ───────────────────────
+
+  Widget _buildTodayAppointments() {
+    if (_appointmentsLoading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 12),
+        child: Center(
+          child: SizedBox(
+            width: 20, height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+          ),
+        ),
+      );
+    }
+    if (_todayAppointments.isEmpty) return const SizedBox.shrink();
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      GestureDetector(
+        onTap: () => setState(() => _appointmentsExpanded = !_appointmentsExpanded),
+        child: Row(children: [
+          const Icon(Icons.access_time_filled_rounded, size: 15, color: AppColors.textPrimary),
+          const SizedBox(width: 7),
+          const Text("Today's Appointments",
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          const Spacer(),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+              width: 6, height: 6,
+              decoration: const BoxDecoration(color: AppColors.brandGreen, shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '${_todayAppointments.length} slot${_todayAppointments.length == 1 ? '' : 's'} available',
+              style: const TextStyle(fontSize: 11.5, color: AppColors.textSecondary, fontWeight: FontWeight.w600),
+            ),
+          ]),
+          const SizedBox(width: 2),
+          AnimatedRotation(
+            turns: _appointmentsExpanded ? 0.5 : 0,
+            duration: const Duration(milliseconds: 200),
+            child: const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: AppColors.textSecondary),
+          ),
+        ]),
+      ),
+      if (_appointmentsExpanded) ...[
+        const SizedBox(height: 10),
+        ..._todayAppointments.map((apt) => Padding(
+          padding: const EdgeInsets.only(bottom: 10),
+          child: _AppointmentCard(
+            booking: apt,
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => TechnicianBookingDetailScreen(booking: apt)),
+            ),
+          ),
+        )),
+      ],
+    ]);
+  }
+
   // ── Slot panel for the selected day ───────────────────────────────────────
 
   Widget _buildSlotPanel() {
@@ -388,20 +556,20 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (_selectedDayIndex == 0) ...[
+          _buildTodayAppointments(),
+          const SizedBox(height: 20),
+        ],
+
         // Section header
         Row(children: [
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(
-              '${_dayLabel(d)}, ${d.day} ${_months[d.month]}',
-              style: const TextStyle(
-                  fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
-            ),
-            const SizedBox(height: 2),
-            const Text(
-              'Tap a slot to toggle your availability',
-              style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
-            ),
-          ]),
+          const Icon(Icons.calendar_today_outlined, size: 15, color: AppColors.textPrimary),
+          const SizedBox(width: 7),
+          const Text(
+            'Other Time Slots',
+            style: TextStyle(
+                fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+          ),
           const Spacer(),
           _QuickButton(
             label: allSel ? 'Clear' : 'All',
@@ -411,7 +579,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
           ),
         ]),
 
-        const SizedBox(height: 16),
+        const SizedBox(height: 14),
 
         if (_masterSlots.isEmpty)
           Container(
@@ -427,64 +595,75 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
             ),
           )
         else
-          Wrap(
-            spacing: 8,
-            runSpacing: 10,
+          Column(
             children: _masterSlots.map((slot) {
               final slotId    = slot['slot_id']    as int;
               final slotLabel = slot['slot_label'] as String;
+              final start     = slot['slot_start'] as String?;
+              final end       = slot['slot_end']   as String?;
+              final range     = _timeRangeLabel(start, end);
               final isSel     = selected.contains(slotId);
               final isPast    = _isPast(k, slot);
-              return GestureDetector(
-                onTap: isPast ? null : () => _toggleSlot(k, slotId),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 160),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-                  decoration: BoxDecoration(
-                    color: isPast
-                        ? const Color(0xFFF0F0F0)
-                        : (isSel ? AppColors.brandGreen : Colors.white),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: isPast
-                          ? AppColors.divider
-                          : (isSel ? AppColors.brandGreen : AppColors.divider),
-                      width: (!isPast && isSel) ? 1.5 : 1,
-                    ),
-                    boxShadow: (!isPast && isSel)
-                        ? [BoxShadow(
-                            color: AppColors.brandGreen.withValues(alpha: 0.18),
-                            blurRadius: 6,
-                            offset: const Offset(0, 2))]
-                        : [BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.04),
-                            blurRadius: 4,
-                            offset: const Offset(0, 1))],
-                  ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(
-                      isPast
-                          ? Icons.lock_outline_rounded
-                          : (isSel
-                              ? Icons.check_circle_rounded
-                              : Icons.radio_button_unchecked_rounded),
-                      size: 15,
-                      color: isPast
-                          ? AppColors.textHint
-                          : (isSel ? Colors.white : AppColors.textHint),
-                    ),
-                    const SizedBox(width: 7),
-                    Text(
-                      slotLabel,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: GestureDetector(
+                  onTap: isPast ? null : () => _toggleSlot(k, slotId),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: isPast ? const Color(0xFFF5F5F5) : Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
                         color: isPast
-                            ? AppColors.textHint
-                            : (isSel ? Colors.white : AppColors.textPrimary),
+                            ? AppColors.divider
+                            : (isSel ? AppColors.brandGreen : AppColors.divider),
+                        width: (!isPast && isSel) ? 1.5 : 1,
                       ),
                     ),
-                  ]),
+                    child: Row(children: [
+                      Icon(
+                        isPast
+                            ? Icons.lock_outline_rounded
+                            : (isSel
+                                ? Icons.check_circle_rounded
+                                : Icons.radio_button_unchecked_rounded),
+                        size: 20,
+                        color: isPast
+                            ? AppColors.textHint
+                            : (isSel ? AppColors.brandGreen : AppColors.textHint),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          range.isNotEmpty ? '$slotLabel ($range)' : slotLabel,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w600,
+                            color: isPast ? AppColors.textHint : AppColors.textPrimary,
+                          ),
+                        ),
+                      ),
+                      Icon(_slotTimeIcon(start),
+                          size: 17, color: isPast ? AppColors.textHint : const Color(0xFFF5A623)),
+                      const SizedBox(width: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: isPast ? const Color(0xFFF0F0F0) : AppColors.brandGreenSurface,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          isPast ? 'Past' : 'Available',
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w600,
+                            color: isPast ? AppColors.textHint : AppColors.brandGreen,
+                          ),
+                        ),
+                      ),
+                    ]),
+                  ),
                 ),
               );
             }).toList(),
@@ -710,7 +889,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
           child: ColoredBox(
             color: AppColors.background,
             child: RefreshIndicator(
-              onRefresh: () async => _loadSlots(),
+              onRefresh: () async => Future.wait([_loadSlots(), _loadTodayAppointments()]),
               color: AppColors.brandGreen,
               child: _buildSlotPanel(),
             ),
@@ -720,28 +899,52 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
     }
 
     if (widget.embedded) {
+      final techName = SocketService.instance.userName.trim();
+      final techFirstName = techName.isNotEmpty ? techName.split(RegExp(r'\s+')).first : 'Technician';
+
       return Column(children: [
         Container(
           color: AppColors.brandGreen,
           padding: EdgeInsets.fromLTRB(
               16, MediaQuery.of(context).padding.top + 14, 16, 14),
           child: Row(children: [
-            const Expanded(
-              child: Text('My Schedule',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600)),
-            ),
-            if (!_slotsLoading) ...[
-              badge,
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: _loadSlots,
-                child: const Icon(Icons.refresh_rounded,
-                    color: Colors.white70, size: 20),
+            Container(
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(11),
               ),
-            ],
+              child: const Icon(Icons.calendar_month_rounded, color: Colors.white, size: 20),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Schedule',
+                      style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+                  SizedBox(height: 2),
+                  Text('Your upcoming appointments',
+                      style: TextStyle(color: Colors.white70, fontSize: 11.5)),
+                ],
+              ),
+            ),
+            CircleAvatar(
+              radius: 15,
+              backgroundColor: Colors.white.withValues(alpha: 0.2),
+              child: const Icon(Icons.person_rounded, color: Colors.white, size: 16),
+            ),
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(techFirstName,
+                    style: const TextStyle(color: Colors.white, fontSize: 12.5, fontWeight: FontWeight.w600)),
+                const Text('Field Service', style: TextStyle(color: Colors.white60, fontSize: 10)),
+              ],
+            ),
           ]),
         ),
         Expanded(child: body),
@@ -786,6 +989,90 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
           ? null
           : _buildSaveButton(
               bottomPadding: MediaQuery.of(context).padding.bottom + 12),
+    );
+  }
+}
+
+// ── Today's appointment card ───────────────────────────────────────────────
+
+class _AppointmentCard extends StatelessWidget {
+  final TechnicianBooking booking;
+  final VoidCallback onTap;
+
+  const _AppointmentCard({required this.booking, required this.onTap});
+
+  String _partOfDay(DateTime d, String timeSlot) {
+    final match = RegExp(r'^(\d{1,2}):').firstMatch(timeSlot);
+    int hour = d.hour;
+    if (match != null) hour = int.tryParse(match.group(1)!) ?? d.hour;
+    final isPm = timeSlot.toUpperCase().contains('PM');
+    if (isPm && hour != 12) hour += 12;
+    if (!isPm && hour == 12) hour = 0;
+    if (hour < 12) return 'Morning';
+    if (hour < 16) return 'Afternoon';
+    if (hour < 20) return 'Evening';
+    return 'Night';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: AppColors.brandGreenSurface,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: AppColors.brandGreenLight),
+        ),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(booking.timeSlot,
+                  style: const TextStyle(
+                      fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.brandGreen)),
+              const SizedBox(height: 2),
+              Text(_partOfDay(booking.date, booking.timeSlot),
+                  style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
+            ]),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(booking.customerName,
+                  style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              const SizedBox(height: 4),
+              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Icon(Icons.location_on_outlined, size: 13, color: AppColors.textSecondary),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    [booking.address, booking.city, booking.pincode]
+                        .where((s) => s.isNotEmpty).join(', '),
+                    style: const TextStyle(fontSize: 11.5, color: AppColors.textSecondary),
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(6)),
+                child: Text(booking.mode,
+                    style: const TextStyle(
+                        fontSize: 10.5, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
+              ),
+            ]),
+          ),
+          const Icon(Icons.chevron_right_rounded, color: AppColors.brandGreen, size: 20),
+        ]),
+      ),
     );
   }
 }

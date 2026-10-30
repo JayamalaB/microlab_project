@@ -456,6 +456,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
           return TechnicianBooking(
             id:                map['booking_id']?.toString() ?? '',
             bookingRef:        map['booking_ref']        as String?,
+            referenceNo:       map['reference_no']       as String?,
             patientId:         int.tryParse(map['patient_id']?.toString() ?? ''),
             customerName:      map['patient_name']       as String? ?? 'Patient',
             customerPhone:     map['patient_mobile']     as String? ?? '',
@@ -1439,8 +1440,9 @@ class _PendingBookingCard extends StatelessWidget {
                       ]),
                     ),
                   if (booking.isVip) const SizedBox(width: 8),
-                  Text(booking.bookingRef ?? '#${booking.id}',
-                      style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                  if (booking.referenceNo != null)
+                    Text(booking.referenceNo!,
+                        style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
                 ],
               ),
             ),

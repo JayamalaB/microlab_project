@@ -36,7 +36,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   int _selectedIndex = 0;
   MemberModel? _activeMember;
+  MemberModel? _dashboardMember; // kept alive in IndexedStack even when back is pressed
   List<MemberModel> _members = [];
+  final Map<String, BookingDraft> _drafts = {};
   bool _loadingPatients = true;
   final _bookingsRefresh = ValueNotifier<int>(0);
   final _reportsRefresh  = ValueNotifier<int>(0);
@@ -107,11 +109,11 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   Future<void> _startBooking() async {
     final m = _bookingFor;
     if (m != null) {
-      setState(() => _activeMember = m);
+      setState(() { _activeMember = m; _dashboardMember = m; });
       return;
     }
     final added = await _openAddMember(select: true);
-    if (added != null && mounted) setState(() => _activeMember = added);
+    if (added != null && mounted) setState(() { _activeMember = added; _dashboardMember = added; });
   }
 
   void _pickBookingFor() {
@@ -535,26 +537,30 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
             index: _stackIndex,
             children: [
               _homeBody(),
-              // Slot 1: embedded dashboard
-              if (_activeMember != null)
+              // Slot 1: embedded dashboard — kept alive via _dashboardMember so
+              // back-press (which only clears _activeMember) does not destroy state.
+              if (_dashboardMember != null)
                 SafeArea(
                   top: false,
                   bottom: false,
                   child: CustomerDashboardScreen(
-                    key: ValueKey(_activeMember!.id),
-                    member: _activeMember!,
+                    key: ValueKey(_dashboardMember!.id),
+                    member: _dashboardMember!,
                     isVip: widget.isVip,
                     embedded: true,
                     onBack: () {
                       setState(() => _activeMember = null);
-                      _loadRecentBooking(); // a booking may have just been made
+                      _loadRecentBooking();
                     },
+                    initialDraft: _drafts[_dashboardMember!.id],
+                    onDraftSave: (draft) => _drafts[_dashboardMember!.id] = draft,
+                    onMemberAdded: _loadPatients,
                   ),
                 )
               else
                 const SizedBox.shrink(),
               SafeArea(top: false, bottom: false, child: MyBookingsScreen(embedded: true, refreshTrigger: _bookingsRefresh)),
-              SafeArea(top: false, bottom: false, child: ReportsScreen(embedded: true, refreshTrigger: _reportsRefresh)),
+              SafeArea(top: false, bottom: false, child: ReportsScreen(embedded: true, refreshTrigger: _reportsRefresh, onViewBookings: () => _onNavTap(1))),
               // Slot 4: profile
               SafeArea(
                 top: false,

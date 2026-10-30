@@ -39,6 +39,15 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
   List<BookingModel> _bookings = [];
   bool _isLoading = true;
   String? _error;
+  String _bookingsFilter = 'All';
+
+  static const _upcomingStatuses = {
+    'Pending', 'Scheduled', 'Confirmed', 'Technician Allocated', 'Technician Arrived', 'In Progress',
+  };
+  static const _completedStatuses = {
+    'Completed', 'Sample Collected', 'Handed to Lab', 'Handed to Lab Pending',
+  };
+  static const _cancelledStatuses = {'Cancelled'};
 
   StreamSubscription<BookingAcceptedEvent>? _acceptedSub;
   StreamSubscription<int>? _enRouteSub;
@@ -205,6 +214,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       paidAmount:          amountPaid,
       amountDue:           amountDue,
       paymentStatus:       b['payment_status'] as String?,
+      paymentMode:         b['payment_mode']   as String?,
       status:              _mapStatus(b['booking_status'] as String? ?? 'pending'),
       createdAt:           DateTime.tryParse(b['created_at'] as String? ?? '') ?? DateTime.now(),
       docRequired:         presImages.isNotEmpty,
@@ -227,6 +237,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       refundStatus:        b['refund_status'] as String?,
       rescheduleCount:     b['reschedule_count'] != null ? (b['reschedule_count'] as num).toInt() : 0,
       canReschedule:       b['can_reschedule'] as bool? ?? true,
+      referenceNo:         b['reference_no'] as String?,
     );
   }
 
@@ -243,6 +254,89 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
         .toList()
       ..sort((a, b) => b.bookings.first.createdAt.compareTo(a.bookings.first.createdAt));
     return groups;
+  }
+
+  List<_PatientGroupView> _visibleGroups() {
+    final filter = _bookingsFilter;
+    final result = <_PatientGroupView>[];
+
+    for (final g in _patientGroups) {
+      List<BookingModel> matched;
+      if (filter == 'Upcoming') {
+        matched = g.bookings.where((b) => _upcomingStatuses.contains(b.status)).toList();
+      } else if (filter == 'Completed') {
+        matched = g.bookings.where((b) => _completedStatuses.contains(b.status)).toList();
+      } else if (filter == 'Cancelled') {
+        matched = g.bookings.where((b) => _cancelledStatuses.contains(b.status)).toList();
+      } else {
+        matched = g.bookings;
+      }
+      if (matched.isEmpty) continue;
+
+      String badge;
+      Color badgeColor;
+      String dateLabel;
+      DateTime dateValue;
+
+      if (filter == 'Upcoming') {
+        badge = 'Upcoming';
+        badgeColor = const Color(0xFF1565C0);
+        matched = [...matched]..sort((a, b) => a.date.compareTo(b.date));
+        dateValue = matched.first.date;
+        dateLabel = 'Next appointment';
+      } else if (filter == 'Completed') {
+        badge = 'Completed';
+        badgeColor = AppColors.brandGreen;
+        matched = [...matched]..sort((a, b) => b.date.compareTo(a.date));
+        dateValue = matched.first.date;
+        dateLabel = 'Last booking';
+      } else if (filter == 'Cancelled') {
+        badge = 'Cancelled';
+        badgeColor = const Color(0xFFD32F2F);
+        matched = [...matched]..sort((a, b) => b.date.compareTo(a.date));
+        dateValue = matched.first.date;
+        dateLabel = 'Cancelled on';
+      } else {
+        final upcoming = g.bookings.where((b) => _upcomingStatuses.contains(b.status)).toList();
+        if (upcoming.isNotEmpty) {
+          badge = 'Upcoming';
+          badgeColor = const Color(0xFF1565C0);
+          upcoming.sort((a, b) => a.date.compareTo(b.date));
+          dateValue = upcoming.first.date;
+          dateLabel = 'Next appointment';
+        } else {
+          final completed = g.bookings.where((b) => _completedStatuses.contains(b.status)).toList();
+          final pool = completed.isNotEmpty ? completed : g.bookings;
+          final sortedPool = [...pool]..sort((a, b) => b.date.compareTo(a.date));
+          dateValue = sortedPool.first.date;
+          if (completed.isNotEmpty) {
+            badge = 'Completed';
+            badgeColor = AppColors.brandGreen;
+            dateLabel = 'Last booking';
+          } else {
+            badge = 'Cancelled';
+            badgeColor = const Color(0xFFD32F2F);
+            dateLabel = 'Cancelled on';
+          }
+        }
+      }
+
+      final upcomingCount = g.bookings.where((b) => _upcomingStatuses.contains(b.status)).length;
+
+      result.add(_PatientGroupView(
+        member: g.member,
+        allBookings: g.bookings,
+        displayCount: matched.length,
+        upcomingCount: filter == 'All' ? upcomingCount : 0,
+        badge: badge,
+        badgeColor: badgeColor,
+        dateLabel: dateLabel,
+        dateValue: dateValue,
+      ));
+    }
+
+    result.sort((a, b) => b.dateValue.compareTo(a.dateValue));
+    return result;
   }
 
   @override
@@ -282,14 +376,17 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
             height: MediaQuery.of(context).padding.top + 56,
             padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
             child: const Align(
-              alignment: Alignment.center,
-              child: Text(
-                'My Bookings',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.2),
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  'My Bookings',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.2),
+                ),
               ),
             ),
           ),
@@ -383,33 +480,178 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       );
     }
 
+    final views = _visibleGroups();
+
     return RefreshIndicator(
       onRefresh: () async => _loadBookings(),
       color: AppColors.brandGreen,
       child: ColoredBox(
-      color: const Color(0xFFF4F6F8),
-      child: ListView.builder(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-        itemCount: groups.length,
-        itemBuilder: (_, i) {
-          final g = groups[i];
-          return _PatientCard(
-            member: g.member,
-            bookings: g.bookings,
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => _PatientBookingsPage(
-                    member: g.member,
-                    initialBookings: g.bookings,
+        color: const Color(0xFFF4F6F8),
+        child: CustomScrollView(
+          slivers: [
+            SliverToBoxAdapter(child: _buildSummaryHeader()),
+            SliverToBoxAdapter(child: _buildFilterPills()),
+            if (views.isEmpty)
+              SliverFillRemaining(hasScrollBody: false, child: _buildFilterEmptyState())
+            else
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+                sliver: SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (_, i) {
+                      final v = views[i];
+                      return _PatientCard(
+                        view: v,
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => _PatientBookingsPage(
+                                member: v.member,
+                                initialBookings: v.allBookings,
+                              ),
+                            ),
+                          ).then((_) => _loadBookings());
+                        },
+                      );
+                    },
+                    childCount: views.length,
                   ),
                 ),
-              ).then((_) => _loadBookings());
-            },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummaryHeader() {
+    final total = _bookings.length;
+    final upcoming = _bookings.where((b) => _upcomingStatuses.contains(b.status)).length;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+      child: Row(
+        children: [
+          const Expanded(
+            child: Text('Your appointments',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+          ),
+          _StatChip(icon: Icons.event_note_rounded, label: '$total total'),
+          const SizedBox(width: 8),
+          _StatChip(icon: Icons.schedule_rounded, label: '$upcoming upcoming'),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFilterPills() {
+    const tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
+    return SizedBox(
+      height: 40,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        itemCount: tabs.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (_, i) {
+          final t = tabs[i];
+          final selected = _bookingsFilter == t;
+          return GestureDetector(
+            onTap: () => setState(() => _bookingsFilter = t),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: selected ? AppColors.brandGreen : Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: selected ? AppColors.brandGreen : AppColors.divider),
+              ),
+              child: Text(t,
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: selected ? Colors.white : AppColors.textSecondary)),
+            ),
           );
         },
       ),
+    );
+  }
+
+  Widget _buildFilterEmptyState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(40),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 64,
+              height: 64,
+              decoration: const BoxDecoration(color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+              child: const Icon(Icons.filter_list_off_rounded, size: 28, color: AppColors.brandGreen),
+            ),
+            const SizedBox(height: 14),
+            Text('No $_bookingsFilter bookings',
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            const SizedBox(height: 6),
+            const Text(
+              'Try a different filter to see more bookings.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Patient group view model ────────────────────────────────────────────────
+
+class _PatientGroupView {
+  final MemberModel member;
+  final List<BookingModel> allBookings;
+  final int displayCount;
+  final int upcomingCount;
+  final String badge;
+  final Color badgeColor;
+  final String dateLabel;
+  final DateTime dateValue;
+
+  _PatientGroupView({
+    required this.member,
+    required this.allBookings,
+    required this.displayCount,
+    required this.upcomingCount,
+    required this.badge,
+    required this.badgeColor,
+    required this.dateLabel,
+    required this.dateValue,
+  });
+}
+
+class _StatChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _StatChip({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: AppColors.brandGreenSurface,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: AppColors.brandGreen),
+          const SizedBox(width: 5),
+          Text(label,
+              style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+        ],
       ),
     );
   }
@@ -418,20 +660,23 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
 // ─── Patient Card ────────────────────────────────────────────────────────────
 
 class _PatientCard extends StatelessWidget {
-  final MemberModel member;
-  final List<BookingModel> bookings;
+  final _PatientGroupView view;
   final VoidCallback onTap;
 
-  const _PatientCard({required this.member, required this.bookings, required this.onTap});
+  const _PatientCard({required this.view, required this.onTap});
+
+  String _fmtDate(DateTime d) {
+    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return '${d.day} ${months[d.month]} ${d.year}';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final upcoming = bookings.where((b) =>
-        b.status == 'Pending' ||
-        b.status == 'Confirmed' ||
-        b.status == 'Technician Allocated' ||
-        b.status == 'In Progress').length;
+    final member = view.member;
     final initial = member.name.isNotEmpty ? member.name[0].toUpperCase() : '?';
+    final countLabel = view.upcomingCount > 0
+        ? '${view.upcomingCount} upcoming · ${view.allBookings.length} booking${view.allBookings.length == 1 ? '' : 's'}'
+        : '${view.displayCount} booking${view.displayCount == 1 ? '' : 's'}';
 
     return GestureDetector(
       onTap: onTap,
@@ -449,49 +694,68 @@ class _PatientCard extends StatelessWidget {
             ),
           ],
         ),
-        child: Row(children: [
-          Container(
-            width: 46,
-            height: 46,
-            decoration: const BoxDecoration(
-              color: AppColors.brandGreenSurface,
-              shape: BoxShape.circle,
-            ),
-            child: Center(
-              child: Text(
-                initial,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.brandGreen,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: const BoxDecoration(
+                  color: AppColors.brandGreenSurface,
+                  shape: BoxShape.circle,
                 ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  member.name,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textPrimary,
+                child: Center(
+                  child: Text(
+                    initial,
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.brandGreen,
+                    ),
                   ),
                 ),
-                const SizedBox(height: 3),
-                Text(
-                  '${bookings.length} booking${bookings.length == 1 ? '' : 's'}'
-                  '${upcoming > 0 ? ' · $upcoming upcoming' : ''}',
-                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      member.name,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(countLabel,
+                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                  ],
                 ),
-              ],
-            ),
-          ),
-          const Icon(Icons.chevron_right_rounded, color: AppColors.textHint, size: 22),
-        ]),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: view.badgeColor.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(view.badge,
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: view.badgeColor)),
+              ),
+            ]),
+            const SizedBox(height: 10),
+            Row(children: [
+              const Icon(Icons.event_outlined, size: 13, color: AppColors.textHint),
+              const SizedBox(width: 5),
+              Text('${view.dateLabel} · ${_fmtDate(view.dateValue)}',
+                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+              const Spacer(),
+              const Icon(Icons.chevron_right_rounded, color: AppColors.textHint, size: 20),
+            ]),
+          ],
+        ),
       ),
     );
   }
@@ -1106,8 +1370,9 @@ class _BookingCard extends StatelessWidget {
                     Text(booking.status,
                         style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: sc)),
                     const Spacer(),
-                    Text(booking.id,
-                        style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                    if (booking.referenceNo != null)
+                      Text(booking.referenceNo!,
+                          style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
                   ],
                 ),
               ),
@@ -1533,12 +1798,13 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
 
                   pw.Table(
                     columnWidths: {
-                      0: const pw.FixedColumnWidth(70),
+                      0: const pw.FixedColumnWidth(110),
                       1: const pw.FlexColumnWidth(),
                     },
                     children: [
-                      _infoRow('Patient', b.member.name, base: base),
-                      _infoRow('Mode',    b.mode,         base: base),
+                      _infoRow('Patient',        b.member.name, base: base),
+                      _infoRow('Booking Type',   b.mode,         base: base),
+                      _infoRow('Payment Method', b.paymentMode == 'RAZORPAY' ? 'Online' : b.paymentMode == 'CASH' ? 'Cash' : 'Pay Later', base: base),
                       _infoRow('Date',    '${b.date.day}/${b.date.month}/${b.date.year}', base: base),
                       _infoRow('Slot',    b.timeSlot,     base: base),
                       if (b.address != null) _infoRow('Address', b.address!, base: base),
@@ -1642,7 +1908,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     setState(() => _billBusy = true);
     try {
       final bytes    = await _generateBillPdf(widget.booking);
-      final filename = 'Bill_${widget.booking.id}.pdf';
+      final filename = 'Bill_${widget.booking.referenceNo ?? widget.booking.id}.pdf';
       if (kIsWeb) {
         await Printing.sharePdf(bytes: bytes, filename: filename);
       } else {
@@ -1671,10 +1937,10 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
       final bytes    = kIsWeb
           ? (_cachedBillBytes ?? await _generateBillPdf(widget.booking))
           : await _generateBillPdf(widget.booking);
-      final filename = 'Bill_${widget.booking.id}.pdf';
+      final filename = 'Bill_${widget.booking.referenceNo ?? widget.booking.id}.pdf';
       await Share.shareXFiles(
         [XFile.fromData(bytes, mimeType: 'application/pdf', name: filename)],
-        subject: 'MicroLab Bill – ${widget.booking.id}',
+        subject: 'MicroLab Bill – ${widget.booking.referenceNo ?? widget.booking.id}',
       );
     } catch (e) {
       debugPrint('[MyBookings] bill share failed: $e');
@@ -1886,8 +2152,9 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                     children: [
                       const Text('Booking Details',
                           style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                      Text(b.id,
-                          style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                      if (b.referenceNo != null)
+                        Text(b.referenceNo!,
+                            style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
                     ],
                   ),
                 ),
@@ -2603,7 +2870,7 @@ class _CancelSheetState extends State<_CancelSheet> {
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
           ]),
           const SizedBox(height: 4),
-          Text('${widget.booking.member.name} · ${widget.booking.id}',
+          Text('${widget.booking.member.name}${widget.booking.referenceNo != null ? ' · ${widget.booking.referenceNo}' : ''}',
               style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
           const SizedBox(height: 14),
           if (arrivedWarning) ...[
