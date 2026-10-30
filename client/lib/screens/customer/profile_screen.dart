@@ -106,13 +106,17 @@ class ProfileScreen extends StatelessWidget {
   MemberModel? get _self {
     try {
       return members.firstWhere((m) => m.relation == 'Self');
-    } catch (_) {
-      return null;
-    }
+    } catch (_) {}
+    try {
+      return members.firstWhere((m) => m.mobile == mobile);
+    } catch (_) {}
+    return null;
   }
 
-  List<MemberModel> get _patients =>
-      members.where((m) => m.relation != 'Self').toList();
+  List<MemberModel> get _patients {
+    final self = _self;
+    return members.where((m) => m.id != self?.id).toList();
+  }
 
   @override
   Widget build(BuildContext context) {
