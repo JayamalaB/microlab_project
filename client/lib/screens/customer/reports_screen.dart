@@ -19,7 +19,8 @@ import 'package:microlab/utils/app_messages.dart';
 class ReportsScreen extends StatefulWidget {
   final bool embedded;
   final ValueNotifier<int>? refreshTrigger;
-  const ReportsScreen({super.key, this.embedded = false, this.refreshTrigger});
+  final VoidCallback? onViewBookings;
+  const ReportsScreen({super.key, this.embedded = false, this.refreshTrigger, this.onViewBookings});
 
   @override
   State<ReportsScreen> createState() => _ReportsScreenState();
@@ -29,6 +30,7 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
   List<BookingModel> _bookings = [];
   bool _isLoading = true;
   String? _error;
+  DateTime? _dateFilter;
 
   StreamSubscription<ReportReadyEvent>? _reportSub;
   StreamSubscription<bool>? _connectedSub;
@@ -162,6 +164,112 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
     return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
   }
 
+  String _formatDateShort(DateTime d) {
+    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return '${d.day} ${months[d.month]} ${d.year}';
+  }
+
+  bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  Future<void> _pickDateFilter() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _dateFilter ?? now,
+      firstDate: DateTime(now.year - 5),
+      lastDate: now,
+      helpText: 'FILTER BY DATE',
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: const ColorScheme.light(
+            primary: AppColors.brandGreen, onPrimary: Colors.white, surface: Colors.white,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) setState(() => _dateFilter = picked);
+  }
+
+  Widget _buildFilterRow() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+      child: Row(
+        children: [
+          if (_dateFilter != null)
+            Expanded(
+              child: GestureDetector(
+                onTap: () => setState(() => _dateFilter = null),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: AppColors.brandGreenSurface,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.event_outlined, size: 14, color: AppColors.brandGreen),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(_formatDateShort(_dateFilter!),
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+                      ),
+                      const SizedBox(width: 4),
+                      const Icon(Icons.close_rounded, size: 15, color: AppColors.brandGreen),
+                    ],
+                  ),
+                ),
+              ),
+            )
+          else
+            const Spacer(),
+          const SizedBox(width: 10),
+          GestureDetector(
+            onTap: _pickDateFilter,
+            child: Container(
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.divider),
+              ),
+              child: Icon(Icons.filter_list_rounded,
+                  size: 19,
+                  color: _dateFilter != null ? AppColors.brandGreen : AppColors.textSecondary),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNoMatchState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(40),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.event_busy_rounded, size: 40, color: AppColors.textHint),
+            const SizedBox(height: 14),
+            const Text('No reports for this date',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () => setState(() => _dateFilter = null),
+              child: const Text('Clear filter', style: TextStyle(color: AppColors.brandGreen)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _openReport(BuildContext context, BookingModel booking) {
     Navigator.push(context, MaterialPageRoute(
       builder: (_) => _ReportDetailPage(booking: booking),
@@ -201,18 +309,46 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
           physics: const AlwaysScrollableScrollPhysics(),
           child: SizedBox(
             height: MediaQuery.of(context).size.height * 0.7,
-            child: const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.receipt_long_outlined, size: 48, color: AppColors.brandGreenLight),
-                  SizedBox(height: 16),
-                  Text('No reports yet',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                  SizedBox(height: 8),
-                  Text('Reports for completed tests appear here.',
-                      style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                ],
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(40),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 88,
+                      height: 88,
+                      decoration: const BoxDecoration(
+                          color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+                      child: const Icon(Icons.receipt_long_outlined,
+                          size: 38, color: AppColors.brandGreen),
+                    ),
+                    const SizedBox(height: 18),
+                    const Text('No reports yet',
+                        style: TextStyle(
+                            fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                    const SizedBox(height: 8),
+                    const Text('Reports for completed tests will appear here.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.4)),
+                    const SizedBox(height: 4),
+                    const Text('Your test results will be available here once processed.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 12, color: AppColors.textHint, height: 1.4)),
+                    const SizedBox(height: 22),
+                    OutlinedButton.icon(
+                      onPressed: widget.onViewBookings,
+                      icon: const Icon(Icons.calendar_month_outlined, size: 17),
+                      label: const Text('View My Bookings'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.brandGreen,
+                        side: const BorderSide(color: AppColors.brandGreen, width: 1.4),
+                        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -220,109 +356,126 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
       );
     }
 
+    final filtered = _dateFilter == null
+        ? reports
+        : reports.where((b) => _sameDay(b.date, _dateFilter!)).toList();
+
     return RefreshIndicator(
       onRefresh: () async => _loadReports(),
       color: AppColors.brandGreen,
-      child: ListView.builder(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-      itemCount: reports.length,
-      itemBuilder: (_, i) {
-        final b = reports[i];
-        return Container(
-          margin: const EdgeInsets.only(bottom: 12),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: AppColors.divider),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(13),
-            child: Column(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  color: AppColors.brandGreenSurface,
-                  child: Row(
-                    children: [
-                      const Icon(Icons.check_circle_outline,
-                          size: 14, color: AppColors.brandGreen),
-                      const SizedBox(width: 6),
-                      const Text('Report Ready',
-                          style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.brandGreen)),
-                      const Spacer(),
-                      if (b.referenceNo != null)
-                        Text(b.referenceNo!,
-                            style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
-                    ],
-                  ),
+      child: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(child: _buildFilterRow()),
+          if (filtered.isEmpty)
+            SliverFillRemaining(hasScrollBody: false, child: _buildNoMatchState())
+          else
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+              sliver: SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (_, i) => _buildReportCard(context, filtered[i]),
+                  childCount: filtered.length,
                 ),
-                Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(b.member.name,
-                                style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: AppColors.textPrimary)),
-                          ),
-                          Text(_formatDate(b.date),
-                              style: const TextStyle(
-                                  fontSize: 12, color: AppColors.textSecondary)),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 6, runSpacing: 4,
-                        children: b.tests.map((t) => Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: t.type == 'package'
-                                ? AppColors.brandGreenSurface
-                                : const Color(0xFFEEF4FB),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(t.name,
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  color: t.type == 'package'
-                                      ? AppColors.brandGreen
-                                      : const Color(0xFF1565C0))),
-                        )).toList(),
-                      ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: () => _openReport(context, b),
-                          icon: const Icon(Icons.description_outlined, size: 16),
-                          label: const Text('View Reports'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: AppColors.brandGreen,
-                            foregroundColor: Colors.white,
-                            elevation: 0,
-                            padding: const EdgeInsets.symmetric(vertical: 11),
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(10)),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
-        );
-      },
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReportCard(BuildContext context, BookingModel b) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.divider),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(13),
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              color: AppColors.brandGreenSurface,
+              child: Row(
+                children: [
+                  const Icon(Icons.check_circle_outline,
+                      size: 14, color: AppColors.brandGreen),
+                  const SizedBox(width: 6),
+                  const Text('Report Ready',
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.brandGreen)),
+                  const Spacer(),
+                  if (b.referenceNo != null)
+                    Text(b.referenceNo!,
+                        style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(b.member.name,
+                            style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.textPrimary)),
+                      ),
+                      Text(_formatDate(b.date),
+                          style: const TextStyle(
+                              fontSize: 12, color: AppColors.textSecondary)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6, runSpacing: 4,
+                    children: b.tests.map((t) => Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: t.type == 'package'
+                            ? AppColors.brandGreenSurface
+                            : const Color(0xFFEEF4FB),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(t.name,
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: t.type == 'package'
+                                  ? AppColors.brandGreen
+                                  : const Color(0xFF1565C0))),
+                    )).toList(),
+                  ),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () => _openReport(context, b),
+                      icon: const Icon(Icons.description_outlined, size: 16),
+                      label: const Text('View Reports'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.brandGreen,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(vertical: 11),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -23,11 +23,41 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
   List<TechnicianBooking> _history = [];
   bool _loading = true;
   String? _error;
+  int _activeTab = 0; // 0 = Completed, 1 = Cancelled
+  DateTime? _dateFilter;
 
   @override
   void initState() {
     super.initState();
     _loadHistory();
+  }
+
+  bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  String _formatDateShort(DateTime d) {
+    const months = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return '${d.day} ${months[d.month]} ${d.year}';
+  }
+
+  Future<void> _pickDateFilter() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _dateFilter ?? now,
+      firstDate: DateTime(now.year - 5),
+      lastDate: now,
+      helpText: 'FILTER BY DATE',
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: const ColorScheme.light(
+            primary: AppColors.brandGreen, onPrimary: Colors.white, surface: Colors.white,
+          ),
+        ),
+        child: child!,
+      ),
+    );
+    if (picked != null) setState(() => _dateFilter = picked);
   }
 
   Future<void> _loadHistory() async {
@@ -124,8 +154,12 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final completed = _history.where((b) => b.status == 'Completed').toList();
-    final cancelled = _history.where((b) => b.status == 'Cancelled').toList();
+    var completed = _history.where((b) => b.status == 'Completed').toList();
+    var cancelled = _history.where((b) => b.status == 'Cancelled').toList();
+    if (_dateFilter != null) {
+      completed = completed.where((b) => _sameDay(b.date, _dateFilter!)).toList();
+      cancelled = cancelled.where((b) => _sameDay(b.date, _dateFilter!)).toList();
+    }
 
     Widget body;
     if (_loading) {
@@ -146,37 +180,78 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
         ),
       );
     } else {
-      body = DefaultTabController(
-        length: 2,
-        child: Column(
-          children: [
-            Container(
-              color: AppColors.brandGreen,
-              child: TabBar(
-                indicatorColor: Colors.white,
-                indicatorWeight: 3,
-                labelColor: Colors.white,
-                unselectedLabelColor: Colors.white60,
-                labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                tabs: [
-                  Tab(text: 'Completed (${completed.length})'),
-                  Tab(text: 'Cancelled (${cancelled.length})'),
-                ],
-              ),
-            ),
-            Expanded(
-              child: ColoredBox(
-                color: AppColors.background,
-                child: TabBarView(
-                  children: [
-                    _BookingList(bookings: completed, formatDate: _formatDate, onRefresh: _loadHistory),
-                    _BookingList(bookings: cancelled, formatDate: _formatDate, onRefresh: _loadHistory),
-                  ],
+      body = Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+            child: Column(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: AppColors.divider),
+                  ),
+                  child: Row(children: [
+                    Expanded(
+                      child: _HistoryTabButton(
+                        label: 'Completed (${completed.length})',
+                        icon: Icons.check_circle_outline_rounded,
+                        selected: _activeTab == 0,
+                        onTap: () => setState(() => _activeTab = 0),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: _HistoryTabButton(
+                        label: 'Cancelled (${cancelled.length})',
+                        icon: Icons.cancel_outlined,
+                        selected: _activeTab == 1,
+                        onTap: () => setState(() => _activeTab = 1),
+                      ),
+                    ),
+                  ]),
                 ),
+                if (_dateFilter != null) ...[
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: GestureDetector(
+                      onTap: () => setState(() => _dateFilter = null),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                        decoration: BoxDecoration(
+                          color: AppColors.brandGreenSurface,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.event_outlined, size: 13, color: AppColors.brandGreen),
+                          const SizedBox(width: 6),
+                          Text(_formatDateShort(_dateFilter!),
+                              style: const TextStyle(
+                                  fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+                          const SizedBox(width: 4),
+                          const Icon(Icons.close_rounded, size: 14, color: AppColors.brandGreen),
+                        ]),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          Expanded(
+            child: ColoredBox(
+              color: AppColors.background,
+              child: _BookingList(
+                bookings: _activeTab == 0 ? completed : cancelled,
+                formatDate: _formatDate,
+                onRefresh: _loadHistory,
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       );
     }
 
@@ -186,19 +261,47 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
           Container(
             color: AppColors.brandGreen,
             padding: EdgeInsets.fromLTRB(
-                16, MediaQuery.of(context).padding.top + 14, 16, _loading || _error != null ? 14 : 0),
+                16, MediaQuery.of(context).padding.top + 14, 16, 16),
             child: Row(
               children: [
-                const Text('History',
-                    style: TextStyle(
-                        color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
-                const Spacer(),
+                Container(
+                  width: 36,
+                  height: 36,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.history_rounded, color: Colors.white, size: 19),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('History',
+                          style: TextStyle(
+                              color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+                      SizedBox(height: 2),
+                      Text('Completed & Cancelled Appointments',
+                          style: TextStyle(color: Colors.white70, fontSize: 11.5)),
+                    ],
+                  ),
+                ),
                 if (!_loading)
-                  IconButton(
-                    icon: const Icon(Icons.refresh_rounded, color: Colors.white70, size: 20),
-                    onPressed: _loadHistory,
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
+                  GestureDetector(
+                    onTap: _pickDateFilter,
+                    child: Container(
+                      width: 36,
+                      height: 36,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(Icons.filter_list_rounded,
+                          color: _dateFilter != null ? Colors.white : Colors.white70, size: 19),
+                    ),
                   ),
               ],
             ),
@@ -720,68 +823,138 @@ class _HistoryCard extends StatelessWidget {
 
             Padding(
               padding: const EdgeInsets.all(14),
-              child: Column(
+              child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Name
-                  Text(booking.customerName,
-                      style: const TextStyle(
-                          fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                  const SizedBox(height: 8),
-
-                  // Date
-                  Row(children: [
-                    const Icon(Icons.event_outlined, size: 12, color: AppColors.textHint),
-                    const SizedBox(width: 5),
-                    Text(formatDate(booking.date),
-                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                  ]),
-                  const SizedBox(height: 6),
-
-                  // Address
-                  if (booking.address.isNotEmpty)
-                    Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      const Icon(Icons.location_on_outlined, size: 12, color: AppColors.textHint),
-                      const SizedBox(width: 5),
-                      Expanded(
-                        child: Text(
-                          [booking.address, booking.city]
-                              .where((s) => s.isNotEmpty).join(', '),
-                          style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
-                          maxLines: 1, overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    ]),
-
-                  const SizedBox(height: 8),
-
-                  // Tests
-                  Wrap(spacing: 6, runSpacing: 4,
-                    children: booking.testNames.take(2).map((t) => Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: AppColors.brandGreenSurface,
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(t,
-                          style: const TextStyle(fontSize: 11, color: AppColors.brandGreen)),
-                    )).toList(),
+                  Container(
+                    width: 42,
+                    height: 42,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: AppColors.brandGreenSurface,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.home_rounded, color: AppColors.brandGreen, size: 20),
                   ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Name
+                        Text(booking.customerName,
+                            style: const TextStyle(
+                                fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                        const SizedBox(height: 8),
 
-                  // Amount collected
-                  if (isCompleted && totalCollected > 0) ...[
-                    const SizedBox(height: 8),
-                    Row(children: [
-                      const Icon(Icons.payments_outlined, size: 13, color: AppColors.brandGreen),
-                      const SizedBox(width: 5),
-                      Text('Collected: ₹${totalCollected.toInt()}',
-                          style: const TextStyle(
-                              fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-                    ]),
-                  ],
+                        // Date + time
+                        Row(children: [
+                          const Icon(Icons.event_outlined, size: 12, color: AppColors.textHint),
+                          const SizedBox(width: 5),
+                          Expanded(
+                            child: Text(
+                              booking.timeSlot.isNotEmpty && booking.timeSlot != '—'
+                                  ? '${formatDate(booking.date)} · ${booking.timeSlot}'
+                                  : formatDate(booking.date),
+                              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                              maxLines: 1, overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ]),
+                        const SizedBox(height: 6),
+
+                        // Address
+                        if (booking.address.isNotEmpty)
+                          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            const Icon(Icons.location_on_outlined, size: 12, color: AppColors.textHint),
+                            const SizedBox(width: 5),
+                            Expanded(
+                              child: Text(
+                                [booking.address, booking.city]
+                                    .where((s) => s.isNotEmpty).join(', '),
+                                style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                                maxLines: 1, overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ]),
+
+                        const SizedBox(height: 8),
+
+                        // Tests
+                        Wrap(spacing: 6, runSpacing: 4,
+                          children: booking.testNames.take(2).map((t) => Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: AppColors.brandGreenSurface,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(t,
+                                style: const TextStyle(fontSize: 11, color: AppColors.brandGreen)),
+                          )).toList(),
+                        ),
+
+                        // Amount collected
+                        if (isCompleted && totalCollected > 0) ...[
+                          const SizedBox(height: 8),
+                          Row(children: [
+                            const Icon(Icons.payments_outlined, size: 13, color: AppColors.brandGreen),
+                            const SizedBox(width: 5),
+                            Text('Collected: ₹${totalCollected.toInt()}',
+                                style: const TextStyle(
+                                    fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
+                          ]),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  const Icon(Icons.chevron_right_rounded, color: AppColors.textHint, size: 20),
                 ],
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── History segmented tab button ────────────────────────────────────────────
+
+class _HistoryTabButton extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _HistoryTabButton({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.brandGreen : Colors.transparent,
+          borderRadius: BorderRadius.circular(11),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 15, color: selected ? Colors.white : AppColors.textSecondary),
+            const SizedBox(width: 6),
+            Text(label,
+                style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: selected ? Colors.white : AppColors.textSecondary)),
           ],
         ),
       ),
