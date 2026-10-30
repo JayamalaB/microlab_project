@@ -561,7 +561,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
               else
                 const SizedBox.shrink(),
               SafeArea(top: false, bottom: false, child: MyBookingsScreen(embedded: true, refreshTrigger: _bookingsRefresh)),
-              SafeArea(top: false, bottom: false, child: ReportsScreen(embedded: true, refreshTrigger: _reportsRefresh)),
+              SafeArea(top: false, bottom: false, child: ReportsScreen(embedded: true, refreshTrigger: _reportsRefresh, onViewBookings: () => _onNavTap(1))),
               // Slot 4: profile
               SafeArea(
                 top: false,
