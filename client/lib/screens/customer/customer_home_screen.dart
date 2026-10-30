@@ -420,7 +420,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       backgroundColor: AppColors.background,
       appBar: (!_inDashboard && _selectedIndex == 0)
           ? PreferredSize(
-              preferredSize: const Size.fromHeight(172),
+              preferredSize: const Size.fromHeight(88),
               child: Container(
                 color: AppColors.brandGreen,
                 child: SafeArea(
@@ -428,46 +428,17 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                   child: Stack(
                     children: [
                       Positioned(
-                        right: -8,
-                        top: 30,
+                        right: 56,
+                        top: -10,
                         child: Icon(Icons.science_outlined,
-                            size: 110, color: Colors.white.withValues(alpha: 0.08)),
+                            size: 100, color: Colors.white.withValues(alpha: 0.08)),
                       ),
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 6, 6, 14),
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            // Logo row + call
-                            Row(
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: Image.asset('assets/icon/app_icon.png',
-                                      width: 32, height: 32, fit: BoxFit.cover,
-                                      errorBuilder: (_, __, ___) => const Icon(
-                                          Icons.biotech_rounded, color: Colors.white, size: 28)),
-                                ),
-                                const SizedBox(width: 10),
-                                const Expanded(
-                                  child: Text('MicroLab',
-                                      style: TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 20,
-                                          fontWeight: FontWeight.w700)),
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.phone_outlined,
-                                      color: Colors.white, size: 22),
-                                  tooltip: 'Call us',
-                                  onPressed: () async {
-                                    final uri = Uri(scheme: 'tel', path: '7339535472');
-                                    if (await canLaunchUrl(uri)) launchUrl(uri);
-                                  },
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 10),
                             // Greeting = the account holder; "Booking for" =
                             // who Book Test books for.
                             Row(
@@ -529,6 +500,28 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                                         ),
                                       ),
                                     ],
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                // Call MicroLab — phone icon in a circle.
+                                Material(
+                                  color: Colors.white.withValues(alpha: 0.16),
+                                  shape: CircleBorder(
+                                      side: BorderSide(color: Colors.white.withValues(alpha: 0.35))),
+                                  child: InkWell(
+                                    customBorder: const CircleBorder(),
+                                    onTap: () async {
+                                      final uri = Uri(scheme: 'tel', path: '7339535472');
+                                      if (await canLaunchUrl(uri)) launchUrl(uri);
+                                    },
+                                    child: const Tooltip(
+                                      message: 'Call us',
+                                      child: SizedBox(
+                                        width: 44,
+                                        height: 44,
+                                        child: Icon(Icons.phone_rounded, color: Colors.white, size: 22),
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ],
