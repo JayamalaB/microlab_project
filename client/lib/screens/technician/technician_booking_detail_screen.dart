@@ -2331,7 +2331,7 @@ void _resumeJourney() {
                   style: TextStyle(
                       fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
               const SizedBox(height: 4),
-              Text('${widget.booking.customerName} · ${widget.booking.id}',
+              Text('${widget.booking.customerName}${widget.booking.referenceNo != null ? ' · ${widget.booking.referenceNo}' : ''}',
                   style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
               const SizedBox(height: 20),
 
@@ -3238,8 +3238,9 @@ void _resumeJourney() {
           children: [
             const Text('Manage Booking',
                 style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600)),
-            Text(widget.booking.id,
-                style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 11)),
+            if (widget.booking.referenceNo != null)
+              Text(widget.booking.referenceNo!,
+                  style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 11)),
           ],
         ),
         actions: [
@@ -4366,8 +4367,8 @@ void _resumeJourney() {
                                 '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
                                 style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                               ),
-                              if ((c['booking_ref'] as String?) != null)
-                                Text(c['booking_ref'] as String,
+                              if ((c['reference_no'] as String?) != null)
+                                Text(c['reference_no'] as String,
                                     style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
                             ],
                           )),

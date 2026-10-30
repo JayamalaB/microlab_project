@@ -102,6 +102,8 @@ exports.getHistory = async (req, res) => {
         SELECT
            tc.collection_id,
            tc.booking_id,
+           b.booking_ref,
+           b.reference_no,
            tc.collection_status,
            tc.collection_date,
            tc.collection_address,
@@ -137,6 +139,8 @@ exports.getHistory = async (req, res) => {
         SELECT
            NULL AS collection_id,
            b.booking_id,
+           b.booking_ref,
+           b.reference_no,
            'cancelled' AS collection_status,
            b.booking_date AS collection_date,
            b.collection_address,
@@ -266,7 +270,7 @@ exports.cancelAssignedBooking = async (req, res) => {
 
   try {
     const [[tc]] = await db.execute(
-      `SELECT tc.collection_status, b.booking_ref, b.visit_group_id
+      `SELECT tc.collection_status, b.booking_ref, b.reference_no, b.visit_group_id
        FROM ip_technician_collection tc
        JOIN ip_bookings b ON b.booking_id = tc.booking_id
        WHERE tc.booking_id = ? AND tc.technician_id = ?
@@ -300,7 +304,7 @@ exports.cancelAssignedBooking = async (req, res) => {
       allIds,
       technicianId,
       notifyTitle: 'Booking Unassigned',
-      notifyBody:  `You are no longer assigned to booking ${tc.booking_ref} (${reason.replace(/_/g, ' ')}). It has been re-dispatched.`,
+      notifyBody:  `You are no longer assigned to booking ${tc.reference_no ?? tc.booking_ref} (${reason.replace(/_/g, ' ')}). It has been re-dispatched.`,
       notifyType:  'booking_unassigned',
       excludeFromRedispatch: true,
       technicianCancelReason: reason,
@@ -327,6 +331,7 @@ exports.getActiveBookings = async (req, res) => {
          tc.collection_id,
          tc.booking_id,
          b.booking_ref,
+         b.reference_no,
          b.patient_id,
          tc.collection_status,
          DATE_FORMAT(tc.collection_date, '%Y-%m-%d') AS collection_date,

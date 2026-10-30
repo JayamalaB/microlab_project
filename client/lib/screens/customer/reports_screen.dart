@@ -141,6 +141,7 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
       createdAt:    DateTime.tryParse(b['created_at'] as String? ?? '') ?? DateTime.now(),
       docRequired: false, docVerified: false,
       reportUrl:    b['report_url'] as String?,
+      referenceNo:  b['reference_no'] as String?,
     );
   }
 
@@ -252,8 +253,9 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
                               fontWeight: FontWeight.w600,
                               color: AppColors.brandGreen)),
                       const Spacer(),
-                      Text(b.id,
-                          style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                      if (b.referenceNo != null)
+                        Text(b.referenceNo!,
+                            style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
                     ],
                   ),
                 ),
@@ -449,12 +451,12 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
     setState(() => _busy[i] = 'share');
     try {
       final resultId = r['result_id'] as int;
-      final name = '${(r['test_name'] as String? ?? 'Report').replaceAll(' ', '_')}_${booking.id}.pdf';
+      final name = '${(r['test_name'] as String? ?? 'Report').replaceAll(' ', '_')}_${booking.referenceNo ?? booking.id}.pdf';
       final bytes = await _fetchBytes(resultId);
       if (!mounted) return;
       await Share.shareXFiles(
         [XFile.fromData(bytes, mimeType: 'application/pdf', name: name)],
-        subject: 'MicroLab Report – ${booking.id}',
+        subject: 'MicroLab Report – ${booking.referenceNo ?? booking.id}',
       );
     } catch (e) {
       debugPrint('[Reports] share failed: $e');
@@ -470,7 +472,7 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
     setState(() => _busy[i] = 'download');
     try {
       final resultId = r['result_id'] as int;
-      final name = '${(r['test_name'] as String? ?? 'Report').replaceAll(' ', '_')}_${booking.id}.pdf';
+      final name = '${(r['test_name'] as String? ?? 'Report').replaceAll(' ', '_')}_${booking.referenceNo ?? booking.id}.pdf';
       final bytes = await _fetchBytes(resultId);
       if (!mounted) return;
       if (kIsWeb) {
@@ -612,8 +614,9 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
                     color: Colors.white,
                     fontSize: 16,
                     fontWeight: FontWeight.w600)),
-            Text(booking.id,
-                style: const TextStyle(color: Colors.white70, fontSize: 11)),
+            if (booking.referenceNo != null)
+              Text(booking.referenceNo!,
+                  style: const TextStyle(color: Colors.white70, fontSize: 11)),
           ],
         ),
       ),
@@ -670,7 +673,7 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
                   const Divider(color: Colors.white24, height: 1),
                   const SizedBox(height: 12),
                   Row(children: [
-                    _ReportMeta(label: 'Report ID', value: booking.id),
+                    _ReportMeta(label: 'Report ID', value: booking.referenceNo ?? booking.id),
                     const SizedBox(width: 20),
                     _ReportMeta(label: 'Collected', value: _fmtShort(booking.date)),
                     if (booking.reportReadyDate != null) ...[

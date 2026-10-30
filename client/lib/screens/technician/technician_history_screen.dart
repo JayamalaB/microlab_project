@@ -82,6 +82,7 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
 
             return TechnicianBooking(
               id:                 'BK${map['booking_id'] ?? ''}',
+              referenceNo:        map['reference_no']       as String?,
               customerName:       map['patient_name']       as String? ?? 'Patient',
               customerPhone:      map['patient_mobile']     as String? ?? '',
               address:            map['collection_address'] as String? ?? '',
@@ -428,8 +429,9 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
                   const Text('Booking Details',
                       style: TextStyle(
                           fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                  Text(b.id,
-                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                  if (b.referenceNo != null)
+                    Text(b.referenceNo!,
+                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
                 ]),
               ),
               Container(
@@ -710,8 +712,9 @@ class _HistoryCard extends StatelessWidget {
                     style: TextStyle(
                         fontSize: 12, fontWeight: FontWeight.w600, color: statusColor)),
                 const Spacer(),
-                Text(booking.id,
-                    style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                if (booking.referenceNo != null)
+                  Text(booking.referenceNo!,
+                      style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
               ]),
             ),
 

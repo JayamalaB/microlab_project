@@ -440,6 +440,7 @@ exports.getMyBookings = async (req, res) => {
       `SELECT
          b.booking_id              AS booking_id_num,
          b.booking_ref,
+         b.reference_no,
          b.visit_group_id,
          b.reschedule_count,
          b.status                  AS booking_status,
@@ -942,7 +943,7 @@ exports.cancelBooking = async (req, res) => {
             token: fcmToken,
             notification: {
               title: 'Booking Cancelled ❌',
-              body:  `Booking ${booking.booking_ref} has been cancelled by the customer. Do not travel to the location.`,
+              body:  `Booking ${booking.reference_no ?? booking.booking_ref} has been cancelled by the customer. Do not travel to the location.`,
             },
             data: {
               type:        'booking_cancelled',
@@ -1722,7 +1723,7 @@ exports.getLinkedPatients = async (req, res) => {
     //        (2) new approach — sibling bookings linked via visit_group_id
     const [rows] = await db.execute(
       `SELECT p.patient_id, p.patient_name, p.patient_mobile,
-              NULL AS booking_ref, NULL AS booking_id,
+              NULL AS booking_ref, NULL AS reference_no, NULL AS booking_id,
               NULL AS total_amount, NULL AS amount_due, NULL AS payment_status,
               NULL AS additional_charge_amount, NULL AS additional_charge_reason
        FROM ip_patient_bookings pb
@@ -1735,7 +1736,7 @@ exports.getLinkedPatients = async (req, res) => {
        UNION
 
        SELECT p.patient_id, p.patient_name, p.patient_mobile,
-              b2.booking_ref, b2.booking_id,
+              b2.booking_ref, b2.reference_no, b2.booking_id,
               b2.total_amount, b2.amount_due, b2.payment_status,
               b2.additional_charge_amount, b2.additional_charge_reason
        FROM ip_bookings b1

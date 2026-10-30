@@ -228,6 +228,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       refundStatus:        b['refund_status'] as String?,
       rescheduleCount:     b['reschedule_count'] != null ? (b['reschedule_count'] as num).toInt() : 0,
       canReschedule:       b['can_reschedule'] as bool? ?? true,
+      referenceNo:         b['reference_no'] as String?,
     );
   }
 
@@ -1107,8 +1108,9 @@ class _BookingCard extends StatelessWidget {
                     Text(booking.status,
                         style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: sc)),
                     const Spacer(),
-                    Text(booking.id,
-                        style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                    if (booking.referenceNo != null)
+                      Text(booking.referenceNo!,
+                          style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
                   ],
                 ),
               ),
@@ -1644,7 +1646,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     setState(() => _billBusy = true);
     try {
       final bytes    = await _generateBillPdf(widget.booking);
-      final filename = 'Bill_${widget.booking.id}.pdf';
+      final filename = 'Bill_${widget.booking.referenceNo ?? widget.booking.id}.pdf';
       if (kIsWeb) {
         await Printing.sharePdf(bytes: bytes, filename: filename);
       } else {
@@ -1673,10 +1675,10 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
       final bytes    = kIsWeb
           ? (_cachedBillBytes ?? await _generateBillPdf(widget.booking))
           : await _generateBillPdf(widget.booking);
-      final filename = 'Bill_${widget.booking.id}.pdf';
+      final filename = 'Bill_${widget.booking.referenceNo ?? widget.booking.id}.pdf';
       await Share.shareXFiles(
         [XFile.fromData(bytes, mimeType: 'application/pdf', name: filename)],
-        subject: 'MicroLab Bill – ${widget.booking.id}',
+        subject: 'MicroLab Bill – ${widget.booking.referenceNo ?? widget.booking.id}',
       );
     } catch (e) {
       debugPrint('[MyBookings] bill share failed: $e');
@@ -1888,8 +1890,9 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                     children: [
                       const Text('Booking Details',
                           style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                      Text(b.id,
-                          style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                      if (b.referenceNo != null)
+                        Text(b.referenceNo!,
+                            style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
                     ],
                   ),
                 ),
@@ -2605,7 +2608,7 @@ class _CancelSheetState extends State<_CancelSheet> {
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
           ]),
           const SizedBox(height: 4),
-          Text('${widget.booking.member.name} · ${widget.booking.id}',
+          Text('${widget.booking.member.name}${widget.booking.referenceNo != null ? ' · ${widget.booking.referenceNo}' : ''}',
               style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
           const SizedBox(height: 14),
           if (arrivedWarning) ...[
