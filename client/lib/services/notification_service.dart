@@ -43,6 +43,12 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await plugin.initialize(
     const InitializationSettings(
       android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      // Background isolate — never prompt for permission from here.
+      iOS: DarwinInitializationSettings(
+        requestAlertPermission: false,
+        requestBadgePermission: false,
+        requestSoundPermission: false,
+      ),
     ),
     onDidReceiveBackgroundNotificationResponse: onBackgroundNotificationAction,
   );
@@ -138,6 +144,10 @@ class NotificationService {
     await _localNotifs.initialize(
       const InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        // Required on iOS — without it initialize() throws and local
+        // booking notifications never work. Requests alert/badge/sound
+        // permission on first launch (Android asks via FCM below).
+        iOS: DarwinInitializationSettings(),
       ),
       // Fires when user taps a notification or action button while app is running
       // (foreground or background). Does NOT fire for cold-start taps — handled

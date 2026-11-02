@@ -14,20 +14,35 @@ import 'package:microlab/services/api_service.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Firebase, foreground service, push notifications — Android only.
+  // Firebase, foreground service, push notifications.
   // flutter_foreground_task uses dart:isolate which is not available on Web.
+  //
+  // Each step has its own try/catch: a missing Firebase config (no
+  // google-services.json / GoogleService-Info.plist, e.g. local dev or iOS
+  // builds) must only disable push — it must not skip the foreground service
+  // init, otherwise technicians cannot go online.
   if (!kIsWeb) {
+    FlutterForegroundTask.initCommunicationPort();
     try {
-      FlutterForegroundTask.initCommunicationPort();
       FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
       await Firebase.initializeApp();
+    } catch (e) {
+      debugPrint('Firebase init skipped: $e');
+    }
+    try {
       await NotificationService.instance.initialize();
+    } catch (e) {
+      debugPrint('Notification init skipped: $e');
+    }
+    try {
       BookingNotificationService.instance.init();
+    } catch (e) {
+      debugPrint('Booking notification init skipped: $e');
+    }
+    try {
       ForegroundService.instance.init();
     } catch (e) {
-      // Missing/invalid google-services.json (e.g. local dev builds) should
-      // not take down the whole app — push notifications just stay disabled.
-      debugPrint('Firebase/notification init skipped: $e');
+      debugPrint('Foreground service init skipped: $e');
     }
   }
 

@@ -10,6 +10,16 @@
     <string>MicroLab needs permission to save photos.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>MicroLab uses your location to find your nearest branch and calculate the Home Collection service charge.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>While you are online, MicroLab shares your location so customers can track your arrival and nearby bookings can be sent to you.</string>
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>com.pravera.flutter_foreground_task.refresh</string>
+    </array>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>fetch</string>
+    </array>
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleExecutable</key>
