@@ -12,6 +12,16 @@ const TEST_COLS    = 'product_name, product_description, product_price, pre_inst
 // Only what the chatbot actually shows: name, mobile, working hours. branch_city/
 // branch_name stay filterable via WHERE even though they're not selected.
 const BRANCH_COLS  = 'branch_name, branch_mobile, start_time, end_time';
+// ip_branches.branch_state is only populated for a handful of rows — most branches
+// were entered with it blank. Treating an unset state as "Tamil Nadu" (the lab's
+// home state) lets the state/district picker surface those branches too, instead
+// of silently hiding every branch that was never tagged. The two branches known
+// to be outside Tamil Nadu are excluded by city so they don't get swept in.
+const NON_TAMILNADU_CITIES = ['bangalore', 'bengaluru', 'thiruvananthapuram', 'trivandrum'];
+function tamilNaduStateFilter(cityColumn = 'branch_city') {
+    const exclude = NON_TAMILNADU_CITIES.map(c => `LOWER(${cityColumn}) NOT LIKE '%${c}%'`).join(' AND ');
+    return `(branch_state IS NULL OR branch_state = '' OR LOWER(branch_state) LIKE '%tamil%nadu%') AND ${exclude}`;
+}
 // ip_patients / ip_clients — always scoped to the authenticated patient's own client_id (see
 // buildPatientProfileQuery / buildClientAccountQuery). Never selected without a patientId.
 const PATIENT_COLS = [
@@ -595,7 +605,14 @@ class LLMRetriever {
             conditions.push(`(LOWER(product_name) LIKE '%${entities.keyword.toLowerCase().replace(/'/g, "''")}%' OR LOWER(product_description) LIKE '%${entities.keyword.toLowerCase().replace(/'/g, "''")}%')`);
         }
         if (entities.fasting_query) {
-            // Return tests that have pre_instructions (fasting/preparation info)
+            // A specific test was named ("does CBC need fasting?") — answer about
+            // THAT test, not a generic "has some prep instructions" list. Previously
+            // this branch ignored product_name/keyword entirely, so a named-test
+            // fasting question always returned up to 20 unrelated tests instead.
+            if (conditions.length > 0) {
+                return `SELECT ${TEST_COLS} FROM ip_products WHERE (${conditions.join(' OR ')}) AND product_active = 1 LIMIT 20`;
+            }
+            // No specific test named — list tests that have pre_instructions (fasting/preparation info)
             return `SELECT ${TEST_COLS} FROM ip_products WHERE pre_instructions IS NOT NULL AND pre_instructions != '' AND product_active = 1 LIMIT 20`;
         }
         if (entities.price_query && conditions.length === 0) {
@@ -1088,12 +1105,11 @@ class LLMRetriever {
     // that state has enough branches for a flat list to be unwieldy. Skips
     // straight to the branch list if there's only one district on record.
     async _answerBranchDistrictPicker(stateText, sessionId) {
-        const s = stateText.toLowerCase().replace(/'/g, "''");
         let districts = [];
         try {
             const [rows] = await db.pool.execute(
                 `SELECT DISTINCT branch_city FROM ip_branches ` +
-                `WHERE branch_active = 1 AND LOWER(branch_state) LIKE '%${s}%' ` +
+                `WHERE branch_active = 1 AND ${tamilNaduStateFilter()} ` +
                 `AND branch_city IS NOT NULL AND branch_city <> ''`
             );
             // branch_city sometimes stores "Area, District" (e.g. "Peelamedu, Coimbatore")
@@ -1147,8 +1163,11 @@ class LLMRetriever {
     // within it (Tamil Nadu's picker). Reached by tapping a state/district chip
     // or typing the name as a reply while the matching pending-selection flag is set.
     async _answerBranchesInState(stateText, sessionId, cityText) {
-        const s = stateText.toLowerCase().replace(/'/g, "''");
-        const conditions = [`LOWER(branch_state) LIKE '%${s}%'`, 'branch_active = 1'];
+        const isTamilNadu = /^tamil\s*nadu$/i.test(stateText.trim());
+        const stateCondition = isTamilNadu
+            ? tamilNaduStateFilter()
+            : `LOWER(branch_state) LIKE '%${stateText.toLowerCase().replace(/'/g, "''")}%'`;
+        const conditions = [stateCondition, 'branch_active = 1'];
         if (cityText) {
             const c = cityText.toLowerCase().replace(/'/g, "''");
             conditions.push(`LOWER(branch_city) LIKE '%${c}%'`);

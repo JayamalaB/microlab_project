@@ -62,21 +62,6 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
   int get _totalSlots =>
       _days.fold(0, (s, d) => s + (_selectedSlots[_key(d)]?.length ?? 0));
 
-  // "08:00:00" → "8 AM"; combined into "8 AM – 10 AM" for a slot range.
-  String _timeRangeLabel(String? start, String? end) {
-    if (start == null || end == null) return '';
-    String fmt(String t) {
-      final parts = t.split(':');
-      if (parts.length < 2) return t;
-      final h = int.tryParse(parts[0]) ?? 0;
-      final m = parts[1];
-      final isPm = h >= 12;
-      final h12  = h % 12 == 0 ? 12 : h % 12;
-      return m == '00' ? '$h12 ${isPm ? 'PM' : 'AM'}' : '$h12:$m ${isPm ? 'PM' : 'AM'}';
-    }
-    return '${fmt(start)} – ${fmt(end)}';
-  }
-
   IconData _slotTimeIcon(String? start) {
     final h = int.tryParse((start ?? '').split(':').first) ?? 9;
     if (h < 17) return Icons.wb_sunny_outlined;
@@ -601,8 +586,6 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
               final slotId    = slot['slot_id']    as int;
               final slotLabel = slot['slot_label'] as String;
               final start     = slot['slot_start'] as String?;
-              final end       = slot['slot_end']   as String?;
-              final range     = _timeRangeLabel(start, end);
               final isSel     = selected.contains(slotId);
               final isPast    = _isPast(k, slot);
               return Padding(
@@ -637,7 +620,9 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
                       const SizedBox(width: 12),
                       Expanded(
                         child: Text(
-                          range.isNotEmpty ? '$slotLabel ($range)' : slotLabel,
+                          // Name exactly as saved in ip_slots — it already
+                          // carries the timing, so none is added here.
+                          slotLabel,
                           style: TextStyle(
                             fontSize: 13.5,
                             fontWeight: FontWeight.w600,

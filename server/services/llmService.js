@@ -84,6 +84,16 @@ Try asking:
         try {
             const prompt = `You are a database query assistant for MicroLab, a diagnostic laboratory. Be precise and concise.
 
+IMPORTANT — phrasing never changes meaning: the same request can arrive as a short keyword phrase
+("thyroid tests", "CBC price", "Coimbatore branch") or as a full natural-language sentence
+("What tests are available for thyroid?", "What is the price of the CBC test?", "Where is your branch
+in Coimbatore?", "Can you tell me which tests need fasting?"). Extract the SAME entities either way —
+strip the question wrapper ("what is", "can you tell me", "do you have", "are available", "is there")
+before deciding what's a product name, category/keyword, city, or branch; the wrapper itself is never
+an entity and never means "list everything" when a specific name, category, condition, or place is
+named anywhere else in the sentence. Only fall back to a bare listing (all entities null) when nothing
+specific is named at all, e.g. "what tests do you have" or "show me your tests" alone.
+
 Database Schema (ONLY these tables exist — never reference any other table):
 - ip_products: product_name, product_description, product_price, pre_instructions
   (ALL diagnostic tests AND health packages. "packages", "tests", "health checkup", "panel", "available tests", "what packages", "list tests" ALL refer to this table)
@@ -104,9 +114,13 @@ Database Schema (ONLY these tables exist — never reference any other table):
   reference/id.)
 
 Intent rules:
-- "show all tests", "list tests", "available tests", "what tests do you have" → test_query, keyword: null (list all)
+- "show all tests", "list tests", "available tests", "what tests do you have" (nothing else named) → test_query, keyword: null (list all)
 - "price of CBC", "Lipid Profile test" → test_query, product_name: extracted name
 - "thyroid tests", "blood tests" → test_query, keyword: category word only
+- "what tests are available for thyroid?", "what tests do you have for diabetes?", "tests for kidney function",
+  "do you have any thyroid tests?" → test_query, keyword: the named category/condition word (e.g. "thyroid",
+  "diabetes", "kidney") — a trailing "for X" / "related to X" names a category just as much as "X tests" does;
+  only use keyword: null when NO category, condition, or body part is named anywhere in the question
 - "where is branch", "Coimbatore location" → branch_query
 - "who are my family members", "list patients on my account", "my profile", "my blood group", "my mother's details" → patient_profile_query
 - "my subscription", "my plan", "my account status", "is my account active" → client_account_query
@@ -138,7 +152,13 @@ Respond with ONLY a JSON object (no extra text):
                 model: 'gpt-4.1-mini',
                 messages: [{ role: 'user', content: prompt }],
                 temperature: 0.2,
-                max_tokens: 300
+                max_tokens: 300,
+                // Forces a syntactically valid JSON body — without this, gpt-4.1-mini
+                // occasionally wraps the object in a ```json fence or adds a stray
+                // sentence despite the prompt's instructions, which broke JSON.parse
+                // below and silently misrouted the question to the generic
+                // 'general_query' fallback (empty entities, full-list answers).
+                response_format: { type: 'json_object' }
             });
 
             const result = JSON.parse(response.choices[0].message.content);
