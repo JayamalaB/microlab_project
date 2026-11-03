@@ -595,7 +595,14 @@ class LLMRetriever {
             conditions.push(`(LOWER(product_name) LIKE '%${entities.keyword.toLowerCase().replace(/'/g, "''")}%' OR LOWER(product_description) LIKE '%${entities.keyword.toLowerCase().replace(/'/g, "''")}%')`);
         }
         if (entities.fasting_query) {
-            // Return tests that have pre_instructions (fasting/preparation info)
+            // A specific test was named ("does CBC need fasting?") — answer about
+            // THAT test, not a generic "has some prep instructions" list. Previously
+            // this branch ignored product_name/keyword entirely, so a named-test
+            // fasting question always returned up to 20 unrelated tests instead.
+            if (conditions.length > 0) {
+                return `SELECT ${TEST_COLS} FROM ip_products WHERE (${conditions.join(' OR ')}) AND product_active = 1 LIMIT 20`;
+            }
+            // No specific test named — list tests that have pre_instructions (fasting/preparation info)
             return `SELECT ${TEST_COLS} FROM ip_products WHERE pre_instructions IS NOT NULL AND pre_instructions != '' AND product_active = 1 LIMIT 20`;
         }
         if (entities.price_query && conditions.length === 0) {

@@ -138,7 +138,13 @@ Respond with ONLY a JSON object (no extra text):
                 model: 'gpt-4.1-mini',
                 messages: [{ role: 'user', content: prompt }],
                 temperature: 0.2,
-                max_tokens: 300
+                max_tokens: 300,
+                // Forces a syntactically valid JSON body — without this, gpt-4.1-mini
+                // occasionally wraps the object in a ```json fence or adds a stray
+                // sentence despite the prompt's instructions, which broke JSON.parse
+                // below and silently misrouted the question to the generic
+                // 'general_query' fallback (empty entities, full-list answers).
+                response_format: { type: 'json_object' }
             });
 
             const result = JSON.parse(response.choices[0].message.content);
