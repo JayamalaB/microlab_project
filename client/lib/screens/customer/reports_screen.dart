@@ -197,50 +197,74 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
       child: Row(
         children: [
-          if (_dateFilter != null)
-            Expanded(
-              child: GestureDetector(
-                onTap: () => setState(() => _dateFilter = null),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: AppColors.brandGreenSurface,
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.event_outlined, size: 14, color: AppColors.brandGreen),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(_formatDateShort(_dateFilter!),
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                fontSize: 12.5, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+          Expanded(
+            child: GestureDetector(
+              onTap: _dateFilter != null
+                  ? () => setState(() => _dateFilter = null)
+                  : _pickDateFilter,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: _dateFilter != null ? AppColors.brandGreenSurface : Colors.transparent,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.event_outlined,
+                        size: 14,
+                        color: _dateFilter != null ? AppColors.brandGreen : AppColors.textHint),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _dateFilter != null ? _formatDateShort(_dateFilter!) : 'All dates',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: _dateFilter != null ? FontWeight.w600 : FontWeight.w400,
+                          color: _dateFilter != null ? AppColors.brandGreen : AppColors.textHint,
+                        ),
                       ),
+                    ),
+                    if (_dateFilter != null) ...[
                       const SizedBox(width: 4),
                       const Icon(Icons.close_rounded, size: 15, color: AppColors.brandGreen),
                     ],
-                  ),
+                  ],
                 ),
               ),
-            )
-          else
-            const Spacer(),
+            ),
+          ),
           const SizedBox(width: 10),
           GestureDetector(
             onTap: _pickDateFilter,
             child: Container(
-              width: 38,
-              height: 38,
-              alignment: Alignment.center,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: _dateFilter != null ? AppColors.brandGreen : Colors.white,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.divider),
+                border: Border.all(
+                    color: _dateFilter != null ? AppColors.brandGreen : AppColors.divider),
+                boxShadow: [
+                  BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.06),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2)),
+                ],
               ),
-              child: Icon(Icons.filter_list_rounded,
-                  size: 19,
-                  color: _dateFilter != null ? AppColors.brandGreen : AppColors.textSecondary),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.tune_rounded,
+                      size: 16,
+                      color: _dateFilter != null ? Colors.white : AppColors.textSecondary),
+                  const SizedBox(width: 6),
+                  Text('Filter',
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: _dateFilter != null ? Colors.white : AppColors.textSecondary)),
+                ],
+              ),
             ),
           ),
         ],
