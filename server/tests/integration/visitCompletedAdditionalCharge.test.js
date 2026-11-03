@@ -73,6 +73,8 @@ beforeEach(() => {
 
 const row = (over) => ({
   booking_id: 900, booking_ref: '100000900', booking_type: 'home_collection', booking_date: '2026-10-26',
+  // service_charge_amount is the stored home-collection fare.
+  home_collection_fare: '49.00',
   total_amount: '1299.00', additional_charge_amount: '50.00', additional_charge_reason: 'Waited 30 min at customer location',
   patient_id: 501, client_id: 10, status: 'completed', reference_no: null, visit_group_id: null, slot_time: '10:00',
   ...over,
@@ -112,6 +114,7 @@ test('family visit — each booking carries its own additional charge', async ()
   wireDb([
     row({ visit_group_id: 'VG1' }),
     row({ booking_id: 901, booking_ref: '100000901', patient_id: 502, visit_group_id: 'VG1',
+      home_collection_fare: null,
       total_amount: '300.00', additional_charge_amount: '0.00', additional_charge_reason: null }),
   ]);
   const payload = captureAsmx();
