@@ -13,6 +13,12 @@ import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/models.dart' show BranchModel;
 import 'package:microlab/utils/app_messages.dart';
 import 'technician_active_job_screen.dart';
+// ₹ amount for display — whole rupees as "1229", and paise kept as
+// "1229.50" (never cut off, so a due like ₹0.50 doesn't show as ₹0).
+String _inr(num v) {
+  final r = (v * 100).round() / 100;
+  return r == r.truncateToDouble() ? r.toInt().toString() : r.toStringAsFixed(2);
+}
 
 // Popped by TechnicianBookingDetailScreen (see _exitScreen) when the
 // technician leaves mid-journey from an instance that was itself opened from
@@ -167,6 +173,10 @@ class _TechnicianBookingDetailScreenState
   List<Map<String, String>> _catalogueItems = [];
   bool _showAddTest = false;
   String _searchQuery = '';
+  // "Add Test / Package" multi-select: ticked catalogue ids, added together
+  // by _addSelectedTests.
+  final Set<String> _pendingTestIds = {};
+  bool _addingTests = false;
 
   // Hand Over to Lab — branch list for the "received branch/lab" picker,
   // fetched lazily (only when that dialog is actually about to open, not on
@@ -278,7 +288,9 @@ class _TechnicianBookingDetailScreenState
 
   double get _amountDue {
     final due = (_testsTotal + _serviceCharge + _additionalCharge) - (_liveAmountPaid + _sessionPaymentCollected);
-    return due < 0.0 ? 0.0 : due;
+    // Rounded to paise so float leftovers (e.g. 0.0000001) never count as due.
+    final r = (due * 100).round() / 100;
+    return r < 0.0 ? 0.0 : r;
   }
 
   // Additional charges can be entered on site — from Destination Reached up
@@ -446,7 +458,7 @@ class _TechnicianBookingDetailScreenState
                 onPressed: () => Navigator.pop(ctx, i),
                 child: Text(
                   targets[i].amount > 0
-                      ? '${targets[i].name}  ·  ₹${targets[i].amount.toInt()} added'
+                      ? '${targets[i].name}  ·  ₹${_inr(targets[i].amount)} added'
                       : targets[i].name,
                   style: const TextStyle(fontSize: 14),
                 ),
@@ -603,7 +615,7 @@ class _TechnicianBookingDetailScreenState
       if (!mounted) return;
     }
     AppMessages.success(context, result > 0
-        ? 'Additional charge ₹${result.toInt()} added for ${target.name}'
+        ? 'Additional charge ₹${_inr(result)} added for ${target.name}'
         : 'Additional charge removed');
   }
 
@@ -1806,6 +1818,31 @@ void _resumeJourney() {
     }
   }
 
+  // Adds every ticked test/package, one after another through _addTest (same
+  // optimistic add, server call, prescription gate and failure message as a
+  // single add), then closes the picker.
+  Future<void> _addSelectedTests() async {
+    if (_isFinalized || _addingTests || _pendingTestIds.isEmpty) return;
+    final picked = _catalogueItems.where((t) => _pendingTestIds.contains(t['id'])).toList();
+    setState(() => _addingTests = true);
+    for (final t in picked) {
+      await _addTest(t);
+      if (!mounted) return;
+    }
+    setState(() {
+      _addingTests = false;
+      _pendingTestIds.clear();
+      _showAddTest = false;
+      _searchQuery = '';
+    });
+  }
+
+  void _closeAddTest() => setState(() {
+        _showAddTest = false;
+        _searchQuery = '';
+        _pendingTestIds.clear();
+      });
+
   // Collection checklist toggle — purely a per-item tracking flag, does not
   // touch _currentStatus, collection_status, or the sample_collected flow.
   // targetBookingId defaults to this screen's own (primary) booking; pass a
@@ -2344,15 +2381,15 @@ void _resumeJourney() {
                 subtitle: _unpaidMembers.isEmpty
                     ? 'All payments collected'
                     : _unpaidMembers.length > 1
-                        ? 'Collect ₹${_unpaidTotal.toInt()} for ${_unpaidMembers.length} members. Part payment is fine to continue.'
+                        ? 'Collect ₹${_inr(_unpaidTotal)} for ${_unpaidMembers.length} members. Part payment is fine to continue.'
                         : _livePaymentStatus == 'paid'
-                            ? 'Original ₹${_liveAmountPaid.toInt()} paid. Collect additional: ₹${_unpaidTotal.toInt()}'
-                            : 'Collect ₹${_unpaidTotal.toInt()} from customer (tests amount)',
+                            ? 'Original ₹${_inr(_liveAmountPaid)} paid. Collect additional: ₹${_inr(_unpaidTotal)}'
+                            : 'Collect ₹${_inr(_unpaidTotal)} from customer (tests amount)',
                 done: _unpaidMembers.isEmpty,
                 locked: false,
                 buttonLabel: _unpaidMembers.isEmpty
                     ? 'Paid ✓'
-                    : 'Make Payment  ₹${_unpaidTotal.toInt()}',
+                    : 'Make Payment  ₹${_inr(_unpaidTotal)}',
                 buttonColor: _unpaidMembers.isEmpty ? AppColors.brandGreen : const Color(0xFF1565C0),
                 // Same entry point as the Collect Payment card: a family with
                 // 2+ members owing is asked single vs individual payment.
@@ -2423,7 +2460,10 @@ void _resumeJourney() {
     required String subtitle,
     bool allowPartial = true,
   }) {
-    final amountCtrl = TextEditingController(text: maxAmount.toStringAsFixed(0));
+    // The due can carry paise (older fares, offer prices) — the box, the
+    // limit shown and the check all use the same exact 2-decimal amount.
+    maxAmount = (maxAmount * 100).round() / 100;
+    final amountCtrl = TextEditingController(text: _inr(maxAmount));
     String method = 'RAZORPAY';
     String? errorText;
     return showModalBottomSheet<Map<String, dynamic>>(
@@ -2461,13 +2501,13 @@ void _resumeJourney() {
                 const SizedBox(height: 6),
                 TextField(
                   controller: amountCtrl,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: false),
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                   onChanged: (_) { if (errorText != null) setSheet(() => errorText = null); },
                   decoration: InputDecoration(
                     prefixText: '₹ ',
                     errorText: errorText,
-                    helperText: 'Full amount due: ₹${maxAmount.toInt()} — enter less to pay partially',
+                    helperText: 'Full amount due: ₹${_inr(maxAmount)} — enter less to pay partially',
                     helperMaxLines: 2,
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
                   ),
@@ -2483,7 +2523,7 @@ void _resumeJourney() {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Text('Amount', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                      Text('₹${maxAmount.toInt()}',
+                      Text('₹${_inr(maxAmount)}',
                           style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
                     ],
                   ),
@@ -2528,9 +2568,9 @@ void _resumeJourney() {
                 height: 48,
                 child: ElevatedButton(
                   onPressed: () {
-                    final amt = double.tryParse(amountCtrl.text) ?? 0;
+                    final amt = ((double.tryParse(amountCtrl.text) ?? 0) * 100).round() / 100;
                     if (amt <= 0) { setSheet(() => errorText = 'Enter an amount greater than 0'); return; }
-                    if (amt > maxAmount) { setSheet(() => errorText = 'Cannot exceed ₹${maxAmount.toInt()}'); return; }
+                    if (amt > maxAmount + 0.001) { setSheet(() => errorText = 'Cannot exceed ₹${_inr(maxAmount)}'); return; }
                     Navigator.pop(ctx, {'method': method, 'amount': amt});
                   },
                   style: ElevatedButton.styleFrom(
@@ -2691,7 +2731,7 @@ void _resumeJourney() {
           _sessionPaymentCollected += amount;
           _livePaymentStatus       = stillDue ? 'partial' : 'paid';
         });
-        AppMessages.success(context, 'UPI payment of ₹${amount.toInt()} received');
+        AppMessages.success(context, 'UPI payment of ₹${_inr(amount)} received');
         onDone?.call();
         _refreshPaymentInfo();
       }
@@ -2702,7 +2742,7 @@ void _resumeJourney() {
 
     final options = {
       'key': AppConstants.razorpayKeyId,
-      'amount': (amount * 100).toInt(),
+      'amount': (amount * 100).round(),
       'name': 'MicroLab',
       'description': _selectedTests.map((t) => t['name']).join(', '),
       'prefill': {
@@ -2728,7 +2768,7 @@ void _resumeJourney() {
           _sessionPaymentCollected += paidAmount;
           _livePaymentStatus       = stillDue ? 'partial' : 'paid';
         });
-        AppMessages.success(context, 'Payment of ₹${paidAmount.toInt()} received. Ref: $paymentId');
+        AppMessages.success(context, 'Payment of ₹${_inr(paidAmount)} received. Ref: $paymentId');
         onDone?.call();
         // Persist to DB and refresh live payment state from server
         () async {
@@ -2777,7 +2817,7 @@ void _resumeJourney() {
     });
     if (ok) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('₹${amount.toInt()} cash received'),
+        content: Text('₹${_inr(amount)} cash received'),
         backgroundColor: AppColors.brandGreen,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -2819,7 +2859,7 @@ void _resumeJourney() {
           return p;
         }).toList();
       });
-      AppMessages.success(context, '₹${amount.toInt()} received for $patientName. Ref: $paymentId');
+      AppMessages.success(context, '₹${_inr(amount)} received for $patientName. Ref: $paymentId');
     }
 
     if (method == 'CASH') {
@@ -2852,7 +2892,7 @@ void _resumeJourney() {
 
     final options = {
       'key': AppConstants.razorpayKeyId,
-      'amount': (amount * 100).toInt(),
+      'amount': (amount * 100).round(),
       'name': 'MicroLab',
       'description': 'Tests for $patientName',
       'prefill': {
@@ -2996,7 +3036,7 @@ void _resumeJourney() {
         }
       });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content:         Text('₹${enteredAmount.toInt()} received · $paymentRef'),
+        content:         Text('₹${_inr(enteredAmount)} received · $paymentRef'),
         backgroundColor: AppColors.brandGreen,
         behavior:        SnackBarBehavior.floating,
         shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -3033,7 +3073,7 @@ void _resumeJourney() {
       options: {
         // Same configured key as every other payment (was a hard-coded test key).
         'key':         AppConstants.razorpayKeyId,
-        'amount':      (enteredAmount * 100).toInt(),
+        'amount':      (enteredAmount * 100).round(),
         'name':        'MicroLab',
         'description': 'Combined payment · ${unpaidItems.length} members',
         'prefill': {
@@ -3133,7 +3173,7 @@ void _resumeJourney() {
           _PayModeOption(
             icon: Icons.payments_outlined,
             title: 'Single payment',
-            subtitle: 'One payment of ₹${_unpaidTotal.toInt()} for all ${members.length} members',
+            subtitle: 'One payment of ₹${_inr(_unpaidTotal)} for all ${members.length} members',
             onTap: () => Navigator.pop(ctx, 'combined'),
           ),
           const SizedBox(height: 10),
@@ -3194,7 +3234,7 @@ void _resumeJourney() {
                     _collectForMember(m, onDone: onDone);
                   },
                   icon: const Icon(Icons.payment_outlined, size: 18),
-                  label: Text('Collect ₹${m.amount.toInt()} · ${m.name}',
+                  label: Text('Collect ₹${_inr(m.amount)} · ${m.name}',
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF1565C0),
@@ -3551,7 +3591,7 @@ void _resumeJourney() {
                       hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
                       prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
                       suffixIcon: GestureDetector(
-                        onTap: () => setState(() { _showAddTest = false; _searchQuery = ''; }),
+                        onTap: _addingTests ? null : _closeAddTest,
                         child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
                       ),
                       filled: true, fillColor: AppColors.background,
@@ -3562,44 +3602,125 @@ void _resumeJourney() {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  ..._filteredCatalogue.take(5).map((t) => GestureDetector(
-                    onTap: () { _addTest(t); },
-                    child: Container(
-                      margin: const EdgeInsets.only(bottom: 6),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: AppColors.divider),
+                  // Multi-select: tick any number of tests/packages, then
+                  // "Add N selected" adds them all. Ticks survive changing
+                  // the search text.
+                  ...() {
+                    final results = _filteredCatalogue;
+                    final selectedTotal = _catalogueItems
+                        .where((t) => _pendingTestIds.contains(t['id']))
+                        .fold<double>(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
+                    return <Widget>[
+                      Container(
+                        // Fixed height (not shrinkWrap) so a large catalogue
+                        // only builds the rows on screen.
+                        height: results.isEmpty ? null : (results.length * 58.0).clamp(58.0, 300.0),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: AppColors.divider),
+                        ),
+                        child: results.isEmpty
+                            ? const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 18),
+                                child: Center(
+                                  child: Text('No tests found',
+                                      style: TextStyle(fontSize: 13, color: AppColors.textHint)),
+                                ),
+                              )
+                            : ListView.separated(
+                                padding: EdgeInsets.zero,
+                                itemCount: results.length,
+                                separatorBuilder: (_, __) => const Divider(height: 1),
+                                itemBuilder: (_, i) {
+                                  final t = results[i];
+                                  final id = t['id'] ?? '';
+                                  return CheckboxListTile(
+                                    value: _pendingTestIds.contains(id),
+                                    onChanged: _addingTests
+                                        ? null
+                                        : (v) => setState(() {
+                                              if (v == true) {
+                                                _pendingTestIds.add(id);
+                                              } else {
+                                                _pendingTestIds.remove(id);
+                                              }
+                                            }),
+                                    activeColor: AppColors.brandGreen,
+                                    dense: true,
+                                    controlAffinity: ListTileControlAffinity.leading,
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+                                    title: Text(t['name'] ?? '',
+                                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                                    subtitle: (t['category'] ?? '').isEmpty
+                                        ? null
+                                        : Text(t['category']!,
+                                            style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                                    secondary: Text('₹${t['price']}',
+                                        style: const TextStyle(
+                                            fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+                                  );
+                                },
+                              ),
                       ),
-                      child: Row(children: [
-                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Text(t['name'] ?? '', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                          Text(t['category'] ?? '', style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                        ])),
-                        Text('₹${t['price']}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen)),
-                        const SizedBox(width: 8),
-                        const Icon(Icons.add_circle_outline, size: 18, color: AppColors.brandGreen),
+                      const SizedBox(height: 10),
+                      Row(children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: _addingTests ? null : _closeAddTest,
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: AppColors.textSecondary,
+                              side: const BorderSide(color: AppColors.divider),
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                            child: const Text('Cancel'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          flex: 2,
+                          child: ElevatedButton(
+                            onPressed: (_pendingTestIds.isEmpty || _addingTests) ? null : _addSelectedTests,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.brandGreen,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                            child: _addingTests
+                                ? const SizedBox(
+                                    width: 18, height: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                : Text(
+                                    _pendingTestIds.isEmpty
+                                        ? 'Select tests to add'
+                                        : 'Add ${_pendingTestIds.length} selected · ₹${_inr(selectedTotal)}',
+                                    style: const TextStyle(fontWeight: FontWeight.w600),
+                                  ),
+                          ),
+                        ),
                       ]),
-                    ),
-                  )),
+                    ];
+                  }(),
                 ],
 
                 if (_selectedTests.isNotEmpty) ...[
                   const Divider(height: 20),
-                  _BillRow('Tests Total', '₹${_testsTotal.toInt()}', bold: true, green: true),
+                  _BillRow('Tests Total', '₹${_inr(_testsTotal)}', bold: true, green: true),
                   const SizedBox(height: 4),
                   _BillRow(
                     'Service Charge',
-                    '₹${_serviceCharge.toInt()}${_livePaymentStatus == 'paid' ? ' (paid at booking)' : ' (due now)'}',
+                    '₹${_inr(_serviceCharge)}${_livePaymentStatus == 'paid' ? ' (paid at booking)' : ' (due now)'}',
                     sub: true,
                   ),
                   if (_additionalCharge > 0) ...[
                     const SizedBox(height: 4),
-                    _BillRow('Additional Charge', '₹${_additionalCharge.toInt()}', sub: true),
+                    _BillRow('Additional Charge', '₹${_inr(_additionalCharge)}', sub: true),
                   ],
                   const Divider(height: 16),
-                  _BillRow('Amount Due Now', '₹${_amountDue.toInt()}', bold: true, green: true),
+                  _BillRow('Amount Due Now', '₹${_inr(_amountDue)}', bold: true, green: true),
                 ],
               ],
             ),
@@ -4033,11 +4154,11 @@ void _resumeJourney() {
                     Expanded(child: Text(
                       _paymentDone
                           ? (_livePaymentStatus == 'paid'
-                              ? 'Service charge ₹${_serviceCharge.toInt()} paid at booking. All tests also paid.'
-                              : 'All dues collected — service charge ₹${_serviceCharge.toInt()} + tests.')
+                              ? 'Service charge ₹${_inr(_serviceCharge)} paid at booking. All tests also paid.'
+                              : 'All dues collected — service charge ₹${_inr(_serviceCharge)} + tests.')
                           : _livePaymentStatus == 'paid'
-                              ? 'Original booking (₹${_liveAmountPaid.toInt()}) paid. Collect ${_additionalCharge > 0 ? 'balance due' : 'additional tests'}: ₹${_amountDue.toInt()}'
-                              : 'Service charge ₹${_serviceCharge.toInt()} not yet paid. Collect total due: ₹${_amountDue.toInt()}',
+                              ? 'Original booking (₹${_inr(_liveAmountPaid)}) paid. Collect ${_additionalCharge > 0 ? 'balance due' : 'additional tests'}: ₹${_inr(_amountDue)}'
+                              : 'Service charge ₹${_inr(_serviceCharge)} not yet paid. Collect total due: ₹${_inr(_amountDue)}',
                       style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
                     )),
                   ]),
@@ -4072,7 +4193,7 @@ void _resumeJourney() {
                           if ((t.reason ?? '').isNotEmpty)
                             Text(t.reason!, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
                         ])),
-                        Text('₹${t.amount.toInt()}',
+                        Text('₹${_inr(t.amount)}',
                             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
                         if (editable)
                           IconButton(
@@ -4138,7 +4259,7 @@ void _resumeJourney() {
                               children: [
                                 Text(r['name'] as String,
                                     style: const TextStyle(fontSize: 13, color: Color(0xFF555555))),
-                                Text('₹${(r['amount'] as double).toInt()}',
+                                Text('₹${_inr((r['amount'] as double))}',
                                     style: const TextStyle(fontSize: 13, color: Color(0xFF333333))),
                               ],
                             ),
@@ -4149,7 +4270,7 @@ void _resumeJourney() {
                             children: [
                               const Text('Total Due',
                                   style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
-                              Text('₹${totalDue.toInt()}',
+                              Text('₹${_inr(totalDue)}',
                                   style: const TextStyle(
                                       fontSize: 13,
                                       fontWeight: FontWeight.w700,
@@ -4182,7 +4303,7 @@ void _resumeJourney() {
                             _collectAllPayment();
                           },
                           icon: const Icon(Icons.payments_outlined, size: 16),
-                          label: Text('Pay together instead · ₹${totalAmount.toInt()}',
+                          label: Text('Pay together instead · ₹${_inr(totalAmount)}',
                               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                           style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
                         ),
@@ -4201,7 +4322,7 @@ void _resumeJourney() {
                         label: Text(
                           _isProcessingPayment
                               ? 'Processing…'
-                              : 'Collect Payment · ₹${totalAmount.toInt()} · $totalUnpaid members',
+                              : 'Collect Payment · ₹${_inr(totalAmount)} · $totalUnpaid members',
                           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                         ),
                         style: ElevatedButton.styleFrom(
@@ -4243,7 +4364,7 @@ void _resumeJourney() {
                         label: Text(
                           _isProcessingPayment
                               ? 'Processing…'
-                              : 'Collect ₹${_amountDue.toInt()} · ${widget.booking.customerName}',
+                              : 'Collect ₹${_inr(_amountDue)} · ${widget.booking.customerName}',
                           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
                         ),
                         style: ElevatedButton.styleFrom(
@@ -4272,7 +4393,7 @@ void _resumeJourney() {
                             patientName: mName,
                           ),
                           icon: const Icon(Icons.payment_outlined, size: 18),
-                          label: Text('Collect ₹${due.toInt()} · $mName',
+                          label: Text('Collect ₹${_inr(due)} · $mName',
                               style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFF1565C0),
@@ -4391,7 +4512,7 @@ void _resumeJourney() {
                                     color: const Color(0xFFE3F2FD),
                                     borderRadius: BorderRadius.circular(6),
                                   ),
-                                  child: Text('₹${amountDue.toInt()} due',
+                                  child: Text('₹${_inr(amountDue)} due',
                                       style: const TextStyle(fontSize: 11, color: Color(0xFF1565C0), fontWeight: FontWeight.w600)),
                                 ),
                         ]),
@@ -4462,7 +4583,7 @@ void _resumeJourney() {
                             const Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFE65100)),
                             const SizedBox(width: 4),
                             Text(
-                              'Refund ₹${(_familyPendingRefund[memberBookingId]!).toInt()} pending',
+                              'Refund ₹${_inr((_familyPendingRefund[memberBookingId]!))} pending',
                               style: const TextStyle(fontSize: 12, color: Color(0xFFE65100), fontWeight: FontWeight.w500),
                             ),
                           ]),
@@ -5507,9 +5628,9 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                           0 => 'Next: Select Tests',
                           1 => _selectedTestIds.isEmpty
                               ? 'Select at least one test'
-                              : 'Add to Queue · ₹${_selectedTotal.toInt()}',
+                              : 'Add to Queue · ₹${_inr(_selectedTotal)}',
                           _ => 'Submit ${_queuedMembers.length} Member${_queuedMembers.length == 1 ? '' : 's'}'
-                              ' · ₹${_queuedTotal.toInt()}',
+                              ' · ₹${_inr(_queuedTotal)}',
                         },
                         style: const TextStyle(
                             color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
@@ -6032,7 +6153,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                   Expanded(child: Text(name,
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
                           color: AppColors.textPrimary))),
-                  Text('₹${total.toInt()}',
+                  Text('₹${_inr(total)}',
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
                           color: AppColors.textPrimary)),
                 ]),
@@ -6097,7 +6218,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
             const Text('Total to collect',
                 style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
             const Spacer(),
-            Text('₹${_queuedTotal.toInt()}',
+            Text('₹${_inr(_queuedTotal)}',
                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
                     color: AppColors.textPrimary)),
           ]),
@@ -6368,7 +6489,7 @@ class _QrPaymentSheetState extends State<_QrPaymentSheet> {
             const Text('Payment Received!',
                 style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
             const SizedBox(height: 6),
-            Text('₹${widget.amount.toInt()} collected via UPI',
+            Text('₹${_inr(widget.amount)} collected via UPI',
                 style: const TextStyle(fontSize: 14, color: AppColors.textSecondary)),
           ]),
         );
@@ -6379,7 +6500,7 @@ class _QrPaymentSheetState extends State<_QrPaymentSheet> {
           child: Column(
             children: [
               // Amount
-              Text('₹${widget.amount.toInt()}',
+              Text('₹${_inr(widget.amount)}',
                   style: const TextStyle(
                       fontSize: 36, fontWeight: FontWeight.w800,
                       color: AppColors.brandGreen, letterSpacing: -0.5)),

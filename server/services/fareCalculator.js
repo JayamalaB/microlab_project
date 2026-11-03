@@ -95,12 +95,11 @@ function _isInsideIndia(lat, lng) {
 // unit test directly against the spec's own worked examples (Scenarios A/B/C).
 function computeFare({ distanceKm, ratePerKm, baseFare, includedDistanceKm }) {
   const extraDistanceKm = Math.max(0, distanceKm - includedDistanceKm);
-  // toFixed(2)-then-Number, matching this codebase's existing money
-  // convention of computing to 2 decimals server-side (e.g. bookingController
-  // .js's refund-amount math) — display-side truncation to whole rupees
-  // (.toInt() everywhere in the Flutter app) stays a client concern.
-  const extraCharge = Number((extraDistanceKm * ratePerKm).toFixed(2));
-  const finalFare    = Number((baseFare + extraCharge).toFixed(2));
+  // Whole rupees (nearest; ₹112.50 → ₹113): a fare with paise left a
+  // booking total like ₹1229.50 that the technician payment screen, which
+  // works in whole rupees, could never fully collect.
+  const extraCharge = Math.round(extraDistanceKm * ratePerKm);
+  const finalFare    = Math.round(baseFare + extraCharge);
   return { distanceKm: Number(distanceKm.toFixed(2)), extraDistanceKm: Number(extraDistanceKm.toFixed(2)), extraCharge, finalFare };
 }
 
