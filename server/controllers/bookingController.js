@@ -464,6 +464,7 @@ exports.getMyBookings = async (req, res) => {
          b.collection_address,
          b.postal_code             AS collection_pincode,
          b.city                    AS collection_city,
+         b.notes                   AS collection_notes,
          br.branch_name            AS branch_name,
          br.branch_address         AS branch_address,
          br.branch_city            AS branch_location,
@@ -2369,6 +2370,9 @@ exports.createFamilyBooking = async (req, res) => {
     notes             = null,
   } = req.body;
 
+  blog(`[family-notes] req.body keys: ${Object.keys(req.body).join(', ')}`);
+  blog(`[family-notes] notes from body: ${JSON.stringify(notes)} | members: ${members.length}`);
+
   if (!Array.isArray(members) || members.length < 2) {
     return res.status(400).json({ success: false, message: 'At least 2 members required' });
   }
@@ -2468,6 +2472,7 @@ exports.createFamilyBooking = async (req, res) => {
       );
       isFirstMember = false;
       const bookingId  = bResult.insertId;
+      blog(`[family-notes] INSERT done — booking_id=${bookingId} patient_id=${patientId} notes_stored=${JSON.stringify(notes ?? null)}`);
       // Same booking_id + offset scheme as createBooking above — see that
       // function's own comment. visit_group_id (below) intentionally keeps
       // its separate VG-XXXXXX format; only booking_ref changes.

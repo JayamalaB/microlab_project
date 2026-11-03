@@ -1596,6 +1596,38 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             const SizedBox(height: 14),
           ],
 
+          // ── Notes (optional) ──────────────────────────────
+          const SizedBox(height: 14),
+          _SectionCard(
+            title: 'Notes',
+            icon: Icons.notes_outlined,
+            child: TextField(
+              controller: _notesController,
+              maxLines: 3,
+              maxLength: 300,
+              textInputAction: TextInputAction.done,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Any special instructions',
+                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.divider),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.divider),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                counterStyle: const TextStyle(fontSize: 11, color: AppColors.textHint),
+              ),
+            ),
+          ),
+
           // ── Family Members (Home Collection only) ─────────
           if (widget.mode == 'Home Collection') ...[
             const SizedBox(height: 14),
@@ -1636,41 +1668,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ),
             ),
           ],
-
-
-
-          const SizedBox(height: 14),
-
-          // ── Notes (optional) ──────────────────────────────
-          _SectionCard(
-            title: 'Notes',
-            icon: Icons.notes_outlined,
-            child: TextField(
-              controller: _notesController,
-              maxLines: 3,
-              maxLength: 300,
-              textInputAction: TextInputAction.done,
-              style: const TextStyle(fontSize: 14),
-              decoration: InputDecoration(
-                hintText: 'Any special instructions',
-                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.divider),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.divider),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
-                ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                counterStyle: const TextStyle(fontSize: 11, color: AppColors.textHint),
-              ),
-            ),
-          ),
 
           const SizedBox(height: 14),
 
@@ -2785,6 +2782,9 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   String? _newGender;
   String? _newRelation;
   bool _savingNewMember = false;
+  String? _nameError;
+  String? _mobileError;
+  String? _genderError;
   static const _genders   = ['Male', 'Female', 'Other'];
   static const _relations = ['Spouse', 'Father', 'Mother', 'Son', 'Daughter', 'Brother', 'Sister', 'Other'];
 
@@ -2902,7 +2902,14 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   Future<void> _saveNewMember() async {
     final name   = _newNameCtrl.text.trim();
     final mobile = _newMobileCtrl.text.trim();
-    if (name.isEmpty || mobile.isEmpty || _newGender == null) return;
+    final nameErr   = name.isEmpty   ? 'Name is required' : null;
+    final mobileErr = mobile.isEmpty ? 'Mobile number is required'
+                    : mobile.length != 10 ? 'Enter a valid 10-digit mobile number' : null;
+    final genderErr = _newGender == null ? 'Please select a gender' : null;
+    if (nameErr != null || mobileErr != null || genderErr != null) {
+      setState(() { _nameError = nameErr; _mobileError = mobileErr; _genderError = genderErr; });
+      return;
+    }
     setState(() => _savingNewMember = true);
     try {
       final result = await ApiService.savePatient({
@@ -3067,32 +3074,49 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           // Name
-          const Text('Name', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          RichText(text: const TextSpan(style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary), children: [
+            TextSpan(text: 'Name'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ])),
           const SizedBox(height: 6),
           TextField(
             controller: _newNameCtrl,
             textCapitalization: TextCapitalization.words,
-            decoration: _inputDecor('Full name'),
+            onChanged: (_) { if (_nameError != null) setState(() => _nameError = null); },
+            decoration: _inputDecor('Full name').copyWith(
+              errorText: _nameError,
+              errorStyle: const TextStyle(fontSize: 11),
+            ),
           ),
           const SizedBox(height: 14),
           // Mobile
-          const Text('Mobile', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          RichText(text: const TextSpan(style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary), children: [
+            TextSpan(text: 'Mobile'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ])),
           const SizedBox(height: 6),
           TextField(
             controller: _newMobileCtrl,
             keyboardType: TextInputType.phone,
-            decoration: _inputDecor('10-digit mobile number'),
+            onChanged: (_) { if (_mobileError != null) setState(() => _mobileError = null); },
+            decoration: _inputDecor('10-digit mobile number').copyWith(
+              errorText: _mobileError,
+              errorStyle: const TextStyle(fontSize: 11),
+            ),
           ),
           const SizedBox(height: 14),
           // Gender
-          const Text('Gender', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          RichText(text: const TextSpan(style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary), children: [
+            TextSpan(text: 'Gender'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ])),
           const SizedBox(height: 6),
           Row(children: _genders.map((g) {
             final sel = _newGender == g;
             return Expanded(child: Padding(
               padding: EdgeInsets.only(right: g != _genders.last ? 8 : 0),
               child: GestureDetector(
-                onTap: () => setState(() => _newGender = g),
+                onTap: () => setState(() { _newGender = g; _genderError = null; }),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 150),
                   padding: const EdgeInsets.symmetric(vertical: 10),
@@ -3108,6 +3132,11 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
               ),
             ));
           }).toList()),
+          if (_genderError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(_genderError!, style: const TextStyle(fontSize: 11, color: Colors.red)),
+            ),
           const SizedBox(height: 14),
           // Relation
           const Text('Relation (optional)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
@@ -3122,7 +3151,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
           const SizedBox(height: 20),
           Row(children: [
             Expanded(child: OutlinedButton(
-              onPressed: () => setState(() { _showNewMemberForm = false; _newNameCtrl.clear(); _newMobileCtrl.clear(); _newGender = null; _newRelation = null; }),
+              onPressed: () => setState(() { _showNewMemberForm = false; _newNameCtrl.clear(); _newMobileCtrl.clear(); _newGender = null; _newRelation = null; _nameError = null; _mobileError = null; _genderError = null; }),
               style: OutlinedButton.styleFrom(
                 foregroundColor: AppColors.textSecondary,
                 side: const BorderSide(color: AppColors.divider),

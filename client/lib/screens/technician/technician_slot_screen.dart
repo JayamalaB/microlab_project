@@ -238,6 +238,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
           id:                map['booking_id']?.toString() ?? '',
           bookingRef:        map['booking_ref']        as String?,
           referenceNo:       map['reference_no']       as String?,
+          collectionNotes:   map['collection_notes']   as String?,
           patientId:         int.tryParse(map['patient_id']?.toString() ?? ''),
           customerName:      map['patient_name']       as String? ?? 'Patient',
           customerPhone:     map['patient_mobile']     as String? ?? '',

@@ -267,6 +267,7 @@ class BookingModel {
   final int rescheduleCount;
   final bool canReschedule;
   final String? referenceNo;        // ASMX bill_id stored in ip_bookings.reference_no
+  final String? collectionNotes;    // customer notes from checkout
 
   BookingModel({
     required this.id,
@@ -317,6 +318,7 @@ class BookingModel {
     this.rescheduleCount = 0,
     this.canReschedule = true,
     this.referenceNo,
+    this.collectionNotes,
   });
 }
 

@@ -238,6 +238,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       rescheduleCount:     b['reschedule_count'] != null ? (b['reschedule_count'] as num).toInt() : 0,
       canReschedule:       b['can_reschedule'] as bool? ?? true,
       referenceNo:         b['reference_no'] as String?,
+      collectionNotes:     b['collection_notes'] as String?,
     );
   }
 
@@ -2180,11 +2181,15 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                         if (b.city != null || b.pincode != null)
                           _DetailRow(Icons.location_on_outlined, 'Area',
                             [b.city, b.pincode].where((s) => s != null && s.isNotEmpty).join(', ')),
+                        if (b.collectionNotes != null && b.collectionNotes!.isNotEmpty)
+                          _DetailRow(Icons.notes_outlined, 'Notes', b.collectionNotes!),
                       ] else ...[
                         if (b.branch != null)
                           _DetailRow(Icons.local_hospital_outlined, 'Branch', b.branch!.name),
                         if (b.branch?.address != null && b.branch!.address.isNotEmpty)
                           _DetailRow(Icons.location_on_outlined, 'Branch Address', b.branch!.address),
+                        if (b.collectionNotes != null && b.collectionNotes!.isNotEmpty)
+                          _DetailRow(Icons.notes_outlined, 'Notes', b.collectionNotes!),
                       ],
                     ],
                   ),
@@ -3003,7 +3008,7 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
     ].join(', ');
     try {
       await widget.onSubmit(_rating, comment);
-    } catch (_) {
+    } finally {
       if (mounted) setState(() => _submitting = false);
     }
   }

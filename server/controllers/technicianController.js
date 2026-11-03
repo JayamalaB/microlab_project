@@ -345,6 +345,7 @@ exports.getActiveBookings = async (req, res) => {
          b.payment_status,
          b.collection_latitude   AS patient_lat,
          b.collection_longitude  AS patient_lng,
+         b.notes                 AS collection_notes,
          p.patient_name,
          p.patient_mobile,
          s.slot_label,

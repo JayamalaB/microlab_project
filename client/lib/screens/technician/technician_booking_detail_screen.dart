@@ -3404,6 +3404,8 @@ void _resumeJourney() {
                       .join(', ')),
               _InfoRow(Icons.event_outlined, 'Date', _formatDate(widget.booking.date)),
               _InfoRow(Icons.schedule_outlined, 'Slot', widget.booking.timeSlot),
+              if (widget.booking.collectionNotes != null && widget.booking.collectionNotes!.isNotEmpty)
+                _InfoRow(Icons.notes_outlined, 'Notes', widget.booking.collectionNotes!),
               if (widget.booking.isVip)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),

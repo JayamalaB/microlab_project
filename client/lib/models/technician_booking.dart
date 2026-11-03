@@ -26,6 +26,7 @@ class TechnicianBooking {
   final double? patientLng;
   final String hospital;
   final String? referenceNo;
+  final String? collectionNotes;
 
   TechnicianBooking({
     required this.id,
@@ -54,5 +55,6 @@ class TechnicianBooking {
     this.patientLat,
     this.patientLng,
     this.hospital = '',
+    this.collectionNotes,
   });
 }
