@@ -160,7 +160,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
     final presStatus = b['prescription_status'] as String?;
 
     final bookingType = b['booking_type'] as String? ?? 'lab_visit';
-    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Visit';
+    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Appointment';
 
     DateTime date;
     final collDate = b['collection_date'] as String?;

@@ -111,7 +111,7 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
     final amountPaid = double.tryParse(b['amount_paid']?.toString() ?? '') ?? 0.0;
     final additionalCharge = double.tryParse(b['additional_charge_amount']?.toString() ?? '') ?? 0.0;
     final bookingType = b['booking_type'] as String? ?? 'lab_visit';
-    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Visit';
+    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Appointment';
     DateTime date;
     final collDate = b['collection_date'] as String?;
     if (collDate != null && collDate.isNotEmpty) {

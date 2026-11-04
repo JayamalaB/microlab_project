@@ -1363,11 +1363,13 @@ async function _handleBookingRequest(io, socket, data = {}) {
        JOIN ip_products pr ON pr.product_id = bi.product_id
        WHERE bi.booking_id = ? AND pr.document_required IN (1, '1', 'yes')
      ) AS doc_required,
-     (SELECT b.notes FROM ip_bookings b WHERE b.booking_id = ?) AS notes`,
-    [bookingId, bookingId]
+     (SELECT b.notes        FROM ip_bookings b WHERE b.booking_id = ?) AS notes,
+     (SELECT b.reference_no FROM ip_bookings b WHERE b.booking_id = ?) AS reference_no`,
+    [bookingId, bookingId, bookingId]
   );
   const docRequired = !!docReqRow?.doc_required;
   const notes       = String(docReqRow?.notes ?? '').trim() || null;
+  const referenceNo = docReqRow?.reference_no ?? null;
 
   // Build the full booking payload now — needed by both normal dispatch
   // and the slot-based fallback (which sends the complete data to the tech).
@@ -1379,6 +1381,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
     ...(slotLabel       != null && { slotLabel }),
     ...(appointmentTime != null && { appointmentTime }),
     ...(notes           != null && { notes }),
+    ...(referenceNo     != null && { referenceNo }),
     createdAt: new Date().toISOString(),
   };
 

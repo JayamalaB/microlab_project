@@ -758,13 +758,18 @@ exports.collectPayment = async (req, res) => {
 // the qr-status polling endpoint and the webhook handler can both find it.
 exports.createQrPayment = async (req, res) => {
   const technicianId = req.user.id;
-  const { bookingId, amount } = req.body;
+  // bookingIds[] for combined family QR; bookingId for single booking QR.
+  const { bookingId, bookingIds, amount } = req.body;
+  const primaryId  = bookingId ?? (Array.isArray(bookingIds) ? bookingIds[0] : null);
+  const allIds     = Array.isArray(bookingIds) && bookingIds.length > 0 ? bookingIds : [primaryId];
+  const isCombined = allIds.length > 1;
 
-  if (!bookingId || !amount || Number(amount) <= 0) {
+  if (!primaryId || !amount || Number(amount) <= 0) {
     return res.status(400).json({ success: false, message: 'bookingId and amount are required' });
   }
 
   try {
+    // Ownership check on the primary booking (the one used as QR anchor).
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.total_amount, b.amount_paid
        FROM ip_bookings b
@@ -777,16 +782,28 @@ exports.createQrPayment = async (req, res) => {
              WHERE parent.visit_group_id = b.visit_group_id
            ))
          )`,
-      [bookingId, technicianId, technicianId]
+      [primaryId, technicianId, technicianId]
     );
 
     if (!booking) {
       return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
     }
 
-    const amountDue = Math.max(0, parseFloat(booking.total_amount) - parseFloat(booking.amount_paid || 0));
-    if (Number(amount) > amountDue + 0.01) {
-      return res.status(400).json({ success: false, message: `Amount ₹${amount} exceeds amount due ₹${amountDue.toFixed(2)}` });
+    // For combined QR, validate against the sum of all members' due amounts.
+    let totalDue;
+    if (isCombined) {
+      const placeholders = allIds.map(() => '?').join(',');
+      const [rows] = await db.execute(
+        `SELECT SUM(GREATEST(0, total_amount - COALESCE(amount_paid, 0))) AS combined_due
+         FROM ip_bookings WHERE booking_id IN (${placeholders})`,
+        allIds
+      );
+      totalDue = parseFloat(rows[0]?.combined_due ?? 0);
+    } else {
+      totalDue = Math.max(0, parseFloat(booking.total_amount) - parseFloat(booking.amount_paid || 0));
+    }
+    if (Number(amount) > totalDue + 0.01) {
+      return res.status(400).json({ success: false, message: `Amount ₹${amount} exceeds amount due ₹${totalDue.toFixed(2)}` });
     }
 
     const keyId     = process.env.RAZORPAY_KEY_ID;
@@ -818,9 +835,14 @@ exports.createQrPayment = async (req, res) => {
     });
 
     const qrData = await qrRes.json();
+    console.log(`[QR] Razorpay response status=${qrRes.status} id=${qrData.id ?? 'NONE'} image_url=${qrData.image_url ?? 'NULL'} error=${JSON.stringify(qrData.error ?? null)}`);
     if (!qrRes.ok || !qrData.id) {
       console.error('❌ Razorpay QR creation failed:', JSON.stringify(qrData));
       return res.status(502).json({ success: false, message: qrData.error?.description || 'Failed to create QR code' });
+    }
+    if (!qrData.image_url) {
+      console.warn(`[QR] image_url is null for qr_id=${qrData.id} — Razorpay may not support QR in test mode`);
+      return res.status(502).json({ success: false, message: 'QR image not available. This may not be supported in test mode.' });
     }
 
     qrStore.sessions.set(qrData.id, {

@@ -706,7 +706,7 @@ async function syncBookingToClient(bookingId, initiator) {
       // Send "Booking Confirmed" push ONLY for new bookings, not cancel/reschedule/update
       const resolvedAction = payload.action;
       if (resolvedAction === 'new_booking') {
-        await _sendBookingConfirmedNotification(booking, initiator.mobile);
+        await _sendBookingConfirmedNotification(booking, initiator.mobile, result.bill_id ?? null);
       }
 
     } else {
@@ -1137,7 +1137,7 @@ async function _setSyncStatus(bookingIds, status) {
   }
 }
 
-async function _sendBookingConfirmedNotification(booking, initiatorMobile) {
+async function _sendBookingConfirmedNotification(booking, initiatorMobile, referenceNo = null) {
   if (!messaging) {
     writeLog(`[clientSync] push skipped — Firebase not initialised`);
     return;
@@ -1157,12 +1157,12 @@ async function _sendBookingConfirmedNotification(booking, initiatorMobile) {
       token: fcmToken,
       notification: {
         title: 'Booking Confirmed ✅',
-        body:  `Your booking #${booking.booking_ref} has been confirmed. We will contact you shortly.`,
+        body:  `Your booking #${referenceNo ?? booking.reference_no ?? booking.booking_ref} has been confirmed. We will contact you shortly.`,
       },
       data: {
         type:        'booking_confirmed',
         booking_id:  String(booking.booking_id),
-        booking_ref: booking.booking_ref,
+        booking_ref: referenceNo ?? booking.reference_no ?? booking.booking_ref,
       },
       android: {
         priority: 'high',

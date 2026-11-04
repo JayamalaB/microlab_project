@@ -446,29 +446,8 @@ class _TechnicianBookingDetailScreenState
   Future<void> _addAdditionalCharge() async {
     final targets = _additionalChargeTargets;
     if (targets.isEmpty) return;
-    var target = targets.first;
-    if (targets.length > 1) {
-      final picked = await showDialog<int>(
-        context: context,
-        builder: (ctx) => SimpleDialog(
-          title: const Text('Add charge for', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          children: [
-            for (var i = 0; i < targets.length; i++)
-              SimpleDialogOption(
-                onPressed: () => Navigator.pop(ctx, i),
-                child: Text(
-                  targets[i].amount > 0
-                      ? '${targets[i].name}  ·  ₹${_inr(targets[i].amount)} added'
-                      : targets[i].name,
-                  style: const TextStyle(fontSize: 14),
-                ),
-              ),
-          ],
-        ),
-      );
-      if (picked == null || !mounted) return;
-      target = targets[picked];
-    }
+    // Always apply additional charge to the main patient's booking
+    final target = targets.firstWhere((t) => t.isMain, orElse: () => targets.first);
     await _editAdditionalCharge(target);
   }
 
@@ -1679,6 +1658,8 @@ void _resumeJourney() {
 
   void _showAddFamilyTestSheet(int familyBookingId) {
     String searchQuery = '';
+    final Set<String> pendingIds = {};
+    bool adding = false;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1692,6 +1673,9 @@ void _resumeJourney() {
             return (t['name']?.toLowerCase().contains(searchQuery.toLowerCase()) ?? false) ||
                 (t['category']?.toLowerCase().contains(searchQuery.toLowerCase()) ?? false);
           }).toList();
+          final selectedTotal = _catalogueItems
+              .where((t) => pendingIds.contains(t['id']))
+              .fold<double>(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
           return Container(
             decoration: const BoxDecoration(
               color: Colors.white,
@@ -1730,38 +1714,96 @@ void _resumeJourney() {
                   ),
                 ),
                 const SizedBox(height: 8),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(ctx).size.height * 0.4,
+                Container(
+                  height: filtered.isEmpty ? null : (filtered.length * 58.0).clamp(58.0, 300.0),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.divider),
                   ),
                   child: filtered.isEmpty
                       ? const Padding(
                           padding: EdgeInsets.symmetric(vertical: 20),
-                          child: Text('No tests found',
-                              style: TextStyle(fontSize: 13, color: AppColors.textHint)),
+                          child: Center(child: Text('No tests found',
+                              style: TextStyle(fontSize: 13, color: AppColors.textHint))),
                         )
-                      : ListView.builder(
-                          shrinkWrap: true,
+                      : ListView.separated(
+                          padding: EdgeInsets.zero,
                           itemCount: filtered.length,
+                          separatorBuilder: (_, __) => const Divider(height: 1),
                           itemBuilder: (_, i) {
                             final t = filtered[i];
-                            return ListTile(
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                            final id = t['id'] ?? '';
+                            return CheckboxListTile(
+                              value: pendingIds.contains(id),
+                              onChanged: adding
+                                  ? null
+                                  : (v) => setSheet(() {
+                                        if (v == true) pendingIds.add(id);
+                                        else pendingIds.remove(id);
+                                      }),
+                              activeColor: AppColors.brandGreen,
+                              dense: true,
+                              controlAffinity: ListTileControlAffinity.leading,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 6),
                               title: Text(t['name'] ?? '',
                                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                              subtitle: Text(t['category'] ?? '',
-                                  style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                              trailing: Text('₹${t['price'] ?? '0'}',
+                              subtitle: (t['category'] ?? '').isEmpty ? null
+                                  : Text(t['category']!,
+                                      style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                              secondary: Text('₹${t['price'] ?? '0'}',
                                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
                                       color: AppColors.brandGreen)),
-                              onTap: () {
-                                Navigator.pop(ctx);
-                                _addFamilyTest(t, familyBookingId);
-                              },
                             );
                           },
                         ),
                 ),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: adding ? null : () => Navigator.pop(ctx),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.textSecondary,
+                        side: const BorderSide(color: AppColors.divider),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 2,
+                    child: ElevatedButton(
+                      onPressed: (pendingIds.isEmpty || adding) ? null : () async {
+                        setSheet(() => adding = true);
+                        final picked = _catalogueItems
+                            .where((t) => pendingIds.contains(t['id'])).toList();
+                        for (final t in picked) {
+                          await _addFamilyTest(t, familyBookingId);
+                        }
+                        if (ctx.mounted) Navigator.pop(ctx);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.brandGreen,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: adding
+                          ? const SizedBox(width: 18, height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : Text(
+                              pendingIds.isEmpty
+                                  ? 'Select tests to add'
+                                  : 'Add ${pendingIds.length} selected · ₹${selectedTotal.toStringAsFixed(0)}',
+                              style: const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                    ),
+                  ),
+                ]),
               ],
             ),
           );
@@ -2937,16 +2979,18 @@ void _resumeJourney() {
 
   // Shows a QR code sheet and polls until the customer pays or cancels.
   // Returns the Razorpay payment ID on success, null if dismissed without payment.
+  // Pass [bookingIds] for combined family QR so the server validates against total due.
   Future<String?> _showQrPaymentSheet({
     required int bookingId,
     required double amount,
+    List<int>? bookingIds,
   }) async {
     return showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
       isDismissible: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => _QrPaymentSheet(bookingId: bookingId, amount: amount),
+      builder: (ctx) => _QrPaymentSheet(bookingId: bookingId, amount: amount, bookingIds: bookingIds),
     );
   }
 
@@ -3064,6 +3108,43 @@ void _resumeJourney() {
       _refreshPaymentInfo();
       _loadLinkedPatients();
       onDone?.call();
+      return;
+    }
+
+    if (method == 'QR') {
+      final allBookingIds = toCharge.map((a) => a['bookingId'] as int).toList();
+      final primaryId     = allBookingIds.first;
+      final paymentId     = await _showQrPaymentSheet(
+        bookingId:  primaryId,
+        amount:     enteredAmount,
+        bookingIds: allBookingIds.length > 1 ? allBookingIds : null,
+      );
+      if (!mounted) return;
+      if (paymentId != null) {
+        setState(() => _isProcessingPayment = true);
+        var allOk = true;
+        for (final a in toCharge) {
+          final ok = await ApiService.collectPayment(
+            bookingId:         a['bookingId'] as int,
+            razorpayPaymentId: paymentId,
+            amount:            a['allocated'] as double,
+            paymentMethod:     'QR',
+          );
+          if (!ok) allOk = false;
+        }
+        if (mounted) {
+          applySuccessState(paymentId);
+          if (!allOk) {
+            AppMessages.warning(context,
+                'QR payment received, but it didn\'t save for every member. Note ref $paymentId and tell support.',
+                duration: const Duration(seconds: 8));
+          }
+          _refreshPaymentInfo();
+          _loadLinkedPatients();
+          onDone?.call();
+        }
+      }
+      if (mounted) setState(() => _isProcessingPayment = false);
       return;
     }
 
@@ -6280,7 +6361,8 @@ enum _QrState { loading, ready, paid, expired, error }
 class _QrPaymentSheet extends StatefulWidget {
   final int bookingId;
   final double amount;
-  const _QrPaymentSheet({required this.bookingId, required this.amount});
+  final List<int>? bookingIds;
+  const _QrPaymentSheet({required this.bookingId, required this.amount, this.bookingIds});
 
   @override
   State<_QrPaymentSheet> createState() => _QrPaymentSheetState();
@@ -6316,7 +6398,7 @@ class _QrPaymentSheetState extends State<_QrPaymentSheet> {
     _countdownTimer?.cancel();
     setState(() { _state = _QrState.loading; _remaining = _totalSeconds; _errorMsg = null; });
 
-    final data = await ApiService.createQrCode(bookingId: widget.bookingId, amount: widget.amount);
+    final data = await ApiService.createQrCode(bookingId: widget.bookingId, amount: widget.amount, bookingIds: widget.bookingIds);
     if (!mounted) return;
     if (data == null) {
       setState(() { _state = _QrState.error; _errorMsg = 'Could not generate QR. Check your connection and try again.'; });
@@ -6518,11 +6600,23 @@ class _QrPaymentSheetState extends State<_QrPaymentSheet> {
                             : const Center(child: CircularProgressIndicator(
                                 color: AppColors.brandGreen, strokeWidth: 2)),
                         errorBuilder: (_, __, ___) => const Center(
-                          child: Icon(Icons.qr_code_2_rounded,
-                              size: 100, color: AppColors.textHint)),
+                          child: Column(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.broken_image_outlined, size: 52, color: AppColors.textHint),
+                            SizedBox(height: 12),
+                            Text('Could not load QR image.\nCheck your internet connection.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                          ]),
+                        ),
                       )
-                    : const Center(child: CircularProgressIndicator(
-                        color: AppColors.brandGreen, strokeWidth: 2)),
+                    : const Center(
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.qr_code_2_rounded, size: 64, color: AppColors.textHint),
+                          SizedBox(height: 12),
+                          Text('QR code not available',
+                              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                        ]),
+                      ),
               ),
 
               const SizedBox(height: 14),

@@ -29,6 +29,7 @@ class SocketBooking {
   final String? slotLabel;
   final String? appointmentTime; // "06:30" — exact time within slot
   final String? notes;           // customer's booking notes (ip_bookings.notes)
+  final String? referenceNo;     // ip_bookings.reference_no (ASMX bill_id)
 
   SocketBooking({
     required this.bookingId,
@@ -48,6 +49,7 @@ class SocketBooking {
     this.slotLabel,
     this.appointmentTime,
     this.notes,
+    this.referenceNo,
   });
 
   factory SocketBooking.fromJson(Map<String, dynamic> j) => SocketBooking(
@@ -68,6 +70,7 @@ class SocketBooking {
         slotId:          j['slotId']          != null ? _toInt(j['slotId'])    : null,
         slotLabel:       j['slotLabel']       as String?,
         appointmentTime: j['appointmentTime'] as String?,
+        referenceNo:     j['referenceNo']     as String?,
         // FCM sends '' when there are no notes.
         notes: (j['notes'] as String?)?.trim().isNotEmpty == true
             ? (j['notes'] as String).trim()

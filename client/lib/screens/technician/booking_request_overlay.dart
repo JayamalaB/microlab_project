@@ -748,7 +748,7 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                     _DetailRow(
                       icon: Icons.tag_rounded,
                       label: 'Booking ID',
-                      value: '#${widget.booking.bookingId}',
+                      value: '#${widget.booking.referenceNo ?? widget.booking.bookingId}',
                     ),
 
                     const SizedBox(height: 20),

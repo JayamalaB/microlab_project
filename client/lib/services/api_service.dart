@@ -688,17 +688,22 @@ class ApiService {
 
   // Creates a Razorpay UPI QR code for on-site payment.
   // Returns {success, qrId, imageUrl} on success, null on failure.
+  // Pass [bookingIds] for combined family QR (list of all member booking IDs).
   static Future<Map<String, dynamic>?> createQrCode({
     required int bookingId,
     required double amount,
+    List<int>? bookingIds,
   }) async {
     final token = await getToken();
     if (token == null) return null;
     try {
+      final payload = bookingIds != null && bookingIds.length > 1
+          ? {'bookingIds': bookingIds, 'amount': amount}
+          : {'bookingId': bookingId, 'amount': amount};
       final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/create-qr'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
-        body: jsonEncode({'bookingId': bookingId, 'amount': amount}),
+        body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 20));
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       if (body['success'] == true) return body;
