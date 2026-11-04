@@ -349,6 +349,23 @@ class ApiService {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // Whether a time is still free. Only a definite "taken" returns false, so a
+  // network problem here never blocks a payment — the booking step re-checks.
+  static Future<bool> isSlotAvailable(int availableSlotId) async {
+    final token = await getToken();
+    if (token == null) return true;
+    try {
+      final res = await _client.get(
+        Uri.parse('$baseUrl/api/bookings/slot-status/$availableSlotId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 6));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      return body['available'] != false;
+    } catch (_) {
+      return true;
+    }
+  }
+
   static Future<List<TimeSlot>> getSlots({
     required String branchId,
     required DateTime date,

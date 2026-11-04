@@ -22,10 +22,10 @@ beforeEach(() => {
   db.query.mockReset().mockResolvedValue([[], {}]);
 });
 
-// Technician offline / network disconnected mid-job — the app should fail
-// safely (patient told immediately) rather than leaving the customer
-// waiting indefinitely on a technician who silently vanished.
-test('a technician disconnecting mid-job notifies the customer immediately, without a crash', async () => {
+// Technician offline / network disconnected mid-job — technicians lose signal
+// all the time and carry on, so the booking stays assigned and the customer
+// is not told it was cancelled.
+test('a technician disconnecting mid-job keeps the booking, without a crash', async () => {
   const bookingId = 80101;
   const tech    = await connectClient(server.url);
   const patient = await connectClient(server.url);
@@ -47,11 +47,12 @@ test('a technician disconnecting mid-job notifies the customer immediately, with
     tech.emit('booking_accepted', { bookingId, technicianId: 501, technicianName: 'Suresh' });
     await acceptedAtCustomer;
 
-    const cancelledAtCustomer = waitForEvent(patient, 'booking_cancelled');
+    let toldCancelled = false;
+    patient.once('booking_cancelled', () => { toldCancelled = true; });
     tech.disconnect(); // simulates network loss / app killed mid-job
 
-    const cancelPayload = await cancelledAtCustomer;
-    expect(cancelPayload).toMatchObject({ bookingId, reason: 'technician_disconnected' });
+    await new Promise(r => setTimeout(r, 100));
+    expect(toldCancelled).toBe(false);
   } finally {
     patient.disconnect();
   }

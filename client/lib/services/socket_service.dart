@@ -506,7 +506,12 @@ class SocketService {
     _socket!.onReconnect((_) => _log('RECONNECT', 'socket reconnected'));
 
     _registerEventHandlers();
-    _socket!.connect();
+    // The server checks this login token when the socket connects, and again
+    // on every automatic reconnect.
+    ApiService.getToken().then((token) {
+      _socket?.auth = {'token': token};
+      _socket?.connect();
+    });
     _watchNetworkChanges();
 
     // Fetch FCM token once per login so it's ready before the first goOnline().
@@ -1039,6 +1044,7 @@ class SocketService {
     int?    slotId,
     String? slotLabel,
     String? appointmentTime, // "06:30" — exact time within slot
+    bool    slotChanged = false, // customer picked another time after no technician was found
   }) {
     if (_socket == null) {
       _log('WARN', 'booking_request: socket not initialized — emit dropped');
@@ -1063,6 +1069,7 @@ class SocketService {
       if (slotId          != null) 'slotId':          slotId,
       if (slotLabel       != null) 'slotLabel':       slotLabel,
       if (appointmentTime != null) 'appointmentTime': appointmentTime,
+      if (slotChanged) 'slotChanged': true,
     });
     _log('EMIT', 'booking_request  id=$bookingId type=$bookingType branch=$branchId ($branchName) slot=$slotId ($slotLabel) time=$appointmentTime');
   }

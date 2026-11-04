@@ -71,6 +71,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // Silently auto-detected from pincode — patient never sees or selects this.
   BranchModel? _selectedBranch;
   bool _branchDetecting = false;
+  int  _branchLookupId  = 0;
   // Real patientId from auth session — falls back to 1 if socket not yet connected
   int get _patientId {
     final id = SocketService.instance.userId;
@@ -236,6 +237,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // Patient never sees this — branch is stored and forwarded to CheckoutScreen.
   Future<void> _autoDetectBranch(String pincode, {String? place, bool isGps = false}) async {
     if (!mounted) return;
+    // Lookups can finish out of order; only the latest one may set the branch.
+    final lookup = ++_branchLookupId;
     final effectivePlace = place ?? _city;
     debugPrint('\n🏥 [BRANCH AUTO-DETECT] ─────────────────────────────');
     debugPrint('   pincode     : $pincode');
@@ -268,7 +271,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       debugPrint('   ← status    : ${res.statusCode}');
       debugPrint('   ← body      : ${res.body}');
 
-      if (!mounted) return;
+      if (!mounted || lookup != _branchLookupId) return;
 
       if (res.statusCode == 200) {
         final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -292,10 +295,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       } else {
         setState(() => _branchDetecting = false);
         debugPrint('   ❌ HTTP ${res.statusCode} — branch detection skipped');
-        // GPS-only: surface "no nearby branch has availability" to the
-        // patient instead of failing silently. Manual pincode/place 404s are
-        // deliberately left as-is (silent), per the existing behavior there.
-        if (isGps && res.statusCode == 404 && mounted) {
+        // Tell the patient, or checkout can't proceed with no explanation.
+        if (res.statusCode == 404 && mounted) {
           try {
             final body = jsonDecode(res.body) as Map<String, dynamic>;
             if (body['message'] is String) {
@@ -308,8 +309,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         }
       }
     } catch (e) {
-      if (mounted) setState(() => _branchDetecting = false);
       debugPrint('   ❌ error     : $e');
+      if (mounted && lookup == _branchLookupId) {
+        setState(() => _branchDetecting = false);
+        AppMessages.error(context, 'We couldn\'t find a branch for this location. Please check your connection and try again.');
+      }
     }
     debugPrint('────────────────────────────────────────────────────\n');
   }

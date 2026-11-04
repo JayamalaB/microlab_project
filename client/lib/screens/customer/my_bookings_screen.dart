@@ -2063,7 +2063,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     openRazorpay(
       options: {
         'key':         AppConstants.razorpayKeyId,
-        'amount':      (amount * 100).toInt(),
+        'amount':      (amount * 100).round(),
         'name':        'MicroLab',
         'description': b.tests.map((t) => t.name).join(', '),
         'prefill': {

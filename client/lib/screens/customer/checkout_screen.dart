@@ -784,8 +784,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
 
     final primaryBookingId = bookings.isNotEmpty ? bookings[0]['bookingId'] as int? : null;
+    final isScheduled = result['isScheduled'] == true;
 
-    if (primaryBookingId != null && widget.mode == 'Home Collection') {
+    if (primaryBookingId != null && widget.mode == 'Home Collection' && !isScheduled) {
       final address = [_address, _city, _pincode]
           .where((s) => s != null && s.isNotEmpty).join(', ');
       final socket = SocketService.instance;
@@ -836,17 +837,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (mounted) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => _BookingSuccessScreen(
-          booking:           booking,
-          onBookingComplete: widget.onBookingComplete,
-          familyCount:       _familyMembers.length,
-        )),
+        MaterialPageRoute(builder: (_) => isScheduled
+            ? _BookingScheduledScreen(booking: booking)
+            : _BookingSuccessScreen(
+                booking:           booking,
+                onBookingComplete: widget.onBookingComplete,
+                familyCount:       _familyMembers.length,
+              )),
       );
     }
   }
 
   // ── Open Razorpay checkout (or confirm directly for Pay Later) ──────────
-  void _proceedToPayment() {
+  Future<void> _proceedToPayment() async {
     if (!_canProceed) return;
 
     if (_paymentType == 'pay_later') {
@@ -856,13 +859,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     setState(() => _isProcessing = true);
 
+    // Don't send the customer to pay for a time someone else just took.
+    final slotId = int.tryParse(_selectedSlot?.id ?? '');
+    if (slotId != null && !await ApiService.isSlotAvailable(slotId)) {
+      if (!mounted) return;
+      setState(() { _isProcessing = false; _selectedSlot = null; _selectedAppointmentTime = null; });
+      AppMessages.error(context, 'This time was just booked by someone else. Please choose another time.');
+      if (_selectedDate != null) _loadBranchSlots(_selectedDate!);
+      return;
+    }
+
     // TODO: fetch order_id from your backend first
     // POST /api/payment/create-order { amount: _payableNow, currency: 'INR' }
     // then use response['order_id'] below
 
     final options = {
       'key': AppConstants.razorpayKeyId,
-      'amount': (_payableNow * 100).toInt(), // paise
+      'amount': (_payableNow * 100).round(), // paise
       'name': 'MicroLab',
       'description': widget.cart.map((t) => t.name).join(', '),
       'prefill': {
@@ -969,7 +982,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           if (token != null) 'Authorization': 'Bearer $token',
         },
         body: jsonEncode(payload),
-      ).timeout(const Duration(seconds: 10));
+      ).timeout(const Duration(seconds: 20)); // the server confirms the payment with Razorpay
 
       debugPrint('📥 [CHECKOUT] Response ${res.statusCode}: ${res.body}');
 

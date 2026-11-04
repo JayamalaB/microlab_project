@@ -16,7 +16,8 @@
 //   • Newly-online inject  → on technician_online / driver_online, insert into
 //                            active dispatch queues at correct sorted position
 //                            (uncontacted slots only — current actor never displaced)
-//   • Disconnect mid-job   → patient notified immediately via booking_cancelled
+//   • Disconnect mid-job   → the job stays assigned; the technician reconnects
+//                            and carries on (see the 'disconnect' handler)
 
 'use strict';
 const db              = require('../config/db');
@@ -24,6 +25,7 @@ const { branchCodeKey } = require('../services/branchCodes');
 const { messaging }   = require('../config/firebase');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { syncVisitCompletionToClient } = require('../services/clientSync');
+const { moveBookingToSlot } = require('../services/slotChange');
 const {
   findEligibleBranches,
   technicianActiveSlots,
@@ -130,6 +132,7 @@ let _io = null;
 
 // ── Race-condition protection ──────────────────────────────────────────────────
 const acceptedBookings = new Set(); // bookingIds already accepted (blocks duplicates)
+const ACCEPTABLE_BOOKING_STATUSES = ['pending', 'confirmed'];
 
 // ── Reconnect grace period ─────────────────────────────────────────────────────
 // When a technician's socket disconnects (app killed / network drop), we null
@@ -220,6 +223,75 @@ function _notifyPatient(io, bookingId, event, payload) {
   }
 }
 
+// The booking may hold a time on a different technician's schedule (another
+// technician, or another branch after the cross-branch fallback). It moves to
+// the accepting technician's own row for that time and the old one is released.
+// Nothing to do when that row is already the booking's: it isn't free.
+async function _keepTimeWithAcceptor(bookingId, technicianId, bookingDate, appointmentTime) {
+  try {
+    const [[free]] = await db.execute(
+      `SELECT ias.available_slot_id, ias.technician_slot_id
+       FROM ip_available_slots ias
+       JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
+       WHERE ts.technician_id = ? AND ts.slot_date = ? AND ias.slot_time = ? AND ias.is_available = 1
+       LIMIT 1`,
+      [technicianId, bookingDate, `${appointmentTime}:00`]
+    );
+    if (free && await moveBookingToSlot(bookingId, free)) {
+      log('💾', 'APPT_SLOT_MOVED', bookingId, `tech=${technicianId} date=${bookingDate} time=${appointmentTime}`);
+    }
+  } catch (e) {
+    console.error(`❌ [_keepTimeWithAcceptor] booking=${bookingId}: ${e.message}`);
+  }
+}
+
+// The customer picked another slot or time after no technician was found. It is
+// saved on the booking, so the customer's record, the technician and the
+// reminders all show the same time. Returns "HH:MM" of the time now held, or null.
+async function _saveChosenTime(bookingId, { branchId, slotId, appointmentTime }) {
+  const [[booking]] = await db.execute(
+    'SELECT booking_date FROM ip_bookings WHERE booking_id = ? LIMIT 1',
+    [bookingId]
+  );
+  if (!booking?.booking_date) return null;
+
+  const [[free]] = await db.execute(
+    `SELECT ias.available_slot_id, ias.technician_slot_id, ias.slot_time
+     FROM ip_available_slots ias
+     JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
+     WHERE ts.branch_id = ? AND ts.slot_id = ? AND ts.slot_date = ? AND ias.is_available = 1
+       ${appointmentTime ? 'AND ias.slot_time = ?' : ''}
+     ORDER BY ias.slot_time ASC
+     LIMIT 1`,
+    [branchId, slotId, String(booking.booking_date).split('T')[0],
+     ...(appointmentTime ? [`${appointmentTime}:00`] : [])]
+  );
+  if (!free || !(await moveBookingToSlot(bookingId, free))) return null;
+  return String(free.slot_time).slice(0, 5);
+}
+
+// Stops a running search and dismisses the offer on the technician holding it.
+// Returns whether a search was actually running.
+function _stopDispatch(io, bookingId) {
+  const dispatch = dispatchQueues.get(bookingId);
+  if (dispatch) {
+    clearTimeout(dispatch.handle); // stop the 40s retry timer immediately
+    const actor = dispatch.queue[dispatch.techIdx];
+    if (actor) {
+      const actorMap  = dispatch.bookingType === 'transport' ? onlineDrivers : onlineTechnicians;
+      const techEntry = actorMap.get(actor.id);
+      if (techEntry?.socketId) {
+        io.to(techEntry.socketId).emit('booking_cancelled', { bookingId });
+        log('📢', 'CANCEL_OVERLAY_DISMISSED', bookingId,
+          `tech=${actor.name} (id=${actor.id})`);
+      }
+    }
+  }
+  dispatchQueues.delete(bookingId);
+  bookingRooms.delete(bookingId);
+  return !!dispatch;
+}
+
 // Return a technician to the available pool after a job completes
 function _freeTechnician(technicianId, bookingId) {
   const t = onlineTechnicians.get(technicianId);
@@ -241,6 +313,24 @@ function _freeTechnician(technicianId, bookingId) {
      WHERE technician_id = ?`,
     [technicianId]
   );
+}
+
+// A job survives a dropped connection (see the 'disconnect' handler), so one
+// that ended while the technician was away is cleared when they come back.
+async function _clearFinishedJob(technicianId) {
+  const bookingId = technicianActiveBookings.get(technicianId);
+  if (!bookingId) return;
+  try {
+    const [[job]] = await db.execute(
+      'SELECT collection_status FROM ip_technician_collection WHERE booking_id = ? AND technician_id = ? LIMIT 1',
+      [bookingId, technicianId]
+    );
+    if (!job || ['completed', 'cancelled', 'handed_to_lab'].includes(job.collection_status)) {
+      _freeTechnician(technicianId, bookingId);
+    }
+  } catch (e) {
+    console.error(`❌ [_clearFinishedJob] tech=${technicianId}: ${e.message}`);
+  }
 }
 
 // Force a technician fully offline — same effect as the explicit
@@ -279,13 +369,13 @@ function _forceTechnicianOffline(technicianId) {
 // (e.g. no signal inside a building), so their active-job tracking must
 // survive this, unlike an explicit logout/technician_offline signal which
 // really does mean "I'm done." Still removes them from the in-memory
-// dispatch pools and clears any pending grace timer, so dispatch eligibility
-// and the DB online flag stay consistent.
+// socket dispatch pool and clears any pending grace timer. The push pool
+// (fcmOnlineTechnicians) is kept: a technician whose app was closed is still
+// on duty and reachable by push until they go offline or log out.
 function _markTechnicianOfflineStale(technicianId) {
   if (!technicianId) return;
 
   onlineTechnicians.delete(technicianId);
-  fcmOnlineTechnicians.delete(technicianId);
 
   const pendingGrace = graceTimers.get(technicianId);
   if (pendingGrace) { clearTimeout(pendingGrace); graceTimers.delete(technicianId); }
@@ -637,11 +727,19 @@ function _queueStatus(dispatch, actorMap) {
   return lines;
 }
 
-async function dispatchAttempt(io, bookingId) {
+// Runs from timers and socket events, where an uncaught error would otherwise
+// stop the whole server.
+function dispatchAttempt(io, bookingId) {
+  return _dispatchAttempt(io, bookingId).catch((e) => {
+    console.error(`❌ [dispatchAttempt] booking=${bookingId}: ${e.message}`);
+  });
+}
+
+async function _dispatchAttempt(io, bookingId) {
   while (true) {
     if (!bookingRooms.has(bookingId)) return; // patient cancelled
     const dispatch = dispatchQueues.get(bookingId);
-    if (!dispatch) return;
+    if (!dispatch || dispatch._claiming) return;
 
     const { queue, bookingData, bookingType = 'lab' } = dispatch;
     const actorMap = bookingType === 'transport' ? onlineDrivers : onlineTechnicians;
@@ -991,7 +1089,7 @@ async function dispatchAttempt(io, bookingId) {
 //  auto-confirms the booking, and notifies the patient immediately.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId, patientAddress, patientLat, patientLng, bookingData, slotId, appointmentTime }) {
+async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId, patientAddress, patientLat, patientLng, bookingData, slotId, appointmentTime, excludeTechnicianId = null }) {
   try {
     // Get collection date from the booking record
     const [[booking]] = await db.execute(
@@ -1023,7 +1121,10 @@ async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId,
       slotParams
     );
 
-    if (slotRows.length === 0) {
+    // The technician who just gave this job up is not offered it again.
+    const candidates = slotRows.filter(r => r.technician_id !== excludeTechnicianId);
+
+    if (candidates.length === 0) {
       log('⚠️', 'SLOT_FALLBACK_MISS', bookingId,
         `no slot entry for branch=${branchId} date=${collectionDate} slot=${slotId ?? 'any'}`);
       if (slotId != null) {
@@ -1035,18 +1136,24 @@ async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId,
       return false;
     }
 
-    const techId   = slotRows[0].technician_id;
-    const techName = slotRows[0].user_name;
     // All eligible slot techs — used as slotTechIds so expansion can route to any of them.
     const allSlotTechIds = slotId != null
-      ? new Set(slotRows.map(r => r.technician_id))
+      ? new Set(candidates.map(r => r.technician_id))
       : null;
+    const triedIds = () => new Set(excludeTechnicianId != null ? [excludeTechnicianId] : []);
 
-    // ── If the slot technician is currently online and available, use the normal
-    //    dispatch flow — send them a booking_request and wait for their acceptance.
-    //    Only auto-confirm when they are OFFLINE (pre-assigned scheduled booking).
-    const onlineTech = onlineTechnicians.get(techId);
-    if (onlineTech?.isOnline && onlineTech?.isAvailable && onlineTech?.socketId) {
+    // ── If a slot technician is connected, use the normal dispatch flow — send
+    //    them a booking_request and wait for their acceptance. With a chosen
+    //    slot a busy technician still gets the offer and decides (same rule as
+    //    _sortedAvailableActors); with no slot context they are skipped.
+    const liveRow = candidates.find((r) => {
+      const t = onlineTechnicians.get(r.technician_id);
+      return t?.isOnline && t?.socketId && (slotId != null || t?.isAvailable);
+    });
+    if (liveRow) {
+      const techId     = liveRow.technician_id;
+      const techName   = liveRow.user_name;
+      const onlineTech = onlineTechnicians.get(techId);
       const dist =
         patientLat != null && onlineTech.lat != null
           ? haversine(patientLat, patientLng, onlineTech.lat, onlineTech.lng)
@@ -1067,7 +1174,7 @@ async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId,
         techIdx:      0,
         attemptNum:   1,
         handle:       null,
-        triedIds:     new Set(),
+        triedIds:     triedIds(),
         bookingType:     'lab',
         slotId:          slotId ?? null,
         slotTechIds:     allSlotTechIds,
@@ -1087,29 +1194,42 @@ async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId,
       return true;
     }
 
-    // ── Technician is offline — send FCM booking request and wait for their response.
-    //    Auto-confirm only as a last resort when no FCM token exists in the DB.
-    const [[techLoc]] = await db.execute(
-      'SELECT fcm_token FROM ip_technician_live_location WHERE technician_id = ?',
-      [techId]
-    );
-    const fcmToken = techLoc?.fcm_token ?? null;
+    // ── Nobody connected — send an FCM booking request to the first offline
+    //    technician with a token and wait for their response. A connected
+    //    technician reaching this point is busy with no slot context: skipped,
+    //    and their live entry is left alone.
+    let techId = null, techName = null, fcmToken = null;
+    for (const row of candidates) {
+      if (onlineTechnicians.get(row.technician_id)?.socketId) continue;
+      const [[techLoc]] = await db.execute(
+        'SELECT fcm_token FROM ip_technician_live_location WHERE technician_id = ?',
+        [row.technician_id]
+      );
+      if (techLoc?.fcm_token) {
+        techId   = row.technician_id;
+        techName = row.user_name;
+        fcmToken = techLoc.fcm_token;
+        break;
+      }
+    }
 
     if (fcmToken) {
       // Register a temporary onlineTechnicians entry with socketId: null so
       // dispatchAttempt can find the tech and track retries.  The real entry
       // will replace this one when the tech's app opens and emits technician_online.
-      onlineTechnicians.set(techId, {
-        socketId:    null,
-        fcmToken,
-        lat:         null,
-        lng:         null,
-        name:        techName,
-        sessionId:   null,
-        branchId:    branchId ?? null,
-        isOnline:    true,
-        isAvailable: true,
-      });
+      if (!onlineTechnicians.has(techId)) {
+        onlineTechnicians.set(techId, {
+          socketId:    null,
+          fcmToken,
+          lat:         null,
+          lng:         null,
+          name:        techName,
+          sessionId:   null,
+          branchId:    branchId ?? null,
+          isOnline:    true,
+          isAvailable: true,
+        });
+      }
 
       // slotInfo is carried through so booking_accepted can increment booked_count.
       dispatchQueues.set(bookingId, {
@@ -1128,7 +1248,7 @@ async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId,
         techIdx:      0,
         attemptNum:   1,
         handle:       null,
-        triedIds:     new Set(),
+        triedIds:     triedIds(),
         bookingType:     'lab',
         slotInfo:        { techId, collectionDate, branchId },
         slotId:          slotId ?? null,
@@ -1150,7 +1270,7 @@ async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId,
 
     // No FCM token — cannot dispatch.  Return false so the caller can emit booking_timeout.
     log('⚠️', 'SLOT_NO_FCM_TOKEN', bookingId,
-      `tech=${techName} id=${techId} offline, no FCM token — cannot dispatch for date=${collectionDate}`);
+      `${candidates.length} slot technician(s), none reachable — cannot dispatch for date=${collectionDate}`);
     return false;
   } catch (e) {
     console.error('[_trySlotBasedAssign]', e.message);
@@ -1226,6 +1346,20 @@ async function _notifySlotNoAvailability(io, bookingId, failedSlotId, branchId, 
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function _handleBookingRequest(io, socket, data = {}) {
+  try {
+    if (data.slotChanged && data.slotId != null && !dispatchQueues.has(data.bookingId)) {
+      const savedTime = await _saveChosenTime(data.bookingId, data);
+      if (savedTime) data = { ...data, appointmentTime: savedTime };
+    }
+    await _runBookingRequest(io, socket, data);
+  } catch (e) {
+    // A leaked claim would block every later dispatch of this booking.
+    if (dispatchQueues.get(data.bookingId)?._claiming) dispatchQueues.delete(data.bookingId);
+    throw e;
+  }
+}
+
+async function _runBookingRequest(io, socket, data = {}) {
   const {
     bookingId, patientId, patientName,
     patientMobile = '', patientAddress = '',
@@ -1385,7 +1519,7 @@ async function _handleBookingRequest(io, socket, data = {}) {
     createdAt: new Date().toISOString(),
   };
 
-  const slotCtx = { bookingId, branchId, patientId, patientAddress, patientLat, patientLng, bookingData, slotId, appointmentTime };
+  const slotCtx = { bookingId, branchId, patientId, patientAddress, patientLat, patientLng, bookingData, slotId, appointmentTime, excludeTechnicianId };
 
   if (actorMap.size === 0) {
     // Lane 2: try FCM-online techs (socket dead, DB-online, technician_offline not sent)
@@ -1603,6 +1737,12 @@ async function _handleBookingRequest(io, socket, data = {}) {
 
   dlog(bookingId, 'QUEUE_BUILT', `${totalOnline} online, ${available} avail -> ${queue.map(t => `${t.name}(${t.id},${t.dist === Infinity ? 'noGPS' : t.dist.toFixed(1) + 'km'})`).join(' ')}`);
 
+  // Cancelled while the checks above were waiting on the database.
+  if (!dispatchQueues.has(bookingId)) {
+    dlog(bookingId, 'CANCELLED', 'search stopped before dispatch began');
+    return;
+  }
+
   dispatchQueues.set(bookingId, {
     bookingData,
     queue,
@@ -1690,6 +1830,7 @@ module.exports = function bookingSocket(io, socket) {
     // could receive a same-time booking while still mid-collection.
     const reconnectActiveSlots = technicianActiveSlots.get(technicianId);
     const hasActiveApptToday   = (() => {
+      if (technicianActiveBookings.has(technicianId)) return true;
       if (!reconnectActiveSlots || reconnectActiveSlots.size === 0) return false;
       const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
       for (const [, win] of reconnectActiveSlots) {
@@ -1717,6 +1858,8 @@ module.exports = function bookingSocket(io, socket) {
       isOnline:    true,
       isAvailable: !hasActiveApptToday,
     });
+
+    _clearFinishedJob(technicianId);
 
     // Lane 2 pool — survives socket disconnects; cleared only on technician_offline.
     fcmOnlineTechnicians.set(technicianId, {
@@ -1771,7 +1914,7 @@ module.exports = function bookingSocket(io, socket) {
     logBlock('🟢', `Technician Online`, [
       `Technician : ${technicianName} (ID: ${technicianId})`,
       `Branch     : ${branchId ?? 'unassigned'}`,
-      `GPS        : ${lat != null ? `${lat.toFixed(5)}, ${lng.toFixed(5)}` : 'no GPS'}`,
+      `GPS        : ${Number.isFinite(lat) && Number.isFinite(lng) ? `${lat.toFixed(5)}, ${lng.toFixed(5)}` : 'no GPS'}`,
       `Socket     : ${socket.id}`,
     ]);
 
@@ -1822,7 +1965,7 @@ module.exports = function bookingSocket(io, socket) {
 
     function _injectIntoRunningDispatches(isAllowedAtBookingBranch) {
       dispatchQueues.forEach((dispatch, bookingId) => {
-        if (dispatch.bookingType !== 'lab') return;
+        if (dispatch.bookingType !== 'lab' || dispatch._claiming) return;
         const bookingBranchId = dispatch.bookingData.branchId ?? null;
         if (!isAllowedAtBookingBranch(bookingBranchId)) return;
 
@@ -1892,6 +2035,22 @@ module.exports = function bookingSocket(io, socket) {
         lat:      lat ?? t.lat,
         lng:      lng ?? t.lng,
       });
+    } else if (fcmOnlineTechnicians.has(technicianId)) {
+      // The sweep took them out while heartbeats had stopped (a phone asleep).
+      // Their app is back and still thinks it's online, so bring them back too.
+      const entry = fcmOnlineTechnicians.get(technicianId);
+      socket.technicianId   = technicianId;
+      socket.technicianName = entry.name;
+      onlineTechnicians.set(technicianId, {
+        ...entry,
+        socketId:    socket.id,
+        lat:         lat ?? entry.lat,
+        lng:         lng ?? entry.lng,
+        sessionId:   null,
+        isOnline:    true,
+        isAvailable: !technicianActiveBookings.has(technicianId),
+      });
+      log('💓', 'TECH_BACK_ONLINE', '-', `id=${technicianId} — heartbeat resumed after the sweep`);
     }
 
     // If a grace timer is running (e.g. brief reconnect race), cancel it.
@@ -1902,11 +2061,13 @@ module.exports = function bookingSocket(io, socket) {
       log('💓', 'HEARTBEAT_GRACE_CANCEL', '-', `tech id=${technicianId} — grace cleared`);
     }
 
+    // A technician still on duty is online again, whatever the sweep last wrote.
+    const onDuty = fcmOnlineTechnicians.has(technicianId) ? 'online' : null;
     dbRun(
       `UPDATE ip_technician_live_location
-       SET last_ping_at = NOW(), updated_at = NOW()
+       SET last_ping_at = NOW(), online_status = COALESCE(?, online_status), updated_at = NOW()
        WHERE technician_id = ?`,
-      [technicianId]
+      [onDuty, technicianId]
     );
   });
 
@@ -1942,7 +2103,7 @@ module.exports = function bookingSocket(io, socket) {
   });
 
   // ── Accept (technician OR driver) ───────────────────────────────────────────
-  socket.on('booking_accepted', (data = {}) => {
+  socket.on('booking_accepted', async (data = {}) => {
     const {
       bookingId, technicianId, technicianName,
       driverId,  driverName,  sessionId,
@@ -1968,6 +2129,23 @@ module.exports = function bookingSocket(io, socket) {
       log('⚠️', 'ACCEPT_NO_ACTOR_ID', bookingId);
       acceptedBookings.delete(bookingId);
       return;
+    }
+
+    // A push notification can be tapped long after the offer ended. That must
+    // not bring back a booking that was cancelled or taken in the meantime.
+    try {
+      const [[current]] = await db.execute(
+        'SELECT status FROM ip_bookings WHERE booking_id = ? LIMIT 1',
+        [bookingId]
+      );
+      if (current && !ACCEPTABLE_BOOKING_STATUSES.includes(current.status)) {
+        acceptedBookings.delete(bookingId);
+        dlog(bookingId, 'ACCEPT_REFUSED', `${actorName}(${actorId}) -- booking is ${current.status}`);
+        socket.emit('booking_cancelled', { bookingId });
+        return;
+      }
+    } catch (e) {
+      console.error(`❌ [booking_accepted] status check failed booking=${bookingId}: ${e.message}`);
     }
 
     const dispatch        = dispatchQueues.get(bookingId);
@@ -2052,7 +2230,8 @@ module.exports = function bookingSocket(io, socket) {
                SELECT b.booking_id, ?, ?, 'assigned', CURDATE(), ?, ?, ?, pb.patient_id, ?, NOW(), NOW(), NOW()
                FROM ip_bookings b
                LEFT JOIN ip_patient_bookings pb ON pb.booking_id = b.booking_id
-               WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL
+               WHERE b.visit_group_id = ? AND b.booking_id != ?
+                 AND b.deleted_at IS NULL AND b.status != 'cancelled'
                ON DUPLICATE KEY UPDATE
                  technician_id     = VALUES(technician_id),
                  technician_name   = VALUES(technician_name),
@@ -2066,15 +2245,17 @@ module.exports = function bookingSocket(io, socket) {
             );
             dbRun(
               `UPDATE ip_bookings
-               SET technician_id = ?, technician_name = ?, updated_at = NOW()
-               WHERE visit_group_id = ? AND booking_id != ? AND deleted_at IS NULL`,
+               SET status = 'assigned', technician_id = ?, technician_name = ?, updated_at = NOW()
+               WHERE visit_group_id = ? AND booking_id != ?
+                 AND deleted_at IS NULL AND status != 'cancelled'`,
               [actorId, actorName || null, vgId, bookingId]
             );
             dbRun(
               `UPDATE ip_patient_bookings pb
                JOIN ip_bookings b ON b.booking_id = pb.booking_id
                SET pb.collection_status = 'assigned'
-               WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+               WHERE b.visit_group_id = ? AND b.booking_id != ?
+                 AND b.deleted_at IS NULL AND b.status != 'cancelled'`,
               [vgId, bookingId]
             );
             log('💾', 'TCB_SIBLING_CASCADE', bookingId,
@@ -2138,30 +2319,25 @@ module.exports = function bookingSocket(io, socket) {
 
       // If this acceptance came from a slot-based FCM dispatch, increment the
       // slot's booked_count (normally done in the auto-confirm path).
-      if (slotInfo && slotInfo.techId === actorId) {
+      // Only the booked slot, and not when creating the booking already
+      // counted it on this technician's row.
+      if (slotInfo && slotInfo.techId === actorId && dispatchSlotId && !appointmentTime) {
         dbRun(
           `UPDATE ip_technician_slots
            SET booked_count = booked_count + 1
-           WHERE technician_id = ? AND slot_date = ? AND branch_id = ?`,
-          [slotInfo.techId, slotInfo.collectionDate, slotInfo.branchId]
+           WHERE technician_id = ? AND slot_date = ? AND branch_id = ? AND slot_id = ?
+             AND tech_slot_id != COALESCE((
+               SELECT ias.technician_slot_id
+               FROM ip_bookings b
+               JOIN ip_available_slots ias ON ias.available_slot_id = b.available_slot_id
+               WHERE b.booking_id = ?), 0)`,
+          [slotInfo.techId, slotInfo.collectionDate, slotInfo.branchId, dispatchSlotId, bookingId]
         );
       }
 
       // Mark the exact appointment time as taken so no other booking can claim it.
       if (appointmentTime && bookingDate) {
-        dbRun(
-          `UPDATE ip_available_slots ias
-           JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
-           SET ias.is_available = 0, ias.updated_at = NOW()
-           WHERE ts.technician_id  = ?
-             AND ts.slot_date      = ?
-             AND ias.slot_time     = ?
-             AND ias.is_available  = 1
-           LIMIT 1`,
-          [actorId, bookingDate, `${appointmentTime}:00`]
-        );
-        log('💾', 'APPT_SLOT_MARKED', bookingId,
-          `tech=${actorId} date=${bookingDate} time=${appointmentTime} → is_available=0`);
+        _keepTimeWithAcceptor(bookingId, actorId, bookingDate, appointmentTime);
       }
 
       // Record a committed window in technicianActiveSlots for ANY slot-based
@@ -2260,8 +2436,12 @@ module.exports = function bookingSocket(io, socket) {
       [bookingId, technicianId]
     );
 
+    // Only the technician holding the offer moves dispatch on. A Decline tapped
+    // late, on an offer that already moved on, must not skip the next person.
     const dispatch = dispatchQueues.get(bookingId);
-    if (dispatch) {
+    const holdsOffer = dispatch && !dispatch._claiming
+      && Number(dispatch.queue[dispatch.techIdx]?.id) === Number(technicianId);
+    if (holdsOffer) {
       if (dispatch.handle) { clearTimeout(dispatch.handle); dispatch.handle = null; }
       const rejectedName = dispatch.queue[dispatch.techIdx]?.name ?? `ID: ${technicianId}`;
       dispatch.techIdx++;
@@ -2949,7 +3129,11 @@ module.exports = function bookingSocket(io, socket) {
   });
 
   // ── Patient-initiated booking request ─────────────────────────────────────────
-  socket.on('booking_request', (data) => _handleBookingRequest(io, socket, data));
+  socket.on('booking_request', (data) => {
+    _handleBookingRequest(io, socket, data).catch((e) => {
+      console.error(`❌ [booking_request] booking=${data?.bookingId}: ${e.message}`);
+    });
+  });
 
   // ── Patient cancels pending search ───────────────────────────────────────────
   socket.on('patient_cancel_search', (data = {}) => {
@@ -2957,26 +3141,7 @@ module.exports = function bookingSocket(io, socket) {
     if (!bookingId) return;
 
     log('🚫', 'PATIENT_CANCEL_SEARCH', bookingId);
-
-    // Pull dispatch state before deleting so we can stop the timeout and
-    // dismiss the overlay on whichever tech currently holds the request.
-    const dispatch = dispatchQueues.get(bookingId);
-    if (dispatch) {
-      clearTimeout(dispatch.handle); // stop the 40s retry timer immediately
-      const actor = dispatch.queue[dispatch.techIdx];
-      if (actor) {
-        const actorMap   = dispatch.bookingType === 'transport' ? onlineDrivers : onlineTechnicians;
-        const techEntry  = actorMap.get(actor.id);
-        if (techEntry?.socketId) {
-          io.to(techEntry.socketId).emit('booking_cancelled', { bookingId });
-          log('📢', 'CANCEL_OVERLAY_DISMISSED', bookingId,
-            `tech=${actor.name} (id=${actor.id})`);
-        }
-      }
-    }
-
-    dispatchQueues.delete(bookingId);
-    bookingRooms.delete(bookingId);
+    _stopDispatch(io, bookingId);
   });
 
   // ── Stale-notification guard ──────────────────────────────────────────────────
@@ -3006,12 +3171,14 @@ module.exports = function bookingSocket(io, socket) {
     try {
       const [[row]] = await db.execute(
         `SELECT br.request_status,
-                (SELECT COUNT(*) FROM ip_technician_collection tc WHERE tc.booking_id = br.booking_id) AS assigned_count
+                (SELECT COUNT(*) FROM ip_technician_collection tc WHERE tc.booking_id = br.booking_id) AS assigned_count,
+                (SELECT b.status FROM ip_bookings b WHERE b.booking_id = br.booking_id) AS booking_status
          FROM ip_booking_requests br
          WHERE br.booking_id = ? AND br.technician_id = ? LIMIT 1`,
         [bookingId, technicianId]
       );
-      stillPending = row?.request_status === 'pending' && Number(row?.assigned_count ?? 0) === 0;
+      stillPending = row?.request_status === 'pending' && Number(row?.assigned_count ?? 0) === 0
+        && (row?.booking_status == null || ACCEPTABLE_BOOKING_STATUSES.includes(row.booking_status));
     } catch (e) {
       console.error(`[check_pending_booking] booking=${bookingId} tech=${technicianId}: ${e.message}`);
       stillPending = false; // fail-safe: don't resurface a stale request on error
@@ -3035,25 +3202,15 @@ module.exports = function bookingSocket(io, socket) {
   // ── Disconnect cleanup ────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
 
-    if (socket.technicianId) {
+    // The app may already be back on a new socket when the old one's disconnect
+    // arrives; then there is nothing to clean up.
+    const liveTech = onlineTechnicians.get(socket.technicianId);
+    if (socket.technicianId && (!liveTech?.socketId || liveTech.socketId === socket.id)) {
       const tid = socket.technicianId;
 
-      const activeBookingId = technicianActiveBookings.get(tid);
-      if (activeBookingId) {
-        _notifyPatient(io, activeBookingId, 'booking_cancelled', {
-          bookingId: activeBookingId,
-          reason:    'technician_disconnected',
-        });
-        technicianActiveBookings.delete(tid);
-        acceptedBookings.delete(activeBookingId);
-        const dcSlots = technicianActiveSlots.get(tid);
-        if (dcSlots) {
-          dcSlots.delete(activeBookingId);
-          if (dcSlots.size === 0) technicianActiveSlots.delete(tid);
-        }
-        log('⚠️', 'TECH_DISCONNECT_BOOKING', activeBookingId,
-          `tech=${socket.technicianName ?? '?'} id=${tid} — patient notified`);
-      }
+      // An active job is deliberately left alone: technicians lose signal all
+      // the time mid-job and carry on. It ends through collection_completed,
+      // handed_to_lab, a cancel or a reassign, never through a dropped connection.
 
       // Null socketId so dispatch skips socket.io and falls through to FCM.
       // The entry stays in onlineTechnicians so the tech is still reachable
@@ -3124,6 +3281,7 @@ module.exports.emitForceLogout = function(userId) {
   }
 };
 module.exports.freeTechnician = _freeTechnician;
+module.exports.stopDispatch = (bookingId) => (_io ? _stopDispatch(_io, bookingId) : false);
 module.exports.forceTechnicianOffline = _forceTechnicianOffline;
 module.exports.markTechnicianOfflineStale = _markTechnicianOfflineStale;
 
@@ -3201,9 +3359,15 @@ module.exports.unassignAndRedispatch = async function({
 
   const idPlaceholders = allIds.map(() => '?').join(',');
   await db.execute(`DELETE FROM ip_technician_collection WHERE booking_id IN (${idPlaceholders})`, allIds);
+  // A future-date booking goes back to 'scheduled': dispatch defers it to the
+  // cron scheduler, which only picks that status. A family member who has
+  // cancelled stays cancelled.
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
   await db.execute(
-    `UPDATE ip_bookings SET status = 'pending', updated_at = NOW() WHERE booking_id IN (${idPlaceholders})`,
-    allIds
+    `UPDATE ip_bookings
+     SET status = IF(booking_date > ?, 'scheduled', 'pending'), updated_at = NOW()
+     WHERE booking_id IN (${idPlaceholders}) AND status != 'cancelled'`,
+    [todayIST, ...allIds]
   );
 
   if (technicianCancelReason != null) {
@@ -3225,6 +3389,14 @@ module.exports.unassignAndRedispatch = async function({
     _freeTechnician(technicianId, bId);
   }
 
+  await module.exports.redispatchBooking(bookingId, {
+    excludeTechnicianId: excludeFromRedispatch ? technicianId : null,
+    reason: notifyType,
+  });
+};
+
+// Starts dispatch for a booking again, loading everything it needs from the DB.
+module.exports.redispatchBooking = async function(bookingId, { excludeTechnicianId = null, reason = 'redispatch' } = {}) {
   if (!_io) {
     log('⚠️', 'REDISPATCH_SKIPPED', bookingId, 'io not available');
     return;
@@ -3263,12 +3435,39 @@ module.exports.unassignAndRedispatch = async function({
         slotId:          dispRow.slot_id   ?? null,
         slotLabel:       null,
         appointmentTime: dispSlotTime,
-        excludeTechnicianId: excludeFromRedispatch ? technicianId : null,
+        excludeTechnicianId,
       });
-      log('📡', 'REDISPATCH_FIRED', bookingId, `reason=${notifyType}`);
+      log('📡', 'REDISPATCH_FIRED', bookingId, `reason=${reason}`);
     }
   } catch (dispErr) {
     log('❌', 'REDISPATCH_ERROR', bookingId, dispErr.message);
+  }
+};
+
+// ── Restart recovery for searches ───────────────────────────────────────────────
+// A running search lives only in memory, so a restart ends it. Called from
+// server.js shortly after start, once technicians have had time to reconnect:
+// every home collection due today that still has no technician goes through
+// dispatch again. One per family visit.
+module.exports.recoverPendingDispatches = async function () {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const [rows] = await db.execute(
+    `SELECT b.booking_id
+     FROM ip_bookings b
+     WHERE b.status IN ('pending', 'confirmed')
+       AND b.booking_type = 'home_collection'
+       AND b.booking_date = ?
+       AND b.deleted_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM ip_technician_collection tc WHERE tc.booking_id = b.booking_id)
+       AND (b.visit_group_id IS NULL OR b.booking_id = (
+             SELECT MIN(b2.booking_id) FROM ip_bookings b2
+             WHERE b2.visit_group_id = b.visit_group_id
+               AND b2.status IN ('pending', 'confirmed') AND b2.deleted_at IS NULL))`,
+    [today]
+  );
+  console.log(`[STARTUP] ${rows.length} booking(s) still need a technician — restarting their search`);
+  for (const { booking_id: bookingId } of rows) {
+    await module.exports.redispatchBooking(bookingId, { reason: 'server_restart' });
   }
 };
 
@@ -3297,7 +3496,12 @@ module.exports.initDispatchState = async function () {
        WHERE  b.status        = 'assigned'
          AND  b.booking_date  = CURDATE()
          AND  b.technician_id IS NOT NULL
-         AND  b.deleted_at    IS NULL`
+         AND  b.deleted_at    IS NULL
+         -- a family visit is one job: every member is 'assigned'
+         AND  (b.visit_group_id IS NULL OR b.booking_id = (
+                SELECT MIN(b2.booking_id) FROM ip_bookings b2
+                WHERE b2.visit_group_id = b.visit_group_id
+                  AND b2.status = 'assigned' AND b2.deleted_at IS NULL))`
     );
 
     let slotRecovered = 0;

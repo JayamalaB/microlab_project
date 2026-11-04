@@ -13,6 +13,9 @@ const { savePartialReason } = require('../services/partialPaymentReason');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 const dbLogger = require('../utils/dbLogger');
+const { getTechnicianBranches } = require('../services/technicianBranches');
+const { verifyRazorpayPayment } = require('../services/razorpayVerify');
+const { captureRazorpayPayment } = require('../services/razorpayCapture');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -84,8 +87,16 @@ exports.getProfile = async (req, res) => {
       [technicianId, technicianId]
     );
 
+    // Extra detail: the rest of the profile still loads if this fails.
+    let branches = [];
+    try {
+      branches = await getTechnicianBranches(technicianId);
+    } catch (branchErr) {
+      console.error('[getProfile] branches failed:', branchErr.message);
+    }
+
     console.log(`✅ Profile loaded — ${profile.user_name} branch=${profile.branch_name}`);
-    res.json({ success: true, profile, stats });
+    res.json({ success: true, profile, stats, branches });
   } catch (e) {
     console.error('[getProfile]', e.message);
     res.status(500).json({ success: false, message: e.message });
@@ -411,7 +422,7 @@ exports.getSlots = async (req, res) => {
     const [techSlots] = await db.execute(
       `SELECT slot_id, DATE_FORMAT(slot_date, '%Y-%m-%d') AS slot_date, max_bookings, booked_count, is_available, duration_minutes
        FROM ip_technician_slots
-       WHERE technician_id = ? AND slot_date >= CURDATE()
+       WHERE technician_id = ? AND slot_date >= CURDATE() AND is_available = 1
        ORDER BY slot_date ASC`,
       [technicianId]
     );
@@ -478,27 +489,72 @@ exports.saveSlots = async (req, res) => {
     try {
       await connection.beginTransaction();
 
-      // Delete ip_available_slots tied to this tech's future slots before removing the slots
-      await connection.query(
-        `DELETE ias FROM ip_available_slots ias
-         JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
-         WHERE ts.technician_id = ? AND ts.slot_date >= CURDATE()`,
-        [technicianId]
+      // What the technician wants: "date|slotId" → duration in minutes, or null.
+      const slotKey = (date, slotId) => `${date}|${slotId}`;
+      const wanted  = new Map();
+      for (const day of slots) {
+        if (!Array.isArray(day.slot_ids)) continue;
+        const durMap = day.durations ?? {}; // { "1": 30, "2": 15 } — keyed by slot_id string
+        for (const slotId of day.slot_ids) {
+          wanted.set(slotKey(day.date, slotId), durMap[String(slotId)] ? Number(durMap[String(slotId)]) : null);
+        }
+      }
+
+      // A slot with bookings is never deleted: those bookings point at its
+      // rows, and deleting them would lose the appointment time and put a
+      // booked time back on sale. Only unbooked slots are removed or rebuilt.
+      const [existing] = await connection.query(
+        `SELECT ts.tech_slot_id, ts.slot_id, ts.duration_minutes,
+                DATE_FORMAT(ts.slot_date, '%Y-%m-%d') AS slot_date,
+                (ts.booked_count > 0 OR EXISTS (
+                   SELECT 1 FROM ip_available_slots ias
+                   WHERE ias.technician_slot_id = ts.tech_slot_id AND ias.is_available = 0)) AS has_bookings
+         FROM ip_technician_slots ts
+         WHERE ts.technician_id = ? AND ts.slot_date >= ?`,
+        [technicianId, todayIST]
       );
 
-      // Remove all future technician slots then re-insert selected ones
-      await connection.query(
-        'DELETE FROM ip_technician_slots WHERE technician_id = ? AND slot_date >= CURDATE()',
-        [technicianId]
-      );
+      for (const row of existing) {
+        const key         = slotKey(row.slot_date, row.slot_id);
+        const isWanted    = wanted.has(key);
+        const hasBookings = Number(row.has_bookings) === 1;
+        const sameLength  = isWanted && (Number(row.duration_minutes) || null) === wanted.get(key);
+
+        if (hasBookings) {
+          // Booked but unticked: stays for its bookings, with its free times withdrawn.
+          await connection.query(
+            'UPDATE ip_technician_slots SET is_available = ? WHERE tech_slot_id = ?',
+            [isWanted ? 1 : 0, row.tech_slot_id]
+          );
+          if (!isWanted) {
+            await connection.query(
+              'DELETE FROM ip_available_slots WHERE technician_slot_id = ? AND is_available = 1',
+              [row.tech_slot_id]
+            );
+          } else {
+            await _restoreFreeTimes(connection, row);
+            wanted.delete(key);
+          }
+        } else if (sameLength) {
+          await connection.query(
+            'UPDATE ip_technician_slots SET is_available = 1 WHERE tech_slot_id = ?',
+            [row.tech_slot_id]
+          );
+          wanted.delete(key);
+        } else {
+          await connection.query('DELETE FROM ip_available_slots WHERE technician_slot_id = ?', [row.tech_slot_id]);
+          await connection.query('DELETE FROM ip_technician_slots WHERE tech_slot_id = ?', [row.tech_slot_id]);
+        }
+      }
 
       let totalIntervals = 0;
       for (const day of slots) {
         if (!Array.isArray(day.slot_ids) || day.slot_ids.length === 0) continue;
-        const durMap = day.durations ?? {}; // { "1": 30, "2": 15 } — keyed by slot_id string
 
         for (const slotId of day.slot_ids) {
-          const durationMinutes = durMap[String(slotId)] ? Number(durMap[String(slotId)]) : null;
+          const key = slotKey(day.date, slotId);
+          if (!wanted.has(key)) continue; // kept as it was above
+          const durationMinutes = wanted.get(key);
 
           // When duration is set, calculate interval count first so max_bookings
           // reflects actual capacity rather than a hardcoded guess.
@@ -554,6 +610,32 @@ exports.saveSlots = async (req, res) => {
     res.status(500).json({ success: false, message: e.message });
   }
 };
+
+// Puts back the free times of a booked slot the technician ticked again after
+// unticking it. Times that are still booked keep their rows.
+async function _restoreFreeTimes(connection, row) {
+  const durationMinutes = Number(row.duration_minutes);
+  if (!durationMinutes) return;
+  const [[slotDef]] = await connection.query(
+    'SELECT slot_start, slot_end FROM ip_slots WHERE slot_id = ?',
+    [row.slot_id]
+  );
+  if (!slotDef) return;
+  const [rows] = await connection.query(
+    'SELECT slot_time FROM ip_available_slots WHERE technician_slot_id = ?',
+    [row.tech_slot_id]
+  );
+  const present = new Set(rows.map(r => String(r.slot_time).slice(0, 5)));
+  for (const t of _generateIntervals(slotDef.slot_start, slotDef.slot_end, durationMinutes)) {
+    if (present.has(String(t).slice(0, 5))) continue;
+    await connection.query(
+      `INSERT INTO ip_available_slots
+         (booking_type, technician_slot_id, slot_date, slot_time, is_available, created_at)
+       VALUES ('home_collection', ?, ?, ?, 1, NOW())`,
+      [row.tech_slot_id, row.slot_date, t]
+    );
+  }
+}
 
 // ── GET /api/technicians/stats ────────────────────────────────────────────────
 // Returns total / online / offline technician counts.
@@ -707,6 +789,14 @@ exports.collectPayment = async (req, res) => {
       });
     }
 
+    // A combined family payment splits one Razorpay payment across bookings,
+    // so the id repeats and the payment may be larger than this share.
+    let payment = null;
+    if (paymentMethod === 'RAZORPAY') {
+      payment = await verifyRazorpayPayment(razorpayPaymentId, { amount: incomingAmount, atLeast: true });
+      if (!payment.ok) return res.status(402).json({ success: false, message: payment.message });
+    }
+
     const newAmountPaid    = currentPaid + incomingAmount;
     const newAmountDue     = Math.max(0, totalAmount - newAmountPaid);
     const newPaymentStatus = newAmountDue <= 0 ? 'paid' : 'partial';
@@ -737,6 +827,10 @@ exports.collectPayment = async (req, res) => {
         technicianId,
       ]
     );
+
+    // The whole payment, once: a split family payment is already 'captured' by
+    // the time the next booking's share arrives.
+    if (payment?.status === 'authorized') captureRazorpayPayment(razorpayPaymentId, payment.amount);
 
     console.log(`✅ collectPayment — booking_id=${bookingId} method=${paymentMethod} +₹${amount} → paid=₹${newAmountPaid} due=₹${newAmountDue} status=${newPaymentStatus} by technician_id=${technicianId}`);
 

@@ -405,7 +405,10 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
       final url = '$baseUrl/api/technicians/$techId/active-bookings';
       debugPrint('   GET $url');
 
-      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
+      final res = await http.get(
+        Uri.parse(url),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 8));
 
       debugPrint('   status=${res.statusCode}  bodyLen=${res.body.length}');
       debugPrint('   body=${res.body.substring(0, res.body.length.clamp(0, 400))}');

@@ -17,6 +17,17 @@
 // paid same-day booking auto-confirms), TC-BOOK-03 (future-dated booking
 // stays 'scheduled' even if paid — the cron dispatches it later, not this
 // endpoint), negative case (missing patientId, no DB touched at all).
+// Booking access, price and payment checks have their own tests
+// (accessControl, itemPrices, razorpayVerify); this file covers what follows them.
+jest.mock('../../middleware/access', () => ({
+  ...jest.requireActual('../../middleware/access'),
+  requireBookingAccess: (_req, _res, next) => next(),
+  requirePatientAccess: (_req, _res, next) => next(),
+}));
+jest.mock('../../services/itemPrices', () => ({ checkItemPrices: async () => ({ ok: true }) }));
+jest.mock('../../services/razorpayVerify', () => ({
+  verifyRazorpayPayment: async (_id, { amount }) => ({ ok: true, amount: Number(amount) }),
+}));
 jest.mock('../../config/db');
 jest.mock('../../services/clientSync');
 const db        = require('../../config/db');
@@ -58,14 +69,6 @@ describe('POST /api/bookings', () => {
   // TC-BOOK-01 — pay-later, same-day booking: stays 'pending', no
   // gateway/payment fields populated, no auto-confirm update fired.
   //
-  // NOTE on call count: the source has a real bug at bookingController.js:185
-  // — it pushes `{ productId: validProductId, ... }` into bookingItemsInserted
-  // but then checks `singleItem.validProductId` (a property that was never
-  // set — the key is `productId`). That condition is always falsy, so the
-  // "UPDATE ip_bookings SET product_id" step for single-item bookings never
-  // actually runs, in EVERY booking, not just multi-item ones. This test
-  // asserts the real (buggy) call count, not the one the code's comment
-  // implies — see the final test report for this as a reported finding.
   test('a pay-later booking is created with status pending', async () => {
     primeAuthCheck(db, token);
     const conn = createMockConnection();
@@ -105,7 +108,9 @@ describe('POST /api/bookings', () => {
     expect(res.body.bookingRef).toBe('900');
     expect(conn.commit).toHaveBeenCalled();
     expect(conn.rollback).not.toHaveBeenCalled();
-    expect(conn.execute).toHaveBeenCalledTimes(7);
+    expect(conn.execute).toHaveBeenCalledTimes(8);
+    // A single-item booking records its product.
+    expect(conn.execute.mock.calls.some(c => /SET product_id = \?/.test(c[0]))).toBe(true);
     // Confirms the booking row itself was inserted with 'pending' status and
     // the un-paid amount split (amount_paid=0, amount_due=total).
     const insertBookingParams = conn.execute.mock.calls[1][1];
@@ -142,8 +147,8 @@ describe('POST /api/bookings', () => {
       });
 
     expect(res.status).toBe(201);
-    expect(conn.execute).toHaveBeenCalledTimes(8);
-    const confirmCall = conn.execute.mock.calls[7];
+    expect(conn.execute).toHaveBeenCalledTimes(9);
+    const confirmCall = conn.execute.mock.calls[8];
     expect(confirmCall[0]).toMatch(/status = 'confirmed'/);
     expect(confirmCall[1]).toEqual([901]);
   });
@@ -180,7 +185,7 @@ describe('POST /api/bookings', () => {
     expect(res.status).toBe(201);
     expect(res.body.isScheduled).toBe(true);
     // 7 calls, not 8 — the auto-confirm UPDATE was correctly skipped.
-    expect(conn.execute).toHaveBeenCalledTimes(7);
+    expect(conn.execute).toHaveBeenCalledTimes(8);
   });
 });
 
@@ -283,12 +288,10 @@ describe('POST /api/bookings — Home Collection fare', () => {
     expect(res.body.code).toBe('RATE_NOT_FOUND');
   });
 
-  // A paid-in-full booking has already had Razorpay capture a specific
-  // amount before this request is even sent (see createBooking's own
-  // comment on why) — the server can't un-charge that, so totalAmount is
-  // trusted as-is here rather than overridden, even though the fare is
-  // still computed and stored for audit.
-  test('a paid-in-full booking keeps the already-captured totalAmount even if it disagrees with the recomputed fare', async () => {
+  // The total is always the server's own figure. A payment that doesn't match
+  // it is refused by the Razorpay check (bookings.paymentChecks.test.js), and
+  // nothing is captured until the booking is saved.
+  test('a paid-in-full booking stores the server-computed total, not the one the app sent', async () => {
     primeAuthCheck(db, token);
     const conn = createMockConnection();
     db.getConnection.mockResolvedValue(conn);
@@ -309,14 +312,14 @@ describe('POST /api/bookings — Home Collection fare', () => {
       .send({
         patientId: 501, branchId: 3, paymentType: 'full',
         razorpayPaymentId: 'pay_test999',
-        totalAmount: 500, // deliberately NOT itemsTotal(500) + the active rate's real fare
+        totalAmount: 1, // the app's own figure, ignored
         ...pickupCoords,
         items: [{ packageId: 7, originalPrice: 500, finalPrice: 500 }],
       });
 
     expect(res.status).toBe(201);
     const insertBookingParams = conn.execute.mock.calls[3][1];
-    expect(insertBookingParams[8]).toBe(500);   // total_amount — the captured amount, untouched
-    expect(insertBookingParams[19]).toBeGreaterThan(0); // home_collection_fare still recorded for audit
+    expect(insertBookingParams[8]).toBe(500 + insertBookingParams[19]); // total_amount = items + fare
+    expect(insertBookingParams[19]).toBeGreaterThan(0);                 // home_collection_fare
   });
 });

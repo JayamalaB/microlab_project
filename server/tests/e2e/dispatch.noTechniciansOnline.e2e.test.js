@@ -14,6 +14,17 @@
 // already-populated bookingSocket.js module/Maps as every earlier test in
 // that file. Only a separate file guarantees a truly pristine dispatch
 // module.
+// Booking access, price and payment checks have their own tests
+// (accessControl, itemPrices, razorpayVerify); this file covers what follows them.
+jest.mock('../../middleware/access', () => ({
+  ...jest.requireActual('../../middleware/access'),
+  requireBookingAccess: (_req, _res, next) => next(),
+  requirePatientAccess: (_req, _res, next) => next(),
+}));
+jest.mock('../../services/itemPrices', () => ({ checkItemPrices: async () => ({ ok: true }) }));
+jest.mock('../../services/razorpayVerify', () => ({
+  verifyRazorpayPayment: async (_id, { amount }) => ({ ok: true, amount: Number(amount) }),
+}));
 jest.mock('../../config/db');
 jest.mock('../../config/firebase', () => ({ messaging: null }));
 jest.mock('../../services/clientSync');

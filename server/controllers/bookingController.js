@@ -45,39 +45,35 @@ function blog(msg) {
   process.stdout.write(line);
   fs.appendFileSync(BOOKING_LOG, line, 'utf8');
 }
-const { triggerScheduledDispatch, freeTechnician, unassignAndRedispatch } = require('../socket/bookingSocket');
+const { triggerScheduledDispatch, freeTechnician, unassignAndRedispatch, stopDispatch, redispatchBooking } = require('../socket/bookingSocket');
+const { checkItemPrices } = require('../services/itemPrices');
+const { verifyRazorpayPayment } = require('../services/razorpayVerify');
+const { captureRazorpayPayment } = require('../services/razorpayCapture');
+const { releaseSlotIfUnused } = require('../services/slotChange');
 
 // ── Razorpay capture (web checkout.js leaves payments as "Authorized") ─────────
 // Fire-and-forget: never blocks the booking flow. Mobile SDK auto-captures,
 // but checkout.js on web requires an explicit server-side capture call.
-function captureRazorpayPayment(paymentId, amountInRupees) {
-  if (!paymentId || paymentId.startsWith('wallet:') || paymentId === 'pay_later') return;
-  const keyId     = process.env.RAZORPAY_KEY_ID;
-  const keySecret = process.env.RAZORPAY_KEY_SECRET;
-  if (!keyId || !keySecret) return;
-
-  const body = JSON.stringify({ amount: Math.round(amountInRupees * 100), currency: 'INR' });
-  const auth = 'Basic ' + Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-  const req  = https.request({
-    hostname: 'api.razorpay.com',
-    path:     `/v1/payments/${encodeURIComponent(paymentId)}/capture`,
-    method:   'POST',
-    headers:  { 'Authorization': auth, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-  }, (upstream) => {
-    let data = '';
-    upstream.on('data', c => data += c);
-    upstream.on('end', () => {
-      if (upstream.statusCode === 200) console.log(`💳 Razorpay captured: ${paymentId}`);
-      else console.warn(`⚠️  Razorpay capture ${paymentId} → ${upstream.statusCode}: ${data}`);
-    });
-  });
-  req.on('error', err => console.warn(`⚠️  Razorpay capture error: ${err.message}`));
-  req.write(body);
-  req.end();
-}
 
 let _io = null;
 exports.setIo = (io) => { _io = io; };
+
+const SLOT_TAKEN_MESSAGE = 'This time was just booked by someone else. Please choose another time.';
+
+// GET /api/bookings/slot-status/:availableSlotId — asked just before opening
+// Razorpay, so a customer isn't sent to pay for a time that has gone.
+exports.getSlotStatus = async (req, res) => {
+  try {
+    const [[slot]] = await db.execute(
+      'SELECT is_available FROM ip_available_slots WHERE available_slot_id = ?',
+      [req.params.availableSlotId]
+    );
+    res.json({ success: true, available: Number(slot?.is_available) === 1 });
+  } catch (err) {
+    console.error('❌ getSlotStatus FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
 
 function _pushToPatient(bookingId, event, payload) {
   if (!_io) return;
@@ -112,10 +108,9 @@ exports.createBooking = async (req, res) => {
     razorpayPaymentId = null,
     razorpayOrderId   = null,
   } = req.body;
-  // let, not const — Home Collection bookings have this recomputed
-  // server-side below (see the fare-calculation block) rather than trusted
-  // as sent, once the authoritative Branch→Customer fare is known.
-  let totalAmount = Number(req.body.totalAmount) || 0;
+  // Recomputed server-side below from the checked item prices and the
+  // authoritative fare, never trusted as sent.
+  let totalAmount = 0;
 
   if (!patientId) {
     return res.status(400).json({ success: false, message: 'patientId is required' });
@@ -146,43 +141,36 @@ exports.createBooking = async (req, res) => {
   try {
     await conn.beginTransaction();
 
+    const prices = await checkItemPrices(conn, items);
+    if (!prices.ok) {
+      await conn.rollback();
+      return res.status(409).json({ success: false, message: prices.message });
+    }
+
     // Home Collection fare — Branch → Customer distance, computed
     // authoritatively here, never trusted from the client (see
-    // fareCalculator.js). itemsTotal is this request's own items[].finalPrice
-    // sum — already trusted the same way a few lines below when each item is
-    // inserted — so only the fare portion of totalAmount changes from
-    // client-supplied to server-computed, not item pricing.
-    //
-    // Pay-later bookings (nothing charged yet): totalAmount is fully
-    // recomputed here (itemsTotal + authoritative fare) — this is the actual
-    // fix for "the server currently trusts whatever totalAmount the client
-    // sends with zero validation."
-    //
-    // Pay-now bookings: Razorpay already captured a specific amount (based on
-    // a fare quote fetched moments earlier via this same
-    // calculateHomeCollectionFare logic) *before* this request is even sent —
-    // there is no undoing that capture from here. totalAmount is trusted as
-    // the amount actually paid; the authoritative fare is still computed and
-    // stored (home_collection_fare) for audit, and a disagreement beyond a
-    // cent of rounding (e.g. the active rate changed in the few minutes
-    // between quote and confirm) is logged as a warning rather than silently
-    // accepted or silently overridden — a completed payment can't be un-charged.
+    // fareCalculator.js).
     let homeCollectionFare = null;
     if (bookingType === 'home_collection') {
       homeCollectionFare = await calculateHomeCollectionFare({
         branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude, dbConn: conn,
       });
+      blog(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} finalFare=₹${homeCollectionFare.finalFare} rateId=${homeCollectionFare.rateId}`);
+    }
 
-      const itemsTotal = items.reduce((sum, item) => sum + (Number(item.finalPrice) || 0), 0);
-      if (isPaid) {
-        const expected = Number((itemsTotal + homeCollectionFare.finalFare).toFixed(2));
-        if (Math.abs(expected - totalAmount) > 0.01) {
-          console.warn(`⚠️  [CREATE BOOKING] paid totalAmount=₹${totalAmount} disagrees with itemsTotal+fare=₹${expected} (rateId=${homeCollectionFare.rateId}) — trusting the already-captured payment amount`);
-        }
-      } else {
-        totalAmount = Number((itemsTotal + homeCollectionFare.finalFare).toFixed(2));
+    const itemsTotal = items.reduce((sum, item) => sum + (Number(item.finalPrice) || 0), 0);
+    totalAmount = Number((itemsTotal + (homeCollectionFare?.finalFare ?? 0)).toFixed(2));
+
+    // Pay-now: the customer authorised this payment before this request was
+    // sent. It is only taken (captured) after the booking is saved, so if
+    // anything here disagrees nothing is charged and Razorpay releases it.
+    let verifiedPayment = null;
+    if (isPaid) {
+      verifiedPayment = await verifyRazorpayPayment(razorpayPaymentId, { amount: totalAmount, checkReuse: true });
+      if (!verifiedPayment.ok) {
+        await conn.rollback();
+        return res.status(402).json({ success: false, message: verifiedPayment.message });
       }
-      blog(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} finalFare=₹${homeCollectionFare.finalFare} rateId=${homeCollectionFare.rateId} → totalAmount=₹${totalAmount}`);
     }
 
     const amountPaid = isPaid ? totalAmount : 0;
@@ -191,9 +179,13 @@ exports.createBooking = async (req, res) => {
     // Resolve patient_id_ref from ip_patients
     let resolvedPatientIdRef = patientIdRef ?? null;
     const [[patientRow]] = await conn.execute(
-      `SELECT patient_id_ref FROM ip_patients WHERE patient_id = ? LIMIT 1`,
+      `SELECT patient_id_ref, client_id FROM ip_patients WHERE patient_id = ? LIMIT 1`,
       [patientId]
     );
+    if (patientRow?.client_id != null && patientRow.client_id !== clientId) {
+      await conn.rollback();
+      return res.status(403).json({ success: false, message: 'This patient is not on your account' });
+    }
     if (patientRow?.patient_id_ref) resolvedPatientIdRef = patientRow.patient_id_ref;
     blog(`👤 patientId=${patientId} → patient_id_ref=${resolvedPatientIdRef}`);
 
@@ -297,19 +289,25 @@ exports.createBooking = async (req, res) => {
 
     // Update product_id in ip_bookings — use single item's id, 0 for multi-product
     const singleItem = bookingItemsInserted.length === 1 ? bookingItemsInserted[0] : null;
-    if (singleItem && singleItem.validProductId) {
+    if (singleItem && singleItem.productId) {
       await conn.execute(
         'UPDATE ip_bookings SET product_id = ? WHERE booking_id = ?',
-        [singleItem.validProductId, bookingId]
+        [singleItem.productId, bookingId]
       );
     }
 
     // 4. Mark this slot row as booked + increment booked count
     if (availableSlotId) {
-      await conn.execute(
-        'UPDATE ip_available_slots SET is_available = 0, updated_at = NOW() WHERE available_slot_id = ?',
+      // The is_available check is what stops two customers booking one time:
+      // only one of these updates can change the row.
+      const [claimed] = await conn.execute(
+        'UPDATE ip_available_slots SET is_available = 0, updated_at = NOW() WHERE available_slot_id = ? AND is_available = 1',
         [availableSlotId]
       );
+      if (claimed.affectedRows === 0) {
+        await conn.rollback();
+        return res.status(409).json({ success: false, code: 'SLOT_TAKEN', message: SLOT_TAKEN_MESSAGE });
+      }
       console.log(`🔒 available_slot_id=${availableSlotId} marked unavailable`);
     }
     if (labSlotId) {
@@ -358,7 +356,7 @@ exports.createBooking = async (req, res) => {
     blog(`🎉 Booking created — booking_id=${bookingId} ref=${bookingRef}`);
     blog('─────────────────────────────────────────────────');
 
-    if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, totalAmount);
+    if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, verifiedPayment.amount);
 
     // Sync all bookings to client server regardless of payment status (fire-and-forget)
     syncBookingToClient(bookingId, {
@@ -657,15 +655,12 @@ exports.cancelBooking = async (req, res) => {
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.booking_ref, b.status, b.booking_type, b.total_amount, b.available_slot_id, b.booking_date,
               b.patient_id, b.visit_group_id,
-              COALESCE(pt.amount_paid, 0) AS amount_paid,
+              COALESCE(b.amount_paid, 0) AS amount_paid,
               COALESCE((SELECT SUM(bi.final_price) FROM ip_booking_items bi WHERE bi.booking_id = b.booking_id), 0) AS items_total
        FROM ip_bookings b
-       LEFT JOIN ip_payment_transactions pt
-         ON pt.booking_id = b.booking_id AND (pt.is_refund = 0 OR pt.is_refund IS NULL)
        WHERE b.booking_id = ?
          AND (b.client_id = ? OR b.patient_id = ?)
          AND b.deleted_at IS NULL
-       ORDER BY pt.created_at DESC
        LIMIT 1`,
       [bookingId, clientId, patientId]
     );
@@ -685,12 +680,10 @@ exports.cancelBooking = async (req, res) => {
         [booking.available_slot_id]
       );
       if (slot) {
-        const istOffsetMs      = (5 * 60 + 30) * 60 * 1000;
-        const istNow           = new Date(Date.now() + istOffsetMs);
         const slotDate         = new Date(booking.booking_date);
         const [h, m]           = slot.slot_time.split(':');
-        slotDate.setUTCHours(parseInt(h, 10) - 5, parseInt(m, 10) - 30, 0, 0);
-        const minutesUntilSlot = (slotDate - istNow) / 60000;
+        slotDate.setUTCHours(parseInt(h, 10) - 5, parseInt(m, 10) - 30, 0, 0); // IST → real instant
+        const minutesUntilSlot = (slotDate - Date.now()) / 60000;
         if (minutesUntilSlot < cutoffMinutes) {
           return res.status(400).json({
             success: false,
@@ -775,6 +768,25 @@ exports.cancelBooking = async (req, res) => {
        WHERE booking_id = ?`,
       [reason ?? null, refundAmount, refundStatus, bookingId]
     );
+
+    // A search still running for this booking stops here, or a technician could
+    // accept a cancelled booking. If the family's search was on this member,
+    // the rest of the visit still needs a technician.
+    const wasSearching = stopDispatch(bookingId);
+    try {
+      await releaseSlotIfUnused(booking.available_slot_id);
+      if (wasSearching && booking.visit_group_id) {
+        const [[nextMember]] = await db.execute(
+          `SELECT booking_id FROM ip_bookings
+           WHERE visit_group_id = ? AND status IN ('pending', 'confirmed') AND deleted_at IS NULL
+           ORDER BY booking_id ASC LIMIT 1`,
+          [booking.visit_group_id]
+        );
+        if (nextMember) await redispatchBooking(nextMember.booking_id, { reason: 'member_cancelled' });
+      }
+    } catch (slotErr) {
+      console.error(`❌ cancelBooking cleanup failed booking_id=${bookingId}: ${slotErr.message}`);
+    }
 
     // Transfer service charge to the next active sibling so they carry it going forward
     if (siblingToTransfer && bookingServiceCharge > 0) {
@@ -990,7 +1002,7 @@ exports.payBooking = async (req, res) => {
     await conn.beginTransaction();
 
     const [[booking]] = await conn.execute(
-      `SELECT booking_id, patient_id, total_amount, status
+      `SELECT booking_id, patient_id, total_amount, amount_paid, status
        FROM ip_bookings
        WHERE booking_id = ? AND client_id = ? AND deleted_at IS NULL`,
       [bookingId, clientId]
@@ -998,6 +1010,18 @@ exports.payBooking = async (req, res) => {
     if (!booking) {
       await conn.rollback();
       return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    // This clears the whole balance below, so the payment has to cover it.
+    const amountOwed = (Number(booking.total_amount) || 0) - (Number(booking.amount_paid) || 0);
+    if (Number(amount) < amountOwed - 0.01) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: 'Payment does not cover the amount due' });
+    }
+    const payment = await verifyRazorpayPayment(razorpayPaymentId, { amount, checkReuse: true });
+    if (!payment.ok) {
+      await conn.rollback();
+      return res.status(402).json({ success: false, message: payment.message });
     }
 
     const txnRef = `TXN${Date.now()}`;
@@ -1382,6 +1406,29 @@ exports.getBooking = async (req, res) => {
     res.json({ success: true, booking: rows[0] });
   } catch (err) {
     console.error('❌ getBooking FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── GET /api/bookings/:bookingId/tech-location ────────────────────────────────
+// Last known position of the booking's technician, so the tracking map can
+// place them straight away instead of waiting for the next live update.
+exports.getTechLocation = async (req, res) => {
+  try {
+    const [[row]] = await db.execute(
+      `SELECT ll.latitude AS lat, ll.longitude AS lng
+       FROM ip_technician_collection tc
+       JOIN ip_technician_live_location ll ON ll.technician_id = tc.technician_id
+       WHERE tc.booking_id = ? AND tc.collection_status != 'cancelled'
+       LIMIT 1`,
+      [req.params.bookingId]
+    );
+    if (row?.lat == null || row?.lng == null) {
+      return res.status(404).json({ success: false, message: 'Location not available' });
+    }
+    res.json({ success: true, lat: Number(row.lat), lng: Number(row.lng) });
+  } catch (err) {
+    console.error('❌ getTechLocation FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
@@ -2001,6 +2048,17 @@ exports.updateAdminStatus = async (req, res) => {
          WHERE booking_id = ? AND request_status = 'pending'`,
         [bookingId]
       );
+      // Same clean-up as a customer cancel.
+      stopDispatch(Number(bookingId));
+      const [[cancelled]] = await db.execute(
+        `SELECT b.available_slot_id, tc.technician_id
+         FROM ip_bookings b
+         LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
+         WHERE b.booking_id = ?`,
+        [bookingId]
+      );
+      await releaseSlotIfUnused(cancelled?.available_slot_id);
+      if (cancelled?.technician_id) freeTechnician(cancelled.technician_id, Number(bookingId));
     }
 
     console.log(`✅ updateAdminStatus — booking_id=${bookingId} → ${status}`);
@@ -2051,6 +2109,12 @@ exports.updateBookingItems = async (req, res) => {
     if (booking.collection_status && blockedStatuses.includes(booking.collection_status)) {
       await conn.rollback();
       return res.status(400).json({ success: false, message: 'Technician is already on the way — booking cannot be edited' });
+    }
+
+    const prices = await checkItemPrices(conn, items);
+    if (!prices.ok) {
+      await conn.rollback();
+      return res.status(409).json({ success: false, message: prices.message });
     }
 
     await conn.execute('DELETE FROM ip_booking_items WHERE booking_id = ?', [bookingId]);
@@ -2201,7 +2265,13 @@ exports.selfEditItems = async (req, res) => {
     // topUpAmount (from Flutter) = newTotal - amountPaid (clears all outstanding).
     // Fall back to diffAmount if topUpAmount not sent (older clients).
     const actualTopUp = topUpAmount ? Number(topUpAmount) : diffAmount;
+    let topUp = null;
     if (diffAmount > 0.5 && isPaid && razorpayPaymentId) {
+      topUp = await verifyRazorpayPayment(razorpayPaymentId, { amount: actualTopUp, checkReuse: true });
+      if (!topUp.ok) {
+        await conn.rollback();
+        return res.status(402).json({ success: false, message: topUp.message });
+      }
       await conn.execute(
         `INSERT INTO ip_payment_transactions
            (transaction_ref, booking_id, patient_id, payment_type,
@@ -2320,6 +2390,8 @@ exports.selfEditItems = async (req, res) => {
     );
 
     await conn.commit();
+
+    if (topUp?.status === 'authorized') captureRazorpayPayment(razorpayPaymentId, topUp.amount);
     console.log(`✅ selfEditItems booking_id=${bookingId} diff=₹${diffAmount} refund=${refundIssued}`);
     res.json({
       success: true, newTotal, diffAmount,
@@ -2387,6 +2459,12 @@ exports.createFamilyBooking = async (req, res) => {
   }
 
   const isPaid = paymentType === 'full' && razorpayPaymentId;
+
+  // Future-date visits are held until the cron scheduler fires dispatch —
+  // same rule as createBooking.
+  const todayIST      = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  const bookingStatus = (collectionDate && collectionDate > todayIST) ? 'scheduled' : 'pending';
+
   // visitGroupId is derived below from the FIRST member's own booking_id
   // (assigned atomically by the database) once it's known — not from
   // Date.now(), which two different customers' family-booking requests
@@ -2417,9 +2495,17 @@ exports.createFamilyBooking = async (req, res) => {
   // fare error rejects the request cleanly without a partial rollback.
   let familyFare = null; // set for home_collection only; null = lab_test
   if (bookingType === 'home_collection') {
-    familyFare = await calculateHomeCollectionFare({
-      branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude,
-    });
+    try {
+      familyFare = await calculateHomeCollectionFare({
+        branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude,
+      });
+    } catch (err) {
+      if (!(err instanceof FareCalculationError)) throw err;
+      // Same replies as createBooking: 503 when rates aren't set up, 422 when
+      // this request can't be priced (e.g. outside the service area).
+      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
+      return res.status(status).json({ success: false, code: err.code, message: err.message });
+    }
     blog(`💰 [CREATE FAMILY BOOKING] fare — distanceKm=${familyFare.distanceKm} finalFare=₹${familyFare.finalFare} rateId=${familyFare.rateId}`);
   }
 
@@ -2429,19 +2515,45 @@ exports.createFamilyBooking = async (req, res) => {
     const createdBookings = [];
     let isFirstMember = true;
 
+    const activeMembers = members.filter(m => m.patientId);
+    const allItems = activeMembers.flatMap(m => m.items ?? []);
+    const prices = await checkItemPrices(conn, allItems);
+    if (!prices.ok) {
+      await conn.rollback();
+      return res.status(409).json({ success: false, message: prices.message });
+    }
+
+    // One Razorpay payment covers every member. Same rule as createBooking:
+    // it is only captured after the visit is saved.
+    const sumPrices = (items) => items.reduce((sum, item) => sum + (Number(item.finalPrice) || 0), 0);
+    const visitTotal = Number((sumPrices(allItems) + (familyFare?.finalFare ?? 0)).toFixed(2));
+    let verifiedPayment = null;
+    if (isPaid) {
+      verifiedPayment = await verifyRazorpayPayment(razorpayPaymentId, { amount: visitTotal, checkReuse: true });
+      if (!verifiedPayment.ok) {
+        await conn.rollback();
+        return res.status(402).json({ success: false, message: verifiedPayment.message });
+      }
+    }
+
     for (const member of members) {
-      const { patientId, items = [], totalAmount = 0 } = member;
+      const { patientId, items = [] } = member;
       if (!patientId) continue;
 
       // Resolve patient_id_ref
       let resolvedPatientIdRef = null;
       const [[patRow]] = await conn.execute(
-        `SELECT patient_id_ref FROM ip_patients WHERE patient_id = ? LIMIT 1`, [patientId]
+        `SELECT patient_id_ref, client_id FROM ip_patients WHERE patient_id = ? LIMIT 1`, [patientId]
       );
+      if (patRow?.client_id != null && patRow.client_id !== clientId) {
+        await conn.rollback();
+        return res.status(403).json({ success: false, message: 'This patient is not on your account' });
+      }
       if (patRow?.patient_id_ref) resolvedPatientIdRef = patRow.patient_id_ref;
 
       // Primary member carries the service charge; additional members have 0.
       const memberFare       = (isFirstMember && familyFare) ? familyFare.finalFare  : 0;
+      const totalAmount      = Number((sumPrices(items) + memberFare).toFixed(2));
       const memberDistanceKm = (isFirstMember && familyFare) ? familyFare.distanceKm : null;
       const memberRateId     = (isFirstMember && familyFare) ? familyFare.rateId     : null;
 
@@ -2459,10 +2571,10 @@ exports.createFamilyBooking = async (req, res) => {
             home_collection_fare, home_collection_distance_km, km_rate_id,
             patient_id, patient_id_ref, product_id,
             payment_status, visit_group_id, start_datetime, end_datetime, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, 'mobile_app', ?,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'mobile_app', ?,
                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), ?, NOW())`,
         [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
-         bookingType, totalAmount, amountPaid, amountDue, notes ?? null,
+         bookingType, bookingStatus, totalAmount, amountPaid, amountDue, notes ?? null,
          collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
          collectionLatitude ?? null, collectionLongitude ?? null,
          memberFare, memberDistanceKm, memberRateId,
@@ -2532,7 +2644,7 @@ exports.createFamilyBooking = async (req, res) => {
          isPaid ? new Date() : null]
       );
 
-      if (isPaid) {
+      if (isPaid && bookingStatus !== 'scheduled') {
         await conn.execute(
           `UPDATE ip_bookings SET status = 'confirmed', updated_at = NOW() WHERE booking_id = ?`, [bookingId]
         );
@@ -2553,12 +2665,16 @@ exports.createFamilyBooking = async (req, res) => {
       console.log(`✅ family member booking_id=${bookingId} ref=${bookingRef} patient=${patientId} total=₹${totalAmount} docItemId=${docRequiredItemId}`);
     }
 
-    // Mark slot used once for the whole group
+    // Mark slot used once for the whole group. Same check as createBooking.
     if (availableSlotId) {
-      await conn.execute(
-        'UPDATE ip_available_slots SET is_available = 0, updated_at = NOW() WHERE available_slot_id = ?',
+      const [claimed] = await conn.execute(
+        'UPDATE ip_available_slots SET is_available = 0, updated_at = NOW() WHERE available_slot_id = ? AND is_available = 1',
         [availableSlotId]
       );
+      if (claimed.affectedRows === 0) {
+        await conn.rollback();
+        return res.status(409).json({ success: false, code: 'SLOT_TAKEN', message: SLOT_TAKEN_MESSAGE });
+      }
     }
     if (labSlotId) {
       await conn.execute('UPDATE ip_lab_slots SET booked_count = booked_count + 1 WHERE lab_slot_id = ?', [labSlotId]);
@@ -2570,7 +2686,7 @@ exports.createFamilyBooking = async (req, res) => {
     console.log(`🎉 Family booking done — visitGroupId=${visitGroupId} members=${createdBookings.length}`);
     console.log('─────────────────────────────────────────────────\n');
 
-    if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, totalAmount);
+    if (isPaid && razorpayPaymentId) captureRazorpayPayment(razorpayPaymentId, verifiedPayment.amount);
 
     for (const { bookingId } of createdBookings) {
       syncBookingToClient(bookingId, {
@@ -2580,7 +2696,12 @@ exports.createFamilyBooking = async (req, res) => {
       }).catch(err => console.error('[clientSync] unhandled:', err.message));
     }
 
-    res.status(201).json({ success: true, visitGroupId, bookings: createdBookings });
+    res.status(201).json({
+      success:     true,
+      visitGroupId,
+      isScheduled: bookingStatus === 'scheduled',
+      bookings:    createdBookings,
+    });
   } catch (err) {
     await conn.rollback();
     blog(`❌ createFamilyBooking FAILED — ${err.message}`);
@@ -3038,16 +3159,20 @@ exports.rescheduleBooking = async (req, res) => {
         }
       }
 
-      // 2. Update ALL members to the new date + slot
+      // 2. Update ALL members to the new date + slot. A booking still waiting
+      // for a technician moves to 'scheduled' when the new date is in the
+      // future — only the cron scheduler can dispatch it from there.
+      const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
       await conn.execute(
         `UPDATE ip_bookings
          SET booking_date      = ?,
              available_slot_id = ?,
              lab_slot_id       = ?,
+             status            = IF(? > ? AND status IN ('pending', 'confirmed'), 'scheduled', status),
              reschedule_count  = reschedule_count + 1,
              updated_at        = NOW()
          WHERE booking_id IN (${allIds.map(() => '?').join(',')})`,
-        [collectionDate, availableSlotId, newSlot.lab_slot_id ?? null, ...allIds]
+        [collectionDate, availableSlotId, newSlot.lab_slot_id ?? null, collectionDate, todayIST, ...allIds]
       );
 
       // 3. Mark new slot as used once (shared across all members)

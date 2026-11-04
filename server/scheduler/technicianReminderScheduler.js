@@ -134,7 +134,8 @@ const DUE_ROWS_SQL = `
     AND COALESCE(ias.slot_time, s.slot_start) IS NOT NULL
     AND (b.visit_group_id IS NULL OR b.booking_id = (
           SELECT MIN(b2.booking_id) FROM ip_bookings b2
-          WHERE b2.visit_group_id = b.visit_group_id AND b2.deleted_at IS NULL))`;
+          WHERE b2.visit_group_id = b.visit_group_id AND b2.deleted_at IS NULL
+            AND b2.status != 'cancelled'))`;
 
 async function sendPush(technicianId, bookingId, msg) {
   const [[tech]] = await db.execute(

@@ -42,6 +42,8 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
   String _photoUrl       = '';
   String _techCity       = '';
   List<String> _specializations = [];
+  List<Map<String, dynamic>> _branches = [];
+  bool _branchesLoaded = false;
 
   // ── Today's stats (loaded from API) ──────────────────────────────────────────
   int _assignedToday  = 0;
@@ -120,8 +122,13 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
 
   Future<void> _loadStats(int techId) async {
     try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token') ?? '';
       final res = await http
-          .get(Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/profile'))
+          .get(
+            Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/profile'),
+            headers: {'Authorization': 'Bearer $token'},
+          )
           .timeout(const Duration(seconds: 8));
 
       if (!mounted) return;
@@ -139,6 +146,8 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
           _pendingToday   = int.tryParse(stats['pending_today'].toString())   ?? 0;
           _totalDone      = int.tryParse(stats['total_done'].toString())      ?? 0;
           _statsLoading   = false;
+          _branches       = (body['branches'] as List? ?? []).cast<Map<String, dynamic>>();
+          _branchesLoaded = true;
         });
       }
     } catch (_) {
@@ -556,6 +565,17 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
 
         const SizedBox(height: 24),
 
+        // ── My Branches ───────────────────────────────────────────────────
+        const _SectionTitle('My Branches'),
+        const SizedBox(height: 10),
+        if (_branches.isNotEmpty)
+          ..._branches.map((b) => _BranchTile(branch: b))
+        else if (_branchesLoaded)
+          const Text('No branch assigned yet. Please contact your admin.',
+              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+
+        const SizedBox(height: 24),
+
         // ── Specializations ──────────────────────────────────
         Row(
           children: [
@@ -870,6 +890,83 @@ class _SpecChip extends StatelessWidget {
 }
 
 // ─── Section title ────────────────────────────────────────────────────────────
+
+// One branch this technician works at. Name, default marker, then city with
+// pincode and the full address, each only when it's there.
+class _BranchTile extends StatelessWidget {
+  final Map<String, dynamic> branch;
+  const _BranchTile({required this.branch});
+
+  @override
+  Widget build(BuildContext context) {
+    final name     = branch['name'] as String? ?? '—';
+    final isMain   = branch['isDefault'] == true;
+    final address  = (branch['address'] as String? ?? '').trim();
+    final location = [branch['location'], branch['pincode']]
+        .map((v) => (v ?? '').toString().trim())
+        .where((v) => v.isNotEmpty)
+        .join(' - ');
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.divider),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.location_on_outlined, size: 18, color: AppColors.brandGreen),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(name,
+                          style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.textPrimary)),
+                    ),
+                    if (isMain)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: AppColors.brandGreenSurface,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Text('Default',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.brandGreen)),
+                      ),
+                  ],
+                ),
+                if (location.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(location,
+                      style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                ],
+                if (address.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(address,
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class _SectionTitle extends StatelessWidget {
   final String text;

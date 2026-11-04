@@ -190,10 +190,14 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
     try {
       final prefs  = await SharedPreferences.getInstance();
       final techId = prefs.getInt('user_id') ?? 0;
+      final token  = prefs.getString('auth_token') ?? '';
       if (techId == 0) { setState(() => _appointmentsLoading = false); return; }
 
       final res = await ApiService.authClient
-          .get(Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/active-bookings'))
+          .get(
+            Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/active-bookings'),
+            headers: {'Authorization': 'Bearer $token'},
+          )
           .timeout(const Duration(seconds: 10));
 
       if (!mounted) return;
