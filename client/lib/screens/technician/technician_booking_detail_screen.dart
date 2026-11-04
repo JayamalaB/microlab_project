@@ -2506,8 +2506,13 @@ void _resumeJourney() {
     // limit shown and the check all use the same exact 2-decimal amount.
     maxAmount = (maxAmount * 100).round() / 100;
     final amountCtrl = TextEditingController(text: _inr(maxAmount));
+    final reasonCtrl = TextEditingController();
     String method = 'RAZORPAY';
     String? errorText;
+    String? reasonError;
+    // Less than the full due → a partial payment, which needs a reason.
+    double enteredAmount() => ((double.tryParse(amountCtrl.text) ?? 0) * 100).round() / 100;
+    bool isPartial() => allowPartial && enteredAmount() > 0 && enteredAmount() < maxAmount - 0.001;
     return showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       isScrollControlled: true,
@@ -2545,7 +2550,8 @@ void _resumeJourney() {
                   controller: amountCtrl,
                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
                   inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
-                  onChanged: (_) { if (errorText != null) setSheet(() => errorText = null); },
+                  // Always rebuilds: the reason field follows the amount.
+                  onChanged: (_) => setSheet(() { errorText = null; reasonError = null; }),
                   decoration: InputDecoration(
                     prefixText: '₹ ',
                     errorText: errorText,
@@ -2554,6 +2560,26 @@ void _resumeJourney() {
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
                   ),
                 ),
+                // Only for a partial payment — not needed when paying in full.
+                if (isPartial()) ...[
+                  const SizedBox(height: 12),
+                  const Text('Reason for partial payment *',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: reasonCtrl,
+                    maxLength: 255,
+                    maxLines: 2,
+                    minLines: 1,
+                    textCapitalization: TextCapitalization.sentences,
+                    onChanged: (_) { if (reasonError != null) setSheet(() => reasonError = null); },
+                    decoration: InputDecoration(
+                      hintText: 'Why is only part of the amount being paid?',
+                      errorText: reasonError,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ],
               ] else
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -2610,10 +2636,19 @@ void _resumeJourney() {
                 height: 48,
                 child: ElevatedButton(
                   onPressed: () {
-                    final amt = ((double.tryParse(amountCtrl.text) ?? 0) * 100).round() / 100;
+                    final amt = enteredAmount();
                     if (amt <= 0) { setSheet(() => errorText = 'Enter an amount greater than 0'); return; }
                     if (amt > maxAmount + 0.001) { setSheet(() => errorText = 'Cannot exceed ₹${_inr(maxAmount)}'); return; }
-                    Navigator.pop(ctx, {'method': method, 'amount': amt});
+                    final reason = reasonCtrl.text.trim();
+                    if (isPartial() && reason.isEmpty) {
+                      setSheet(() => reasonError = 'Please enter the reason for partial payment');
+                      return;
+                    }
+                    Navigator.pop(ctx, {
+                      'method': method,
+                      'amount': amt,
+                      'partialReason': isPartial() ? reason : null,
+                    });
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.brandGreen,
@@ -2757,15 +2792,16 @@ void _resumeJourney() {
     if (choice == null || !mounted) return;
     final method = choice['method'] as String;
     final amount = choice['amount'] as double;
+    final partialReason = choice['partialReason'] as String?;
 
     if (method == 'CASH') {
-      await _collectCashPayment(amount: amount, onDone: onDone);
+      await _collectCashPayment(amount: amount, partialReason: partialReason, onDone: onDone);
       return;
     }
 
     if (method == 'QR') {
       final bookingId = int.tryParse(widget.booking.id) ?? 0;
-      final paymentId = await _showQrPaymentSheet(bookingId: bookingId, amount: amount);
+      final paymentId = await _showQrPaymentSheet(bookingId: bookingId, amount: amount, partialReason: partialReason);
       if (!mounted) return;
       if (paymentId != null) {
         final stillDue = amount < _amountDue;
@@ -2819,6 +2855,7 @@ void _resumeJourney() {
             razorpayPaymentId: paymentId,
             amount: paidAmount,
             paymentMethod: 'RAZORPAY',
+            partialReason: partialReason,
           );
           if (mounted) _refreshPaymentInfo();
           if (!ok && mounted) {
@@ -2839,7 +2876,7 @@ void _resumeJourney() {
 
   // Cash counterpart to _collectPayment — no Razorpay checkout, just a direct
   // server record. Supports the same partial-amount capability.
-  Future<void> _collectCashPayment({required double amount, VoidCallback? onDone}) async {
+  Future<void> _collectCashPayment({required double amount, String? partialReason, VoidCallback? onDone}) async {
     setState(() => _isProcessingPayment = true);
     final bookingId      = int.tryParse(widget.booking.id) ?? 0;
     final stillDue       = amount < _amountDue;
@@ -2848,6 +2885,7 @@ void _resumeJourney() {
       bookingId: bookingId,
       amount: amount,
       paymentMethod: 'CASH',
+      partialReason: partialReason,
     );
     if (!mounted) return;
     setState(() {
@@ -2889,6 +2927,7 @@ void _resumeJourney() {
     if (choice == null || !mounted) return;
     final method = choice['method'] as String;
     final amount = choice['amount'] as double;
+    final partialReason = choice['partialReason'] as String?;
     final stillDue = amount < amountDue;
 
     void applyLocalUpdate(String paymentId) {
@@ -2909,6 +2948,7 @@ void _resumeJourney() {
         bookingId: siblingBookingId,
         amount: amount,
         paymentMethod: 'CASH',
+        partialReason: partialReason,
       );
       if (ok) {
         applyLocalUpdate('cash');
@@ -2924,7 +2964,7 @@ void _resumeJourney() {
     }
 
     if (method == 'QR') {
-      final paymentId = await _showQrPaymentSheet(bookingId: siblingBookingId, amount: amount);
+      final paymentId = await _showQrPaymentSheet(bookingId: siblingBookingId, amount: amount, partialReason: partialReason);
       if (paymentId != null && mounted) {
         applyLocalUpdate(paymentId);
         _loadLinkedPatients();
@@ -2958,6 +2998,7 @@ void _resumeJourney() {
           razorpayPaymentId: paymentId,
           amount: amount,
           paymentMethod: 'RAZORPAY',
+          partialReason: partialReason,
         );
         if (!ok && mounted) {
           AppMessages.warning(context,
@@ -2984,13 +3025,14 @@ void _resumeJourney() {
     required int bookingId,
     required double amount,
     List<int>? bookingIds,
+    String? partialReason,
   }) async {
     return showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
       isDismissible: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => _QrPaymentSheet(bookingId: bookingId, amount: amount, bookingIds: bookingIds),
+      builder: (ctx) => _QrPaymentSheet(bookingId: bookingId, amount: amount, bookingIds: bookingIds, partialReason: partialReason),
     );
   }
 
@@ -3037,6 +3079,7 @@ void _resumeJourney() {
     if (choice == null || !mounted) return;
     final method        = choice['method'] as String;
     final enteredAmount = choice['amount'] as double;
+    final partialReason = choice['partialReason'] as String?;
 
     // Sequential/waterfall allocation: fill each booking's due amount in list
     // order (parent first, then siblings) until the entered amount runs out.
@@ -3095,6 +3138,7 @@ void _resumeJourney() {
           bookingId:     a['bookingId'] as int,
           amount:        a['allocated'] as double,
           paymentMethod: 'CASH',
+          partialReason: partialReason,
         );
         if (!ok) allOk = false;
       }
@@ -3118,6 +3162,7 @@ void _resumeJourney() {
         bookingId:  primaryId,
         amount:     enteredAmount,
         bookingIds: allBookingIds.length > 1 ? allBookingIds : null,
+        partialReason: partialReason,
       );
       if (!mounted) return;
       if (paymentId != null) {
@@ -3129,6 +3174,7 @@ void _resumeJourney() {
             razorpayPaymentId: paymentId,
             amount:            a['allocated'] as double,
             paymentMethod:     'QR',
+            partialReason:     partialReason,
           );
           if (!ok) allOk = false;
         }
@@ -3178,6 +3224,7 @@ void _resumeJourney() {
             razorpayPaymentId: paymentId,
             amount:            a['allocated'] as double,
             paymentMethod:     'RAZORPAY',
+            partialReason:     partialReason,
           );
           if (!ok) allOk = false;
         }
@@ -6362,7 +6409,8 @@ class _QrPaymentSheet extends StatefulWidget {
   final int bookingId;
   final double amount;
   final List<int>? bookingIds;
-  const _QrPaymentSheet({required this.bookingId, required this.amount, this.bookingIds});
+  final String? partialReason;
+  const _QrPaymentSheet({required this.bookingId, required this.amount, this.bookingIds, this.partialReason});
 
   @override
   State<_QrPaymentSheet> createState() => _QrPaymentSheetState();
@@ -6398,7 +6446,7 @@ class _QrPaymentSheetState extends State<_QrPaymentSheet> {
     _countdownTimer?.cancel();
     setState(() { _state = _QrState.loading; _remaining = _totalSeconds; _errorMsg = null; });
 
-    final data = await ApiService.createQrCode(bookingId: widget.bookingId, amount: widget.amount, bookingIds: widget.bookingIds);
+    final data = await ApiService.createQrCode(bookingId: widget.bookingId, amount: widget.amount, bookingIds: widget.bookingIds, partialReason: widget.partialReason);
     if (!mounted) return;
     if (data == null) {
       setState(() { _state = _QrState.error; _errorMsg = 'Could not generate QR. Check your connection and try again.'; });

@@ -9,6 +9,7 @@ const settings = require('../config/settings');
 const fs   = require('fs');
 const path = require('path');
 const qrStore  = require('../services/qrSessionStore');
+const { savePartialReason } = require('../services/partialPaymentReason');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 const dbLogger = require('../utils/dbLogger');
@@ -654,7 +655,7 @@ exports.getAll = async (req, res) => {
 // to 0 — the remainder can be collected later in a follow-up call.
 exports.collectPayment = async (req, res) => {
   const technicianId  = req.user.id;
-  const { bookingId, razorpayPaymentId, amount, paymentMethod = 'RAZORPAY' } = req.body;
+  const { bookingId, razorpayPaymentId, amount, paymentMethod = 'RAZORPAY', partialReason } = req.body;
 
   if (!bookingId || !amount) {
     return res.status(400).json({ success: false, message: 'bookingId and amount are required' });
@@ -745,6 +746,14 @@ exports.collectPayment = async (req, res) => {
     // still saved to ip_payment_transactions/ip_bookings above exactly as
     // before; only the immediate per-action sync was removed.
 
+    // Sent by the app only for a partial payment. The payment above is already
+    // saved, so a failure here must not report the payment as failed.
+    try {
+      await savePartialReason(bookingId, partialReason);
+    } catch (reasonErr) {
+      console.error(`⚠️  collectPayment — partial reason not saved booking_id=${bookingId}: ${reasonErr.message}`);
+    }
+
     res.json({ success: true, amountPaid: newAmountPaid, amountDue: newAmountDue, paymentStatus: newPaymentStatus });
   } catch (err) {
     console.error('❌ collectPayment FAILED:', err.message);
@@ -759,7 +768,8 @@ exports.collectPayment = async (req, res) => {
 exports.createQrPayment = async (req, res) => {
   const technicianId = req.user.id;
   // bookingIds[] for combined family QR; bookingId for single booking QR.
-  const { bookingId, bookingIds, amount } = req.body;
+  const { bookingId, bookingIds, amount, partialReason } = req.body;
+  const reasonText = String(partialReason ?? '').trim().slice(0, 255); // Razorpay notes: 256 chars max
   const primaryId  = bookingId ?? (Array.isArray(bookingIds) ? bookingIds[0] : null);
   const allIds     = Array.isArray(bookingIds) && bookingIds.length > 0 ? bookingIds : [primaryId];
   const isCombined = allIds.length > 1;
@@ -830,6 +840,8 @@ exports.createQrPayment = async (req, res) => {
           booking_id:    String(bookingId),
           technician_id: String(technicianId),
           amount:        String(amount),
+          // Saved by the webhook once the payment is recorded.
+          ...(reasonText && { partial_reason: reasonText }),
         },
       }),
     });

@@ -800,6 +800,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       [bookingRows] = await db.execute(
         `SELECT booking_id, booking_ref, booking_type, booking_date, total_amount,
                 home_collection_fare, additional_charge_amount, additional_charge_reason,
+                partial_payment_reason, amount_due,
                 patient_id, client_id, status, reference_no, visit_group_id,
                 TIME_FORMAT(
                   (SELECT av.slot_time FROM ip_available_slots av
@@ -814,6 +815,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       const [[b]] = await db.execute(
         `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date, b.total_amount,
                 b.home_collection_fare, b.additional_charge_amount, b.additional_charge_reason,
+                b.partial_payment_reason, b.amount_due,
                 b.patient_id, b.client_id, b.status, b.reference_no, b.visit_group_id,
                 TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
          FROM ip_bookings b
@@ -860,6 +862,9 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     // patient_id | patient_details, slot_details, blood_test_list,
     // payment_details, proof_photo.
     const bookings = [];
+    // The partial-payment reason applies to the whole visit, but only while a
+    // balance remains — once everything is settled there is no reason to send.
+    const visitHasBalance = bookingRows.some(r => _toAmount(r.amount_due) > 0);
     // Parallel to bookings[]: what was sent for each entry, in the same order.
     // The ASMX replies with one result per booking in that order, so result N
     // is matched to sent[N].
@@ -904,6 +909,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
         additional_charge_reason: b.additional_charge_reason ?? '',
         total_amount:             totalAmount,
         paid_amount:         _toAmount(data.paymentDetails.paid_amount),
+        partial_payment_reason: visitHasBalance ? (b.partial_payment_reason ?? '') : '',
         payment_type:        data.paymentDetails.payment_type,
         razorpay_payment_id: data.paymentDetails.razorpay_payment_id,
       };

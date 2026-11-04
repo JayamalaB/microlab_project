@@ -660,6 +660,7 @@ class ApiService {
     String? razorpayPaymentId,
     required double amount,
     String paymentMethod = 'RAZORPAY',
+    String? partialReason, // why only part of the due was paid
   }) async {
     final token = await getToken();
     if (token == null) return false;
@@ -675,6 +676,7 @@ class ApiService {
           'razorpayPaymentId': razorpayPaymentId,
           'amount': amount,
           'paymentMethod': paymentMethod,
+          if (partialReason != null) 'partialReason': partialReason,
         }),
       ).timeout(const Duration(seconds: 15));
       final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -693,13 +695,17 @@ class ApiService {
     required int bookingId,
     required double amount,
     List<int>? bookingIds,
+    String? partialReason,
   }) async {
     final token = await getToken();
     if (token == null) return null;
     try {
-      final payload = bookingIds != null && bookingIds.length > 1
-          ? {'bookingIds': bookingIds, 'amount': amount}
-          : {'bookingId': bookingId, 'amount': amount};
+      final payload = <String, dynamic>{
+        ...(bookingIds != null && bookingIds.length > 1
+            ? {'bookingIds': bookingIds, 'amount': amount}
+            : {'bookingId': bookingId, 'amount': amount}),
+        if (partialReason != null) 'partialReason': partialReason,
+      };
       final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/create-qr'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},

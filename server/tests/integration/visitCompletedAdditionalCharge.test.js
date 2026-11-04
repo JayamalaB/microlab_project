@@ -94,6 +94,7 @@ test('payment_details: test + service charge + additional charge = total, with t
     additional_charge_reason: 'Waited 30 min at customer location',
     total_amount:             1299,
     paid_amount:              1299,
+    partial_payment_reason:   '',
     payment_type:             'pay_later',
     razorpay_payment_id:      null,
   }));
@@ -108,6 +109,37 @@ test('a booking without an additional charge sends 0 and an empty reason', async
     test_amount: 1200, service_charge_amount: 49,
     additional_charge_amount: 0, additional_charge_reason: '', total_amount: 1249,
   });
+});
+
+test('partial payment: the reason is sent while a balance remains', async () => {
+  wireDb([row({ amount_due: '300.00', partial_payment_reason: 'Customer will pay the rest at report delivery' })]);
+  const payload = captureAsmx();
+  await syncVisitCompletionToClient(900, { mobile: '9000000001', type: 'technician', technicianId: 17 });
+
+  expect(payload().bookings[0].payment_details.partial_payment_reason)
+    .toBe('Customer will pay the rest at report delivery');
+});
+
+test('family visit: the reason goes on every member, even one already fully paid', async () => {
+  wireDb([
+    row({ visit_group_id: 'VG1', amount_due: '0.00', partial_payment_reason: 'Short of cash today' }),
+    row({ booking_id: 901, booking_ref: '100000901', patient_id: 502, visit_group_id: 'VG1',
+      amount_due: '200.00', partial_payment_reason: 'Short of cash today' }),
+  ]);
+  const payload = captureAsmx();
+  await syncVisitCompletionToClient(900, { mobile: '9000000001', type: 'technician', technicianId: 17 });
+
+  const [self, member] = payload().bookings;
+  expect(self.payment_details.partial_payment_reason).toBe('Short of cash today');
+  expect(member.payment_details.partial_payment_reason).toBe('Short of cash today');
+});
+
+test('nothing left to pay: an old reason is not sent', async () => {
+  wireDb([row({ amount_due: '0.00', partial_payment_reason: 'Paid the rest later' })]);
+  const payload = captureAsmx();
+  await syncVisitCompletionToClient(900, { mobile: '9000000001', type: 'technician', technicianId: 17 });
+
+  expect(payload().bookings[0].payment_details.partial_payment_reason).toBe('');
 });
 
 test('family visit — each booking carries its own additional charge', async () => {
