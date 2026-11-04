@@ -161,4 +161,52 @@ describe('POST /api/technicians/collect-payment', () => {
     expect(res.body.paymentStatus).toBe('paid');
     expect(res.body.amountDue).toBe(0);
   });
+
+  // Partial-payment reason: saved when sent, none when paying in full.
+  test('a partial payment saves its reason', async () => {
+    primeAuthCheck(db, token);
+    db.execute
+      .mockResolvedValueOnce([[{ booking_id: 900, patient_id: 55, total_amount: 878, amount_paid: 0 }]])
+      .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce([{ insertId: 1 }])
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);
+
+    const res = await request(app).post('/api/technicians/collect-payment')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ bookingId: 900, amount: 300, paymentMethod: 'CASH', partialReason: 'Short of cash today' });
+
+    expect(res.status).toBe(200);
+    const saved = db.execute.mock.calls.find(c => c[0].includes('partial_payment_reason'));
+    expect(saved[1]).toEqual([900, 'Short of cash today', 900]);
+  });
+
+  test('a full payment saves no reason', async () => {
+    primeAuthCheck(db, token);
+    db.execute
+      .mockResolvedValueOnce([[{ booking_id: 900, patient_id: 55, total_amount: 878, amount_paid: 0 }]])
+      .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce([{ insertId: 1 }]);
+
+    await request(app).post('/api/technicians/collect-payment')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ bookingId: 900, amount: 878, paymentMethod: 'CASH' });
+
+    expect(db.execute.mock.calls.some(c => c[0].includes('partial_payment_reason'))).toBe(false);
+  });
+
+  test('the payment still succeeds if saving the reason fails', async () => {
+    primeAuthCheck(db, token);
+    db.execute
+      .mockResolvedValueOnce([[{ booking_id: 900, patient_id: 55, total_amount: 878, amount_paid: 0 }]])
+      .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce([{ insertId: 1 }])
+      .mockRejectedValueOnce(new Error('column missing'));
+
+    const res = await request(app).post('/api/technicians/collect-payment')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ bookingId: 900, amount: 300, paymentMethod: 'CASH', partialReason: 'Short of cash' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.paymentStatus).toBe('partial');
+  });
 });

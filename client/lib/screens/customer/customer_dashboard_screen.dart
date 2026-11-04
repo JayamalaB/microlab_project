@@ -33,6 +33,9 @@ class CustomerDashboardScreen extends StatefulWidget {
   final bool isVip;
   final bool embedded;
   final VoidCallback? onBack;
+  final BookingDraft? initialDraft;
+  final void Function(BookingDraft)? onDraftSave;
+  final VoidCallback? onMemberAdded;
   const CustomerDashboardScreen({
     super.key,
     required this.member,
@@ -40,6 +43,9 @@ class CustomerDashboardScreen extends StatefulWidget {
     this.isVip = false,
     this.embedded = false,
     this.onBack,
+    this.initialDraft,
+    this.onDraftSave,
+    this.onMemberAdded,
   });
 
   @override
@@ -65,6 +71,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // Silently auto-detected from pincode — patient never sees or selects this.
   BranchModel? _selectedBranch;
   bool _branchDetecting = false;
+  int  _branchLookupId  = 0;
   // Real patientId from auth session — falls back to 1 if socket not yet connected
   int get _patientId {
     final id = SocketService.instance.userId;
@@ -74,6 +81,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // ── Cart ──────────────────────────────────────────────────
   final List<TestModel> _cart = [];
   bool get _isLabTest => _mode == 'Lab Test';
+  bool _bookingCompleted = false;
 
   // ── Tests/Packages ────────────────────────────────────────
   bool _loadingTests = false;
@@ -109,7 +117,18 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     _loadTests();
     _loadCategories();
     NotificationService.instance.loadCustomerToken();
-    if (widget.initialCartTests.isNotEmpty) {
+    final draft = widget.initialDraft;
+    if (draft != null && !draft.isEmpty) {
+      _cart.addAll(draft.cart);
+      _mode           = draft.mode;
+      _modeChosen     = draft.modeChosen;
+      _address        = draft.address;
+      _pincode        = draft.pincode;
+      _city           = draft.city;
+      _lat            = draft.lat;
+      _lng            = draft.lng;
+      _selectedBranch = draft.selectedBranch;
+    } else if (widget.initialCartTests.isNotEmpty) {
       _cart.addAll(widget.initialCartTests);
     }
     _searchController.addListener(() {
@@ -218,6 +237,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // Patient never sees this — branch is stored and forwarded to CheckoutScreen.
   Future<void> _autoDetectBranch(String pincode, {String? place, bool isGps = false}) async {
     if (!mounted) return;
+    // Lookups can finish out of order; only the latest one may set the branch.
+    final lookup = ++_branchLookupId;
     final effectivePlace = place ?? _city;
     debugPrint('\n🏥 [BRANCH AUTO-DETECT] ─────────────────────────────');
     debugPrint('   pincode     : $pincode');
@@ -250,7 +271,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       debugPrint('   ← status    : ${res.statusCode}');
       debugPrint('   ← body      : ${res.body}');
 
-      if (!mounted) return;
+      if (!mounted || lookup != _branchLookupId) return;
 
       if (res.statusCode == 200) {
         final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -274,10 +295,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       } else {
         setState(() => _branchDetecting = false);
         debugPrint('   ❌ HTTP ${res.statusCode} — branch detection skipped');
-        // GPS-only: surface "no nearby branch has availability" to the
-        // patient instead of failing silently. Manual pincode/place 404s are
-        // deliberately left as-is (silent), per the existing behavior there.
-        if (isGps && res.statusCode == 404 && mounted) {
+        // Tell the patient, or checkout can't proceed with no explanation.
+        if (res.statusCode == 404 && mounted) {
           try {
             final body = jsonDecode(res.body) as Map<String, dynamic>;
             if (body['message'] is String) {
@@ -290,8 +309,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         }
       }
     } catch (e) {
-      if (mounted) setState(() => _branchDetecting = false);
       debugPrint('   ❌ error     : $e');
+      if (mounted && lookup == _branchLookupId) {
+        setState(() => _branchDetecting = false);
+        AppMessages.error(context, 'We couldn\'t find a branch for this location. Please check your connection and try again.');
+      }
     }
     debugPrint('────────────────────────────────────────────────────\n');
   }
@@ -412,14 +434,22 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         cart: _cart,
         onRemove: (t) => setState(() => _cart.removeWhere((x) => x.id == t.id)),
         onCheckout: () {
+          // Guard: branch detection still in flight — don't proceed with null branchId
+          if (_branchDetecting && _mode == 'Home Collection') {
+            debugPrint('🛑 [CHECKOUT BLOCKED] branch detection still running — showing wait message');
+            Navigator.pop(context); // close cart sheet
+            AppMessages.info(context, 'Finding your nearest branch... please wait a moment');
+            return;
+          }
           final branchId = _selectedBranch != null
               ? int.tryParse(_selectedBranch!.id)
               : null;
           debugPrint('\n🛒 [CHECKOUT] ────────────────────────────────────');
           debugPrint('   mode        : $_mode');
           debugPrint('   pincode     : ${_pincode ?? '—'}');
-          debugPrint('   branch      : ${_selectedBranch?.name ?? '⚠️ none — slots will be static'}');
+          debugPrint('   branch      : ${_selectedBranch?.name ?? '⚠️ none'}');
           debugPrint('   branchId    : ${branchId ?? '⚠️ null'}');
+          debugPrint('   detecting   : $_branchDetecting');
           debugPrint('   patientId   : $_patientId');
           debugPrint('   cart items  : ${_cart.length}');
           debugPrint('──────────────────────────────────────────────────\n');
@@ -440,15 +470,20 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 patientLat: _lat,
                 patientLng: _lng,
                 branchId:   branchId,
-                onBookingComplete: () => setState(() {
-                  _cart.clear();
-                  _address        = null;
-                  _pincode        = null;
-                  _city           = null;
-                  _lat            = null;
-                  _lng            = null;
-                  _selectedBranch = null;
-                }),
+                onMemberAdded: widget.onMemberAdded,
+                onBookingComplete: () {
+                  _bookingCompleted = true;
+                  widget.onDraftSave?.call(BookingDraft());
+                  setState(() {
+                    _cart.clear();
+                    _address        = null;
+                    _pincode        = null;
+                    _city           = null;
+                    _lat            = null;
+                    _lng            = null;
+                    _selectedBranch = null;
+                  });
+                },
               ),
             ),
           );
@@ -547,8 +582,23 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     );
   }
 
+  void _saveDraft() {
+    widget.onDraftSave?.call(BookingDraft(
+      cart:           List.from(_cart),
+      mode:           _mode,
+      modeChosen:     _modeChosen,
+      address:        _address,
+      pincode:        _pincode,
+      city:           _city,
+      lat:            _lat,
+      lng:            _lng,
+      selectedBranch: _selectedBranch,
+    ));
+  }
+
   @override
   void dispose() {
+    if (!_bookingCompleted) _saveDraft();
     _searchDebounce?.cancel();
     _searchController.dispose();
     _scrollController.dispose();
@@ -638,11 +688,6 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SizedBox(height: 16),
-
-              // ── Trust banner ──────────────────────────
-              const _TrustBanner(),
-
               const SizedBox(height: 16),
 
               // ── Search + Upload ───────────────────────
@@ -818,7 +863,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                     physics: const NeverScrollableScrollPhysics(),
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     itemCount: _filteredTests.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 10),
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
                     itemBuilder: (_, i) => _TestCard(
                       test: _filteredTests[i],
                       inCart: _inCart(_filteredTests[i]),
@@ -2474,260 +2519,133 @@ class _TestCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: onAdd,
       child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
+          color: inCart ? AppColors.brandGreenSurface : Colors.white,
+          borderRadius: BorderRadius.circular(12),
           border: Border.all(
               color: inCart ? AppColors.brandGreen : AppColors.divider,
               width: inCart ? 1.5 : 1),
         ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(13),
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  // Type badge
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 7, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: test.type == 'package'
-                                          ? const Color(0xFFE8F5F1)
-                                          : const Color(0xFFEEF4FB),
-                                      borderRadius: BorderRadius.circular(6),
-                                    ),
-                                    child: Text(
-                                      test.type == 'package'
-                                          ? 'Package'
-                                          : 'Test',
-                                      style: TextStyle(
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w600,
-                                          color: test.type == 'package'
-                                              ? AppColors.brandGreen
-                                              : const Color(0xFF1565C0)),
-                                    ),
-                                  ),
-                                  if (test.hasOffer) ...[
-                                    const SizedBox(width: 6),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 7, vertical: 2),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFFFF3E0),
-                                        borderRadius: BorderRadius.circular(6),
-                                      ),
-                                      child: Text(
-                                        '${(test.offerPercent ?? 0).toInt()}% OFF',
-                                        style: const TextStyle(
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.w700,
-                                            color: Color(0xFFE65100)),
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                              const SizedBox(height: 6),
-                              Text(test.name,
-                                  style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.textPrimary)),
-                              const SizedBox(height: 3),
-                              Text(test.description,
-                                  style: const TextStyle(
-                                      fontSize: 12,
-                                      color: AppColors.textSecondary,
-                                      height: 1.4),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis),
-                            ],
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // Checkbox
+            SizedBox(
+              width: 22,
+              height: 22,
+              child: Checkbox(
+                value: inCart,
+                onChanged: (_) => onAdd(),
+                activeColor: AppColors.brandGreen,
+                shape: const CircleBorder(),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+            const SizedBox(width: 10),
+            // Content
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: test.type == 'package'
+                              ? const Color(0xFFE8F5F1)
+                              : const Color(0xFFEEF4FB),
+                          borderRadius: BorderRadius.circular(5),
+                        ),
+                        child: Text(
+                          test.type == 'package' ? 'Package' : 'Test',
+                          style: TextStyle(
+                              fontSize: 9,
+                              fontWeight: FontWeight.w600,
+                              color: test.type == 'package'
+                                  ? AppColors.brandGreen
+                                  : const Color(0xFF1565C0)),
+                        ),
+                      ),
+                      if (test.hasOffer) ...[
+                        const SizedBox(width: 5),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFF3E0),
+                            borderRadius: BorderRadius.circular(5),
+                          ),
+                          child: Text(
+                            '${(test.offerPercent ?? 0).toInt()}% OFF',
+                            style: const TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFFE65100)),
                           ),
                         ),
-                        const SizedBox(width: 10),
-                        // Price
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Text('₹${test.finalPrice.toInt()}',
-                                style: const TextStyle(
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.textPrimary)),
-                            if (test.hasOffer)
-                              Text('₹${test.originalPrice.toInt()}',
-                                  style: const TextStyle(
-                                      fontSize: 12,
-                                      color: AppColors.textHint,
-                                      decoration:
-                                          TextDecoration.lineThrough)),
-                          ],
-                        ),
                       ],
-                    ),
-                    const SizedBox(height: 8),
-                    // Meta row
-                    Row(
-                      children: [
-                        _MetaChip(
-                            icon: Icons.schedule_outlined,
-                            label: test.reportStatus),
-                        const SizedBox(width: 8),
-                        _MetaChip(
-                            icon: Icons.category_outlined,
-                            label: test.category),
-                        if (test.docRequired) ...[
-                          const SizedBox(width: 8),
-                          _MetaChip(
-                              icon: Icons.description_outlined,
-                              label: 'Rx needed',
-                              color: const Color(0xFFE65100)),
-                        ],
-                      ],
-                    ),
-                    // Offer validity
-                    if (test.hasOffer && test.endDate != null) ...[
-                      const SizedBox(height: 6),
-                      Row(
-                        children: [
-                          const Icon(Icons.local_offer_outlined,
-                              size: 11, color: Color(0xFFE65100)),
-                          const SizedBox(width: 4),
-                          Text('Offer valid till ${test.endDate}',
-                              style: const TextStyle(
-                                  fontSize: 11, color: Color(0xFFE65100))),
-                        ],
-                      ),
                     ],
-                  ],
-                ),
-              ),
-
-              // Add to cart strip
-              Material(
-                color: inCart
-                    ? AppColors.brandGreenSurface
-                    : const Color(0xFFF4F6F8),
-                child: InkWell(
-                  onTap: onAdd,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          inCart
-                              ? Icons.check_circle_outline
-                              : Icons.add_circle_outline,
-                          size: 15,
-                          color: inCart
-                              ? AppColors.brandGreen
-                              : AppColors.textSecondary,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          inCart ? 'Added to cart' : 'Add to cart',
-                          style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              color: inCart
-                                  ? AppColors.brandGreen
-                                  : AppColors.textSecondary),
-                        ),
-                      ],
-                    ),
                   ),
-                ),
+                  const SizedBox(height: 4),
+                  Text(test.name,
+                      style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.textPrimary)),
+                  const SizedBox(height: 3),
+                  Row(
+                    children: [
+                      Icon(Icons.schedule_outlined,
+                          size: 11, color: AppColors.textHint),
+                      const SizedBox(width: 3),
+                      Text(test.reportStatus,
+                          style: const TextStyle(
+                              fontSize: 11, color: AppColors.textHint)),
+                      const SizedBox(width: 8),
+                      Icon(Icons.category_outlined,
+                          size: 11, color: AppColors.textHint),
+                      const SizedBox(width: 3),
+                      Text(test.category,
+                          style: const TextStyle(
+                              fontSize: 11, color: AppColors.textHint)),
+                      if (test.docRequired) ...[
+                        const SizedBox(width: 8),
+                        const Icon(Icons.description_outlined,
+                            size: 11, color: Color(0xFFE65100)),
+                        const SizedBox(width: 3),
+                        const Text('Rx',
+                            style: TextStyle(
+                                fontSize: 11, color: Color(0xFFE65100))),
+                      ],
+                    ],
+                  ),
+                ],
               ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _MetaChip extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color? color;
-  const _MetaChip({required this.icon, required this.label, this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    final c = color ?? AppColors.textSecondary;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 11, color: c),
-        const SizedBox(width: 3),
-        Text(label, style: TextStyle(fontSize: 11, color: c)),
-      ],
-    );
-  }
-}
-
-// ─── Trust Banner ────────────────────────────────────────────────────────────
-
-class _TrustBanner extends StatelessWidget {
-  const _TrustBanner();
-
-  static const _items = [
-    (Icons.home_outlined, 'Home Collection'),
-    (Icons.verified_outlined, 'NABL Certified'),
-    (Icons.schedule_rounded, 'Reports in 24 hrs'),
-    (Icons.lock_outline_rounded, '100% Secure'),
-    (Icons.medical_services_outlined, 'Doctor Support'),
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 44,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: _items.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (_, i) {
-          final (icon, label) = _items[i];
-          return Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: AppColors.brandGreenSurface,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: AppColors.brandGreenLight),
             ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
+            const SizedBox(width: 10),
+            // Price
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Icon(icon, size: 14, color: AppColors.brandGreen),
-                const SizedBox(width: 6),
-                Text(label,
+                Text('₹${test.finalPrice.toInt()}',
                     style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.brandGreen)),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary)),
+                if (test.hasOffer)
+                  Text('₹${test.originalPrice.toInt()}',
+                      style: const TextStyle(
+                          fontSize: 11,
+                          color: AppColors.textHint,
+                          decoration: TextDecoration.lineThrough)),
               ],
             ),
-          );
-        },
+          ],
+        ),
       ),
     );
   }

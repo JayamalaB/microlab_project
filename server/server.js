@@ -6,7 +6,17 @@ const { Server } = require('socket.io');
 const bookingSocket = require('./socket/bookingSocket');
 const bookingController = require('./controllers/bookingController');
 const settings = require('./config/settings');
+const { socketAuth, guardEvents } = require('./socket/socketAuth');
 require('dotenv').config();
+
+// One failed request must not stop the server for everyone: nothing restarts
+// it automatically under nohup, and running searches live in memory.
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ [unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('❌ [uncaughtException]', err);
+});
 
 const app = express();
 const { init: initKnowledge, reloadQA } = require('./services/knowledgeService');
@@ -19,7 +29,10 @@ const io = new Server(httpServer, {
 // Give bookingController a reference to io so REST updates can push to sockets
 bookingController.setIo(io);
 
+io.use(socketAuth);
+
 io.on('connection', (socket) => {
+  guardEvents(socket);
   bookingSocket(io, socket);
 });
 
@@ -86,7 +99,7 @@ app.get('/health', (req, res) => {
 });
 
 // Hot-reload FAQ without restarting
-app.post('/api/reload-qa', (req, res) => {
+app.post('/api/reload-qa', require('./middleware/rolloutAuth'), require('./middleware/access').requireTechnician, (req, res) => {
   const result = reloadQA();
   res.json({ success: true, ...result });
 });
@@ -104,6 +117,17 @@ async function start() {
     console.log(`🚀 MicroLab server running on http://localhost:${PORT}`);
     console.log(`🎙️  Sarvam API key: ${process.env.SARVAM_API_KEY ? '✓ loaded' : '✗ MISSING — voice will fail'}`);
   });
+
+  // Searches running before the restart are gone from memory. Wait for
+  // technicians' apps to reconnect, then start them again.
+  setTimeout(() => {
+    bookingSocket.recoverPendingDispatches().catch((e) => {
+      console.error('❌ [STARTUP] search recovery failed:', e.message);
+    });
+  }, 60_000);
 }
 
-start();
+start().catch((e) => {
+  console.error('❌ [STARTUP] server failed to start:', e);
+  process.exit(1);
+});

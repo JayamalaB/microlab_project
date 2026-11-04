@@ -8,9 +8,14 @@ const db       = require('../config/db');
 const settings = require('../config/settings');
 const fs   = require('fs');
 const path = require('path');
+const qrStore  = require('../services/qrSessionStore');
+const { savePartialReason } = require('../services/partialPaymentReason');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 const dbLogger = require('../utils/dbLogger');
+const { getTechnicianBranches } = require('../services/technicianBranches');
+const { verifyRazorpayPayment } = require('../services/razorpayVerify');
+const { captureRazorpayPayment } = require('../services/razorpayCapture');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -82,8 +87,16 @@ exports.getProfile = async (req, res) => {
       [technicianId, technicianId]
     );
 
+    // Extra detail: the rest of the profile still loads if this fails.
+    let branches = [];
+    try {
+      branches = await getTechnicianBranches(technicianId);
+    } catch (branchErr) {
+      console.error('[getProfile] branches failed:', branchErr.message);
+    }
+
     console.log(`✅ Profile loaded — ${profile.user_name} branch=${profile.branch_name}`);
-    res.json({ success: true, profile, stats });
+    res.json({ success: true, profile, stats, branches });
   } catch (e) {
     console.error('[getProfile]', e.message);
     res.status(500).json({ success: false, message: e.message });
@@ -101,6 +114,8 @@ exports.getHistory = async (req, res) => {
         SELECT
            tc.collection_id,
            tc.booking_id,
+           b.booking_ref,
+           b.reference_no,
            tc.collection_status,
            tc.collection_date,
            tc.collection_address,
@@ -136,6 +151,8 @@ exports.getHistory = async (req, res) => {
         SELECT
            NULL AS collection_id,
            b.booking_id,
+           b.booking_ref,
+           b.reference_no,
            'cancelled' AS collection_status,
            b.booking_date AS collection_date,
            b.collection_address,
@@ -265,7 +282,7 @@ exports.cancelAssignedBooking = async (req, res) => {
 
   try {
     const [[tc]] = await db.execute(
-      `SELECT tc.collection_status, b.booking_ref, b.visit_group_id
+      `SELECT tc.collection_status, b.booking_ref, b.reference_no, b.visit_group_id
        FROM ip_technician_collection tc
        JOIN ip_bookings b ON b.booking_id = tc.booking_id
        WHERE tc.booking_id = ? AND tc.technician_id = ?
@@ -299,7 +316,7 @@ exports.cancelAssignedBooking = async (req, res) => {
       allIds,
       technicianId,
       notifyTitle: 'Booking Unassigned',
-      notifyBody:  `You are no longer assigned to booking ${tc.booking_ref} (${reason.replace(/_/g, ' ')}). It has been re-dispatched.`,
+      notifyBody:  `You are no longer assigned to booking ${tc.reference_no ?? tc.booking_ref} (${reason.replace(/_/g, ' ')}). It has been re-dispatched.`,
       notifyType:  'booking_unassigned',
       excludeFromRedispatch: true,
       technicianCancelReason: reason,
@@ -326,6 +343,7 @@ exports.getActiveBookings = async (req, res) => {
          tc.collection_id,
          tc.booking_id,
          b.booking_ref,
+         b.reference_no,
          b.patient_id,
          tc.collection_status,
          DATE_FORMAT(tc.collection_date, '%Y-%m-%d') AS collection_date,
@@ -339,6 +357,7 @@ exports.getActiveBookings = async (req, res) => {
          b.payment_status,
          b.collection_latitude   AS patient_lat,
          b.collection_longitude  AS patient_lng,
+         b.notes                 AS collection_notes,
          p.patient_name,
          p.patient_mobile,
          s.slot_label,
@@ -403,7 +422,7 @@ exports.getSlots = async (req, res) => {
     const [techSlots] = await db.execute(
       `SELECT slot_id, DATE_FORMAT(slot_date, '%Y-%m-%d') AS slot_date, max_bookings, booked_count, is_available, duration_minutes
        FROM ip_technician_slots
-       WHERE technician_id = ? AND slot_date >= CURDATE()
+       WHERE technician_id = ? AND slot_date >= CURDATE() AND is_available = 1
        ORDER BY slot_date ASC`,
       [technicianId]
     );
@@ -470,27 +489,72 @@ exports.saveSlots = async (req, res) => {
     try {
       await connection.beginTransaction();
 
-      // Delete ip_available_slots tied to this tech's future slots before removing the slots
-      await connection.query(
-        `DELETE ias FROM ip_available_slots ias
-         JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
-         WHERE ts.technician_id = ? AND ts.slot_date >= CURDATE()`,
-        [technicianId]
+      // What the technician wants: "date|slotId" → duration in minutes, or null.
+      const slotKey = (date, slotId) => `${date}|${slotId}`;
+      const wanted  = new Map();
+      for (const day of slots) {
+        if (!Array.isArray(day.slot_ids)) continue;
+        const durMap = day.durations ?? {}; // { "1": 30, "2": 15 } — keyed by slot_id string
+        for (const slotId of day.slot_ids) {
+          wanted.set(slotKey(day.date, slotId), durMap[String(slotId)] ? Number(durMap[String(slotId)]) : null);
+        }
+      }
+
+      // A slot with bookings is never deleted: those bookings point at its
+      // rows, and deleting them would lose the appointment time and put a
+      // booked time back on sale. Only unbooked slots are removed or rebuilt.
+      const [existing] = await connection.query(
+        `SELECT ts.tech_slot_id, ts.slot_id, ts.duration_minutes,
+                DATE_FORMAT(ts.slot_date, '%Y-%m-%d') AS slot_date,
+                (ts.booked_count > 0 OR EXISTS (
+                   SELECT 1 FROM ip_available_slots ias
+                   WHERE ias.technician_slot_id = ts.tech_slot_id AND ias.is_available = 0)) AS has_bookings
+         FROM ip_technician_slots ts
+         WHERE ts.technician_id = ? AND ts.slot_date >= ?`,
+        [technicianId, todayIST]
       );
 
-      // Remove all future technician slots then re-insert selected ones
-      await connection.query(
-        'DELETE FROM ip_technician_slots WHERE technician_id = ? AND slot_date >= CURDATE()',
-        [technicianId]
-      );
+      for (const row of existing) {
+        const key         = slotKey(row.slot_date, row.slot_id);
+        const isWanted    = wanted.has(key);
+        const hasBookings = Number(row.has_bookings) === 1;
+        const sameLength  = isWanted && (Number(row.duration_minutes) || null) === wanted.get(key);
+
+        if (hasBookings) {
+          // Booked but unticked: stays for its bookings, with its free times withdrawn.
+          await connection.query(
+            'UPDATE ip_technician_slots SET is_available = ? WHERE tech_slot_id = ?',
+            [isWanted ? 1 : 0, row.tech_slot_id]
+          );
+          if (!isWanted) {
+            await connection.query(
+              'DELETE FROM ip_available_slots WHERE technician_slot_id = ? AND is_available = 1',
+              [row.tech_slot_id]
+            );
+          } else {
+            await _restoreFreeTimes(connection, row);
+            wanted.delete(key);
+          }
+        } else if (sameLength) {
+          await connection.query(
+            'UPDATE ip_technician_slots SET is_available = 1 WHERE tech_slot_id = ?',
+            [row.tech_slot_id]
+          );
+          wanted.delete(key);
+        } else {
+          await connection.query('DELETE FROM ip_available_slots WHERE technician_slot_id = ?', [row.tech_slot_id]);
+          await connection.query('DELETE FROM ip_technician_slots WHERE tech_slot_id = ?', [row.tech_slot_id]);
+        }
+      }
 
       let totalIntervals = 0;
       for (const day of slots) {
         if (!Array.isArray(day.slot_ids) || day.slot_ids.length === 0) continue;
-        const durMap = day.durations ?? {}; // { "1": 30, "2": 15 } — keyed by slot_id string
 
         for (const slotId of day.slot_ids) {
-          const durationMinutes = durMap[String(slotId)] ? Number(durMap[String(slotId)]) : null;
+          const key = slotKey(day.date, slotId);
+          if (!wanted.has(key)) continue; // kept as it was above
+          const durationMinutes = wanted.get(key);
 
           // When duration is set, calculate interval count first so max_bookings
           // reflects actual capacity rather than a hardcoded guess.
@@ -546,6 +610,32 @@ exports.saveSlots = async (req, res) => {
     res.status(500).json({ success: false, message: e.message });
   }
 };
+
+// Puts back the free times of a booked slot the technician ticked again after
+// unticking it. Times that are still booked keep their rows.
+async function _restoreFreeTimes(connection, row) {
+  const durationMinutes = Number(row.duration_minutes);
+  if (!durationMinutes) return;
+  const [[slotDef]] = await connection.query(
+    'SELECT slot_start, slot_end FROM ip_slots WHERE slot_id = ?',
+    [row.slot_id]
+  );
+  if (!slotDef) return;
+  const [rows] = await connection.query(
+    'SELECT slot_time FROM ip_available_slots WHERE technician_slot_id = ?',
+    [row.tech_slot_id]
+  );
+  const present = new Set(rows.map(r => String(r.slot_time).slice(0, 5)));
+  for (const t of _generateIntervals(slotDef.slot_start, slotDef.slot_end, durationMinutes)) {
+    if (present.has(String(t).slice(0, 5))) continue;
+    await connection.query(
+      `INSERT INTO ip_available_slots
+         (booking_type, technician_slot_id, slot_date, slot_time, is_available, created_at)
+       VALUES ('home_collection', ?, ?, ?, 1, NOW())`,
+      [row.tech_slot_id, row.slot_date, t]
+    );
+  }
+}
 
 // ── GET /api/technicians/stats ────────────────────────────────────────────────
 // Returns total / online / offline technician counts.
@@ -647,7 +737,7 @@ exports.getAll = async (req, res) => {
 // to 0 — the remainder can be collected later in a follow-up call.
 exports.collectPayment = async (req, res) => {
   const technicianId  = req.user.id;
-  const { bookingId, razorpayPaymentId, amount, paymentMethod = 'RAZORPAY' } = req.body;
+  const { bookingId, razorpayPaymentId, amount, paymentMethod = 'RAZORPAY', partialReason } = req.body;
 
   if (!bookingId || !amount) {
     return res.status(400).json({ success: false, message: 'bookingId and amount are required' });
@@ -699,6 +789,14 @@ exports.collectPayment = async (req, res) => {
       });
     }
 
+    // A combined family payment splits one Razorpay payment across bookings,
+    // so the id repeats and the payment may be larger than this share.
+    let payment = null;
+    if (paymentMethod === 'RAZORPAY') {
+      payment = await verifyRazorpayPayment(razorpayPaymentId, { amount: incomingAmount, atLeast: true });
+      if (!payment.ok) return res.status(402).json({ success: false, message: payment.message });
+    }
+
     const newAmountPaid    = currentPaid + incomingAmount;
     const newAmountDue     = Math.max(0, totalAmount - newAmountPaid);
     const newPaymentStatus = newAmountDue <= 0 ? 'paid' : 'partial';
@@ -730,6 +828,10 @@ exports.collectPayment = async (req, res) => {
       ]
     );
 
+    // The whole payment, once: a split family payment is already 'captured' by
+    // the time the next booking's share arrives.
+    if (payment?.status === 'authorized') captureRazorpayPayment(razorpayPaymentId, payment.amount);
+
     console.log(`✅ collectPayment — booking_id=${bookingId} method=${paymentMethod} +₹${amount} → paid=₹${newAmountPaid} due=₹${newAmountDue} status=${newPaymentStatus} by technician_id=${technicianId}`);
 
     // No individual Jayamala sync here — payment for a technician-run visit
@@ -738,11 +840,139 @@ exports.collectPayment = async (req, res) => {
     // still saved to ip_payment_transactions/ip_bookings above exactly as
     // before; only the immediate per-action sync was removed.
 
+    // Sent by the app only for a partial payment. The payment above is already
+    // saved, so a failure here must not report the payment as failed.
+    try {
+      await savePartialReason(bookingId, partialReason);
+    } catch (reasonErr) {
+      console.error(`⚠️  collectPayment — partial reason not saved booking_id=${bookingId}: ${reasonErr.message}`);
+    }
+
     res.json({ success: true, amountPaid: newAmountPaid, amountDue: newAmountDue, paymentStatus: newPaymentStatus });
   } catch (err) {
     console.error('❌ collectPayment FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
+};
+
+// ── POST /api/technicians/create-qr ──────────────────────────────────────────
+// Creates a Razorpay UPI QR code for on-site payment collection.
+// Returns { qrId, imageUrl } on success; stores session in qrSessionStore so
+// the qr-status polling endpoint and the webhook handler can both find it.
+exports.createQrPayment = async (req, res) => {
+  const technicianId = req.user.id;
+  // bookingIds[] for combined family QR; bookingId for single booking QR.
+  const { bookingId, bookingIds, amount, partialReason } = req.body;
+  const reasonText = String(partialReason ?? '').trim().slice(0, 255); // Razorpay notes: 256 chars max
+  const primaryId  = bookingId ?? (Array.isArray(bookingIds) ? bookingIds[0] : null);
+  const allIds     = Array.isArray(bookingIds) && bookingIds.length > 0 ? bookingIds : [primaryId];
+  const isCombined = allIds.length > 1;
+
+  if (!primaryId || !amount || Number(amount) <= 0) {
+    return res.status(400).json({ success: false, message: 'bookingId and amount are required' });
+  }
+
+  try {
+    // Ownership check on the primary booking (the one used as QR anchor).
+    const [[booking]] = await db.execute(
+      `SELECT b.booking_id, b.total_amount, b.amount_paid
+       FROM ip_bookings b
+       WHERE b.booking_id = ?
+         AND (
+           EXISTS (SELECT 1 FROM ip_technician_collection tc WHERE tc.booking_id = b.booking_id AND tc.technician_id = ?)
+           OR (b.visit_group_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM ip_bookings parent
+             INNER JOIN ip_technician_collection tc ON tc.booking_id = parent.booking_id AND tc.technician_id = ?
+             WHERE parent.visit_group_id = b.visit_group_id
+           ))
+         )`,
+      [primaryId, technicianId, technicianId]
+    );
+
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
+    }
+
+    // For combined QR, validate against the sum of all members' due amounts.
+    let totalDue;
+    if (isCombined) {
+      const placeholders = allIds.map(() => '?').join(',');
+      const [rows] = await db.execute(
+        `SELECT SUM(GREATEST(0, total_amount - COALESCE(amount_paid, 0))) AS combined_due
+         FROM ip_bookings WHERE booking_id IN (${placeholders})`,
+        allIds
+      );
+      totalDue = parseFloat(rows[0]?.combined_due ?? 0);
+    } else {
+      totalDue = Math.max(0, parseFloat(booking.total_amount) - parseFloat(booking.amount_paid || 0));
+    }
+    if (Number(amount) > totalDue + 0.01) {
+      return res.status(400).json({ success: false, message: `Amount ₹${amount} exceeds amount due ₹${totalDue.toFixed(2)}` });
+    }
+
+    const keyId     = process.env.RAZORPAY_KEY_ID;
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    if (!keyId || !keySecret) {
+      return res.status(500).json({ success: false, message: 'Razorpay credentials not configured' });
+    }
+
+    const auth    = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+    const closeBy = Math.floor(Date.now() / 1000) + 600; // 10-minute expiry
+
+    const qrRes = await fetch('https://api.razorpay.com/v1/payments/qr_codes', {
+      method: 'POST',
+      headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'upi_qr',
+        name: 'MicroLab',
+        usage: 'single_use',
+        fixed_amount: true,
+        payment_amount: Math.round(Number(amount) * 100),
+        description: `Payment for booking ${bookingId}`,
+        close_by: closeBy,
+        notes: {
+          booking_id:    String(bookingId),
+          technician_id: String(technicianId),
+          amount:        String(amount),
+          // Saved by the webhook once the payment is recorded.
+          ...(reasonText && { partial_reason: reasonText }),
+        },
+      }),
+    });
+
+    const qrData = await qrRes.json();
+    console.log(`[QR] Razorpay response status=${qrRes.status} id=${qrData.id ?? 'NONE'} image_url=${qrData.image_url ?? 'NULL'} error=${JSON.stringify(qrData.error ?? null)}`);
+    if (!qrRes.ok || !qrData.id) {
+      console.error('❌ Razorpay QR creation failed:', JSON.stringify(qrData));
+      return res.status(502).json({ success: false, message: qrData.error?.description || 'Failed to create QR code' });
+    }
+    if (!qrData.image_url) {
+      console.warn(`[QR] image_url is null for qr_id=${qrData.id} — Razorpay may not support QR in test mode`);
+      return res.status(502).json({ success: false, message: 'QR image not available. This may not be supported in test mode.' });
+    }
+
+    qrStore.sessions.set(qrData.id, {
+      bookingId:    parseInt(bookingId, 10),
+      amount:       Number(amount),
+      technicianId,
+      paid:         false,
+      paymentId:    null,
+    });
+
+    console.log(`✅ QR created — qr_id=${qrData.id} booking_id=${bookingId} amount=₹${amount} by technician_id=${technicianId}`);
+    res.json({ success: true, qrId: qrData.id, imageUrl: qrData.image_url });
+  } catch (err) {
+    console.error('❌ createQrPayment FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── GET /api/technicians/qr-status/:qrId ─────────────────────────────────────
+// Polling endpoint: returns whether the QR session has been paid.
+exports.getQrStatus = (req, res) => {
+  const session = qrStore.sessions.get(req.params.qrId);
+  if (!session) return res.status(404).json({ success: false, message: 'QR session not found' });
+  res.json({ success: true, paid: session.paid, paymentId: session.paymentId });
 };
 
 // ── PUT /api/technicians/bookings/:bookingId/additional-charge ───────────────

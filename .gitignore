@@ -25,5 +25,8 @@ client/.flutter-plugins-dependencies
 *.iml
 .vscode/
 
+# Server logs — contain patient mobile numbers
+server/logs/
+
 # Runtime-uploaded files (test-booking documents, patient photos) — not source
 server/uploads/

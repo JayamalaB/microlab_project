@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +13,12 @@ import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/models.dart' show BranchModel;
 import 'package:microlab/utils/app_messages.dart';
 import 'technician_active_job_screen.dart';
+// ₹ amount for display — whole rupees as "1229", and paise kept as
+// "1229.50" (never cut off, so a due like ₹0.50 doesn't show as ₹0).
+String _inr(num v) {
+  final r = (v * 100).round() / 100;
+  return r == r.truncateToDouble() ? r.toInt().toString() : r.toStringAsFixed(2);
+}
 
 // Popped by TechnicianBookingDetailScreen (see _exitScreen) when the
 // technician leaves mid-journey from an instance that was itself opened from
@@ -166,6 +173,10 @@ class _TechnicianBookingDetailScreenState
   List<Map<String, String>> _catalogueItems = [];
   bool _showAddTest = false;
   String _searchQuery = '';
+  // "Add Test / Package" multi-select: ticked catalogue ids, added together
+  // by _addSelectedTests.
+  final Set<String> _pendingTestIds = {};
+  bool _addingTests = false;
 
   // Hand Over to Lab — branch list for the "received branch/lab" picker,
   // fetched lazily (only when that dialog is actually about to open, not on
@@ -277,7 +288,9 @@ class _TechnicianBookingDetailScreenState
 
   double get _amountDue {
     final due = (_testsTotal + _serviceCharge + _additionalCharge) - (_liveAmountPaid + _sessionPaymentCollected);
-    return due < 0.0 ? 0.0 : due;
+    // Rounded to paise so float leftovers (e.g. 0.0000001) never count as due.
+    final r = (due * 100).round() / 100;
+    return r < 0.0 ? 0.0 : r;
   }
 
   // Additional charges can be entered on site — from Destination Reached up
@@ -433,29 +446,8 @@ class _TechnicianBookingDetailScreenState
   Future<void> _addAdditionalCharge() async {
     final targets = _additionalChargeTargets;
     if (targets.isEmpty) return;
-    var target = targets.first;
-    if (targets.length > 1) {
-      final picked = await showDialog<int>(
-        context: context,
-        builder: (ctx) => SimpleDialog(
-          title: const Text('Add charge for', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          children: [
-            for (var i = 0; i < targets.length; i++)
-              SimpleDialogOption(
-                onPressed: () => Navigator.pop(ctx, i),
-                child: Text(
-                  targets[i].amount > 0
-                      ? '${targets[i].name}  ·  ₹${targets[i].amount.toInt()} added'
-                      : targets[i].name,
-                  style: const TextStyle(fontSize: 14),
-                ),
-              ),
-          ],
-        ),
-      );
-      if (picked == null || !mounted) return;
-      target = targets[picked];
-    }
+    // Always apply additional charge to the main patient's booking
+    final target = targets.firstWhere((t) => t.isMain, orElse: () => targets.first);
     await _editAdditionalCharge(target);
   }
 
@@ -602,7 +594,7 @@ class _TechnicianBookingDetailScreenState
       if (!mounted) return;
     }
     AppMessages.success(context, result > 0
-        ? 'Additional charge ₹${result.toInt()} added for ${target.name}'
+        ? 'Additional charge ₹${_inr(result)} added for ${target.name}'
         : 'Additional charge removed');
   }
 
@@ -615,11 +607,13 @@ class _TechnicianBookingDetailScreenState
       final data = await ApiService.getBookingPaymentInfo(bookingId);
       if (!mounted || data == null) return;
       setState(() {
-        _livePaymentStatus = data['payment_status'] as String? ?? _livePaymentStatus;
-        _liveAmountPaid    = double.tryParse(data['amount_paid']?.toString() ?? '') ?? _liveAmountPaid;
-        _totalAmount       = double.tryParse(data['total_amount']?.toString() ?? '') ?? _totalAmount;
-        _additionalCharge  = double.tryParse(data['additional_charge_amount']?.toString() ?? '') ?? 0.0;
+        _livePaymentStatus      = data['payment_status'] as String? ?? _livePaymentStatus;
+        _liveAmountPaid         = double.tryParse(data['amount_paid']?.toString() ?? '') ?? _liveAmountPaid;
+        _totalAmount            = double.tryParse(data['total_amount']?.toString() ?? '') ?? _totalAmount;
+        _additionalCharge       = double.tryParse(data['additional_charge_amount']?.toString() ?? '') ?? 0.0;
         _additionalChargeReason = data['additional_charge_reason'] as String?;
+        // Server value now includes everything paid — session tracking is redundant
+        _sessionPaymentCollected = 0.0;
       });
     } catch (e) {
       debugPrint('[_refreshPaymentInfo] $e');
@@ -1664,6 +1658,8 @@ void _resumeJourney() {
 
   void _showAddFamilyTestSheet(int familyBookingId) {
     String searchQuery = '';
+    final Set<String> pendingIds = {};
+    bool adding = false;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1677,6 +1673,9 @@ void _resumeJourney() {
             return (t['name']?.toLowerCase().contains(searchQuery.toLowerCase()) ?? false) ||
                 (t['category']?.toLowerCase().contains(searchQuery.toLowerCase()) ?? false);
           }).toList();
+          final selectedTotal = _catalogueItems
+              .where((t) => pendingIds.contains(t['id']))
+              .fold<double>(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
           return Container(
             decoration: const BoxDecoration(
               color: Colors.white,
@@ -1715,38 +1714,96 @@ void _resumeJourney() {
                   ),
                 ),
                 const SizedBox(height: 8),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(ctx).size.height * 0.4,
+                Container(
+                  height: filtered.isEmpty ? null : (filtered.length * 58.0).clamp(58.0, 300.0),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.divider),
                   ),
                   child: filtered.isEmpty
                       ? const Padding(
                           padding: EdgeInsets.symmetric(vertical: 20),
-                          child: Text('No tests found',
-                              style: TextStyle(fontSize: 13, color: AppColors.textHint)),
+                          child: Center(child: Text('No tests found',
+                              style: TextStyle(fontSize: 13, color: AppColors.textHint))),
                         )
-                      : ListView.builder(
-                          shrinkWrap: true,
+                      : ListView.separated(
+                          padding: EdgeInsets.zero,
                           itemCount: filtered.length,
+                          separatorBuilder: (_, __) => const Divider(height: 1),
                           itemBuilder: (_, i) {
                             final t = filtered[i];
-                            return ListTile(
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                            final id = t['id'] ?? '';
+                            return CheckboxListTile(
+                              value: pendingIds.contains(id),
+                              onChanged: adding
+                                  ? null
+                                  : (v) => setSheet(() {
+                                        if (v == true) pendingIds.add(id);
+                                        else pendingIds.remove(id);
+                                      }),
+                              activeColor: AppColors.brandGreen,
+                              dense: true,
+                              controlAffinity: ListTileControlAffinity.leading,
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 6),
                               title: Text(t['name'] ?? '',
                                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                              subtitle: Text(t['category'] ?? '',
-                                  style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                              trailing: Text('₹${t['price'] ?? '0'}',
+                              subtitle: (t['category'] ?? '').isEmpty ? null
+                                  : Text(t['category']!,
+                                      style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                              secondary: Text('₹${t['price'] ?? '0'}',
                                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
                                       color: AppColors.brandGreen)),
-                              onTap: () {
-                                Navigator.pop(ctx);
-                                _addFamilyTest(t, familyBookingId);
-                              },
                             );
                           },
                         ),
                 ),
+                const SizedBox(height: 10),
+                Row(children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: adding ? null : () => Navigator.pop(ctx),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.textSecondary,
+                        side: const BorderSide(color: AppColors.divider),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 2,
+                    child: ElevatedButton(
+                      onPressed: (pendingIds.isEmpty || adding) ? null : () async {
+                        setSheet(() => adding = true);
+                        final picked = _catalogueItems
+                            .where((t) => pendingIds.contains(t['id'])).toList();
+                        for (final t in picked) {
+                          await _addFamilyTest(t, familyBookingId);
+                        }
+                        if (ctx.mounted) Navigator.pop(ctx);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.brandGreen,
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: adding
+                          ? const SizedBox(width: 18, height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : Text(
+                              pendingIds.isEmpty
+                                  ? 'Select tests to add'
+                                  : 'Add ${pendingIds.length} selected · ₹${selectedTotal.toStringAsFixed(0)}',
+                              style: const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                    ),
+                  ),
+                ]),
               ],
             ),
           );
@@ -1802,6 +1859,31 @@ void _resumeJourney() {
       }
     }
   }
+
+  // Adds every ticked test/package, one after another through _addTest (same
+  // optimistic add, server call, prescription gate and failure message as a
+  // single add), then closes the picker.
+  Future<void> _addSelectedTests() async {
+    if (_isFinalized || _addingTests || _pendingTestIds.isEmpty) return;
+    final picked = _catalogueItems.where((t) => _pendingTestIds.contains(t['id'])).toList();
+    setState(() => _addingTests = true);
+    for (final t in picked) {
+      await _addTest(t);
+      if (!mounted) return;
+    }
+    setState(() {
+      _addingTests = false;
+      _pendingTestIds.clear();
+      _showAddTest = false;
+      _searchQuery = '';
+    });
+  }
+
+  void _closeAddTest() => setState(() {
+        _showAddTest = false;
+        _searchQuery = '';
+        _pendingTestIds.clear();
+      });
 
   // Collection checklist toggle — purely a per-item tracking flag, does not
   // touch _currentStatus, collection_status, or the sample_collected flow.
@@ -2328,7 +2410,7 @@ void _resumeJourney() {
                   style: TextStyle(
                       fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
               const SizedBox(height: 4),
-              Text('${widget.booking.customerName} · ${widget.booking.id}',
+              Text('${widget.booking.customerName}${widget.booking.referenceNo != null ? ' · ${widget.booking.referenceNo}' : ''}',
                   style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
               const SizedBox(height: 20),
 
@@ -2341,15 +2423,15 @@ void _resumeJourney() {
                 subtitle: _unpaidMembers.isEmpty
                     ? 'All payments collected'
                     : _unpaidMembers.length > 1
-                        ? 'Collect ₹${_unpaidTotal.toInt()} for ${_unpaidMembers.length} members. Part payment is fine to continue.'
+                        ? 'Collect ₹${_inr(_unpaidTotal)} for ${_unpaidMembers.length} members. Part payment is fine to continue.'
                         : _livePaymentStatus == 'paid'
-                            ? 'Original ₹${_liveAmountPaid.toInt()} paid. Collect additional: ₹${_unpaidTotal.toInt()}'
-                            : 'Collect ₹${_unpaidTotal.toInt()} from customer (tests amount)',
+                            ? 'Original ₹${_inr(_liveAmountPaid)} paid. Collect additional: ₹${_inr(_unpaidTotal)}'
+                            : 'Collect ₹${_inr(_unpaidTotal)} from customer (tests amount)',
                 done: _unpaidMembers.isEmpty,
                 locked: false,
                 buttonLabel: _unpaidMembers.isEmpty
                     ? 'Paid ✓'
-                    : 'Make Payment  ₹${_unpaidTotal.toInt()}',
+                    : 'Make Payment  ₹${_inr(_unpaidTotal)}',
                 buttonColor: _unpaidMembers.isEmpty ? AppColors.brandGreen : const Color(0xFF1565C0),
                 // Same entry point as the Collect Payment card: a family with
                 // 2+ members owing is asked single vs individual payment.
@@ -2420,9 +2502,17 @@ void _resumeJourney() {
     required String subtitle,
     bool allowPartial = true,
   }) {
-    final amountCtrl = TextEditingController(text: maxAmount.toStringAsFixed(0));
+    // The due can carry paise (older fares, offer prices) — the box, the
+    // limit shown and the check all use the same exact 2-decimal amount.
+    maxAmount = (maxAmount * 100).round() / 100;
+    final amountCtrl = TextEditingController(text: _inr(maxAmount));
+    final reasonCtrl = TextEditingController();
     String method = 'RAZORPAY';
     String? errorText;
+    String? reasonError;
+    // Less than the full due → a partial payment, which needs a reason.
+    double enteredAmount() => ((double.tryParse(amountCtrl.text) ?? 0) * 100).round() / 100;
+    bool isPartial() => allowPartial && enteredAmount() > 0 && enteredAmount() < maxAmount - 0.001;
     return showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       isScrollControlled: true,
@@ -2458,17 +2548,38 @@ void _resumeJourney() {
                 const SizedBox(height: 6),
                 TextField(
                   controller: amountCtrl,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: false),
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  onChanged: (_) { if (errorText != null) setSheet(() => errorText = null); },
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
+                  // Always rebuilds: the reason field follows the amount.
+                  onChanged: (_) => setSheet(() { errorText = null; reasonError = null; }),
                   decoration: InputDecoration(
                     prefixText: '₹ ',
                     errorText: errorText,
-                    helperText: 'Full amount due: ₹${maxAmount.toInt()} — enter less to pay partially',
+                    helperText: 'Full amount due: ₹${_inr(maxAmount)} — enter less to pay partially',
                     helperMaxLines: 2,
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
                   ),
                 ),
+                // Only for a partial payment — not needed when paying in full.
+                if (isPartial()) ...[
+                  const SizedBox(height: 12),
+                  const Text('Reason for partial payment *',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: reasonCtrl,
+                    maxLength: 255,
+                    maxLines: 2,
+                    minLines: 1,
+                    textCapitalization: TextCapitalization.sentences,
+                    onChanged: (_) { if (reasonError != null) setSheet(() => reasonError = null); },
+                    decoration: InputDecoration(
+                      hintText: 'Why is only part of the amount being paid?',
+                      errorText: reasonError,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ],
               ] else
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -2480,7 +2591,7 @@ void _resumeJourney() {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Text('Amount', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                      Text('₹${maxAmount.toInt()}',
+                      Text('₹${_inr(maxAmount)}',
                           style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
                     ],
                   ),
@@ -2499,7 +2610,16 @@ void _resumeJourney() {
                     onTap: () => setSheet(() => method = 'RAZORPAY'),
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _PaymentMethodChip(
+                    label: 'UPI QR',
+                    icon: Icons.qr_code_rounded,
+                    selected: method == 'QR',
+                    onTap: () => setSheet(() => method = 'QR'),
+                  ),
+                ),
+                const SizedBox(width: 8),
                 Expanded(
                   child: _PaymentMethodChip(
                     label: 'Cash',
@@ -2516,10 +2636,19 @@ void _resumeJourney() {
                 height: 48,
                 child: ElevatedButton(
                   onPressed: () {
-                    final amt = double.tryParse(amountCtrl.text) ?? 0;
+                    final amt = enteredAmount();
                     if (amt <= 0) { setSheet(() => errorText = 'Enter an amount greater than 0'); return; }
-                    if (amt > maxAmount) { setSheet(() => errorText = 'Cannot exceed ₹${maxAmount.toInt()}'); return; }
-                    Navigator.pop(ctx, {'method': method, 'amount': amt});
+                    if (amt > maxAmount + 0.001) { setSheet(() => errorText = 'Cannot exceed ₹${_inr(maxAmount)}'); return; }
+                    final reason = reasonCtrl.text.trim();
+                    if (isPartial() && reason.isEmpty) {
+                      setSheet(() => reasonError = 'Please enter the reason for partial payment');
+                      return;
+                    }
+                    Navigator.pop(ctx, {
+                      'method': method,
+                      'amount': amt,
+                      'partialReason': isPartial() ? reason : null,
+                    });
                   },
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.brandGreen,
@@ -2527,8 +2656,12 @@ void _resumeJourney() {
                     elevation: 0,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                   ),
-                  child: Text(method == 'CASH' ? 'Confirm Cash Received' : 'Continue to Razorpay',
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                  child: Text(
+                    method == 'CASH' ? 'Confirm Cash Received'
+                        : method == 'QR' ? 'Generate QR Code'
+                        : 'Continue to Razorpay',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
                 ),
               ),
             ],
@@ -2659,9 +2792,27 @@ void _resumeJourney() {
     if (choice == null || !mounted) return;
     final method = choice['method'] as String;
     final amount = choice['amount'] as double;
+    final partialReason = choice['partialReason'] as String?;
 
     if (method == 'CASH') {
-      await _collectCashPayment(amount: amount, onDone: onDone);
+      await _collectCashPayment(amount: amount, partialReason: partialReason, onDone: onDone);
+      return;
+    }
+
+    if (method == 'QR') {
+      final bookingId = int.tryParse(widget.booking.id) ?? 0;
+      final paymentId = await _showQrPaymentSheet(bookingId: bookingId, amount: amount, partialReason: partialReason);
+      if (!mounted) return;
+      if (paymentId != null) {
+        final stillDue = amount < _amountDue;
+        setState(() {
+          _sessionPaymentCollected += amount;
+          _livePaymentStatus       = stillDue ? 'partial' : 'paid';
+        });
+        AppMessages.success(context, 'UPI payment of ₹${_inr(amount)} received');
+        onDone?.call();
+        _refreshPaymentInfo();
+      }
       return;
     }
 
@@ -2669,7 +2820,7 @@ void _resumeJourney() {
 
     final options = {
       'key': AppConstants.razorpayKeyId,
-      'amount': (amount * 100).toInt(),
+      'amount': (amount * 100).round(),
       'name': 'MicroLab',
       'description': _selectedTests.map((t) => t['name']).join(', '),
       'prefill': {
@@ -2695,7 +2846,7 @@ void _resumeJourney() {
           _sessionPaymentCollected += paidAmount;
           _livePaymentStatus       = stillDue ? 'partial' : 'paid';
         });
-        AppMessages.success(context, 'Payment of ₹${paidAmount.toInt()} received. Ref: $paymentId');
+        AppMessages.success(context, 'Payment of ₹${_inr(paidAmount)} received. Ref: $paymentId');
         onDone?.call();
         // Persist to DB and refresh live payment state from server
         () async {
@@ -2704,6 +2855,7 @@ void _resumeJourney() {
             razorpayPaymentId: paymentId,
             amount: paidAmount,
             paymentMethod: 'RAZORPAY',
+            partialReason: partialReason,
           );
           if (mounted) _refreshPaymentInfo();
           if (!ok && mounted) {
@@ -2724,7 +2876,7 @@ void _resumeJourney() {
 
   // Cash counterpart to _collectPayment — no Razorpay checkout, just a direct
   // server record. Supports the same partial-amount capability.
-  Future<void> _collectCashPayment({required double amount, VoidCallback? onDone}) async {
+  Future<void> _collectCashPayment({required double amount, String? partialReason, VoidCallback? onDone}) async {
     setState(() => _isProcessingPayment = true);
     final bookingId      = int.tryParse(widget.booking.id) ?? 0;
     final stillDue       = amount < _amountDue;
@@ -2733,6 +2885,7 @@ void _resumeJourney() {
       bookingId: bookingId,
       amount: amount,
       paymentMethod: 'CASH',
+      partialReason: partialReason,
     );
     if (!mounted) return;
     setState(() {
@@ -2744,7 +2897,7 @@ void _resumeJourney() {
     });
     if (ok) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('₹${amount.toInt()} cash received'),
+        content: Text('₹${_inr(amount)} cash received'),
         backgroundColor: AppColors.brandGreen,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -2774,6 +2927,7 @@ void _resumeJourney() {
     if (choice == null || !mounted) return;
     final method = choice['method'] as String;
     final amount = choice['amount'] as double;
+    final partialReason = choice['partialReason'] as String?;
     final stillDue = amount < amountDue;
 
     void applyLocalUpdate(String paymentId) {
@@ -2786,7 +2940,7 @@ void _resumeJourney() {
           return p;
         }).toList();
       });
-      AppMessages.success(context, '₹${amount.toInt()} received for $patientName. Ref: $paymentId');
+      AppMessages.success(context, '₹${_inr(amount)} received for $patientName. Ref: $paymentId');
     }
 
     if (method == 'CASH') {
@@ -2794,6 +2948,7 @@ void _resumeJourney() {
         bookingId: siblingBookingId,
         amount: amount,
         paymentMethod: 'CASH',
+        partialReason: partialReason,
       );
       if (ok) {
         applyLocalUpdate('cash');
@@ -2808,9 +2963,18 @@ void _resumeJourney() {
       return;
     }
 
+    if (method == 'QR') {
+      final paymentId = await _showQrPaymentSheet(bookingId: siblingBookingId, amount: amount, partialReason: partialReason);
+      if (paymentId != null && mounted) {
+        applyLocalUpdate(paymentId);
+        _loadLinkedPatients();
+      }
+      return;
+    }
+
     final options = {
       'key': AppConstants.razorpayKeyId,
-      'amount': (amount * 100).toInt(),
+      'amount': (amount * 100).round(),
       'name': 'MicroLab',
       'description': 'Tests for $patientName',
       'prefill': {
@@ -2834,6 +2998,7 @@ void _resumeJourney() {
           razorpayPaymentId: paymentId,
           amount: amount,
           paymentMethod: 'RAZORPAY',
+          partialReason: partialReason,
         );
         if (!ok && mounted) {
           AppMessages.warning(context,
@@ -2850,6 +3015,24 @@ void _resumeJourney() {
               : AppMessages.error(context, AppMessages.paymentError(msg));
         }
       },
+    );
+  }
+
+  // Shows a QR code sheet and polls until the customer pays or cancels.
+  // Returns the Razorpay payment ID on success, null if dismissed without payment.
+  // Pass [bookingIds] for combined family QR so the server validates against total due.
+  Future<String?> _showQrPaymentSheet({
+    required int bookingId,
+    required double amount,
+    List<int>? bookingIds,
+    String? partialReason,
+  }) async {
+    return showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _QrPaymentSheet(bookingId: bookingId, amount: amount, bookingIds: bookingIds, partialReason: partialReason),
     );
   }
 
@@ -2896,6 +3079,7 @@ void _resumeJourney() {
     if (choice == null || !mounted) return;
     final method        = choice['method'] as String;
     final enteredAmount = choice['amount'] as double;
+    final partialReason = choice['partialReason'] as String?;
 
     // Sequential/waterfall allocation: fill each booking's due amount in list
     // order (parent first, then siblings) until the entered amount runs out.
@@ -2939,7 +3123,7 @@ void _resumeJourney() {
         }
       });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content:         Text('₹${enteredAmount.toInt()} received · $paymentRef'),
+        content:         Text('₹${_inr(enteredAmount)} received · $paymentRef'),
         backgroundColor: AppColors.brandGreen,
         behavior:        SnackBarBehavior.floating,
         shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -2954,6 +3138,7 @@ void _resumeJourney() {
           bookingId:     a['bookingId'] as int,
           amount:        a['allocated'] as double,
           paymentMethod: 'CASH',
+          partialReason: partialReason,
         );
         if (!ok) allOk = false;
       }
@@ -2970,13 +3155,52 @@ void _resumeJourney() {
       return;
     }
 
+    if (method == 'QR') {
+      final allBookingIds = toCharge.map((a) => a['bookingId'] as int).toList();
+      final primaryId     = allBookingIds.first;
+      final paymentId     = await _showQrPaymentSheet(
+        bookingId:  primaryId,
+        amount:     enteredAmount,
+        bookingIds: allBookingIds.length > 1 ? allBookingIds : null,
+        partialReason: partialReason,
+      );
+      if (!mounted) return;
+      if (paymentId != null) {
+        setState(() => _isProcessingPayment = true);
+        var allOk = true;
+        for (final a in toCharge) {
+          final ok = await ApiService.collectPayment(
+            bookingId:         a['bookingId'] as int,
+            razorpayPaymentId: paymentId,
+            amount:            a['allocated'] as double,
+            paymentMethod:     'QR',
+            partialReason:     partialReason,
+          );
+          if (!ok) allOk = false;
+        }
+        if (mounted) {
+          applySuccessState(paymentId);
+          if (!allOk) {
+            AppMessages.warning(context,
+                'QR payment received, but it didn\'t save for every member. Note ref $paymentId and tell support.',
+                duration: const Duration(seconds: 8));
+          }
+          _refreshPaymentInfo();
+          _loadLinkedPatients();
+          onDone?.call();
+        }
+      }
+      if (mounted) setState(() => _isProcessingPayment = false);
+      return;
+    }
+
     setState(() => _isProcessingPayment = true);
 
     openRazorpay(
       options: {
         // Same configured key as every other payment (was a hard-coded test key).
         'key':         AppConstants.razorpayKeyId,
-        'amount':      (enteredAmount * 100).toInt(),
+        'amount':      (enteredAmount * 100).round(),
         'name':        'MicroLab',
         'description': 'Combined payment · ${unpaidItems.length} members',
         'prefill': {
@@ -3000,6 +3224,7 @@ void _resumeJourney() {
             razorpayPaymentId: paymentId,
             amount:            a['allocated'] as double,
             paymentMethod:     'RAZORPAY',
+            partialReason:     partialReason,
           );
           if (!ok) allOk = false;
         }
@@ -3076,7 +3301,7 @@ void _resumeJourney() {
           _PayModeOption(
             icon: Icons.payments_outlined,
             title: 'Single payment',
-            subtitle: 'One payment of ₹${_unpaidTotal.toInt()} for all ${members.length} members',
+            subtitle: 'One payment of ₹${_inr(_unpaidTotal)} for all ${members.length} members',
             onTap: () => Navigator.pop(ctx, 'combined'),
           ),
           const SizedBox(height: 10),
@@ -3137,7 +3362,7 @@ void _resumeJourney() {
                     _collectForMember(m, onDone: onDone);
                   },
                   icon: const Icon(Icons.payment_outlined, size: 18),
-                  label: Text('Collect ₹${m.amount.toInt()} · ${m.name}',
+                  label: Text('Collect ₹${_inr(m.amount)} · ${m.name}',
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF1565C0),
@@ -3181,8 +3406,9 @@ void _resumeJourney() {
           children: [
             const Text('Manage Booking',
                 style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600)),
-            Text(widget.booking.id,
-                style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 11)),
+            if (widget.booking.referenceNo != null)
+              Text(widget.booking.referenceNo!,
+                  style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 11)),
           ],
         ),
         actions: [
@@ -3346,6 +3572,8 @@ void _resumeJourney() {
                       .join(', ')),
               _InfoRow(Icons.event_outlined, 'Date', _formatDate(widget.booking.date)),
               _InfoRow(Icons.schedule_outlined, 'Slot', widget.booking.timeSlot),
+              if (widget.booking.collectionNotes != null && widget.booking.collectionNotes!.isNotEmpty)
+                _InfoRow(Icons.notes_outlined, 'Notes', widget.booking.collectionNotes!),
               if (widget.booking.isVip)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
@@ -3491,7 +3719,7 @@ void _resumeJourney() {
                       hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
                       prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
                       suffixIcon: GestureDetector(
-                        onTap: () => setState(() { _showAddTest = false; _searchQuery = ''; }),
+                        onTap: _addingTests ? null : _closeAddTest,
                         child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
                       ),
                       filled: true, fillColor: AppColors.background,
@@ -3502,44 +3730,125 @@ void _resumeJourney() {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  ..._filteredCatalogue.take(5).map((t) => GestureDetector(
-                    onTap: () { _addTest(t); },
-                    child: Container(
-                      margin: const EdgeInsets.only(bottom: 6),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: AppColors.divider),
+                  // Multi-select: tick any number of tests/packages, then
+                  // "Add N selected" adds them all. Ticks survive changing
+                  // the search text.
+                  ...() {
+                    final results = _filteredCatalogue;
+                    final selectedTotal = _catalogueItems
+                        .where((t) => _pendingTestIds.contains(t['id']))
+                        .fold<double>(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
+                    return <Widget>[
+                      Container(
+                        // Fixed height (not shrinkWrap) so a large catalogue
+                        // only builds the rows on screen.
+                        height: results.isEmpty ? null : (results.length * 58.0).clamp(58.0, 300.0),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: AppColors.divider),
+                        ),
+                        child: results.isEmpty
+                            ? const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 18),
+                                child: Center(
+                                  child: Text('No tests found',
+                                      style: TextStyle(fontSize: 13, color: AppColors.textHint)),
+                                ),
+                              )
+                            : ListView.separated(
+                                padding: EdgeInsets.zero,
+                                itemCount: results.length,
+                                separatorBuilder: (_, __) => const Divider(height: 1),
+                                itemBuilder: (_, i) {
+                                  final t = results[i];
+                                  final id = t['id'] ?? '';
+                                  return CheckboxListTile(
+                                    value: _pendingTestIds.contains(id),
+                                    onChanged: _addingTests
+                                        ? null
+                                        : (v) => setState(() {
+                                              if (v == true) {
+                                                _pendingTestIds.add(id);
+                                              } else {
+                                                _pendingTestIds.remove(id);
+                                              }
+                                            }),
+                                    activeColor: AppColors.brandGreen,
+                                    dense: true,
+                                    controlAffinity: ListTileControlAffinity.leading,
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+                                    title: Text(t['name'] ?? '',
+                                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                                    subtitle: (t['category'] ?? '').isEmpty
+                                        ? null
+                                        : Text(t['category']!,
+                                            style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                                    secondary: Text('₹${t['price']}',
+                                        style: const TextStyle(
+                                            fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+                                  );
+                                },
+                              ),
                       ),
-                      child: Row(children: [
-                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Text(t['name'] ?? '', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                          Text(t['category'] ?? '', style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                        ])),
-                        Text('₹${t['price']}', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen)),
-                        const SizedBox(width: 8),
-                        const Icon(Icons.add_circle_outline, size: 18, color: AppColors.brandGreen),
+                      const SizedBox(height: 10),
+                      Row(children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: _addingTests ? null : _closeAddTest,
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: AppColors.textSecondary,
+                              side: const BorderSide(color: AppColors.divider),
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                            child: const Text('Cancel'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          flex: 2,
+                          child: ElevatedButton(
+                            onPressed: (_pendingTestIds.isEmpty || _addingTests) ? null : _addSelectedTests,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.brandGreen,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            ),
+                            child: _addingTests
+                                ? const SizedBox(
+                                    width: 18, height: 18,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                                : Text(
+                                    _pendingTestIds.isEmpty
+                                        ? 'Select tests to add'
+                                        : 'Add ${_pendingTestIds.length} selected · ₹${_inr(selectedTotal)}',
+                                    style: const TextStyle(fontWeight: FontWeight.w600),
+                                  ),
+                          ),
+                        ),
                       ]),
-                    ),
-                  )),
+                    ];
+                  }(),
                 ],
 
                 if (_selectedTests.isNotEmpty) ...[
                   const Divider(height: 20),
-                  _BillRow('Tests Total', '₹${_testsTotal.toInt()}', bold: true, green: true),
+                  _BillRow('Tests Total', '₹${_inr(_testsTotal)}', bold: true, green: true),
                   const SizedBox(height: 4),
                   _BillRow(
                     'Service Charge',
-                    '₹${_serviceCharge.toInt()}${_livePaymentStatus == 'paid' ? ' (paid at booking)' : ' (due now)'}',
+                    '₹${_inr(_serviceCharge)}${_livePaymentStatus == 'paid' ? ' (paid at booking)' : ' (due now)'}',
                     sub: true,
                   ),
                   if (_additionalCharge > 0) ...[
                     const SizedBox(height: 4),
-                    _BillRow('Additional Charge', '₹${_additionalCharge.toInt()}', sub: true),
+                    _BillRow('Additional Charge', '₹${_inr(_additionalCharge)}', sub: true),
                   ],
                   const Divider(height: 16),
-                  _BillRow('Amount Due Now', '₹${_amountDue.toInt()}', bold: true, green: true),
+                  _BillRow('Amount Due Now', '₹${_inr(_amountDue)}', bold: true, green: true),
                 ],
               ],
             ),
@@ -3973,11 +4282,11 @@ void _resumeJourney() {
                     Expanded(child: Text(
                       _paymentDone
                           ? (_livePaymentStatus == 'paid'
-                              ? 'Service charge ₹${_serviceCharge.toInt()} paid at booking. All tests also paid.'
-                              : 'All dues collected — service charge ₹${_serviceCharge.toInt()} + tests.')
+                              ? 'Service charge ₹${_inr(_serviceCharge)} paid at booking. All tests also paid.'
+                              : 'All dues collected — service charge ₹${_inr(_serviceCharge)} + tests.')
                           : _livePaymentStatus == 'paid'
-                              ? 'Original booking (₹${_liveAmountPaid.toInt()}) paid. Collect ${_additionalCharge > 0 ? 'balance due' : 'additional tests'}: ₹${_amountDue.toInt()}'
-                              : 'Service charge ₹${_serviceCharge.toInt()} not yet paid. Collect total due: ₹${_amountDue.toInt()}',
+                              ? 'Original booking (₹${_inr(_liveAmountPaid)}) paid. Collect ${_additionalCharge > 0 ? 'balance due' : 'additional tests'}: ₹${_inr(_amountDue)}'
+                              : 'Service charge ₹${_inr(_serviceCharge)} not yet paid. Collect total due: ₹${_inr(_amountDue)}',
                       style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
                     )),
                   ]),
@@ -4012,7 +4321,7 @@ void _resumeJourney() {
                           if ((t.reason ?? '').isNotEmpty)
                             Text(t.reason!, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
                         ])),
-                        Text('₹${t.amount.toInt()}',
+                        Text('₹${_inr(t.amount)}',
                             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
                         if (editable)
                           IconButton(
@@ -4078,7 +4387,7 @@ void _resumeJourney() {
                               children: [
                                 Text(r['name'] as String,
                                     style: const TextStyle(fontSize: 13, color: Color(0xFF555555))),
-                                Text('₹${(r['amount'] as double).toInt()}',
+                                Text('₹${_inr((r['amount'] as double))}',
                                     style: const TextStyle(fontSize: 13, color: Color(0xFF333333))),
                               ],
                             ),
@@ -4089,7 +4398,7 @@ void _resumeJourney() {
                             children: [
                               const Text('Total Due',
                                   style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
-                              Text('₹${totalDue.toInt()}',
+                              Text('₹${_inr(totalDue)}',
                                   style: const TextStyle(
                                       fontSize: 13,
                                       fontWeight: FontWeight.w700,
@@ -4122,7 +4431,7 @@ void _resumeJourney() {
                             _collectAllPayment();
                           },
                           icon: const Icon(Icons.payments_outlined, size: 16),
-                          label: Text('Pay together instead · ₹${totalAmount.toInt()}',
+                          label: Text('Pay together instead · ₹${_inr(totalAmount)}',
                               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                           style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
                         ),
@@ -4141,7 +4450,7 @@ void _resumeJourney() {
                         label: Text(
                           _isProcessingPayment
                               ? 'Processing…'
-                              : 'Collect Payment · ₹${totalAmount.toInt()} · $totalUnpaid members',
+                              : 'Collect Payment · ₹${_inr(totalAmount)} · $totalUnpaid members',
                           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                         ),
                         style: ElevatedButton.styleFrom(
@@ -4183,7 +4492,7 @@ void _resumeJourney() {
                         label: Text(
                           _isProcessingPayment
                               ? 'Processing…'
-                              : 'Collect ₹${_amountDue.toInt()} · ${widget.booking.customerName}',
+                              : 'Collect ₹${_inr(_amountDue)} · ${widget.booking.customerName}',
                           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
                         ),
                         style: ElevatedButton.styleFrom(
@@ -4212,7 +4521,7 @@ void _resumeJourney() {
                             patientName: mName,
                           ),
                           icon: const Icon(Icons.payment_outlined, size: 18),
-                          label: Text('Collect ₹${due.toInt()} · $mName',
+                          label: Text('Collect ₹${_inr(due)} · $mName',
                               style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFF1565C0),
@@ -4309,8 +4618,8 @@ void _resumeJourney() {
                                 '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
                                 style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                               ),
-                              if ((c['booking_ref'] as String?) != null)
-                                Text(c['booking_ref'] as String,
+                              if ((c['reference_no'] as String?) != null)
+                                Text(c['reference_no'] as String,
                                     style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
                             ],
                           )),
@@ -4331,7 +4640,7 @@ void _resumeJourney() {
                                     color: const Color(0xFFE3F2FD),
                                     borderRadius: BorderRadius.circular(6),
                                   ),
-                                  child: Text('₹${amountDue.toInt()} due',
+                                  child: Text('₹${_inr(amountDue)} due',
                                       style: const TextStyle(fontSize: 11, color: Color(0xFF1565C0), fontWeight: FontWeight.w600)),
                                 ),
                         ]),
@@ -4402,7 +4711,7 @@ void _resumeJourney() {
                             const Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFE65100)),
                             const SizedBox(width: 4),
                             Text(
-                              'Refund ₹${(_familyPendingRefund[memberBookingId]!).toInt()} pending',
+                              'Refund ₹${_inr((_familyPendingRefund[memberBookingId]!))} pending',
                               style: const TextStyle(fontSize: 12, color: Color(0xFFE65100), fontWeight: FontWeight.w500),
                             ),
                           ]),
@@ -5447,9 +5756,9 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                           0 => 'Next: Select Tests',
                           1 => _selectedTestIds.isEmpty
                               ? 'Select at least one test'
-                              : 'Add to Queue · ₹${_selectedTotal.toInt()}',
+                              : 'Add to Queue · ₹${_inr(_selectedTotal)}',
                           _ => 'Submit ${_queuedMembers.length} Member${_queuedMembers.length == 1 ? '' : 's'}'
-                              ' · ₹${_queuedTotal.toInt()}',
+                              ' · ₹${_inr(_queuedTotal)}',
                         },
                         style: const TextStyle(
                             color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
@@ -5972,7 +6281,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                   Expanded(child: Text(name,
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
                           color: AppColors.textPrimary))),
-                  Text('₹${total.toInt()}',
+                  Text('₹${_inr(total)}',
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
                           color: AppColors.textPrimary)),
                 ]),
@@ -6037,7 +6346,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
             const Text('Total to collect',
                 style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
             const Spacer(),
-            Text('₹${_queuedTotal.toInt()}',
+            Text('₹${_inr(_queuedTotal)}',
                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
                     color: AppColors.textPrimary)),
           ]),
@@ -6088,5 +6397,309 @@ class _PayModeOption extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// ── QR Payment Sheet ──────────────────────────────────────────────────────────
+// Shows a Razorpay UPI QR code with a 5-minute countdown. Polls the server
+// every 4 s. Pops with the Razorpay payment ID on success, null on cancel.
+enum _QrState { loading, ready, paid, expired, error }
+
+class _QrPaymentSheet extends StatefulWidget {
+  final int bookingId;
+  final double amount;
+  final List<int>? bookingIds;
+  final String? partialReason;
+  const _QrPaymentSheet({required this.bookingId, required this.amount, this.bookingIds, this.partialReason});
+
+  @override
+  State<_QrPaymentSheet> createState() => _QrPaymentSheetState();
+}
+
+class _QrPaymentSheetState extends State<_QrPaymentSheet> {
+  static const int _totalSeconds = 300; // 5 minutes
+
+  _QrState _state = _QrState.loading;
+  String? _qrId;
+  String? _imageUrl;
+  String? _errorMsg;
+  int _remaining = _totalSeconds;
+
+  Timer? _pollTimer;
+  Timer? _countdownTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _generateQr();
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    _countdownTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _generateQr() async {
+    _pollTimer?.cancel();
+    _countdownTimer?.cancel();
+    setState(() { _state = _QrState.loading; _remaining = _totalSeconds; _errorMsg = null; });
+
+    final data = await ApiService.createQrCode(bookingId: widget.bookingId, amount: widget.amount, bookingIds: widget.bookingIds, partialReason: widget.partialReason);
+    if (!mounted) return;
+    if (data == null) {
+      setState(() { _state = _QrState.error; _errorMsg = 'Could not generate QR. Check your connection and try again.'; });
+      return;
+    }
+
+    setState(() {
+      _state    = _QrState.ready;
+      _qrId     = data['qrId'] as String?;
+      _imageUrl = data['imageUrl'] as String?;
+    });
+
+    // Countdown — tick every second
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (_remaining <= 1) {
+        _countdownTimer?.cancel();
+        _pollTimer?.cancel();
+        if (mounted) setState(() => _state = _QrState.expired);
+      } else {
+        setState(() => _remaining--);
+      }
+    });
+
+    // Poll server every 4 s
+    _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
+      if (_qrId == null || !mounted) return;
+      final status = await ApiService.getQrStatus(_qrId!);
+      if (!mounted) return;
+      if (status != null && status['paid'] == true) {
+        _pollTimer?.cancel();
+        _countdownTimer?.cancel();
+        setState(() => _state = _QrState.paid);
+        await Future.delayed(const Duration(milliseconds: 1600));
+        if (mounted) Navigator.of(context).pop(status['paymentId'] as String?);
+      }
+    });
+  }
+
+  String get _timerLabel {
+    final m = _remaining ~/ 60;
+    final s = (_remaining % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final screenH = MediaQuery.of(context).size.height;
+    return Container(
+      height: screenH * 0.82,
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      child: Column(
+        children: [
+          // Drag handle
+          const SizedBox(height: 12),
+          Container(width: 36, height: 4,
+              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2))),
+          const SizedBox(height: 4),
+
+          Expanded(child: _buildBody()),
+
+          // Cancel / close button at bottom
+          if (_state != _QrState.paid)
+            Padding(
+              padding: EdgeInsets.fromLTRB(24, 0, 24,
+                  MediaQuery.of(context).padding.bottom + 20),
+              child: SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: OutlinedButton(
+                  onPressed: () => Navigator.of(context).pop(null),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.textSecondary,
+                    side: const BorderSide(color: AppColors.divider),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    switch (_state) {
+      case _QrState.loading:
+        return const Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            CircularProgressIndicator(color: AppColors.brandGreen, strokeWidth: 3),
+            SizedBox(height: 20),
+            Text('Generating QR code…',
+                style: TextStyle(fontSize: 15, color: AppColors.textSecondary, fontWeight: FontWeight.w500)),
+          ]),
+        );
+
+      case _QrState.error:
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.wifi_off_rounded, size: 52, color: AppColors.textHint),
+              const SizedBox(height: 16),
+              Text(_errorMsg ?? 'Something went wrong',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 14, color: AppColors.textSecondary, height: 1.5)),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: _generateQr,
+                icon: const Icon(Icons.refresh_rounded, size: 18),
+                label: const Text('Try Again', style: TextStyle(fontWeight: FontWeight.w600)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.brandGreen,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
+                ),
+              ),
+            ]),
+          ),
+        );
+
+      case _QrState.expired:
+        return Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.timer_off_rounded, size: 52, color: AppColors.textHint),
+              const SizedBox(height: 16),
+              const Text('QR Code Expired',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              const SizedBox(height: 8),
+              const Text('The 5-minute window passed.\nGenerate a new code to try again.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5)),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: _generateQr,
+                icon: const Icon(Icons.qr_code_rounded, size: 18),
+                label: const Text('Generate New QR', style: TextStyle(fontWeight: FontWeight.w600)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.brandGreen,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
+                ),
+              ),
+            ]),
+          ),
+        );
+
+      case _QrState.paid:
+        return Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Container(
+              width: 80, height: 80,
+              decoration: BoxDecoration(
+                color: AppColors.brandGreen.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.check_rounded, color: AppColors.brandGreen, size: 44),
+            ),
+            const SizedBox(height: 20),
+            const Text('Payment Received!',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+            const SizedBox(height: 6),
+            Text('₹${_inr(widget.amount)} collected via UPI',
+                style: const TextStyle(fontSize: 14, color: AppColors.textSecondary)),
+          ]),
+        );
+
+      case _QrState.ready:
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
+          child: Column(
+            children: [
+              // Amount
+              Text('₹${_inr(widget.amount)}',
+                  style: const TextStyle(
+                      fontSize: 36, fontWeight: FontWeight.w800,
+                      color: AppColors.brandGreen, letterSpacing: -0.5)),
+
+              const SizedBox(height: 16),
+
+              // QR image — no card border, no padding, just the image
+              Expanded(
+                child: _imageUrl != null
+                    ? Image.network(
+                        _imageUrl!,
+                        fit: BoxFit.contain,
+                        loadingBuilder: (_, child, progress) => progress == null
+                            ? child
+                            : const Center(child: CircularProgressIndicator(
+                                color: AppColors.brandGreen, strokeWidth: 2)),
+                        errorBuilder: (_, __, ___) => const Center(
+                          child: Column(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.broken_image_outlined, size: 52, color: AppColors.textHint),
+                            SizedBox(height: 12),
+                            Text('Could not load QR image.\nCheck your internet connection.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                          ]),
+                        ),
+                      )
+                    : const Center(
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.qr_code_2_rounded, size: 64, color: AppColors.textHint),
+                          SizedBox(height: 12),
+                          Text('QR code not available',
+                              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                        ]),
+                      ),
+              ),
+
+              const SizedBox(height: 14),
+
+              // Timer pill only
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _remaining <= 60
+                      ? Colors.red.withValues(alpha: 0.08)
+                      : AppColors.background,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: _remaining <= 60
+                        ? Colors.red.withValues(alpha: 0.3)
+                        : AppColors.divider,
+                  ),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.timer_outlined,
+                      size: 14,
+                      color: _remaining <= 60 ? Colors.red : AppColors.textSecondary),
+                  const SizedBox(width: 5),
+                  Text(_timerLabel,
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: _remaining <= 60 ? Colors.red : AppColors.textPrimary)),
+                ]),
+              ),
+
+              const SizedBox(height: 16),
+            ],
+          ),
+        );
+    }
   }
 }

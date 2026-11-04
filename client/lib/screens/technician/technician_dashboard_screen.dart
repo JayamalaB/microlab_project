@@ -405,7 +405,10 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
       final url = '$baseUrl/api/technicians/$techId/active-bookings';
       debugPrint('   GET $url');
 
-      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
+      final res = await http.get(
+        Uri.parse(url),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 8));
 
       debugPrint('   status=${res.statusCode}  bodyLen=${res.body.length}');
       debugPrint('   body=${res.body.substring(0, res.body.length.clamp(0, 400))}');
@@ -456,6 +459,8 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
           return TechnicianBooking(
             id:                map['booking_id']?.toString() ?? '',
             bookingRef:        map['booking_ref']        as String?,
+            referenceNo:       map['reference_no']       as String?,
+            collectionNotes:   map['collection_notes']   as String?,
             patientId:         int.tryParse(map['patient_id']?.toString() ?? ''),
             customerName:      map['patient_name']       as String? ?? 'Patient',
             customerPhone:     map['patient_mobile']     as String? ?? '',
@@ -966,7 +971,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
         backgroundColor: AppColors.background,
         appBar: _selectedIndex == 0
             ? PreferredSize(
-                preferredSize: const Size.fromHeight(112),
+                preferredSize: const Size.fromHeight(116),
                 child: Container(
                   color: AppColors.brandGreen,
                   child: SafeArea(
@@ -975,44 +980,34 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                       children: [
                         Positioned(
                           right: -8,
-                          top: -16,
+                          top: 30,
                           child: Icon(Icons.science_outlined,
-                              size: 96, color: Colors.white.withOpacity(0.08)),
+                              size: 110, color: Colors.white.withValues(alpha: 0.08)),
                         ),
                         Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 10, 12, 10),
-                          child: Row(
+                          padding: const EdgeInsets.fromLTRB(16, 4, 12, 12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              const CircleAvatar(
-                                radius: 22,
-                                backgroundColor: Colors.white,
-                                child: Icon(Icons.person, color: AppColors.brandGreen, size: 24),
+                          // Logo row (same as the customer Home header) +
+                          // refresh and the Online switch.
+                          Row(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.asset('assets/icon/app_icon.png',
+                                    width: 32, height: 32, fit: BoxFit.cover,
+                                    errorBuilder: (_, __, ___) => const Icon(
+                                        Icons.biotech_rounded, color: Colors.white, size: 28)),
                               ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Text('Welcome,',
-                                        style: TextStyle(
-                                            color: Colors.white.withOpacity(0.85),
-                                            fontSize: 13)),
-                                    Text(
-                                      '${SocketService.instance.userName.trim().isNotEmpty ? SocketService.instance.userName.trim().split(RegExp(r"\s+")).first : "Technician"}!',
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 20,
-                                          fontWeight: FontWeight.w700),
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                    const SizedBox(height: 2),
-                                    const Text(
-                                      'Keep up the great work!',
-                                      style: TextStyle(color: Colors.white70, fontSize: 12),
-                                    ),
-                                  ],
-                                ),
+                              const SizedBox(width: 10),
+                              const Expanded(
+                                child: Text('MicroLab',
+                                    style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.w700)),
                               ),
                               IconButton(
                                 icon: _isRefreshing
@@ -1074,6 +1069,41 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                                         ),
                                       ],
                                     ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          // Greeting
+                          Row(
+                            children: [
+                              const CircleAvatar(
+                                radius: 22,
+                                backgroundColor: Colors.white,
+                                child: Icon(Icons.person, color: AppColors.brandGreen, size: 24),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      'Welcome, ${SocketService.instance.userName.trim().isNotEmpty ? SocketService.instance.userName.trim().split(RegExp(r"\s+")).first : "Technician"}!',
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 19,
+                                          fontWeight: FontWeight.w700),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    const Text(
+                                      'Keep up the great work!',
+                                      style: TextStyle(color: Colors.white70, fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
                             ],
                           ),
                         ),
@@ -1414,8 +1444,9 @@ class _PendingBookingCard extends StatelessWidget {
                       ]),
                     ),
                   if (booking.isVip) const SizedBox(width: 8),
-                  Text(booking.bookingRef ?? '#${booking.id}',
-                      style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                  if (booking.referenceNo != null)
+                    Text(booking.referenceNo!,
+                        style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
                 ],
               ),
             ),

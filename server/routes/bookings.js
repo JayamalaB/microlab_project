@@ -5,6 +5,8 @@ const auth        = require('../middleware/auth');
 const adminAuth   = require('../middleware/adminAuth');
 const adminSecret    = require('../middleware/adminSecret');
 const adminBodyAuth  = require('../middleware/adminBodyAuth');
+const rolloutAuth    = require('../middleware/rolloutAuth');
+const { requireBookingAccess, requirePatientAccess } = require('../middleware/access');
 
 // POST /api/bookings — create booking (returns bookingId)
 router.post('/', auth, bookingController.createBooking);
@@ -21,10 +23,13 @@ router.get('/mine', auth, bookingController.getMyBookings);
 router.get('/fare-quote', auth, bookingController.getHomeCollectionFareQuote);
 
 // GET /api/bookings/patient/:patientId — patient booking history
-router.get('/patient/:patientId', bookingController.getPatientBookings);
+// GET /api/bookings/slot-status/:availableSlotId — is this time still free?
+router.get('/slot-status/:availableSlotId', auth, bookingController.getSlotStatus);
+
+router.get('/patient/:patientId', rolloutAuth, requirePatientAccess, bookingController.getPatientBookings);
 
 // GET /api/bookings/:bookingId — single booking detail
-router.get('/:bookingId', bookingController.getBooking);
+router.get('/:bookingId', rolloutAuth, requireBookingAccess, bookingController.getBooking);
 
 // GET /api/bookings/:bookingId/results — released test results for patient
 router.get('/:bookingId/results', auth, bookingController.getBookingResults);
@@ -40,21 +45,22 @@ router.post('/:bookingId/results/:resultId/released', adminSecret, bookingContro
 router.post('/report-status', adminBodyAuth('bill_id'), bookingController.reportStatusWebhook);
 
 // GET  /api/bookings/:bookingId/items   — list booking test items
-router.get('/:bookingId/items',                    auth, bookingController.getItems);
+router.get('/:bookingId/tech-location', rolloutAuth, requireBookingAccess, bookingController.getTechLocation);
+router.get('/:bookingId/items',                    auth, requireBookingAccess, bookingController.getItems);
 // GET  /api/bookings/:bookingId/linked-patients — additional patients added by technician
-router.get('/:bookingId/linked-patients',          auth, bookingController.getLinkedPatients);
+router.get('/:bookingId/linked-patients',          auth, requireBookingAccess, bookingController.getLinkedPatients);
 // POST /api/bookings/:bookingId/items   — add a test to a booking
-router.post('/:bookingId/items',                   auth, bookingController.addItem);
+router.post('/:bookingId/items',                   auth, requireBookingAccess, bookingController.addItem);
 // DELETE /api/bookings/:bookingId/items/:id — remove a test from a booking
-router.delete('/:bookingId/items/:bookingItemId',  auth, bookingController.removeItem);
+router.delete('/:bookingId/items/:bookingItemId',  auth, requireBookingAccess, bookingController.removeItem);
 // PATCH /api/bookings/:bookingId/items/:bookingItemId/collected — technician checklist toggle
-router.patch('/:bookingId/items/:bookingItemId/collected', auth, bookingController.setItemCollected);
+router.patch('/:bookingId/items/:bookingItemId/collected', auth, requireBookingAccess, bookingController.setItemCollected);
 // POST /api/bookings/:bookingId/collection-photo — technician's sample-collection proof photo
-router.post('/:bookingId/collection-photo', auth, bookingController.saveCollectionProofPhoto);
+router.post('/:bookingId/collection-photo', auth, requireBookingAccess, bookingController.saveCollectionProofPhoto);
 // GET  /api/bookings/:bookingId/collection-photo — current proof photo (if any)
-router.get('/:bookingId/collection-photo', auth, bookingController.getCollectionProofPhoto);
+router.get('/:bookingId/collection-photo', auth, requireBookingAccess, bookingController.getCollectionProofPhoto);
 // DELETE /api/bookings/:bookingId/collection-photo — technician removes the photo (before OTP)
-router.delete('/:bookingId/collection-photo', auth, bookingController.removeCollectionProofPhoto);
+router.delete('/:bookingId/collection-photo', auth, requireBookingAccess, bookingController.removeCollectionProofPhoto);
 
 // POST /api/bookings/:bookingId/cancel — customer cancels a booking
 router.post('/:bookingId/cancel', auth, bookingController.cancelBooking);

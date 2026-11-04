@@ -361,7 +361,7 @@ const _kLayerQs = <_Layer, List<String>>{
   _Layer.db: [
     'Show all available tests', 'What is the price of CBC test?',
     'List all branch locations', 'What tests are available for thyroid?',
-    'Show Coimbatore branch details', 'Which tests require fasting?',
+    'Show Coimbatore branch details', 'What is the price of a Lipid Profile?',
     'My booking', 'Booking history',
   ],
   _Layer.web: [
@@ -376,13 +376,13 @@ const _kLayerQs = <_Layer, List<String>>{
 
 const _kFollowUps = <_Layer, List<String>>{
   _Layer.staticInfo: ['General Info', 'Testing Info', 'Branch Locations'],
-  _Layer.db:         ['What is the test preparation?', 'Show all branch locations', 'Which tests have no fasting?'],
+  _Layer.db:         ['What is the price of CBC test?', 'Show all branch locations', 'What tests are available for thyroid?'],
   _Layer.web:        ['Who are the doctors at MicroLab?', 'How can I access my reports online?', 'What is the home sample collection process?'],
 };
 
 // Follow-ups by server intent — used when layer is "all"
 const _kIntentFollowUps = <String, List<String>>{
-  'test_query':    ['Which tests require fasting?', 'Show all branch locations', 'What is the price of CBC test?'],
+  'test_query':    ['What is the price of a Lipid Profile?', 'Show all branch locations', 'What is the price of CBC test?'],
   'branch_query':  ['Show Coimbatore branch details', 'What are your working hours?', 'How do I book a home collection?'],
   'default_qa':    ['General Info', 'Testing Info', 'Branch Locations'],
   'website_live':  ["What are MicroLab's accreditations?", 'Tell me about home collection', 'Contact support'],

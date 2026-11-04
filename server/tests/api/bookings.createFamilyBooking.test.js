@@ -18,6 +18,17 @@
 // any DB call), TC-FAMBOOK-03 (feature flag off), TC-FAMBOOK-04 (pay-later
 // family booking creates N sibling bookings sharing one visit_group_id),
 // TC-FAMBOOK-05 (a paid family booking syncs each member to Jayamala).
+// Booking access, price and payment checks have their own tests
+// (accessControl, itemPrices, razorpayVerify); this file covers what follows them.
+jest.mock('../../middleware/access', () => ({
+  ...jest.requireActual('../../middleware/access'),
+  requireBookingAccess: (_req, _res, next) => next(),
+  requirePatientAccess: (_req, _res, next) => next(),
+}));
+jest.mock('../../services/itemPrices', () => ({ checkItemPrices: async () => ({ ok: true }) }));
+jest.mock('../../services/razorpayVerify', () => ({
+  verifyRazorpayPayment: async (_id, { amount }) => ({ ok: true, amount: Number(amount) }),
+}));
 jest.mock('../../config/db');
 jest.mock('../../config/settings');
 jest.mock('../../services/clientSync');

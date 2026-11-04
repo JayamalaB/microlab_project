@@ -349,6 +349,23 @@ class ApiService {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // Whether a time is still free. Only a definite "taken" returns false, so a
+  // network problem here never blocks a payment — the booking step re-checks.
+  static Future<bool> isSlotAvailable(int availableSlotId) async {
+    final token = await getToken();
+    if (token == null) return true;
+    try {
+      final res = await _client.get(
+        Uri.parse('$baseUrl/api/bookings/slot-status/$availableSlotId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 6));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      return body['available'] != false;
+    } catch (_) {
+      return true;
+    }
+  }
+
   static Future<List<TimeSlot>> getSlots({
     required String branchId,
     required DateTime date,
@@ -660,6 +677,7 @@ class ApiService {
     String? razorpayPaymentId,
     required double amount,
     String paymentMethod = 'RAZORPAY',
+    String? partialReason, // why only part of the due was paid
   }) async {
     final token = await getToken();
     if (token == null) return false;
@@ -675,6 +693,7 @@ class ApiService {
           'razorpayPaymentId': razorpayPaymentId,
           'amount': amount,
           'paymentMethod': paymentMethod,
+          if (partialReason != null) 'partialReason': partialReason,
         }),
       ).timeout(const Duration(seconds: 15));
       final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -684,6 +703,55 @@ class ApiService {
       debugPrint('[collectPayment] ERROR: $e');
     }
     return false;
+  }
+
+  // Creates a Razorpay UPI QR code for on-site payment.
+  // Returns {success, qrId, imageUrl} on success, null on failure.
+  // Pass [bookingIds] for combined family QR (list of all member booking IDs).
+  static Future<Map<String, dynamic>?> createQrCode({
+    required int bookingId,
+    required double amount,
+    List<int>? bookingIds,
+    String? partialReason,
+  }) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final payload = <String, dynamic>{
+        ...(bookingIds != null && bookingIds.length > 1
+            ? {'bookingIds': bookingIds, 'amount': amount}
+            : {'bookingId': bookingId, 'amount': amount}),
+        if (partialReason != null) 'partialReason': partialReason,
+      };
+      final res = await _client.post(
+        Uri.parse('$baseUrl/api/technicians/create-qr'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      ).timeout(const Duration(seconds: 20));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return body;
+      debugPrint('[createQrCode] failed: ${body['message']}');
+    } catch (e) {
+      debugPrint('[createQrCode] ERROR: $e');
+    }
+    return null;
+  }
+
+  // Polls whether a QR payment session has been paid.
+  // Returns {success, paid, paymentId} or null on error.
+  static Future<Map<String, dynamic>?> getQrStatus(String qrId) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await _client.get(
+        Uri.parse('$baseUrl/api/technicians/qr-status/$qrId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[getQrStatus] ERROR: $e');
+      return null;
+    }
   }
 
   // Sets the booking's additional charge (amount + reason) entered by the
@@ -1241,6 +1309,7 @@ class ApiService {
     required String paymentType,
     String? razorpayPaymentId,
     String? razorpayOrderId,
+    String? notes,
   }) async {
     final token = await getToken();
     if (token == null) return null;
@@ -1259,6 +1328,7 @@ class ApiService {
         if (branchId            != null) 'branchId':           branchId,
         if (razorpayPaymentId   != null) 'razorpayPaymentId':  razorpayPaymentId,
         if (razorpayOrderId     != null) 'razorpayOrderId':    razorpayOrderId,
+        if (notes != null && notes.isNotEmpty) 'notes': notes,
       };
       final res = await _client.post(
         Uri.parse('$baseUrl/api/bookings/family'),

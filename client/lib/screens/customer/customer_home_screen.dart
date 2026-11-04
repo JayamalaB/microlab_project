@@ -36,7 +36,10 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   int _selectedIndex = 0;
   MemberModel? _activeMember;
+  MemberModel? _dashboardMember; // kept alive in IndexedStack even when back is pressed
   List<MemberModel> _members = [];
+  String? _accountName;
+  final Map<String, BookingDraft> _drafts = {};
   bool _loadingPatients = true;
   final _bookingsRefresh = ValueNotifier<int>(0);
   final _reportsRefresh  = ValueNotifier<int>(0);
@@ -107,11 +110,11 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   Future<void> _startBooking() async {
     final m = _bookingFor;
     if (m != null) {
-      setState(() => _activeMember = m);
+      setState(() { _activeMember = m; _dashboardMember = m; });
       return;
     }
     final added = await _openAddMember(select: true);
-    if (added != null && mounted) setState(() => _activeMember = added);
+    if (added != null && mounted) setState(() { _activeMember = added; _dashboardMember = added; });
   }
 
   void _pickBookingFor() {
@@ -196,10 +199,13 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
 
   Future<void> _loadPatients() async {
     try {
+      final prefs   = await SharedPreferences.getInstance();
+      final accName = prefs.getString('user_name');
       final patients = await ApiService.getPatients();
       if (!mounted) return;
       setState(() {
-        _members = patients.map(_patientToMember).toList();
+        _members      = patients.map(_patientToMember).toList();
+        _accountName  = accName;
         _loadingPatients = false;
       });
     } catch (_) {
@@ -414,7 +420,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       backgroundColor: AppColors.background,
       appBar: (!_inDashboard && _selectedIndex == 0)
           ? PreferredSize(
-              preferredSize: const Size.fromHeight(172),
+              preferredSize: const Size.fromHeight(88),
               child: Container(
                 color: AppColors.brandGreen,
                 child: SafeArea(
@@ -422,46 +428,17 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                   child: Stack(
                     children: [
                       Positioned(
-                        right: -8,
-                        top: 30,
+                        right: 56,
+                        top: -10,
                         child: Icon(Icons.science_outlined,
-                            size: 110, color: Colors.white.withValues(alpha: 0.08)),
+                            size: 100, color: Colors.white.withValues(alpha: 0.08)),
                       ),
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 6, 6, 14),
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            // Logo row + call
-                            Row(
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(8),
-                                  child: Image.asset('assets/icon/app_icon.png',
-                                      width: 32, height: 32, fit: BoxFit.cover,
-                                      errorBuilder: (_, __, ___) => const Icon(
-                                          Icons.biotech_rounded, color: Colors.white, size: 28)),
-                                ),
-                                const SizedBox(width: 10),
-                                const Expanded(
-                                  child: Text('MicroLab',
-                                      style: TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 20,
-                                          fontWeight: FontWeight.w700)),
-                                ),
-                                IconButton(
-                                  icon: const Icon(Icons.phone_outlined,
-                                      color: Colors.white, size: 22),
-                                  tooltip: 'Call us',
-                                  onPressed: () async {
-                                    final uri = Uri(scheme: 'tel', path: '7339535472');
-                                    if (await canLaunchUrl(uri)) launchUrl(uri);
-                                  },
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 10),
                             // Greeting = the account holder; "Booking for" =
                             // who Book Test books for.
                             Row(
@@ -525,6 +502,28 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                                     ],
                                   ),
                                 ),
+                                const SizedBox(width: 12),
+                                // Call MicroLab — phone icon in a circle.
+                                Material(
+                                  color: Colors.white.withValues(alpha: 0.16),
+                                  shape: CircleBorder(
+                                      side: BorderSide(color: Colors.white.withValues(alpha: 0.35))),
+                                  child: InkWell(
+                                    customBorder: const CircleBorder(),
+                                    onTap: () async {
+                                      final uri = Uri(scheme: 'tel', path: '18004251316');
+                                      if (await canLaunchUrl(uri)) launchUrl(uri);
+                                    },
+                                    child: const Tooltip(
+                                      message: 'Call us',
+                                      child: SizedBox(
+                                        width: 44,
+                                        height: 44,
+                                        child: Icon(Icons.phone_rounded, color: Colors.white, size: 22),
+                                      ),
+                                    ),
+                                  ),
+                                ),
                               ],
                             ),
                           ],
@@ -542,26 +541,30 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
             index: _stackIndex,
             children: [
               _homeBody(),
-              // Slot 1: embedded dashboard
-              if (_activeMember != null)
+              // Slot 1: embedded dashboard — kept alive via _dashboardMember so
+              // back-press (which only clears _activeMember) does not destroy state.
+              if (_dashboardMember != null)
                 SafeArea(
                   top: false,
                   bottom: false,
                   child: CustomerDashboardScreen(
-                    key: ValueKey(_activeMember!.id),
-                    member: _activeMember!,
+                    key: ValueKey(_dashboardMember!.id),
+                    member: _dashboardMember!,
                     isVip: widget.isVip,
                     embedded: true,
                     onBack: () {
                       setState(() => _activeMember = null);
-                      _loadRecentBooking(); // a booking may have just been made
+                      _loadRecentBooking();
                     },
+                    initialDraft: _drafts[_dashboardMember!.id],
+                    onDraftSave: (draft) => _drafts[_dashboardMember!.id] = draft,
+                    onMemberAdded: _loadPatients,
                   ),
                 )
               else
                 const SizedBox.shrink(),
               SafeArea(top: false, bottom: false, child: MyBookingsScreen(embedded: true, refreshTrigger: _bookingsRefresh)),
-              SafeArea(top: false, bottom: false, child: ReportsScreen(embedded: true, refreshTrigger: _reportsRefresh)),
+              SafeArea(top: false, bottom: false, child: ReportsScreen(embedded: true, refreshTrigger: _reportsRefresh, onViewBookings: () => _onNavTap(1))),
               // Slot 4: profile
               SafeArea(
                 top: false,
@@ -570,6 +573,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                   mobile: widget.mobile,
                   isVip: widget.isVip,
                   members: _members,
+                  accountName: _accountName,
                   embedded: true,
                   onAddMember: _openAddMember,
                   onEditMember: _openEditMember,

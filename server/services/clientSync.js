@@ -247,11 +247,14 @@ async function _fetchPatientTestsPayment(booking) {
     TestName: t.name,
     Rate:     t.price,
   }));
+  const testAmount = _round2(tests.reduce((s, t) => s + _toAmount(t.price), 0));
   const paymentDetails = {
-    total_amount:        booking.total_amount,
-    paid_amount:         payment?.amount_paid  ?? 0,
-    payment_type:        payment?.payment_type === 'RAZORPAY' ? 'full payment' : 'pay_later',
-    razorpay_payment_id: payment?.gateway_transaction_id ?? null,
+    test_amount:           testAmount,
+    service_charge_amount: _toAmount(booking.home_collection_fare),
+    total_amount:          booking.total_amount,
+    paid_amount:           payment?.amount_paid  ?? 0,
+    payment_type:          payment?.payment_type === 'RAZORPAY' ? 'full payment' : 'pay_later',
+    razorpay_payment_id:   payment?.gateway_transaction_id ?? null,
   };
   const patientDetails = {
     name:             patient.patient_name,
@@ -394,8 +397,8 @@ async function syncBookingToClient(bookingId, initiator) {
     // 1. Booking + slot time
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date,
-              b.total_amount, b.patient_id, b.client_id, b.status, b.reference_no,
-              b.visit_group_id,
+              b.total_amount, b.home_collection_fare, b.patient_id, b.client_id,
+              b.status, b.reference_no, b.visit_group_id,
               TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
        FROM ip_bookings b
        LEFT JOIN ip_available_slots av ON av.available_slot_id = b.available_slot_id
@@ -405,6 +408,16 @@ async function syncBookingToClient(bookingId, initiator) {
     if (!booking) {
       writeLog(`[clientSync] booking_id=${bookingId} not found`);
       return;
+    }
+
+    // Diagnostic: log fare for every sync so we can spot NULL home_collection_fare
+    if (booking.booking_type === 'home_collection') {
+      const fareVal = booking.home_collection_fare;
+      writeLog(
+        `[clientSync] 🔍 FARE AUDIT booking_id=${bookingId} ref=${booking.booking_ref}` +
+        `  home_collection_fare=${fareVal != null ? '₹' + fareVal : 'NULL ⚠️'}` +
+        `  total_amount=${booking.total_amount}`
+      );
     }
 
     const timestamp = Math.floor(Date.now() / 1000);
@@ -693,7 +706,7 @@ async function syncBookingToClient(bookingId, initiator) {
       // Send "Booking Confirmed" push ONLY for new bookings, not cancel/reschedule/update
       const resolvedAction = payload.action;
       if (resolvedAction === 'new_booking') {
-        await _sendBookingConfirmedNotification(booking, initiator.mobile);
+        await _sendBookingConfirmedNotification(booking, initiator.mobile, result.bill_id ?? null);
       }
 
     } else {
@@ -786,7 +799,8 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     if (primaryBooking.visit_group_id) {
       [bookingRows] = await db.execute(
         `SELECT booking_id, booking_ref, booking_type, booking_date, total_amount,
-                additional_charge_amount, additional_charge_reason,
+                home_collection_fare, additional_charge_amount, additional_charge_reason,
+                partial_payment_reason, amount_due,
                 patient_id, client_id, status, reference_no, visit_group_id,
                 TIME_FORMAT(
                   (SELECT av.slot_time FROM ip_available_slots av
@@ -800,7 +814,8 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     } else {
       const [[b]] = await db.execute(
         `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date, b.total_amount,
-                b.additional_charge_amount, b.additional_charge_reason,
+                b.home_collection_fare, b.additional_charge_amount, b.additional_charge_reason,
+                b.partial_payment_reason, b.amount_due,
                 b.patient_id, b.client_id, b.status, b.reference_no, b.visit_group_id,
                 TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
          FROM ip_bookings b
@@ -818,6 +833,20 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       return;
     }
 
+    // Diagnostic: log every booking in this visit group with fare details
+    writeLog(`[clientSync] 🔍 VISIT GROUP FARE AUDIT — primary_booking_id=${primaryBookingId} group=${primaryBooking.visit_group_id ?? 'solo'} total_bookings=${bookingRows.length}`);
+    bookingRows.forEach((b, i) => {
+      const isPrimary = b.booking_id === primaryBookingId;
+      const fareVal   = b.home_collection_fare;
+      const fareStr   = fareVal != null ? `₹${fareVal}` : 'NULL ⚠️';
+      writeLog(
+        `[clientSync]   [${i + 1}] booking_id=${b.booking_id} ref=${b.booking_ref}` +
+        `  ${isPrimary ? '← PRIMARY' : '← SIBLING'}` +
+        `  home_collection_fare=${fareStr}` +
+        `  total_amount=${b.total_amount}`
+      );
+    });
+
     // Mark all of them pending before attempting the HTTP call.
     try {
       await db.execute(
@@ -833,6 +862,9 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     // patient_id | patient_details, slot_details, blood_test_list,
     // payment_details, proof_photo.
     const bookings = [];
+    // The partial-payment reason applies to the whole visit, but only while a
+    // balance remains — once everything is settled there is no reason to send.
+    const visitHasBalance = bookingRows.some(r => _toAmount(r.amount_due) > 0);
     // Parallel to bookings[]: what was sent for each entry, in the same order.
     // The ASMX replies with one result per booking in that order, so result N
     // is matched to sent[N].
@@ -870,14 +902,14 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       // total after the tests and the technician's additional charge.
       const totalAmount      = _toAmount(data.paymentDetails.total_amount);
       const additionalCharge = _toAmount(b.additional_charge_amount ?? 0);
-      const testAmount       = _round2(data.tests.reduce((s, t) => s + _toAmount(t.price), 0));
       entry.payment_details = {
-        test_amount:              testAmount,
-        service_charge_amount:    Math.max(0, _round2(totalAmount - testAmount - additionalCharge)),
+        test_amount:              data.paymentDetails.test_amount,
+        service_charge_amount:    _toAmount(b.home_collection_fare),
         additional_charge_amount: additionalCharge,
         additional_charge_reason: b.additional_charge_reason ?? '',
         total_amount:             totalAmount,
         paid_amount:         _toAmount(data.paymentDetails.paid_amount),
+        partial_payment_reason: visitHasBalance ? (b.partial_payment_reason ?? '') : '',
         payment_type:        data.paymentDetails.payment_type,
         razorpay_payment_id: data.paymentDetails.razorpay_payment_id,
       };
@@ -1111,7 +1143,7 @@ async function _setSyncStatus(bookingIds, status) {
   }
 }
 
-async function _sendBookingConfirmedNotification(booking, initiatorMobile) {
+async function _sendBookingConfirmedNotification(booking, initiatorMobile, referenceNo = null) {
   if (!messaging) {
     writeLog(`[clientSync] push skipped — Firebase not initialised`);
     return;
@@ -1131,12 +1163,12 @@ async function _sendBookingConfirmedNotification(booking, initiatorMobile) {
       token: fcmToken,
       notification: {
         title: 'Booking Confirmed ✅',
-        body:  `Your booking #${booking.booking_ref} has been confirmed. We will contact you shortly.`,
+        body:  `Your booking #${referenceNo ?? booking.reference_no ?? booking.booking_ref} has been confirmed. We will contact you shortly.`,
       },
       data: {
         type:        'booking_confirmed',
         booking_id:  String(booking.booking_id),
-        booking_ref: booking.booking_ref,
+        booking_ref: referenceNo ?? booking.reference_no ?? booking.booking_ref,
       },
       android: {
         priority: 'high',
