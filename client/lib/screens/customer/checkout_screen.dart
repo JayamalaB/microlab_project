@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/constants/app_constants.dart';
@@ -20,9 +21,12 @@ class _FamilyMember {
   final PatientModel patient;
   final List<TestModel> tests;
   final List<Uint8List> prescriptionBytes;
-  _FamilyMember({required this.patient, required this.tests, this.prescriptionBytes = const []});
+  final TextEditingController doctorCtrl;
+  _FamilyMember({required this.patient, required this.tests, this.prescriptionBytes = const [], String? doctorName})
+      : doctorCtrl = TextEditingController(text: doctorName ?? '');
   double get testsTotal => tests.fold(0.0, (s, t) => s + t.finalPrice);
   bool get anyDocRequired => tests.any((t) => t.docRequired);
+  void dispose() => doctorCtrl.dispose();
 }
 
 // ─── Prescription doc model ───────────────────────────────────────────────────
@@ -137,6 +141,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Notes ─────────────────────────────────────────────────
   final TextEditingController _notesController = TextEditingController();
 
+  // ── Doctor name (primary patient) ─────────────────────────
+  final TextEditingController _doctorNameController = TextEditingController();
+
   // ── Address (mutable — user can edit in checkout) ─────────
   late String? _address;
   late String? _pincode;
@@ -174,6 +181,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // _grandTotal below) matches what gets billed.
   double? _homeCollectionFare;
   double? _homeCollectionDistanceKm;
+  String? _homeCollectionProductName;
   bool    _fareLoading = false;
   String? _fareErrorMessage;
 
@@ -251,7 +259,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // this screen as constructor params.
   Future<void> _loadHomeCollectionFare() async {
     if (widget.branchId == null || _lat == null || _lng == null) {
-      setState(() => _fareErrorMessage = 'Pickup location unavailable — cannot calculate Home Collection charge');
+      setState(() => _fareErrorMessage = 'Collection location unavailable — cannot calculate Home Collection charge');
       return;
     }
     setState(() { _fareLoading = true; _fareErrorMessage = null; });
@@ -264,8 +272,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (body['success'] == true) {
       final fare = body['fare'] as Map<String, dynamic>;
       setState(() {
-        _homeCollectionFare       = (fare['finalFare'] as num).toDouble();
-        _homeCollectionDistanceKm = (fare['distanceKm'] as num).toDouble();
+        _homeCollectionFare          = (fare['finalFare'] as num).toDouble();
+        _homeCollectionDistanceKm    = (fare['distanceKm'] as num).toDouble();
+        _homeCollectionProductName   = fare['productName'] as String?;
         _fareLoading   = false;
         _fareErrorMessage = null;
       });
@@ -281,6 +290,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   @override
   void dispose() {
     _notesController.dispose();
+    _doctorNameController.dispose();
+    for (final m in _familyMembers) m.dispose();
     clearRazorpay();
     super.dispose();
   }
@@ -690,6 +701,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         }).toList(),
         'totalAmount':   _testsTotal + _serviceCharge,
         'serviceCharge': _serviceCharge,
+        if (_doctorNameController.text.trim().isNotEmpty)
+          'doctorName': _doctorNameController.text.trim(),
       },
       ..._familyMembers.map((m) => {
         'patientId':    m.patient.patientId,
@@ -700,6 +713,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         }).toList(),
         'totalAmount':   m.testsTotal,
         'serviceCharge': 0,
+        if (m.doctorCtrl.text.trim().isNotEmpty) 'doctorName': m.doctorCtrl.text.trim(),
       }),
     ];
 
@@ -849,6 +863,18 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   void _proceedToPayment() {
     if (!_canProceed) return;
 
+    // Validate doctor name — required for primary patient and all family members
+    if (_doctorNameController.text.trim().isEmpty) {
+      AppMessages.error(context, 'Please enter a doctor name for ${widget.member.name}.');
+      return;
+    }
+    for (final m in _familyMembers) {
+      if (m.doctorCtrl.text.trim().isEmpty) {
+        AppMessages.error(context, 'Please enter a doctor name for ${m.patient.name}.');
+        return;
+      }
+    }
+
     if (_paymentType == 'pay_later') {
       _confirmBooking('pay_later');
       return;
@@ -932,6 +958,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'discountAmount': 0,
       'sourceChannel':  'mobile_app',
       'notes':          _notesController.text.trim().isEmpty ? null : _notesController.text.trim(),
+      if (_doctorNameController.text.trim().isNotEmpty) 'doctorName': _doctorNameController.text.trim(),
       'items':          items,
       'paymentType':    isPayNow ? 'full' : 'pay_later',
       if (isPayNow) 'razorpayPaymentId': razorpayPaymentId,
@@ -1628,6 +1655,39 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
           ),
 
+          // ── Doctor Name ─────────────────────────────────────
+          const SizedBox(height: 14),
+          _SectionCard(
+            title: 'Doctor Name',
+            required: true,
+            icon: Icons.local_hospital_outlined,
+            child: TextField(
+              controller: _doctorNameController,
+              maxLines: 1,
+              maxLength: 150,
+              textInputAction: TextInputAction.done,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Enter doctor name or Self',
+                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.divider),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.divider),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                counterStyle: const TextStyle(fontSize: 11, color: AppColors.textHint),
+              ),
+            ),
+          ),
+
           // ── Family Members (Home Collection only) ─────────
           if (widget.mode == 'Home Collection') ...[
             const SizedBox(height: 14),
@@ -1645,9 +1705,39 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         style: TextStyle(fontSize: 12, color: AppColors.textHint, height: 1.4),
                       ),
                     ),
-                  ..._familyMembers.map((m) => _FamilyMemberTile(
-                    member: m,
-                    onRemove: () => setState(() => _familyMembers.remove(m)),
+                  ..._familyMembers.map((m) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _FamilyMemberTile(
+                        member: m,
+                        onRemove: () { m.dispose(); setState(() => _familyMembers.remove(m)); },
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: TextField(
+                          controller: m.doctorCtrl,
+                          maxLength: 150,
+                          textInputAction: TextInputAction.done,
+                          style: const TextStyle(fontSize: 13),
+                          decoration: InputDecoration(
+                            hintText: 'Doctor name for ${m.patient.name}',
+                            hintStyle: const TextStyle(fontSize: 12, color: AppColors.textHint),
+                            prefixIcon: const Icon(Icons.local_hospital_outlined, size: 16, color: AppColors.textHint),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(color: AppColors.divider),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                            counterStyle: const TextStyle(fontSize: 10, color: AppColors.textHint),
+                          ),
+                        ),
+                      ),
+                    ],
                   )),
                   const SizedBox(height: 4),
                   SizedBox(
@@ -1709,7 +1799,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     )
                   else
                     _BillRow(
-                      'Service Charge${_homeCollectionDistanceKm != null ? ' (${_homeCollectionDistanceKm!.toStringAsFixed(1)} km)' : ''}',
+                      '${_homeCollectionProductName ?? 'Service Charge'}${_homeCollectionDistanceKm != null ? ' (${_homeCollectionDistanceKm!.toStringAsFixed(1)} km)' : ''}',
                       '₹${_serviceCharge.toInt()}',
                       sub: true,
                     ),
@@ -2499,9 +2589,10 @@ class _BillRow extends StatelessWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(label, style: TextStyle(
+            Flexible(child: Text(label, overflow: TextOverflow.ellipsis, style: TextStyle(
                 fontSize: sub ? 12 : 13,
-                color: sub ? AppColors.textSecondary : AppColors.textPrimary)),
+                color: sub ? AppColors.textSecondary : AppColors.textPrimary))),
+            const SizedBox(width: 8),
             Text(value, style: TextStyle(
                 fontSize: sub ? 12 : 14,
                 fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
@@ -2782,8 +2873,10 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   String? _newGender;
   String? _newRelation;
   bool _savingNewMember = false;
+  DateTime? _newDob;
   String? _nameError;
   String? _mobileError;
+  String? _dobError;
   String? _genderError;
   static const _genders   = ['Male', 'Female', 'Other'];
   static const _relations = ['Spouse', 'Father', 'Mother', 'Son', 'Daughter', 'Brother', 'Sister', 'Other'];
@@ -2905,19 +2998,22 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
     final nameErr   = name.isEmpty   ? 'Name is required' : null;
     final mobileErr = mobile.isEmpty ? 'Mobile number is required'
                     : mobile.length != 10 ? 'Enter a valid 10-digit mobile number' : null;
+    final dobErr    = _newDob == null ? 'Date of birth is required' : null;
     final genderErr = _newGender == null ? 'Please select a gender' : null;
-    if (nameErr != null || mobileErr != null || genderErr != null) {
-      setState(() { _nameError = nameErr; _mobileError = mobileErr; _genderError = genderErr; });
+    if (nameErr != null || mobileErr != null || dobErr != null || genderErr != null) {
+      setState(() { _nameError = nameErr; _mobileError = mobileErr; _dobError = dobErr; _genderError = genderErr; });
       return;
     }
+    final dobStr = '${_newDob!.year}-${_newDob!.month.toString().padLeft(2, '0')}-${_newDob!.day.toString().padLeft(2, '0')}';
     setState(() => _savingNewMember = true);
     try {
       final result = await ApiService.savePatient({
-        'name':     name,
-        'mobile':   mobile,
-        'gender':   _newGender!,
-        'location': '-',
-        'address':  '-',
+        'name':          name,
+        'mobile':        mobile,
+        'gender':        _newGender!,
+        'date_of_birth': dobStr,
+        'location':      '-',
+        'address':       '-',
         if (_newRelation != null) 'relation': _newRelation,
       });
       if (!mounted) return;
@@ -2925,6 +3021,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
         _newNameCtrl.clear();
         _newMobileCtrl.clear();
         setState(() {
+          _newDob             = null;
           _newGender          = null;
           _newRelation        = null;
           _showNewMemberForm  = false;
@@ -3098,12 +3195,60 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
           TextField(
             controller: _newMobileCtrl,
             keyboardType: TextInputType.phone,
+            maxLength: 10,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
             onChanged: (_) { if (_mobileError != null) setState(() => _mobileError = null); },
             decoration: _inputDecor('10-digit mobile number').copyWith(
+              counterText: '',
               errorText: _mobileError,
               errorStyle: const TextStyle(fontSize: 11),
             ),
           ),
+          const SizedBox(height: 14),
+          // Date of Birth
+          RichText(text: const TextSpan(style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary), children: [
+            TextSpan(text: 'Date of Birth'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ])),
+          const SizedBox(height: 6),
+          GestureDetector(
+            onTap: () async {
+              final picked = await showDatePicker(
+                context: context,
+                initialDate: _newDob ?? DateTime(2000),
+                firstDate: DateTime(1900),
+                lastDate: DateTime.now(),
+              );
+              if (picked != null) setState(() { _newDob = picked; _dobError = null; });
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: _dobError != null ? Colors.red : AppColors.divider),
+              ),
+              child: Row(children: [
+                Icon(Icons.calendar_today_outlined, size: 16,
+                    color: _dobError != null ? Colors.red : AppColors.textHint),
+                const SizedBox(width: 10),
+                Text(
+                  _newDob != null
+                      ? '${_newDob!.day.toString().padLeft(2,'0')}/${_newDob!.month.toString().padLeft(2,'0')}/${_newDob!.year}'
+                      : 'DD/MM/YYYY',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: _newDob != null ? AppColors.textPrimary : AppColors.textHint,
+                  ),
+                ),
+              ]),
+            ),
+          ),
+          if (_dobError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(_dobError!, style: const TextStyle(fontSize: 11, color: Colors.red)),
+            ),
           const SizedBox(height: 14),
           // Gender
           RichText(text: const TextSpan(style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary), children: [
@@ -3151,7 +3296,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
           const SizedBox(height: 20),
           Row(children: [
             Expanded(child: OutlinedButton(
-              onPressed: () => setState(() { _showNewMemberForm = false; _newNameCtrl.clear(); _newMobileCtrl.clear(); _newGender = null; _newRelation = null; _nameError = null; _mobileError = null; _genderError = null; }),
+              onPressed: () => setState(() { _showNewMemberForm = false; _newNameCtrl.clear(); _newMobileCtrl.clear(); _newDob = null; _newGender = null; _newRelation = null; _nameError = null; _mobileError = null; _dobError = null; _genderError = null; }),
               style: OutlinedButton.styleFrom(
                 foregroundColor: AppColors.textSecondary,
                 side: const BorderSide(color: AppColors.divider),

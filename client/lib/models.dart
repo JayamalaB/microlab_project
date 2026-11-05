@@ -89,7 +89,7 @@ class PatientModel {
     return PatientModel(
       patientId:       (j['patient_id'] as num).toInt(),
       patientIdRef:    j['patient_id_ref']?.toString(),
-      name:            toTitleCase(j['name']?.toString() ?? ''),
+      name:            (j['name']?.toString() ?? '').toUpperCase(),
       gender:          j['gender']?.toString() ?? '',
       location:        j['location']?.toString() ?? '',
       address:         j['address']?.toString() ?? '',
@@ -268,6 +268,8 @@ class BookingModel {
   final bool canReschedule;
   final String? referenceNo;        // ASMX bill_id stored in ip_bookings.reference_no
   final String? collectionNotes;    // customer notes from checkout
+  final String? doctorName;         // doctor name referred by (per booking)
+  final String? serviceChargeProductName; // ip_products.product_name for home-collection service charge
 
   BookingModel({
     required this.id,
@@ -319,6 +321,8 @@ class BookingModel {
     this.canReschedule = true,
     this.referenceNo,
     this.collectionNotes,
+    this.doctorName,
+    this.serviceChargeProductName,
   });
 }
 

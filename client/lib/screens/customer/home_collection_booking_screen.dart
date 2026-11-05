@@ -389,7 +389,7 @@ class _HomeCollectionBookingScreenState
                       : _hintRow(
                           Icons.info_outline_rounded,
                           const Color(0xFFF57C00),
-                          'Address-only pickup — technician navigates '
+                          'Address-only collection — technician navigates '
                           'by text, no GPS route.',
                           key: const ValueKey('hint_home'),
                         ),

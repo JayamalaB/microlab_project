@@ -1,7 +1,7 @@
 ﻿const crypto = require('crypto');
 const db       = require('../config/db');
 const settings = require('../config/settings');
-const { calculateHomeCollectionFare, FareCalculationError } = require('../services/fareCalculator');
+const { calculateHomeCollectionProduct, FareCalculationError } = require('../services/fareCalculator');
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { messaging } = require('../config/firebase');
@@ -111,6 +111,7 @@ exports.createBooking = async (req, res) => {
     paymentType       = 'pay_later',
     razorpayPaymentId = null,
     razorpayOrderId   = null,
+    doctorName        = null,
   } = req.body;
   // let, not const — Home Collection bookings have this recomputed
   // server-side below (see the fare-calculation block) rather than trusted
@@ -125,7 +126,7 @@ exports.createBooking = async (req, res) => {
   // (Branch → Customer distance) — checked before any DB work starts, same
   // as the patientId check above.
   if (bookingType === 'home_collection' && (collectionLatitude == null || collectionLongitude == null)) {
-    return res.status(422).json({ success: false, message: 'Pickup location is required for Home Collection bookings' });
+    return res.status(422).json({ success: false, message: 'Collection location is required for Home Collection bookings' });
   }
 
   const isPaid     = paymentType === 'full' && razorpayPaymentId;
@@ -169,7 +170,7 @@ exports.createBooking = async (req, res) => {
     // accepted or silently overridden — a completed payment can't be un-charged.
     let homeCollectionFare = null;
     if (bookingType === 'home_collection') {
-      homeCollectionFare = await calculateHomeCollectionFare({
+      homeCollectionFare = await calculateHomeCollectionProduct({
         branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude, dbConn: conn,
       });
 
@@ -177,12 +178,12 @@ exports.createBooking = async (req, res) => {
       if (isPaid) {
         const expected = Number((itemsTotal + homeCollectionFare.finalFare).toFixed(2));
         if (Math.abs(expected - totalAmount) > 0.01) {
-          console.warn(`⚠️  [CREATE BOOKING] paid totalAmount=₹${totalAmount} disagrees with itemsTotal+fare=₹${expected} (rateId=${homeCollectionFare.rateId}) — trusting the already-captured payment amount`);
+          console.warn(`⚠️  [CREATE BOOKING] paid totalAmount=₹${totalAmount} disagrees with itemsTotal+fare=₹${expected} (productId=${homeCollectionFare.product.product_id}) — trusting the already-captured payment amount`);
         }
       } else {
         totalAmount = Number((itemsTotal + homeCollectionFare.finalFare).toFixed(2));
       }
-      blog(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} finalFare=₹${homeCollectionFare.finalFare} rateId=${homeCollectionFare.rateId} → totalAmount=₹${totalAmount}`);
+      blog(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} doubledKm=${homeCollectionFare.doubledKm} finalFare=₹${homeCollectionFare.finalFare} productId=${homeCollectionFare.product.product_id} → totalAmount=₹${totalAmount}`);
     }
 
     const amountPaid = isPaid ? totalAmount : 0;
@@ -224,18 +225,18 @@ exports.createBooking = async (req, res) => {
          (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
           booking_type, status, total_amount, discount_amount,
           amount_paid, amount_due,
-          source_channel, notes, collection_address, postal_code, city,
+          source_channel, notes, doctor_name, collection_address, postal_code, city,
           collection_latitude, collection_longitude,
-          home_collection_fare, home_collection_distance_km, km_rate_id,
+          home_collection_fare, home_collection_distance_km, service_charge_product_id,
           patient_id, patient_id_ref, product_id,
           payment_status, start_datetime, end_datetime, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
       [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
        bookingType, bookingStatus, totalAmount, discountAmount ?? 0, amountPaid, amountDue,
-       sourceChannel, notes ?? null,
+       sourceChannel, notes ?? null, doctorName ?? null,
        collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
        collectionLatitude ?? null, collectionLongitude ?? null,
-       homeCollectionFare?.finalFare ?? null, homeCollectionFare?.distanceKm ?? null, homeCollectionFare?.rateId ?? null,
+       homeCollectionFare?.finalFare ?? null, homeCollectionFare?.distanceKm ?? null, homeCollectionFare?.product?.product_id ?? null,
        patientId, resolvedPatientIdRef,
        isPaid ? 'paid' : 'unpaid',
        userId ?? null]
@@ -381,11 +382,10 @@ exports.createBooking = async (req, res) => {
   } catch (err) {
     await conn.rollback();
     if (err instanceof FareCalculationError) {
-      // RATE_NOT_FOUND / RATE_CONFIG_INCOMPLETE mean the fare *system* isn't
-      // ready (503, an ops problem) — everything else (missing coordinates,
-      // missing branch location, outside service area) is this specific
-      // request being unable to be priced (422).
-      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
+      // PRODUCT_NOT_FOUND means the fare system isn't configured for this distance (503).
+      // Everything else (missing/invalid coordinates, branch location unavailable) is a
+      // request-level problem (422).
+      const status = err.code === 'PRODUCT_NOT_FOUND' ? 503 : 422;
       blog(`❌ [CREATE BOOKING] fare calculation failed — code=${err.code} ${err.message}`);
       res.status(status).json({ success: false, code: err.code, message: err.message });
     } else {
@@ -418,11 +418,21 @@ exports.getHomeCollectionFareQuote = async (req, res) => {
   }
 
   try {
-    const fare = await calculateHomeCollectionFare({ branchId, pickupLat, pickupLng });
-    res.json({ success: true, fare });
+    const result = await calculateHomeCollectionProduct({ branchId, pickupLat, pickupLng });
+    res.json({
+      success: true,
+      fare: {
+        distanceKm:  result.distanceKm,
+        doubledKm:   result.doubledKm,
+        finalFare:   result.finalFare,
+        productName: result.product.product_name,
+        testCode:    result.product.test_code,
+        productId:   result.product.product_id,
+      },
+    });
   } catch (err) {
     if (err instanceof FareCalculationError) {
-      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
+      const status = err.code === 'PRODUCT_NOT_FOUND' ? 503 : 422;
       return res.status(status).json({ success: false, code: err.code, message: err.message });
     }
     console.error('❌ [FARE QUOTE] failed:', err.message);
@@ -465,6 +475,8 @@ exports.getMyBookings = async (req, res) => {
          b.postal_code             AS collection_pincode,
          b.city                    AS collection_city,
          b.notes                   AS collection_notes,
+         b.doctor_name,
+         sc_p.product_name         AS service_charge_product_name,
          br.branch_name            AS branch_name,
          br.branch_address         AS branch_address,
          br.branch_city            AS branch_location,
@@ -572,6 +584,7 @@ exports.getMyBookings = async (req, res) => {
        LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id
        LEFT JOIN ip_users u          ON u.user_id = tech.user_id
        LEFT JOIN ip_feedback f        ON f.booking_id = b.booking_id
+       LEFT JOIN ip_products sc_p    ON sc_p.product_id = b.service_charge_product_id
        WHERE b.deleted_at IS NULL
        GROUP BY b.booking_id
        ORDER BY b.created_at DESC
@@ -2417,10 +2430,10 @@ exports.createFamilyBooking = async (req, res) => {
   // fare error rejects the request cleanly without a partial rollback.
   let familyFare = null; // set for home_collection only; null = lab_test
   if (bookingType === 'home_collection') {
-    familyFare = await calculateHomeCollectionFare({
+    familyFare = await calculateHomeCollectionProduct({
       branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude,
     });
-    blog(`💰 [CREATE FAMILY BOOKING] fare — distanceKm=${familyFare.distanceKm} finalFare=₹${familyFare.finalFare} rateId=${familyFare.rateId}`);
+    blog(`💰 [CREATE FAMILY BOOKING] fare — distanceKm=${familyFare.distanceKm} doubledKm=${familyFare.doubledKm} finalFare=₹${familyFare.finalFare} productId=${familyFare.product.product_id}`);
   }
 
   const conn = await db.getConnection();
@@ -2430,7 +2443,7 @@ exports.createFamilyBooking = async (req, res) => {
     let isFirstMember = true;
 
     for (const member of members) {
-      const { patientId, items = [], totalAmount = 0 } = member;
+      const { patientId, items = [], totalAmount = 0, doctorName: memberDoctorName = null } = member;
       if (!patientId) continue;
 
       // Resolve patient_id_ref
@@ -2441,9 +2454,9 @@ exports.createFamilyBooking = async (req, res) => {
       if (patRow?.patient_id_ref) resolvedPatientIdRef = patRow.patient_id_ref;
 
       // Primary member carries the service charge; additional members have 0.
-      const memberFare       = (isFirstMember && familyFare) ? familyFare.finalFare  : 0;
-      const memberDistanceKm = (isFirstMember && familyFare) ? familyFare.distanceKm : null;
-      const memberRateId     = (isFirstMember && familyFare) ? familyFare.rateId     : null;
+      const memberFare       = (isFirstMember && familyFare) ? familyFare.finalFare              : 0;
+      const memberDistanceKm = (isFirstMember && familyFare) ? familyFare.distanceKm             : null;
+      const memberScProductId = (isFirstMember && familyFare) ? familyFare.product.product_id    : null;
 
       const amountPaid  = isPaid ? totalAmount : 0;
       const amountDue   = isPaid ? 0 : totalAmount;
@@ -2453,19 +2466,19 @@ exports.createFamilyBooking = async (req, res) => {
         `INSERT INTO ip_bookings
            (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
             booking_type, status, total_amount, discount_amount,
-            amount_paid, amount_due, source_channel, notes,
+            amount_paid, amount_due, source_channel, notes, doctor_name,
             collection_address, postal_code, city,
             collection_latitude, collection_longitude,
-            home_collection_fare, home_collection_distance_km, km_rate_id,
+            home_collection_fare, home_collection_distance_km, service_charge_product_id,
             patient_id, patient_id_ref, product_id,
             payment_status, visit_group_id, start_datetime, end_datetime, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, 'mobile_app', ?,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?, 'mobile_app', ?, ?,
                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), ?, NOW())`,
         [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
-         bookingType, totalAmount, amountPaid, amountDue, notes ?? null,
+         bookingType, totalAmount, amountPaid, amountDue, notes ?? null, memberDoctorName ?? null,
          collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
          collectionLatitude ?? null, collectionLongitude ?? null,
-         memberFare, memberDistanceKm, memberRateId,
+         memberFare, memberDistanceKm, memberScProductId,
          patientId, resolvedPatientIdRef,
          isPaid ? 'paid' : 'unpaid',
          visitGroupId, userId ?? null]
