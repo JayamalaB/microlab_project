@@ -546,13 +546,15 @@ class LLMRetriever {
         const isFamilyScope = intent === 'patient_profile_query' &&
             (FAMILY_SCOPE_PATTERN.test(question) || !!entities.relation || !!entities.person_name);
 
-        // A generic "show all available packages" style question (no specific test
-        // named, no category keyword either) — uses the curated ip_chatbot_packages
-        // list instead of buildTestQuery's generic ip_products listing, since the
-        // chatbot's package list is meant to show only those hand-picked products,
-        // in their configured sort_order, not an arbitrary sample of ip_products.
+        // A generic "show all available tests/packages" style question (no specific
+        // test named, no category keyword either) — uses the curated
+        // ip_chatbot_packages list instead of buildTestQuery's generic ip_products
+        // listing, since the chatbot's list is meant to show only those hand-picked
+        // products, in their configured sort_order, not an arbitrary sample of
+        // ip_products. "tests" and "packages" trigger it the same way — the
+        // schema prompt itself treats them as synonyms for this same table.
         const isChatbotPackagesListing = intent === 'test_query' &&
-            !entities.product_name && !entities.keyword && /\bpackages?\b/i.test(question);
+            !entities.product_name && !entities.keyword && /\b(packages?|tests?)\b/i.test(question);
 
         const sql = intent === 'patient_profile_query'
             ? this.buildPatientProfileQuery(entities, patientId, isFamilyScope)
