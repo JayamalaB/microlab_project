@@ -11,6 +11,10 @@ router.post('/collect-payment',         auth, requireTechnician, technicianContr
 router.post('/create-qr',              auth, requireTechnician, technicianController.createQrPayment);
 router.get('/qr-status/:qrId',         auth, requireTechnician, technicianController.getQrStatus);
 router.put('/bookings/:bookingId/additional-charge', auth, requireTechnician, technicianController.setAdditionalCharge);
+router.get('/charge-packages',          auth, requireTechnician, technicianController.getChargePackages);
+router.get('/bookings/:bookingId/additional-charges',            auth, requireTechnician, technicianController.getAdditionalCharges);
+router.post('/bookings/:bookingId/additional-charges',           auth, requireTechnician, technicianController.addAdditionalCharges);
+router.delete('/bookings/:bookingId/additional-charges/:chargeId', auth, requireTechnician, technicianController.removeAdditionalCharge);
 router.post('/add-visit-member',        auth, requireTechnician, technicianController.addVisitMember);
 router.get('/patient-lookup',           auth, requireTechnician, technicianController.lookupPatient);
 router.get('/booking-family',           auth, requireTechnician, technicianController.getBookingFamily);

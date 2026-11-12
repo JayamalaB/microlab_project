@@ -244,6 +244,19 @@ class _TechnicianBookingDetailScreenState
   double _additionalCharge = 0.0;
   String? _additionalChargeReason;
   bool _savingAdditionalCharge = false;
+  // Charge packages on this visit, each {chargeId, bookingId, productId, name,
+  // testCode, price, reason}, and the visit's service charge product name —
+  // from _loadAdditionalCharges.
+  List<Map<String, dynamic>> _chargePackages = [];
+  String? _serviceChargeProductName;
+  // Service charge collected on the spot (server: services/serviceCharge.js):
+  // {status, productName, oneWayKm, roundTripKm, amount}. status null = booked
+  // before this change (booking-time charge, shown as before); 'pending' /
+  // 'calculated' = shown after arrival; 'applied' = in the bill;
+  // 'no_product' = the technician adds a charge package.
+  Map<String, dynamic>? _serviceChargeInfo;
+  // Products for the "Add charge package" sheet, loaded on first use.
+  List<Map<String, dynamic>> _chargeCatalogue = [];
 
   // Visit members linked to this booking (refreshed after each add)
   List<Map<String, dynamic>> _linkedPatients = [];
@@ -400,6 +413,7 @@ class _TechnicianBookingDetailScreenState
     _loadCollectionProof();
     _loadLinkedPatients();
     _refreshPaymentInfo();
+    _loadAdditionalCharges();
     // A collection photo taken just before Android closed the app (see
     // _recoverLostProofPhoto) is uploaded now instead of being lost.
     _recoverLostProofPhoto();
@@ -441,161 +455,290 @@ class _TechnicianBookingDetailScreenState
     ];
   }
 
-  // "Add additional charge": a family visit first picks whose booking it
-  // goes on (one charge per booking), then the amount + reason sheet.
-  Future<void> _addAdditionalCharge() async {
-    final targets = _additionalChargeTargets;
-    if (targets.isEmpty) return;
-    // Always apply additional charge to the main patient's booking
-    final target = targets.firstWhere((t) => t.isMain, orElse: () => targets.first);
-    await _editAdditionalCharge(target);
+  // Charge packages on this visit and the service charge product name, for
+  // the Billing Summary and the charge cards.
+  Future<void> _loadAdditionalCharges() async {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (bookingId == 0) return;
+    final data = await ApiService.getAdditionalCharges(bookingId);
+    if (!mounted || data == null) return;
+    setState(() {
+      _chargePackages           = (data['charges'] as List? ?? []).cast<Map<String, dynamic>>();
+      _serviceChargeProductName = data['serviceChargeProductName'] as String?;
+      _serviceChargeInfo        = data['serviceCharge'] as Map<String, dynamic>?;
+    });
   }
 
-  // Amount + reason sheet. Saving replaces the booking's charge; "Remove"
-  // saves 0. The server recalculates total_amount / amount_due.
-  Future<void> _editAdditionalCharge(
-      ({int bookingId, String name, double amount, String? reason, bool isMain}) target) async {
-    final amountCtrl = TextEditingController(
-        text: target.amount > 0 ? target.amount.toStringAsFixed(target.amount % 1 == 0 ? 0 : 2) : '');
-    final reasonCtrl = TextEditingController(text: target.reason ?? '');
-    String? formError;
+  double _packagesTotalFor(int bookingId) => _chargePackages
+      .where((c) => (c['bookingId'] as num?)?.toInt() == bookingId)
+      .fold(0.0, (s, c) => s + ((c['price'] as num?)?.toDouble() ?? 0.0));
 
-    final result = await showModalBottomSheet<double>(
+  // The part of a booking's additional charge typed in with an older app
+  // version (amount + reason) — what is left after its charge packages.
+  double _typedChargeFor(int bookingId, double additionalCharge) {
+    final typed = ((additionalCharge - _packagesTotalFor(bookingId)) * 100).round() / 100;
+    return typed > 0 ? typed : 0.0;
+  }
+
+  // New totals from an add/remove reply: this screen's own booking is
+  // updated in place, a family member's by reloading the visit members.
+  Future<void> _applyChargeResult(int bookingId, Map<String, dynamic> res) async {
+    if (bookingId == int.tryParse(widget.booking.id)) {
+      setState(() {
+        _totalAmount       = double.tryParse(res['totalAmount']?.toString() ?? '') ?? _totalAmount;
+        _additionalCharge  = double.tryParse(res['additionalChargeAmount']?.toString() ?? '') ?? _additionalCharge;
+        _livePaymentStatus = res['paymentStatus'] as String? ?? _livePaymentStatus;
+      });
+    } else {
+      await _loadLinkedPatients();
+    }
+    await _loadAdditionalCharges();
+  }
+
+  // "Add charge package": the technician picks one or more products (prices
+  // set by the server) with an optional reason. Goes on the main patient's
+  // booking, like the additional charge before it.
+  Future<void> _addChargePackages() async {
+    final mainId = int.tryParse(widget.booking.id);
+    if (mainId == null) return;
+    if (_chargeCatalogue.isEmpty) {
+      setState(() => _savingAdditionalCharge = true);
+      final packages = await ApiService.getChargePackages();
+      if (!mounted) return;
+      setState(() {
+        _chargeCatalogue        = packages;
+        _savingAdditionalCharge = false;
+      });
+      if (packages.isEmpty) {
+        AppMessages.error(context, 'We couldn\'t load the packages. Please try again.');
+        return;
+      }
+    }
+
+    final choice = await showModalBottomSheet<({List<int> productIds, String reason})>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) {
-          void submit() {
-            final amount = double.tryParse(amountCtrl.text.trim());
-            if (amount == null || amount <= 0) {
-              setSheet(() => formError = 'Enter an amount greater than ₹0');
-              return;
-            }
-            if (reasonCtrl.text.trim().isEmpty) {
-              setSheet(() => formError = 'Enter a reason for the charge');
-              return;
-            }
-            Navigator.pop(ctx, amount);
-          }
-
-          return Padding(
-            padding: EdgeInsets.fromLTRB(20, 16, 20, MediaQuery.of(ctx).viewInsets.bottom + 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Center(child: Container(
-                  width: 40, height: 4,
-                  margin: const EdgeInsets.only(bottom: 14),
-                  decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-                )),
-                Text(target.amount > 0 ? 'Edit additional charge' : 'Add additional charge',
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                const SizedBox(height: 2),
-                Text(target.name, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                const SizedBox(height: 14),
-                TextField(
-                  controller: amountCtrl,
-                  autofocus: true,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d{0,5}(\.\d{0,2})?'))],
-                  decoration: const InputDecoration(
-                    labelText: 'Amount',
-                    prefixText: '₹ ',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  onChanged: (_) { if (formError != null) setSheet(() => formError = null); },
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: reasonCtrl,
-                  maxLength: 255,
-                  maxLines: 2,
-                  minLines: 1,
-                  textCapitalization: TextCapitalization.sentences,
-                  decoration: const InputDecoration(
-                    labelText: 'Reason',
-                    hintText: 'e.g. Waited 30 minutes, extra distance',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  onChanged: (_) { if (formError != null) setSheet(() => formError = null); },
-                ),
-                if (formError != null) ...[
-                  Text(formError!, style: const TextStyle(fontSize: 12, color: AppColors.error)),
-                  const SizedBox(height: 8),
-                ],
-                Row(children: [
-                  if (target.amount > 0) ...[
-                    Expanded(child: OutlinedButton(
-                      onPressed: () => Navigator.pop(ctx, 0.0),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.error,
-                        side: const BorderSide(color: AppColors.error),
-                        padding: const EdgeInsets.symmetric(vertical: 13),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text('Remove'),
-                    )),
-                    const SizedBox(width: 10),
-                  ],
-                  Expanded(flex: 2, child: ElevatedButton(
-                    onPressed: submit,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.brandGreen,
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    ),
-                    child: const Text('Save', style: TextStyle(fontWeight: FontWeight.w600)),
-                  )),
-                ]),
-              ],
-            ),
-          );
-        },
-      ),
+      builder: (_) => _ChargePackageSheet(packages: _chargeCatalogue, patientName: widget.booking.customerName),
     );
-    final reason = reasonCtrl.text.trim();
-    // Disposed after the sheet's closing animation, which still reads them.
-    Future.delayed(const Duration(milliseconds: 400), () {
-      amountCtrl.dispose();
-      reasonCtrl.dispose();
-    });
-    if (result == null || !mounted) return;
+    if (choice == null || !mounted) return;
 
     setState(() => _savingAdditionalCharge = true);
-    final res = await ApiService.setAdditionalCharge(
-      bookingId: target.bookingId,
-      amount: result,
-      reason: result > 0 ? reason : '',
+    final res = await ApiService.addAdditionalCharges(
+      bookingId:  mainId,
+      productIds: choice.productIds,
+      reason:     choice.reason,
     );
     if (!mounted) return;
     setState(() => _savingAdditionalCharge = false);
-
     if (res['success'] != true) {
       AppMessages.error(context, AppMessages.serverMessage(res['message'],
-          fallback: 'We couldn\'t save the additional charge. Please try again.'));
+          fallback: 'We couldn\'t add the charge package. Please try again.'));
+      // A package that went inactive meanwhile: fetch a fresh list next time.
+      _chargeCatalogue = [];
       return;
     }
-    if (target.isMain) {
-      setState(() {
-        _totalAmount            = double.tryParse(res['totalAmount']?.toString() ?? '') ?? _totalAmount;
-        _additionalCharge       = double.tryParse(res['additionalChargeAmount']?.toString() ?? '') ?? 0.0;
-        _additionalChargeReason = res['additionalChargeReason'] as String?;
-        _livePaymentStatus      = res['paymentStatus'] as String? ?? _livePaymentStatus;
-      });
-    } else {
-      await _loadLinkedPatients();
-      if (!mounted) return;
+    await _applyChargeResult(mainId, res);
+    if (!mounted) return;
+    AppMessages.success(context, choice.productIds.length == 1
+        ? 'Charge package added'
+        : '${choice.productIds.length} charge packages added');
+  }
+
+  Future<bool> _confirmRemoveCharge(String name, double amount) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Remove charge?'),
+        content: Text('$name · ₹${_inr(amount)} will be taken off the bill.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<void> _removeChargePackage(Map<String, dynamic> charge) async {
+    final bookingId = (charge['bookingId'] as num?)?.toInt();
+    final chargeId  = (charge['chargeId'] as num?)?.toInt();
+    if (bookingId == null || chargeId == null) return;
+    final name  = charge['name'] as String? ?? 'Charge package';
+    final price = (charge['price'] as num?)?.toDouble() ?? 0.0;
+    if (!await _confirmRemoveCharge(name, price) || !mounted) return;
+
+    setState(() => _savingAdditionalCharge = true);
+    final res = await ApiService.removeAdditionalCharge(bookingId: bookingId, chargeId: chargeId);
+    if (!mounted) return;
+    setState(() => _savingAdditionalCharge = false);
+    if (res['success'] != true) {
+      AppMessages.error(context, AppMessages.serverMessage(res['message'],
+          fallback: 'We couldn\'t remove the charge. Please try again.'));
+      await _loadAdditionalCharges();
+      return;
     }
-    AppMessages.success(context, result > 0
-        ? 'Additional charge ₹${_inr(result)} added for ${target.name}'
-        : 'Additional charge removed');
+    await _applyChargeResult(bookingId, res);
+    if (!mounted) return;
+    AppMessages.success(context, '$name removed');
+  }
+
+  // Removes a charge typed in with an older app version (amount 0 clears it).
+  Future<void> _removeTypedCharge(int bookingId, double amount) async {
+    if (!await _confirmRemoveCharge('Additional charge', amount) || !mounted) return;
+    setState(() => _savingAdditionalCharge = true);
+    final res = await ApiService.setAdditionalCharge(bookingId: bookingId, amount: 0, reason: '');
+    if (!mounted) return;
+    setState(() => _savingAdditionalCharge = false);
+    if (res['success'] != true) {
+      AppMessages.error(context, AppMessages.serverMessage(res['message'],
+          fallback: 'We couldn\'t remove the charge. Please try again.'));
+      return;
+    }
+    if (bookingId == int.tryParse(widget.booking.id)) _additionalChargeReason = null;
+    await _applyChargeResult(bookingId, res);
+    if (!mounted) return;
+    AppMessages.success(context, 'Additional charge removed');
+  }
+
+  String _memberNameFor(int? bookingId) {
+    if (bookingId == int.tryParse(widget.booking.id)) return widget.booking.customerName;
+    final p = _linkedPatients.firstWhere(
+        (p) => (p['booking_id'] as num?)?.toInt() == bookingId, orElse: () => const {});
+    return p['patient_name'] as String? ?? 'Visit Member';
+  }
+
+  // The service charge line(s) of the Billing Summary. Collected on the spot:
+  // shown with its package, km up & down and amount once it is in the bill
+  // (after arrival); before that "After arrival"; no package for the km → ask
+  // the technician to add one. Bookings from before this change: as before.
+  List<Widget> _serviceChargeRows() {
+    final info   = _serviceChargeInfo;
+    final status = info?['status'] as String?;
+    double? km(String key) => (info?[key] as num?)?.toDouble();
+
+    if (status == null) {
+      if (_serviceCharge <= 0) return const [];
+      return [
+        const SizedBox(height: 4),
+        _BillRow(_serviceChargeProductName ?? 'Service Charge', '₹${_inr(_serviceCharge)}', sub: true),
+      ];
+    }
+    if (status == 'applied') {
+      final roundTrip = km('roundTripKm');
+      final oneWay    = km('oneWayKm');
+      return [
+        const SizedBox(height: 4),
+        _BillRow('Service Charge — ${info?['productName'] ?? 'Home Collection'}',
+            '₹${_inr((info?['amount'] as num?)?.toDouble() ?? _serviceCharge)}', sub: true),
+        if (roundTrip != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '${roundTrip.toStringAsFixed(2)} km up & down'
+                '${oneWay != null ? ' (${oneWay.toStringAsFixed(2)} km × 2)' : ''}',
+                style: const TextStyle(fontSize: 11, color: AppColors.textHint),
+              ),
+            ),
+          ),
+      ];
+    }
+    final arrived = _canEditAdditionalCharge || _isFinalized;
+    if (status == 'no_product' && arrived) {
+      final roundTrip = km('roundTripKm');
+      return [
+        const SizedBox(height: 6),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFF8E1),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFFFE082)),
+          ),
+          child: Text(
+            'No service charge package for '
+            '${roundTrip != null ? '${roundTrip.toStringAsFixed(2)} km up & down' : 'this distance'}. '
+            'Please add one with "Add charge package".',
+            style: const TextStyle(fontSize: 12, color: Color(0xFFE65100)),
+          ),
+        ),
+      ];
+    }
+    return const [
+      SizedBox(height: 4),
+      _BillRow('Service Charge', 'After arrival', sub: true),
+    ];
+  }
+
+  // Whole-visit bill, like the customer's checkout Billing Summary: each
+  // patient's tests, the service charge (by its package name), every charge
+  // added on site, then total, paid and due. Uses the same figures as the
+  // payment buttons (_testsTotal, _serviceCharge, _amountDue and each family
+  // booking's own total / amount due), so the two always agree.
+  Widget _billingSummaryCard() {
+    final members = _linkedPatients.where((p) => (p['booking_id'] as num?) != null).toList();
+    double amountOf(Object? v) => double.tryParse(v?.toString() ?? '') ?? 0.0;
+
+    final mainTotal = _testsTotal + _serviceCharge + _additionalCharge;
+    final mainPaid  = _liveAmountPaid + _sessionPaymentCollected;
+    var grandTotal  = mainTotal;
+    var totalDue    = _amountDue;
+    var paid        = mainPaid > mainTotal ? mainTotal : mainPaid;
+    for (final m in members) {
+      final total = amountOf(m['total_amount']);
+      final due   = amountOf(m['amount_due']);
+      grandTotal += total;
+      totalDue   += due;
+      paid       += (total - due) > 0 ? total - due : 0.0;
+    }
+    final typed = _additionalChargeTargets
+        .map((t) => (name: t.name, amount: _typedChargeFor(t.bookingId, t.amount)))
+        .where((t) => t.amount > 0)
+        .toList();
+    final showMember = members.isNotEmpty;
+
+    return _SectionCard(
+      title: 'Billing Summary',
+      icon: Icons.calculate_outlined,
+      child: Column(children: [
+        _BillRow('${widget.booking.customerName} (Tests)', '₹${_inr(_testsTotal)}'),
+        for (final m in members) ...[
+          const SizedBox(height: 4),
+          _BillRow('${m['patient_name'] ?? 'Visit Member'} (Tests)',
+              '₹${_inr(amountOf(m['total_amount']) - amountOf(m['additional_charge_amount']))}'),
+        ],
+        ..._serviceChargeRows(),
+        for (final c in _chargePackages) ...[
+          const SizedBox(height: 4),
+          _BillRow(
+            '+ ${c['name'] ?? 'Charge package'}'
+                '${showMember ? ' · ${_memberNameFor((c['bookingId'] as num?)?.toInt())}' : ''}',
+            '₹${_inr((c['price'] as num?)?.toDouble() ?? 0.0)}',
+            sub: true,
+          ),
+        ],
+        for (final t in typed) ...[
+          const SizedBox(height: 4),
+          _BillRow('+ Additional charge${showMember ? ' · ${t.name}' : ''}', '₹${_inr(t.amount)}', sub: true),
+        ],
+        const Divider(height: 20),
+        _BillRow('Grand Total', '₹${_inr(grandTotal)}', bold: true),
+        if (paid > 0) ...[
+          const SizedBox(height: 4),
+          _BillRow('Paid', '₹${_inr(paid)}', sub: true),
+        ],
+        const SizedBox(height: 6),
+        _BillRow(totalDue > 0 ? 'Amount Due' : 'Fully Paid', '₹${_inr(totalDue)}', bold: true, green: true),
+      ]),
+    );
   }
 
   // Fetches fresh payment_status + amount_paid from the server so the screen
@@ -635,6 +778,7 @@ class _TechnicianBookingDetailScreenState
         _refreshPaymentInfo(),
         _loadLinkedPatients(),
         _loadItems(),
+        _loadAdditionalCharges(),
       ]);
     } finally {
       if (mounted) setState(() => _isReloading = false);
@@ -1022,6 +1166,13 @@ void _handleStatusTransition(String next) {
     case 'Destination Reached':
       setState(() => _currentStatus = 'Destination Reached');
       if (bookingId > 0) SocketService.instance.emitArrived(bookingId: bookingId);
+      // The server adds the service charge to the bill on arrival — reload
+      // the bill once it has (the charges call also applies it if needed).
+      Future.delayed(const Duration(milliseconds: 1500), () async {
+        if (!mounted) return;
+        await _loadAdditionalCharges();
+        await _refreshPaymentInfo();
+      });
       break;
 
     case 'Collection Started':
@@ -3833,23 +3984,6 @@ void _resumeJourney() {
                     ];
                   }(),
                 ],
-
-                if (_selectedTests.isNotEmpty) ...[
-                  const Divider(height: 20),
-                  _BillRow('Tests Total', '₹${_inr(_testsTotal)}', bold: true, green: true),
-                  const SizedBox(height: 4),
-                  _BillRow(
-                    'Service Charge',
-                    '₹${_inr(_serviceCharge)}${_livePaymentStatus == 'paid' ? ' (paid at booking)' : ' (due now)'}',
-                    sub: true,
-                  ),
-                  if (_additionalCharge > 0) ...[
-                    const SizedBox(height: 4),
-                    _BillRow('Additional Charge', '₹${_inr(_additionalCharge)}', sub: true),
-                  ],
-                  const Divider(height: 16),
-                  _BillRow('Amount Due Now', '₹${_inr(_amountDue)}', bold: true, green: true),
-                ],
               ],
             ),
           ),
@@ -4260,6 +4394,11 @@ void _resumeJourney() {
             ]),
           ),
 
+          // ── Billing Summary ──────────────────────────────
+          const SizedBox(height: 14),
+          _billingSummaryCard(),
+          const SizedBox(height: 14),
+
           // ── Collect Payment ──────────────────────────────
           if (!_isCompleted)
             _SectionCard(
@@ -4293,122 +4432,48 @@ void _resumeJourney() {
                 ),
                 const SizedBox(height: 12),
 
-                // Additional charges entered on site (amount + reason), one
-                // per booking — already inside each booking's amount due.
+                // Charges added on site — charge packages, plus any charge typed
+                // in with an older app version — already inside each booking's
+                // amount due (see the Billing Summary above).
                 ...() {
-                  final charged  = _additionalChargeTargets.where((t) => t.amount > 0).toList();
                   final editable = _canEditAdditionalCharge;
-                  if (charged.isEmpty && !editable) return <Widget>[];
+                  final typed = _additionalChargeTargets
+                      .map((t) => (target: t, amount: _typedChargeFor(t.bookingId, t.amount)))
+                      .where((t) => t.amount > 0)
+                      .toList();
+                  if (_chargePackages.isEmpty && typed.isEmpty && !editable) return <Widget>[];
+                  final showMember = _linkedPatients.isNotEmpty;
                   return [
-                    ...charged.map<Widget>((t) => Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFFF8E1),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: const Color(0xFFFFE082)),
-                      ),
-                      child: Row(children: [
-                        const Icon(Icons.add_circle_outline, size: 16, color: Color(0xFFE65100)),
-                        const SizedBox(width: 8),
-                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Text(
-                            charged.length > 1 || _linkedPatients.isNotEmpty
-                                ? 'Additional charge · ${t.name}'
-                                : 'Additional charge',
-                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                          ),
-                          if ((t.reason ?? '').isNotEmpty)
-                            Text(t.reason!, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                        ])),
-                        Text('₹${_inr(t.amount)}',
-                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
-                        if (editable)
-                          IconButton(
-                            onPressed: _savingAdditionalCharge ? null : () => _editAdditionalCharge(t),
-                            icon: const Icon(Icons.edit_outlined, size: 18),
-                            color: AppColors.textSecondary,
-                            tooltip: 'Edit additional charge',
-                            visualDensity: VisualDensity.compact,
-                          ),
-                      ]),
+                    ..._chargePackages.map<Widget>((c) => _ChargeCard(
+                      title:  c['name'] as String? ?? 'Charge package',
+                      member: showMember ? _memberNameFor((c['bookingId'] as num?)?.toInt()) : null,
+                      reason: c['reason'] as String?,
+                      amount: (c['price'] as num?)?.toDouble() ?? 0.0,
+                      onRemove: editable && !_savingAdditionalCharge ? () => _removeChargePackage(c) : null,
+                    )),
+                    ...typed.map<Widget>((t) => _ChargeCard(
+                      title:  'Additional charge',
+                      member: showMember ? t.target.name : null,
+                      reason: t.target.reason,
+                      amount: t.amount,
+                      onRemove: editable && !_savingAdditionalCharge
+                          ? () => _removeTypedCharge(t.target.bookingId, t.amount)
+                          : null,
                     )),
                     if (editable)
                       Align(
                         alignment: Alignment.centerLeft,
                         child: TextButton.icon(
-                          onPressed: _savingAdditionalCharge ? null : _addAdditionalCharge,
+                          onPressed: _savingAdditionalCharge ? null : _addChargePackages,
                           icon: _savingAdditionalCharge
                               ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
                               : const Icon(Icons.add_rounded, size: 18),
-                          label: const Text('Add additional charge',
+                          label: const Text('Add charge package',
                               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                           style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
                         ),
                       ),
                     const SizedBox(height: 8),
-                  ];
-                }(),
-
-                // Billing Summary — per-person breakdown before collect buttons
-                ...() {
-                  final rows = <Map<String, dynamic>>[];
-                  if (!_paymentDone && _amountDue > 0) {
-                    rows.add({
-                      'name':   '${widget.booking.customerName} (Tests)',
-                      'amount': _amountDue,
-                    });
-                  }
-                  for (final p in _linkedPatients) {
-                    final due = double.tryParse(p['amount_due']?.toString() ?? '0') ?? 0.0;
-                    if (due > 0) {
-                      rows.add({
-                        'name':   p['patient_name'] as String? ?? 'Visit Member',
-                        'amount': due,
-                      });
-                    }
-                  }
-                  if (rows.isEmpty) return <Widget>[];
-                  final totalDue = rows.fold<double>(0, (s, r) => s + (r['amount'] as double));
-                  return [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF5F7FA),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: const Color(0xFFE0E4EA)),
-                      ),
-                      child: Column(
-                        children: [
-                          ...rows.map<Widget>((r) => Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 4),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(r['name'] as String,
-                                    style: const TextStyle(fontSize: 13, color: Color(0xFF555555))),
-                                Text('₹${_inr((r['amount'] as double))}',
-                                    style: const TextStyle(fontSize: 13, color: Color(0xFF333333))),
-                              ],
-                            ),
-                          )),
-                          const Divider(height: 16, thickness: 1),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text('Total Due',
-                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
-                              Text('₹${_inr(totalDue)}',
-                                  style: const TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w700,
-                                      color: Color(0xFF1565C0))),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 12),
                   ];
                 }(),
 
@@ -4890,6 +4955,189 @@ class _PaymentMethodChip extends StatelessWidget {
       );
 }
 
+// One charge on the visit (a charge package, or an older typed charge):
+// name, whose booking it is on (family visits), optional reason, amount and
+// a remove button while charges can still change.
+class _ChargeCard extends StatelessWidget {
+  final String title;
+  final String? member;
+  final String? reason;
+  final double amount;
+  final VoidCallback? onRemove;
+  const _ChargeCard({required this.title, this.member, this.reason, required this.amount, this.onRemove});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: EdgeInsets.fromLTRB(12, 8, onRemove != null ? 4 : 12, 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF8E1),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0xFFFFE082)),
+        ),
+        child: Row(children: [
+          const Icon(Icons.add_circle_outline, size: 16, color: Color(0xFFE65100)),
+          const SizedBox(width: 8),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(member != null ? '$title · $member' : title,
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            if ((reason ?? '').isNotEmpty)
+              Text(reason!, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+          ])),
+          Text('₹${_inr(amount)}',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
+          if (onRemove != null)
+            IconButton(
+              onPressed: onRemove,
+              icon: const Icon(Icons.close_rounded, size: 18),
+              color: AppColors.textSecondary,
+              tooltip: 'Remove charge',
+              visualDensity: VisualDensity.compact,
+            ),
+        ]),
+      );
+}
+
+// "Add charge package" sheet: search the catalogue, tick one or more
+// products, add an optional reason. Returns the chosen product ids and the
+// reason; prices shown are the server's, which it charges again on save.
+class _ChargePackageSheet extends StatefulWidget {
+  final List<Map<String, dynamic>> packages;
+  final String patientName;
+  const _ChargePackageSheet({required this.packages, required this.patientName});
+
+  @override
+  State<_ChargePackageSheet> createState() => _ChargePackageSheetState();
+}
+
+class _ChargePackageSheetState extends State<_ChargePackageSheet> {
+  final _searchCtrl = TextEditingController();
+  final _reasonCtrl = TextEditingController();
+  final Set<int> _selected = {};
+  String _query = '';
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    _reasonCtrl.dispose();
+    super.dispose();
+  }
+
+  int _idOf(Map<String, dynamic> p) => (p['productId'] as num).toInt();
+  double _priceOf(Map<String, dynamic> p) => (p['price'] as num?)?.toDouble() ?? 0.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final q = _query.toLowerCase();
+    final shown = q.isEmpty
+        ? widget.packages
+        : widget.packages.where((p) =>
+            (p['name'] as String? ?? '').toLowerCase().contains(q) ||
+            (p['category'] as String? ?? '').toLowerCase().contains(q)).toList();
+    final selectedTotal = widget.packages
+        .where((p) => _selected.contains(_idOf(p)))
+        .fold(0.0, (s, p) => s + _priceOf(p));
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.8,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Center(child: Container(
+                width: 40, height: 4,
+                margin: const EdgeInsets.only(bottom: 14),
+                decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+              )),
+              const Text('Add charge package', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 2),
+              Text(widget.patientName, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _searchCtrl,
+                onChanged: (v) => setState(() => _query = v.trim()),
+                decoration: const InputDecoration(
+                  hintText: 'Search packages',
+                  prefixIcon: Icon(Icons.search, size: 20),
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: shown.isEmpty
+                ? const Center(child: Text('No packages match your search',
+                    style: TextStyle(fontSize: 13, color: AppColors.textSecondary)))
+                : ListView.builder(
+                    itemCount: shown.length,
+                    itemBuilder: (_, i) {
+                      final p  = shown[i];
+                      final id = _idOf(p);
+                      return CheckboxListTile(
+                        value: _selected.contains(id),
+                        onChanged: (v) => setState(() => v == true ? _selected.add(id) : _selected.remove(id)),
+                        dense: true,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        activeColor: AppColors.brandGreen,
+                        title: Text(p['name'] as String? ?? 'Package', style: const TextStyle(fontSize: 13)),
+                        subtitle: (p['category'] as String?) != null
+                            ? Text(p['category'] as String, style: const TextStyle(fontSize: 11))
+                            : null,
+                        secondary: Text('₹${_inr(_priceOf(p))}',
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                      );
+                    },
+                  ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+            child: Column(children: [
+              TextField(
+                controller: _reasonCtrl,
+                maxLength: 255,
+                maxLines: 2,
+                minLines: 1,
+                textCapitalization: TextCapitalization.sentences,
+                decoration: const InputDecoration(
+                  labelText: 'Reason (optional)',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _selected.isEmpty
+                      ? null
+                      : () => Navigator.pop(context,
+                          (productIds: _selected.toList(), reason: _reasonCtrl.text.trim())),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.brandGreen,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: Text(
+                    _selected.isEmpty
+                        ? 'Select packages'
+                        : 'Add ${_selected.length} · ₹${_inr(selectedTotal)}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
 class _BillRow extends StatelessWidget {
   final String label;
   final String value;
@@ -4902,7 +5150,8 @@ class _BillRow extends StatelessWidget {
   Widget build(BuildContext context) => Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: TextStyle(fontSize: sub ? 12 : 13, color: sub ? AppColors.textSecondary : AppColors.textPrimary)),
+          Expanded(child: Text(label, style: TextStyle(fontSize: sub ? 12 : 13, color: sub ? AppColors.textSecondary : AppColors.textPrimary))),
+          const SizedBox(width: 8),
           Text(value, style: TextStyle(fontSize: sub ? 12 : 13, fontWeight: bold ? FontWeight.w700 : FontWeight.w500, color: green ? AppColors.brandGreen : AppColors.textPrimary)),
         ],
       );

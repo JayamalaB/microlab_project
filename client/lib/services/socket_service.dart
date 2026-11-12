@@ -913,6 +913,36 @@ class SocketService {
   // Called by the dashboard's AppLifecycleState.resumed handler and by the
   // network watcher. Forces a reconnect when the socket is down but the
   // SocketService is still initialised (user is logged in).
+  /// Makes sure the socket is up before a step that needs the server's reply
+  /// (e.g. Handed to Lab). A dropped socket is reconnected; one torn down
+  /// earlier (e.g. by force_logout) is rebuilt from the saved login, as the
+  /// splash screen does. Waits up to [timeout] for the connection and returns
+  /// whether it is connected. Signed out (no saved login) → false at once.
+  Future<bool> ensureConnected({Duration timeout = const Duration(seconds: 8)}) async {
+    if (isConnected) return true;
+    // Listen before (re)connecting so a quick connect isn't missed.
+    final connected = onConnected.firstWhere((c) => c).timeout(timeout, onTimeout: () => false);
+
+    if (_socket != null) {
+      reconnect();
+    } else {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token') ?? '';
+      final role  = prefs.getString('user_role')  ?? '';
+      if (token.isEmpty || role.isEmpty) return false;
+      _log('RECONNECT', 'socket was torn down — rebuilding from the saved login');
+      connect(
+        userId:   prefs.getInt('user_id') ?? 0,
+        role:     role,
+        name:     prefs.getString('user_name') ?? prefs.getString('user_mobile') ?? '',
+        branchId: role == 'technician' ? prefs.getInt('branch_id') : null,
+        ipUserId: prefs.getInt('ip_user_id') ?? 0,
+      );
+    }
+    await connected;
+    return isConnected;
+  }
+
   void reconnect() {
     if (_socket == null || _socket!.connected) return;
     _log('RECONNECT', 'manual reconnect triggered');
@@ -1258,8 +1288,8 @@ class SocketService {
     String? receivedByName,
     int? handoverBranchId,
   }) async {
-    if (_socket == null || !isConnected) {
-      _log('HANDED_TO_LAB', 'FAILED — socket not connected  id=$bookingId');
+    if (!await ensureConnected()) {
+      _log('HANDED_TO_LAB', 'FAILED — socket could not connect  id=$bookingId');
       return {
         'success': false,
         'message': 'Not connected — check your internet connection and try again.',

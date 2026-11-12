@@ -270,6 +270,12 @@ class BookingModel {
   final String? collectionNotes;    // customer notes from checkout
   final String? doctorName;         // doctor name referred by (per booking)
   final String? serviceChargeProductName; // ip_products.product_name for home-collection service charge
+  // Service charge collected on the spot: null = booked before that change
+  // (booking-time charge); 'pending' / 'calculated' / 'no_product' = not in the
+  // bill yet (shown as "Collected on the spot"); 'applied' = in the bill,
+  // from the technician's arrival.
+  final String? serviceChargeStatus;
+  final double? serviceChargeKm; // km up & down the service charge was picked for
 
   BookingModel({
     required this.id,
@@ -323,7 +329,20 @@ class BookingModel {
     this.collectionNotes,
     this.doctorName,
     this.serviceChargeProductName,
+    this.serviceChargeStatus,
+    this.serviceChargeKm,
   });
+
+  // Service charge not in the bill yet — collected by the technician on the spot.
+  bool get serviceChargeOnSpot =>
+      serviceChargeStatus != null && serviceChargeStatus != 'applied';
+
+  // "Service Charge · SAMPLE COLLECTION FEES H (150) · 12.2 km"
+  String get serviceChargeLabel => [
+        'Service Charge',
+        if (serviceChargeProductName != null && serviceChargeProductName!.isNotEmpty) serviceChargeProductName!,
+        if (serviceChargeKm != null) '${serviceChargeKm!.toStringAsFixed(1)} km',
+      ].join(' · ');
 }
 
 // ─── Booking Draft (persisted across back-navigation) ────────────────────────

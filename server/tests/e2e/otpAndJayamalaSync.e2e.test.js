@@ -85,7 +85,7 @@ describe('OTP verification integration (real wire)', () => {
     const capture = mockJayamalaHttp({ status: 'success' });
 
     const res = await techPost('/api/technicians/booking-otp/verify', { bookingId: 900, otp: '0000' });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(400); // not 401 — the app signs out on any 401
     expect(http.request).not.toHaveBeenCalled();
     expect(capture()).toBeNull();
   });

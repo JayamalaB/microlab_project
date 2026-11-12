@@ -3,6 +3,14 @@ jest.mock('../../config/db');
 jest.mock('../../config/settings');
 jest.mock('../../services/branchCodes', () => ({ getBranchCode: jest.fn().mockResolvedValue('04') }));
 jest.mock('../../utils/dbLogger');
+// Who works at a branch is tested in tests/services/technicianBranches.test.js;
+// here branch N simply has technician N, so a slot check's first parameter
+// still names the branch it was for.
+jest.mock('../../services/technicianBranches', () => ({
+  technicianIdsAtBranch: jest.fn(async (branchId) => [Number(branchId)]),
+  describeTechnicians: jest.fn(async (ids) => ids.join(', ')),
+  placeholders: (ids) => ids.map(() => '?').join(', '),
+}));
 const db       = require('../../config/db');
 const settings = require('../../config/settings');
 const request  = require('supertest');
@@ -62,7 +70,7 @@ describe('GPS lookup', () => {
   test('looks over the coming days, not only today', async () => {
     wireDb({ all: [NEAR] });
     await get(gps);
-    const [branchId, fromDate, toDate] = slotChecks()[0][1];
+    const [branchId, , fromDate, toDate] = slotChecks()[0][1]; // branch twice (slotAtBranchSql)
     expect(branchId).toBe(1);
     const days = (new Date(toDate) - new Date(fromDate)) / 86400000;
     expect(days).toBe(7);
@@ -72,14 +80,14 @@ describe('GPS lookup', () => {
     settings.get.mockImplementation((k, def) => (k === 'branch_lookup_days' ? '3' : def));
     wireDb({ all: [NEAR] });
     await get(gps);
-    const [, fromDate, toDate] = slotChecks()[0][1];
+    const [, , fromDate, toDate] = slotChecks()[0][1];
     expect((new Date(toDate) - new Date(fromDate)) / 86400000).toBe(3);
   });
 
   test('a date the caller knows is checked on its own', async () => {
     wireDb({ all: [NEAR] });
     await get({ ...gps, date: '2099-01-01' });
-    const [, fromDate, toDate] = slotChecks()[0][1];
+    const [, , fromDate, toDate] = slotChecks()[0][1];
     expect(fromDate).toBe('2099-01-01');
     expect(toDate).toBe('2099-01-01');
   });

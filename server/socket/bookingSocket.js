@@ -26,6 +26,9 @@ const { messaging }   = require('../config/firebase');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { syncVisitCompletionToClient } = require('../services/clientSync');
 const { moveBookingToSlot } = require('../services/slotChange');
+const { slotAtBranchSql, slotAtBranchParams } = require('../services/slotBranches');
+const dispatchDistance = require('../services/dispatchDistance');
+const serviceCharge = require('../services/serviceCharge');
 const {
   findEligibleBranches,
   technicianActiveSlots,
@@ -255,15 +258,16 @@ async function _saveChosenTime(bookingId, { branchId, slotId, appointmentTime })
   );
   if (!booking?.booking_date) return null;
 
+  // Times of slots offered at the branch (services/slotBranches.js).
   const [[free]] = await db.execute(
     `SELECT ias.available_slot_id, ias.technician_slot_id, ias.slot_time
      FROM ip_available_slots ias
      JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
-     WHERE ts.branch_id = ? AND ts.slot_id = ? AND ts.slot_date = ? AND ias.is_available = 1
+     WHERE ${slotAtBranchSql('ts')} AND ts.slot_id = ? AND ts.slot_date = ? AND ias.is_available = 1
        ${appointmentTime ? 'AND ias.slot_time = ?' : ''}
      ORDER BY ias.slot_time ASC
      LIMIT 1`,
-    [branchId, slotId, String(booking.booking_date).split('T')[0],
+    [...slotAtBranchParams(branchId), slotId, String(booking.booking_date).split('T')[0],
      ...(appointmentTime ? [`${appointmentTime}:00`] : [])]
   );
   if (!free || !(await moveBookingToSlot(bookingId, free))) return null;
@@ -908,8 +912,8 @@ async function _dispatchAttempt(io, bookingId) {
             dlog(bookingId, 'BRANCH_EXHAUSTED',
               `branch=${bookingData.branchId ?? 'none'} ${bookingData.branchName ?? ''} exhausted -> trying next branch`);
             dispatch.triedBranchIds.add(nextBranch.branchId);
-            bookingData.branchId   = nextBranch.branchId;
-            bookingData.branchName = nextBranch.name;
+            // nextBranch.distKm is customer → branch (findEligibleBranches).
+            _setDispatchBranch(bookingId, bookingData, nextBranch.branchId, nextBranch.name, nextBranch.distKm, 'NEXT_BRANCH');
             dispatch.queue         = [];
             dispatch.techIdx       = 0;
             dispatch.attemptNum    = 1;
@@ -1089,8 +1093,18 @@ async function _dispatchAttempt(io, bookingId) {
 //  auto-confirms the booking, and notifies the patient immediately.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId, patientAddress, patientLat, patientLng, bookingData, slotId, appointmentTime, excludeTechnicianId = null }) {
+async function _trySlotBasedAssign(io, socket, { bookingId, branchId, branchName = null, patientId, patientAddress, patientLat, patientLng, bookingData, slotId, appointmentTime, excludeTechnicianId = null }) {
   try {
+    // The slot owners found below work at this branch, so whoever accepts
+    // through this fallback serves from it — even when the request-time
+    // branch fallback had moved the dispatch to another branch.
+    if (bookingData && branchId != null && bookingData.branchId !== branchId) {
+      const km = branchId === bookingData.originalBranchId
+        ? bookingData.originalDistanceKm
+        : await dispatchDistance.customerToBranchKm(branchId, patientLat, patientLng);
+      _setDispatchBranch(bookingId, bookingData, branchId, branchName, km, 'SLOT_FALLBACK');
+    }
+
     // Get collection date from the booking record
     const [[booking]] = await db.execute(
       'SELECT booking_date FROM ip_bookings WHERE booking_id = ?',
@@ -1104,15 +1118,18 @@ async function _trySlotBasedAssign(io, socket, { bookingId, branchId, patientId,
       : new Date().toISOString().split('T')[0];
 
     // Build query — filter by patient's chosen slotId when provided.
+    // Slots offered at the booking's branch (services/slotBranches.js).
     const slotFilter = slotId != null ? 'AND ts.slot_id = ?' : '';
-    const slotParams = slotId != null ? [branchId, collectionDate, slotId] : [branchId, collectionDate];
+    const slotParams = slotId != null
+      ? [...slotAtBranchParams(branchId), collectionDate, slotId]
+      : [...slotAtBranchParams(branchId), collectionDate];
 
     const [slotRows] = await db.execute(
       `SELECT ts.technician_id, u.user_name
        FROM ip_technician_slots ts
        JOIN ip_technicians t ON t.technician_id = ts.technician_id
        JOIN ip_users u       ON u.user_id        = t.user_id
-       WHERE ts.branch_id    = ?
+       WHERE ${slotAtBranchSql('ts')}
          AND ts.slot_date    = ?
          AND ts.is_available = 1
          AND ts.booked_count < ts.max_bookings
@@ -1289,19 +1306,21 @@ async function _notifySlotNoAvailability(io, bookingId, failedSlotId, branchId, 
   let alternateSlots = [];
   let timeIntervals  = [];
   try {
+    // Times of slots offered at the branch (services/slotBranches.js).
+    const atBranch = slotAtBranchSql('ts');
     // When appointmentTime set, return other available times in the same slot first
     if (appointmentTime && failedSlotId != null) {
       const [timeRows] = await db.execute(
         `SELECT DISTINCT ias.slot_time
          FROM ip_available_slots ias
          JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
-         WHERE ts.branch_id     = ?
+         WHERE ${atBranch}
            AND ts.slot_id       = ?
            AND ts.slot_date     = ?
            AND ias.is_available = 1
            AND ias.slot_time   != ?
          ORDER BY ias.slot_time ASC`,
-        [branchId, failedSlotId, collectionDate, `${appointmentTime}:00`]
+        [...slotAtBranchParams(branchId), failedSlotId, collectionDate, `${appointmentTime}:00`]
       );
       timeIntervals = timeRows.map(r => ({
         time:  r.slot_time.slice(0, 5),
@@ -1313,14 +1332,14 @@ async function _notifySlotNoAvailability(io, bookingId, failedSlotId, branchId, 
       `SELECT DISTINCT s.slot_id, s.slot_label
        FROM ip_technician_slots ts
        JOIN ip_slots s ON s.slot_id = ts.slot_id
-       WHERE ts.branch_id    = ?
+       WHERE ${atBranch}
          AND ts.slot_date    = ?
          AND ts.is_available = 1
          AND ts.booked_count < ts.max_bookings
          AND s.slot_active   = 1
          AND ts.slot_id     != ?
        ORDER BY s.slot_start ASC`,
-      [branchId, collectionDate, failedSlotId]
+      [...slotAtBranchParams(branchId), collectionDate, failedSlotId]
     );
     alternateSlots = rows.map(r => ({ slotId: r.slot_id, label: r.slot_label }));
   } catch (e) {
@@ -1359,19 +1378,95 @@ async function _handleBookingRequest(io, socket, data = {}) {
   }
 }
 
+// ── Branch distance (customer → branch) for dispatch ────────────────────────
+// bookingData carries, for the whole dispatch: originalBranchId /
+// originalDistanceKm (where the booking started) and branchDistanceKm (the
+// branch now being offered). Every distance is customer location → branch
+// location (services/dispatchDistance.js) — never technician GPS. Technician
+// GPS still orders technicians WITHIN a branch.
+const _km = (n) => (n == null ? null : Math.round(Number(n) * 100) / 100);
+const _fmtKm = (n) => (n == null ? 'unknown' : `${Number(n).toFixed(2)} km`);
+
+// Moves the dispatch to another branch and logs that branch's distance
+// against the original branch's.
+function _setDispatchBranch(bookingId, bookingData, branchId, branchName, distanceKm, why) {
+  bookingData.branchId         = branchId;
+  bookingData.branchName       = branchName ?? null;
+  bookingData.branchDistanceKm = _km(distanceKm);
+  const { differenceKm } = dispatchDistance.distanceDifference(bookingData.branchDistanceKm, bookingData.originalDistanceKm);
+  dlog(bookingId, 'BRANCH_DISTANCE',
+    `${why}: branch=${branchId} ${branchName ?? ''} ${_fmtKm(bookingData.branchDistanceKm)}` +
+    ` | original branch=${bookingData.originalBranchId ?? '-'} ${_fmtKm(bookingData.originalDistanceKm)}` +
+    ` | difference ${dispatchDistance.formatDifference(differenceKm)}`);
+}
+
+// One dispatch-log line per service-charge step (services/serviceCharge.js).
+function _logServiceCharge(bookingId, r) {
+  if (r.skipped) {
+    dlog(bookingId, 'SERVICE_CHARGE', `skipped — ${r.skipped}`);
+  } else if (r.status === 'no_product') {
+    dlog(bookingId, 'SERVICE_CHARGE',
+      `NO PRODUCT for ${_fmtKm(r.roundTripKm)} up & down (${_fmtKm(r.oneWayKm)} × 2) — no charge; technician to add a charge package`);
+  } else if (r.fare != null) {
+    dlog(bookingId, 'SERVICE_CHARGE',
+      `applied on arrival — ₹${r.fare} added | total ₹${r.totalAmount} | due ₹${r.amountDue} (booking ${r.carrierId})`);
+  } else {
+    dlog(bookingId, 'SERVICE_CHARGE',
+      `${r.status} — ${r.productName} ₹${r.price} for ${_fmtKm(r.roundTripKm)} up & down (${_fmtKm(r.oneWayKm)} × 2)` +
+      (r.difference != null ? ` | difference ₹${r.difference}, due ₹${r.amountDue}${r.overpaid > 0 ? `, OVERPAID ₹${r.overpaid} — refund manually` : ''}` : ' | added to the bill on arrival') +
+      ` (booking ${r.carrierId})`);
+  }
+}
+
+// Request-time branch fallback: nobody at the booking's branch can take the
+// job right now. Other branches are tried nearest to the CUSTOMER first, from
+// the same list (and rules) as the cross-branch fallback in dispatchAttempt:
+// findEligibleBranches — customer → branch distance, branch must have bookable
+// slot capacity. Within a branch: its online technicians in live GPS order,
+// then its push-only ones. Returns { queue, candidates }; queue [] = nobody.
+async function _requestTimeBranchFallback(bookingId, bookingData, actorMap, apptCtx, date) {
+  const { patientLat, patientLng } = bookingData;
+  const candidates = await findEligibleBranches(patientLat, patientLng, date, apptCtx?.requestedStart ?? null);
+  for (const cand of candidates) {
+    if (cand.branchId === bookingData.branchId) continue;
+    let queue = buildQueue(patientLat, patientLng, actorMap, cand.branchId, apptCtx);
+    if (queue.length === 0) {
+      const fcmQueue = buildFcmQueue(patientLat, patientLng, cand.branchId);
+      if (fcmQueue.length > 0) {
+        _registerFcmTechs(fcmQueue);
+        queue = buildQueue(patientLat, patientLng, actorMap, cand.branchId, apptCtx);
+      }
+    }
+    if (queue.length > 0) {
+      log('⚠️', 'BRANCH_FALLBACK', bookingId,
+        `no available tech for branch=${bookingData.branchId} — next branch by customer distance: ` +
+        `${cand.name} (${cand.branchId}) ${_fmtKm(cand.distKm)}, ${queue.length} tech(s)`);
+      _setDispatchBranch(bookingId, bookingData, cand.branchId, cand.name, cand.distKm, 'REQUEST_FALLBACK');
+      return { queue, candidates };
+    }
+  }
+  dlog(bookingId, 'BRANCH_FALLBACK_NONE',
+    `${candidates.length} eligible branch(es) by customer distance — none has an available technician now`);
+  return { queue: [], candidates };
+}
+
 async function _runBookingRequest(io, socket, data = {}) {
   const {
     bookingId, patientId, patientName,
     patientMobile = '', patientAddress = '',
     patientLat, patientLng, hospital,
     bookingType     = 'lab',
-    branchId        = null,
-    branchName      = null,
+    branchId:   requestedBranchId   = null,
+    branchName: requestedBranchName = null,
     slotId          = null,
     slotLabel       = null,
     appointmentTime = null, // "HH:MM" — exact time within slot
     excludeTechnicianId = null, // set when re-dispatching after a technician-initiated cancel — that technician just said they can't do this job, so this one dispatch cycle must not re-offer it straight back to them
   } = data;
+  // The branch this dispatch starts from. A redispatch is moved back to the
+  // booking's ORIGINAL branch below (branch_id holds the last serving branch).
+  let branchId   = requestedBranchId;
+  let branchName = requestedBranchName;
 
   dlog(bookingId, 'REQUEST', `patient=${patientName} branch=${branchId} slot=${slotId ?? 'none'}${appointmentTime ? '@' + appointmentTime : ''} type=${bookingType}`);
 
@@ -1467,6 +1562,28 @@ async function _runBookingRequest(io, socket, data = {}) {
     triedIds: new Set(), bookingType, _claiming: true,
   });
 
+  // Customer → branch distances: the original branch (saved on first
+  // dispatch, kept through every redispatch) and its distance. Every dispatch
+  // — first or redispatch (reassignment, reschedule, scheduler pickup, server
+  // restart) — starts from that original branch. Logging only if it fails.
+  let distanceBase = null;
+  if (bookingType !== 'transport') {
+    try {
+      distanceBase = await dispatchDistance.loadOriginalBaseline(bookingId, branchId, patientLat, patientLng);
+      if (distanceBase.originalBranchId != null && distanceBase.originalBranchId !== branchId) {
+        dlog(bookingId, 'START_AT_ORIGINAL',
+          `booking's branch is now ${branchId ?? '-'} (last serving branch) — dispatch starts at the original branch ${distanceBase.originalBranchId}`);
+        branchId   = distanceBase.originalBranchId;
+        branchName = await dispatchDistance.branchNameOf(branchId);
+      }
+      dlog(bookingId, 'DISTANCE_BASELINE',
+        `original branch=${distanceBase.originalBranchId ?? '-'} ${_fmtKm(distanceBase.originalDistanceKm)}` +
+        (distanceBase.saved ? '' : ' | not saved — run migrations/add_dispatch_distance_columns.sql'));
+    } catch (e) {
+      dlog(bookingId, 'DISTANCE_ERR', `baseline not worked out: ${e.message}`);
+    }
+  }
+
   const actorMap    = bookingType === 'transport' ? onlineDrivers : onlineTechnicians;
   const totalOnline = actorMap.size;
   const available   = [...actorMap.values()].filter(a => a.isAvailable).length;
@@ -1519,7 +1636,14 @@ async function _runBookingRequest(io, socket, data = {}) {
     createdAt: new Date().toISOString(),
   };
 
-  const slotCtx = { bookingId, branchId, patientId, patientAddress, patientLat, patientLng, bookingData, slotId, appointmentTime, excludeTechnicianId };
+  if (distanceBase) {
+    bookingData.originalBranchId   = distanceBase.originalBranchId;
+    bookingData.originalDistanceKm = distanceBase.originalDistanceKm;
+    // The dispatch starts at the original branch, so its distance is the original's.
+    bookingData.branchDistanceKm   = distanceBase.originalBranchId === branchId ? distanceBase.originalDistanceKm : null;
+  }
+
+  const slotCtx = { bookingId, branchId, branchName, patientId, patientAddress, patientLat, patientLng, bookingData, slotId, appointmentTime, excludeTechnicianId };
 
   if (actorMap.size === 0) {
     // Lane 2: try FCM-online techs (socket dead, DB-online, technician_offline not sent)
@@ -1550,26 +1674,56 @@ async function _runBookingRequest(io, socket, data = {}) {
     }
   }
 
-  // Priority 1: technicians matching the booking's branch.
-  // Priority 2: any available technician (branch mismatch is better than no one).
+  // Priority 1: technicians at the booking's branch (online, then push-only).
+  // Priority 2: the next branches, nearest to the CUSTOMER first (customer →
+  //             branch distance), each with its own technicians — see
+  //             _requestTimeBranchFallback. Without a customer location (no
+  //             distance to compare), the old any-branch fallback is kept.
   // Priority 3: slot-based fallback (tech offline / all busy).
   // apptCtx passed so _sortedAvailableActors can include appointment-busy techs
   // who have no overlapping window for this booking's appointment time.
   dlog(bookingId, 'SHORTLIST', _shortlistReport(actorMap, branchId, apptCtx, patientLat, patientLng));
   let queue = buildQueue(patientLat, patientLng, actorMap, branchId, apptCtx);
+  let requestBranchCandidates = null; // reused by the cross-branch fallback
 
-  if (queue.length === 0 && branchId != null) {
+  const ranksBranchesByDistance = bookingType !== 'transport' && branchId != null
+    && patientLat != null && patientLng != null;
+
+  if (queue.length === 0 && ranksBranchesByDistance) {
+    // The booking's own branch first: its push-only technicians.
+    const fcmHere = buildFcmQueue(patientLat, patientLng, branchId);
+    if (fcmHere.length > 0) {
+      _registerFcmTechs(fcmHere);
+      queue = buildQueue(patientLat, patientLng, actorMap, branchId, apptCtx);
+      log('📡', 'LANE2_INJECT', bookingId,
+        `socket techs at branch=${branchId} busy — injected ${fcmHere.length} FCM-only tech(s) of this branch`);
+    }
+    if (queue.length === 0) {
+      try {
+        const fb = await _requestTimeBranchFallback(bookingId, bookingData, actorMap, apptCtx, earlyBookingDate);
+        queue = fb.queue;
+        requestBranchCandidates = fb.candidates;
+      } catch (e) {
+        dlog(bookingId, 'BRANCH_FALLBACK_ERR', e.message);
+      }
+    }
+  } else if (queue.length === 0 && branchId != null) {
+    // No customer location: no distance to rank branches by — nearest
+    // technician from any branch, as before.
     const anyBranchQueue = buildQueue(patientLat, patientLng, actorMap, null, apptCtx);
     if (anyBranchQueue.length > 0) {
       queue = anyBranchQueue;
       log('⚠️', 'BRANCH_FALLBACK', bookingId,
-        `no available tech for branch=${branchId} — using nearest from any branch (${queue.length} found)`);
+        `no available tech for branch=${branchId} and no customer location — using nearest from any branch (${queue.length} found)`);
     }
   }
 
   if (queue.length === 0) {
-    // Lane 2: all socket-online techs are busy — try FCM-online pool
-    if (bookingType !== 'transport') {
+    // Lane 2: all socket-online techs are busy — try FCM-online pool. With a
+    // customer location the branches were already walked above (each with
+    // its push-only technicians), so this any-branch pool is only the
+    // no-location case.
+    if (bookingType !== 'transport' && !ranksBranchesByDistance) {
       const fcmQueue = buildFcmQueue(patientLat, patientLng, null); // no branch filter
       if (fcmQueue.length > 0) {
         _registerFcmTechs(fcmQueue);
@@ -1770,11 +1924,12 @@ async function _runBookingRequest(io, socket, data = {}) {
     appointmentTime: appointmentTime ?? null,
     // Cross-branch dispatch fallback state (see the exhaustion block in
     // dispatchAttempt). triedBranchIds seeds with the originally-requested
-    // branch so that branch is never re-tried; branchCandidates is computed
-    // lazily on first exhaustion, not here, to avoid an extra DB round-trip
-    // on the common case where the first technician just accepts.
-    triedBranchIds:  new Set(branchId != null ? [branchId] : []),
-    branchCandidates: null,
+    // branch — and the request-time fallback branch, if one was taken — so
+    // neither is re-tried; branchCandidates is reused from the request-time
+    // fallback, else computed lazily on first exhaustion, to avoid an extra
+    // DB round-trip on the common case where the first technician accepts.
+    triedBranchIds:  new Set([branchId, bookingData.branchId].filter(b => b != null)),
+    branchCandidates: requestBranchCandidates,
   });
 
   dispatchAttempt(io, bookingId);
@@ -2243,12 +2398,16 @@ module.exports = function bookingSocket(io, socket) {
                bd.slotId ? Number(bd.slotId) : null,
                vgId, bookingId]
             );
+            // Same branch as the main booking (set below): the branch whose
+            // technician accepted. COALESCE keeps the existing branch when the
+            // dispatch state is gone (late accept).
             dbRun(
               `UPDATE ip_bookings
-               SET status = 'assigned', technician_id = ?, technician_name = ?, updated_at = NOW()
+               SET status = 'assigned', technician_id = ?, technician_name = ?,
+                   branch_id = COALESCE(?, branch_id), updated_at = NOW()
                WHERE visit_group_id = ? AND booking_id != ?
                  AND deleted_at IS NULL AND status != 'cancelled'`,
-              [actorId, actorName || null, vgId, bookingId]
+              [actorId, actorName || null, bd.branchId ?? null, vgId, bookingId]
             );
             dbRun(
               `UPDATE ip_patient_bookings pb
@@ -2290,6 +2449,27 @@ module.exports = function bookingSocket(io, socket) {
         [actorId, actorName || null, bd.branchId ?? null, bookingId]
       );
 
+      // The branch being offered when this technician accepted, and its
+      // customer → branch distance against the original branch — saved for
+      // the booking and its whole visit. Background, never blocks the accept.
+      dispatchDistance.recordServingBranch(bookingId, {
+        servedBranchId:     bd.branchId ?? null,
+        servedDistanceKm:   bd.branchDistanceKm ?? null,
+        originalBranchId:   bd.originalBranchId ?? null,
+        originalDistanceKm: bd.originalDistanceKm ?? null,
+      }).then(async (r) => {
+        dlog(bookingId, 'SERVED_DISTANCE', r.skipped
+          ? `not saved — ${r.skipped}`
+          : `tech=${actorName}(${actorId}) served branch=${r.servedBranchId ?? '-'} ${_fmtKm(r.servedDistanceKm)}` +
+            ` | original branch=${r.originalBranchId ?? '-'} ${_fmtKm(r.originalDistanceKm)}` +
+            ` | difference ${dispatchDistance.formatDifference(r.differenceKm)} | extra ${_fmtKm(r.extraKm)}`);
+        // Service charge from this branch's distance, up and down; added to
+        // the bill when the technician arrives (services/serviceCharge.js).
+        const servedKm = r.servedDistanceKm ?? bd.branchDistanceKm
+          ?? await dispatchDistance.customerToBranchKm(bd.branchId, bd.patientLat, bd.patientLng);
+        _logServiceCharge(bookingId, await serviceCharge.calculateOnAccept(bookingId, { servedDistanceKm: servedKm }));
+      }).catch(e => dlog(bookingId, 'SERVICE_CHARGE_ERR', e.message));
+
       // online_status is intentionally left untouched here — it reflects
       // connectivity, not job state. task_status (and booking_id, used by
       // dispatch's in-memory isAvailable flag set just above) already fully
@@ -2325,13 +2505,13 @@ module.exports = function bookingSocket(io, socket) {
         dbRun(
           `UPDATE ip_technician_slots
            SET booked_count = booked_count + 1
-           WHERE technician_id = ? AND slot_date = ? AND branch_id = ? AND slot_id = ?
+           WHERE technician_id = ? AND slot_date = ? AND slot_id = ?
              AND tech_slot_id != COALESCE((
                SELECT ias.technician_slot_id
                FROM ip_bookings b
                JOIN ip_available_slots ias ON ias.available_slot_id = b.available_slot_id
                WHERE b.booking_id = ?), 0)`,
-          [slotInfo.techId, slotInfo.collectionDate, slotInfo.branchId, dispatchSlotId, bookingId]
+          [slotInfo.techId, slotInfo.collectionDate, dispatchSlotId, bookingId]
         );
       }
 
@@ -2510,6 +2690,8 @@ module.exports = function bookingSocket(io, socket) {
       [technicianId]
     );
     _notifyPatient(io, bookingId, 'technician_arrived', { bookingId });
+    // The service charge worked out at accept now goes into the bill.
+    serviceCharge.applyOnArrival(bookingId).then(r => _logServiceCharge(bookingId, r));
     sendToBookingOwner(
       bookingId,
       'Technician Arrived 📍',

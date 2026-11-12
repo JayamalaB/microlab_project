@@ -182,7 +182,14 @@ describe('saving technician slots', () => {
     expect(run(conn, /DELETE FROM ip_technician_slots/)).toHaveLength(0);
     const [[sql]] = run(conn, /DELETE FROM ip_available_slots/);
     expect(sql).toMatch(/AND is_available = 1/);
-    expect(run(conn, /SET is_available = \? WHERE tech_slot_id/)[0][1]).toEqual([0, 80]);
+    expect(run(conn, /SET is_available = \?, branch_id = \? WHERE tech_slot_id/)[0][1]).toEqual([0, 4, 80]);
+  });
+
+  test('a kept slot moves to the technician\'s current branch', async () => {
+    const { conn, res } = save([row()], day([2], { 2: 30 }));
+    expect((await res).status).toBe(200);
+    expect(run(conn, /SET is_available = 1, branch_id = \? WHERE tech_slot_id/)[0][1]).toEqual([4, 80]);
+    expect(run(conn, /DELETE FROM ip_technician_slots/)).toHaveLength(0);
   });
 
   test('ticking a booked slot again puts back only the missing free times', async () => {
@@ -208,8 +215,9 @@ describe('saving technician slots', () => {
   test('an unchanged slot is left as it is', async () => {
     const { conn, res } = save([row()], day([2], { 2: 30 }));
     await res;
-    expect(run(conn, /^DELETE/)).toHaveLength(0);
-    expect(run(conn, /INSERT INTO/)).toHaveLength(0);
+    // Only its branch list is refreshed — the slot and its times stay.
+    expect(run(conn, /^DELETE FROM ip_(technician_slots|available_slots)/)).toHaveLength(0);
+    expect(run(conn, /INSERT INTO ip_(technician_slots|available_slots)/)).toHaveLength(0);
   });
 
   test('a new slot is added', async () => {

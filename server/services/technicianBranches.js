@@ -47,4 +47,89 @@ async function getTechnicianBranches(technicianId) {
   }));
 }
 
-module.exports = { getTechnicianBranches };
+// ── Which technicians work at a branch ───────────────────────────────────────
+// Same rule as dispatch: a technician works at their own branch
+// (ip_technicians.branch_id) and at every branch whose code matches their
+// default code or one of their ASMX codes (branch_ids). A technician's slots
+// are stored once, under their own branch, but count for every branch they
+// work at — the customer slot list, branch lookup and slot fallback all ask
+// this instead of reading ip_technician_slots.branch_id.
+//
+// Rebuilt at most once a minute: it changes only when a technician logs in.
+const CACHE_MS = 60 * 1000;
+let cache = null; // { at, byBranch: Map<branchId, number[]>, names: Map<technicianId, string> }
+
+async function _loadTechniciansByBranch() {
+  const [techs] = await db.execute(
+    `SELECT t.technician_id, t.branch_id, t.branch_ids, t.default_branch_id, u.user_name
+     FROM ip_technicians t
+     LEFT JOIN ip_users u ON u.user_id = t.user_id`
+  );
+  const [branches] = await db.execute(
+    'SELECT branch_id, branch_code FROM ip_branches WHERE deleted_at IS NULL'
+  );
+  const byCode = new Map();
+  for (const b of branches) {
+    const key = branchCodeKey(b.branch_code);
+    if (key != null && !byCode.has(key)) byCode.set(key, Number(b.branch_id));
+  }
+
+  const sets  = new Map();
+  const names = new Map();
+  const add = (branchId, technicianId) => {
+    if (branchId == null || !Number.isInteger(branchId)) return;
+    if (!sets.has(branchId)) sets.set(branchId, new Set());
+    sets.get(branchId).add(technicianId);
+  };
+  for (const t of techs ?? []) {
+    const technicianId = Number(t.technician_id);
+    if (t.user_name) names.set(technicianId, t.user_name);
+    if (t.branch_id != null && t.branch_id !== '') add(Number(t.branch_id), technicianId);
+    let codes = t.branch_ids;
+    if (typeof codes === 'string') {
+      try { codes = JSON.parse(codes); } catch { codes = []; }
+    }
+    codes = Array.isArray(codes) ? codes : [];
+    for (const code of [t.default_branch_id, ...codes]) add(byCode.get(branchCodeKey(code)), technicianId);
+  }
+
+  const byBranch = new Map();
+  for (const [branchId, ids] of sets) byBranch.set(branchId, [...ids]);
+  return { byBranch, names };
+}
+
+async function _cached() {
+  if (!cache || Date.now() - cache.at > CACHE_MS) {
+    cache = { at: Date.now(), ...(await _loadTechniciansByBranch()) };
+  }
+  return cache;
+}
+
+// technician_ids of everyone who works at branchId ([] when nobody does).
+async function technicianIdsAtBranch(branchId) {
+  return (await _cached()).byBranch.get(Number(branchId)) ?? [];
+}
+
+// "Elumalai P (13), Nirosh (6)" for logs — "none" when the list is empty.
+// Never throws: it only feeds log lines.
+async function describeTechnicians(ids) {
+  if (!ids || ids.length === 0) return 'none';
+  try {
+    const { names } = await _cached();
+    return ids.map(id => `${names.get(Number(id)) ?? 'Technician'} (${id})`).join(', ');
+  } catch (_) {
+    return ids.join(', ');
+  }
+}
+
+// Forgets the cached list — for tests, and after a change that must show at once.
+function clearTechnicianBranchCache() {
+  cache = null;
+}
+
+// "?, ?, ?" for an IN (…) list of the given ids.
+const placeholders = (ids) => ids.map(() => '?').join(', ');
+
+module.exports = {
+  getTechnicianBranches, technicianIdsAtBranch, describeTechnicians, clearTechnicianBranchCache, placeholders,
+};

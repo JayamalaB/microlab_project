@@ -1839,15 +1839,19 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
       }
       else if (_manualSelected && _manualLat != null && _manualLng != null) {
         // Use manual pincode-based location.
-        // city MUST fire before pincode so _city is ready when auto-detect triggers.
+        // city and lat/lng MUST fire before pincode so they are ready when
+        // auto-detect triggers. Address goes last: with the pincode already
+        // set it doesn't scan the address for one — that scan starts a second
+        // lookup, marked as GPS and without coordinates, which matched a
+        // different branch by city name.
         final address = _addressCtrl.text.trim().isNotEmpty
             ? _addressCtrl.text.trim()
             : _manualAddress;
         final city = _cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim();
         widget.onCityChanged(city);                        // 1st — set city
-        widget.onAddressChanged(address);                  // 2nd
         widget.onLatLngChanged?.call(_manualLat, _manualLng);
-        widget.onPincodeChanged(_pincodeCtrl.text.trim()); // last — triggers auto-detect (city already set)
+        widget.onPincodeChanged(_pincodeCtrl.text.trim()); // triggers auto-detect (city + lat/lng already set)
+        widget.onAddressChanged(address);                  // last — pincode already set, no second lookup
       }
       else {
         setState(() => _locationError = true);

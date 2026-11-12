@@ -46,6 +46,8 @@ function blog(msg) {
   fs.appendFileSync(BOOKING_LOG, line, 'utf8');
 }
 const { triggerScheduledDispatch, freeTechnician, unassignAndRedispatch, stopDispatch, redispatchBooking } = require('../socket/bookingSocket');
+const { recordServingBranch, technicianBranchId, formatDifference } = require('../services/dispatchDistance');
+const serviceCharge = require('../services/serviceCharge');
 const { checkItemPrices } = require('../services/itemPrices');
 const { verifyRazorpayPayment } = require('../services/razorpayVerify');
 const { captureRazorpayPayment } = require('../services/razorpayCapture');
@@ -148,19 +150,14 @@ exports.createBooking = async (req, res) => {
       return res.status(409).json({ success: false, message: prices.message });
     }
 
-    // Home Collection fare — Branch → Customer distance, computed
-    // authoritatively here, never trusted from the client (see
-    // fareCalculator.js).
-    let homeCollectionFare = null;
-    if (bookingType === 'home_collection') {
-      homeCollectionFare = await calculateHomeCollectionProduct({
-        branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude, dbConn: conn,
-      });
-      blog(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} doubledKm=${homeCollectionFare.doubledKm} finalFare=₹${homeCollectionFare.finalFare} productId=${homeCollectionFare.product.product_id}`);
-    }
+    // No Home Collection service charge at booking — it is collected on the
+    // spot: worked out when a technician accepts (customer ↔ that branch, up
+    // and down) and added to the bill when they arrive (services/serviceCharge.js).
+    // The total and any pay-now payment are the tests only.
+    const homeCollectionFare = null;
 
     const itemsTotal = items.reduce((sum, item) => sum + (Number(item.finalPrice) || 0), 0);
-    totalAmount = Number((itemsTotal + (homeCollectionFare?.finalFare ?? 0)).toFixed(2));
+    totalAmount = Number(itemsTotal.toFixed(2));
 
     // Pay-now: the customer authorised this payment before this request was
     // sent. It is only taken (captured) after the booking is saved, so if
@@ -245,6 +242,10 @@ exports.createBooking = async (req, res) => {
     const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
     await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
     blog(`✅ ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef} branch_id=${branchId ?? 'NULL'}`);
+    if (bookingType === 'home_collection') {
+      const sc = await serviceCharge.markPending(conn, bookingId);
+      blog(`💰 [CREATE BOOKING] service charge collected on the spot — ${sc.skipped ? `not marked: ${sc.skipped}` : 'pending until a technician accepts'}`);
+    }
 
     // 2. Patient → booking link
     await conn.execute(
@@ -474,7 +475,14 @@ exports.getMyBookings = async (req, res) => {
          b.city                    AS collection_city,
          b.notes                   AS collection_notes,
          b.doctor_name,
-         sc_p.product_name         AS service_charge_product_name,
+         -- Service charge collected on the spot: shown once it is in the bill
+         -- (technician arrived, status 'applied'); bookings from before this
+         -- change (status NULL) show their booking-time charge as before.
+         CASE WHEN b.service_charge_status IS NULL OR b.service_charge_status = 'applied'
+              THEN sc_p.product_name END AS service_charge_product_name,
+         b.service_charge_status,
+         b.service_charge_km,
+         b.home_collection_distance_km,
          br.branch_name            AS branch_name,
          br.branch_address         AS branch_address,
          br.branch_city            AS branch_location,
@@ -2006,6 +2014,13 @@ exports.updateAdminStatus = async (req, res) => {
       // If no row and no technicianId provided, skip — can't create without a tech
     }
 
+    // Admin moved the visit to arrival or later: the service charge worked out
+    // at accept goes into the bill now (no-op when there is none to add).
+    if (collectionStatus && serviceCharge.ARRIVED_OR_LATER.includes(collectionStatus)) {
+      const sc = await serviceCharge.applyOnArrival(bookingId);
+      if (!sc.skipped) blog(`💰 [ADMIN STATUS] booking_id=${bookingId} service charge ₹${sc.fare} added on ${collectionStatus} — due ₹${sc.amountDue}`);
+    }
+
     // ── 3. Update ip_booking_requests ─────────────────────────────────────
     if (status === 'technician_assigned') {
       // Resolve the technician to record against the request
@@ -2042,6 +2057,27 @@ exports.updateAdminStatus = async (req, res) => {
            WHERE booking_id = ? AND technician_id != ? AND request_status = 'pending'`,
           [bookingId, assignedTechId]
         );
+
+        // Admin assignment: the serving branch is the assigned technician's
+        // own branch, measured customer → branch like dispatch. Logging only
+        // if it fails — the assignment itself is already saved.
+        try {
+          const served = await recordServingBranch(bookingId, {
+            servedBranchId: await technicianBranchId(assignedTechId),
+          });
+          blog(served.skipped
+            ? `📏 [ADMIN ASSIGN] booking_id=${bookingId} distance not saved — ${served.skipped}`
+            : `📏 [ADMIN ASSIGN] booking_id=${bookingId} tech=${assignedTechId} served branch=${served.servedBranchId ?? '-'} ` +
+              `${served.servedDistanceKm ?? '?'} km | original branch=${served.originalBranchId ?? '-'} ${served.originalDistanceKm ?? '?'} km` +
+              ` | difference ${formatDifference(served.differenceKm)}`);
+          // Service charge from the technician's branch, up and down — added
+          // to the bill when they arrive.
+          const sc = await serviceCharge.calculateOnAccept(bookingId, { servedDistanceKm: served.servedDistanceKm ?? null });
+          blog(`💰 [ADMIN ASSIGN] booking_id=${bookingId} service charge ${sc.skipped ? `skipped — ${sc.skipped}`
+            : `${sc.status} — ${sc.productName ?? 'no product'} ${sc.price != null ? `₹${sc.price}` : ''} for ${sc.roundTripKm} km up & down`}`);
+        } catch (distErr) {
+          blog(`⚠️  [ADMIN ASSIGN] booking_id=${bookingId} distance not saved — ${distErr.message}`);
+        }
 
         // Same notification the natural in-app accept flow sends
         // (bookingSocket.js's booking_accepted handler) — admin-assigned
@@ -2470,6 +2506,14 @@ exports.createFamilyBooking = async (req, res) => {
   if (members.length > maxMembers) {
     return res.status(400).json({ success: false, message: `Maximum ${maxMembers} members allowed per visit` });
   }
+  // The collection location decides the service charge when a technician
+  // accepts (customer ↔ branch distance) — same check as createBooking.
+  if (bookingType === 'home_collection' && (collectionLatitude == null || collectionLongitude == null)) {
+    return res.status(422).json({
+      success: false, code: 'MISSING_COORDINATES',
+      message: 'Collection location is required for Home Collection bookings',
+    });
+  }
 
   const isPaid = paymentType === 'full' && razorpayPaymentId;
 
@@ -2503,24 +2547,10 @@ exports.createFamilyBooking = async (req, res) => {
     } catch (_) {}
   }
 
-  // Calculate home collection fare once for the whole visit (only the primary
-  // member is charged; siblings carry 0). Done before the DB transaction so a
-  // fare error rejects the request cleanly without a partial rollback.
-  let familyFare = null; // set for home_collection only; null = lab_test
-  if (bookingType === 'home_collection') {
-    try {
-      familyFare = await calculateHomeCollectionProduct({
-        branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude,
-      });
-    } catch (err) {
-      if (!(err instanceof FareCalculationError)) throw err;
-      // Same replies as createBooking: 503 when no product covers the
-      // distance, 422 when this request can't be priced (e.g. bad location).
-      const status = err.code === 'PRODUCT_NOT_FOUND' ? 503 : 422;
-      return res.status(status).json({ success: false, code: err.code, message: err.message });
-    }
-    blog(`💰 [CREATE FAMILY BOOKING] fare — distanceKm=${familyFare.distanceKm} doubledKm=${familyFare.doubledKm} finalFare=₹${familyFare.finalFare} productId=${familyFare.product.product_id}`);
-  }
+  // No Home Collection service charge at booking — it is collected on the
+  // spot: worked out when a technician accepts and added to the bill when they
+  // arrive (services/serviceCharge.js). The first member carries it, as before.
+  const familyFare = null;
 
   const conn = await db.getConnection();
   try {
@@ -2595,9 +2625,14 @@ exports.createFamilyBooking = async (req, res) => {
          isPaid ? 'paid' : 'unpaid',
          visitGroupId, userId ?? null]
       );
+      const carriesServiceCharge = isFirstMember && bookingType === 'home_collection';
       isFirstMember = false;
       const bookingId  = bResult.insertId;
       blog(`[family-notes] INSERT done — booking_id=${bookingId} patient_id=${patientId} notes_stored=${JSON.stringify(notes ?? null)}`);
+      if (carriesServiceCharge) {
+        const sc = await serviceCharge.markPending(conn, bookingId);
+        blog(`💰 [CREATE FAMILY BOOKING] service charge collected on the spot — ${sc.skipped ? `not marked: ${sc.skipped}` : `carried by booking_id=${bookingId}, pending until a technician accepts`}`);
+      }
       // Same booking_id + offset scheme as createBooking above — see that
       // function's own comment. visit_group_id (below) intentionally keeps
       // its separate VG-XXXXXX format; only booking_ref changes.

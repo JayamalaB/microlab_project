@@ -375,6 +375,17 @@ async function _resolveBranchIdFromCode(code) {
   }
 }
 
+// branch_id when it is a real branch in ip_branches, else null — so a stale or
+// mistyped ip_users.user_branch_id never becomes a technician's branch.
+async function _validBranchId(branchId) {
+  if (branchId == null || branchId === '') return null;
+  const [[row]] = await db.query(
+    'SELECT branch_id FROM ip_branches WHERE branch_id = ? AND deleted_at IS NULL LIMIT 1',
+    [branchId]
+  );
+  return row ? Number(row.branch_id) : null;
+}
+
 // ── Local technician fallback lookup ──────────────────────────────────────────
 // Used only when the Jayamala registry responds "not found" for a technician
 // login. Checks whether this mobile is already known locally as a technician
@@ -512,7 +523,7 @@ exports.verifyOtp = async (req, res) => {
       let matchedBy = 'none';
       if (t?.externalId) {
         const [refRows] = await db.query(
-          `SELECT tech.user_id, tech.technician_id, tech.branch_id
+          `SELECT tech.user_id, tech.technician_id, tech.branch_id, tech.default_branch_id
            FROM ip_technicians tech
            WHERE tech.technician_id_ref = ?
            LIMIT 1`,
@@ -535,7 +546,7 @@ exports.verifyOtp = async (req, res) => {
       }
       if (existingRows.length === 0) {
         [existingRows] = await db.query(
-          `SELECT u.user_id, tech.technician_id, tech.branch_id
+          `SELECT u.user_id, tech.technician_id, tech.branch_id, tech.default_branch_id
            FROM ip_users u
            JOIN ip_technicians tech ON tech.user_id = u.user_id
            WHERE u.user_mobile_no = ? AND u.user_microlab_type = 'technician'
@@ -559,7 +570,15 @@ exports.verifyOtp = async (req, res) => {
         // previously-set data with NULL. Only these 6 columns have any real
         // data source in this flow; everything else (tech_address, gps_data,
         // is_available, technician_active, etc.) is left untouched.
-        const newBranchId = t?.branch_id ?? localTech?.user_branch_id ?? null;
+        // Local fallback (registry didn't return this technician): the default
+        // branch code saved at an earlier registry login first, then
+        // ip_users.user_branch_id — each only when it is a real branch.
+        // Neither → null, which keeps the existing branch.
+        let newBranchId = t?.branch_id ?? null;
+        if (!t) {
+          newBranchId = (await _resolveBranchIdFromCode(existingRows[0].default_branch_id))
+            ?? (await _validBranchId(localTech?.user_branch_id));
+        }
         const newTechCity = t?.tech_city ?? localTech?.user_city    ?? null;
         writeLog(`[verifyOtp] refreshing ip_technicians technician_id=${dbTechnicianId} source=${t ? 'jayamala' : 'local_fallback'} newBranchId=${newBranchId} technician_code=${t?.technician_code ?? 'null(coalesce keeps existing)'} tech_photo=${t?.tech_photo ?? 'null(coalesce keeps existing)'} tech_city=${newTechCity} max_daily_bookings=${t?.max_daily_bookings ?? 'null(coalesce keeps existing)'}`);
         const [updResult] = await db.query(
@@ -588,7 +607,7 @@ exports.verifyOtp = async (req, res) => {
         let insertBranchId = t.branch_id;
         if (insertBranchId == null) {
           const localRow = await _findLocalTechnicianUser(mobile);
-          insertBranchId = localRow?.user_branch_id ?? null;
+          insertBranchId = await _validBranchId(localRow?.user_branch_id);
         }
         if (insertBranchId == null) {
           writeLog(`[verifyOtp] registry insert blocked — no valid branch (codes=[${t.branchCodes.join(',')}] default=${t.branchCode ?? 'none'}) and ip_users.user_branch_id is empty — user_id=${dbUser.user_id}`);
@@ -618,8 +637,9 @@ exports.verifyOtp = async (req, res) => {
         // technician_code/specialization/tech_photo are nullable (no local
         // source, left NULL); max_daily_bookings/technician_active are omitted
         // so the schema's own defaults (8 / 1) apply — no invented values.
-        if (localTech.user_branch_id == null) {
-          writeLog(`[verifyOtp] local fallback blocked — ip_users.user_branch_id is NULL for user_id=${localTech.user_id}, cannot satisfy ip_technicians.branch_id (NOT NULL, no default)`);
+        const localBranchId = await _validBranchId(localTech.user_branch_id);
+        if (localBranchId == null) {
+          writeLog(`[verifyOtp] local fallback blocked — ip_users.user_branch_id=${localTech.user_branch_id ?? 'NULL'} is not a branch in ip_branches for user_id=${localTech.user_id}, cannot satisfy ip_technicians.branch_id (NOT NULL, no default)`);
           return res.status(422).json({
             success: false,
             message: 'Your account isn\'t linked to a MicroLab branch yet. Please contact your admin.',
@@ -629,10 +649,10 @@ exports.verifyOtp = async (req, res) => {
           `INSERT INTO ip_technicians
              (user_id, branch_id, technician_code, specialization, tech_photo, tech_city, is_available)
            VALUES (?, ?, NULL, NULL, NULL, ?, 1)`,
-          [localTech.user_id, localTech.user_branch_id, localTech.user_city ?? null]
+          [localTech.user_id, localBranchId, localTech.user_city ?? null]
         );
         dbTechnicianId = techResult.insertId;
-        dbBranchId     = localTech.user_branch_id;
+        dbBranchId     = localBranchId;
       }
 
       // Registry name/email → ip_users, only filling placeholders: the name

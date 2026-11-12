@@ -112,8 +112,31 @@ async function calculateHomeCollectionProduct({ branchId, pickupLat, pickupLng, 
   };
 }
 
+// Service charge for a one-way customer ↔ branch distance: up and down
+// (km × 2), then the ip_products row whose km range covers it — the same
+// lookup as calculateHomeCollectionProduct, for a distance already known.
+// Returns { roundTripKm, product, price }, or { roundTripKm, product: null }
+// when no product covers the km.
+async function serviceChargeForKm(oneWayKm, dbConn = pool) {
+  const roundTripKm = Number((Number(oneWayKm) * 2).toFixed(2));
+  const product = await _getProductForDistance(roundTripKm, dbConn);
+  logFare(`SERVICE_CHARGE oneWayKm=${oneWayKm} roundTripKm=${roundTripKm} ` +
+    (product ? `productId=${product.product_id} productName="${product.product_name}" price=${product.product_price}` : 'result=PRODUCT_NOT_FOUND'));
+  if (!product) return { roundTripKm, product: null, price: null };
+  return {
+    roundTripKm,
+    product: {
+      product_id:   product.product_id,
+      product_name: product.product_name,
+      test_code:    product.test_code,
+    },
+    price: Math.round(Number(product.product_price)),
+  };
+}
+
 module.exports = {
   calculateHomeCollectionProduct,
+  serviceChargeForKm,
   getBranchCoordinates,
   FareCalculationError,
 };

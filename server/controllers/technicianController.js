@@ -14,6 +14,7 @@ const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 const dbLogger = require('../utils/dbLogger');
 const { getTechnicianBranches } = require('../services/technicianBranches');
+const serviceChargeSvc = require('../services/serviceCharge');
 const { verifyRazorpayPayment } = require('../services/razorpayVerify');
 const { captureRazorpayPayment } = require('../services/razorpayCapture');
 
@@ -419,16 +420,37 @@ exports.getSlots = async (req, res) => {
        ORDER BY MIN(slot_start) ASC`
     );
 
+    // branch_ids: the branches each slot is offered at — the technician's
+    // picks (ip_technician_slot_branches), or the slot's own branch for one
+    // saved before branches could be picked.
     const [techSlots] = await db.execute(
-      `SELECT slot_id, DATE_FORMAT(slot_date, '%Y-%m-%d') AS slot_date, max_bookings, booked_count, is_available, duration_minutes
-       FROM ip_technician_slots
-       WHERE technician_id = ? AND slot_date >= CURDATE() AND is_available = 1
-       ORDER BY slot_date ASC`,
+      `SELECT ts.slot_id, DATE_FORMAT(ts.slot_date, '%Y-%m-%d') AS slot_date, ts.max_bookings, ts.booked_count,
+              ts.is_available, ts.duration_minutes, ts.branch_id,
+              GROUP_CONCAT(sb.branch_id ORDER BY sb.branch_id) AS slot_branch_ids
+       FROM ip_technician_slots ts
+       LEFT JOIN ip_technician_slot_branches sb ON sb.tech_slot_id = ts.tech_slot_id
+       WHERE ts.technician_id = ? AND ts.slot_date >= CURDATE() AND ts.is_available = 1
+       GROUP BY ts.tech_slot_id
+       ORDER BY ts.slot_date ASC`,
       [technicianId]
     );
+    for (const s of techSlots) {
+      s.branch_ids = s.slot_branch_ids
+        ? String(s.slot_branch_ids).split(',').map(Number)
+        : (s.branch_id != null ? [Number(s.branch_id)] : []);
+      delete s.slot_branch_ids;
+    }
 
-    console.log(`✅ Master slots=${masterSlots.length} tech configs=${techSlots.length}`);
-    res.json({ success: true, masterSlots, techSlots });
+    // The branches this technician can offer slots at, for the branch picker.
+    let branches = [];
+    try {
+      branches = await getTechnicianBranches(technicianId);
+    } catch (branchErr) {
+      console.error('[getSlots] branches failed:', branchErr.message);
+    }
+
+    console.log(`✅ Master slots=${masterSlots.length} tech configs=${techSlots.length} branches=${branches.length}`);
+    res.json({ success: true, masterSlots, techSlots, branches });
   } catch (e) {
     console.error('[getSlots]', e.message);
     res.status(500).json({ success: false, message: e.message });
@@ -436,8 +458,12 @@ exports.getSlots = async (req, res) => {
 };
 
 // ── PUT /api/technicians/:technicianId/slots ──────────────────────────────────
-// Body: { slots: [{ date: 'YYYY-MM-DD', slot_ids: [1,2], durations: {"1":30,"2":15} }] }
+// Body: { slots: [{ date: 'YYYY-MM-DD', slot_ids: [1,2], durations: {"1":30,"2":15},
+//                   branches: {"1": [3, 7], "2": [3]} }] }
 // durations is optional; omitting it (or a specific slot_id key) skips interval generation.
+// branches is optional: the branches each slot is offered at, per day — only
+// branches the technician works at are kept; none → their own branch. One
+// slot, one capacity: offered at several branches, the first booking takes it.
 exports.saveSlots = async (req, res) => {
   const { technicianId } = req.params;
   const { slots } = req.body;
@@ -453,6 +479,21 @@ exports.saveSlots = async (req, res) => {
     );
     if (!tech) return res.status(404).json({ success: false, message: 'Technician not found' });
     const branchId = tech.branch_id;
+
+    // Branches this technician may offer a slot at: their own branch plus
+    // their ASMX branches (same list as Profile → My Branches and dispatch).
+    const allowedBranches = new Set(branchId != null ? [Number(branchId)] : []);
+    try {
+      for (const b of await getTechnicianBranches(technicianId)) allowedBranches.add(Number(b.branchId));
+    } catch (branchErr) {
+      console.error('[saveSlots] branches failed — slots go to the own branch:', branchErr.message);
+    }
+    // The branches picked for one slot on one day; none valid → own branch.
+    const branchesFor = (day, slotId) => {
+      const asked = day.branches?.[String(slotId)];
+      const picked = [...new Set((Array.isArray(asked) ? asked : []).map(Number).filter(b => allowedBranches.has(b)))];
+      return picked.length ? picked : (branchId != null ? [Number(branchId)] : []);
+    };
 
     // For today (IST), reject slot_ids whose slot_end has already been reached.
     // A slot is still valid while any appointment time within it remains in the future.
@@ -492,11 +533,14 @@ exports.saveSlots = async (req, res) => {
       // What the technician wants: "date|slotId" → duration in minutes, or null.
       const slotKey = (date, slotId) => `${date}|${slotId}`;
       const wanted  = new Map();
+      // "date|slotId" → the branches it is offered at (first = its own branch_id).
+      const wantedBranches = new Map();
       for (const day of slots) {
         if (!Array.isArray(day.slot_ids)) continue;
         const durMap = day.durations ?? {}; // { "1": 30, "2": 15 } — keyed by slot_id string
         for (const slotId of day.slot_ids) {
           wanted.set(slotKey(day.date, slotId), durMap[String(slotId)] ? Number(durMap[String(slotId)]) : null);
+          wantedBranches.set(slotKey(day.date, slotId), branchesFor(day, slotId));
         }
       }
 
@@ -520,12 +564,16 @@ exports.saveSlots = async (req, res) => {
         const hasBookings = Number(row.has_bookings) === 1;
         const sameLength  = isWanted && (Number(row.duration_minutes) || null) === wanted.get(key);
 
+        // Kept rows take the branches picked now (or the technician's own
+        // branch when unticked), so a change reaches slots saved before it.
+        const keptBranches = wantedBranches.get(key) ?? (branchId != null ? [Number(branchId)] : []);
         if (hasBookings) {
           // Booked but unticked: stays for its bookings, with its free times withdrawn.
           await connection.query(
-            'UPDATE ip_technician_slots SET is_available = ? WHERE tech_slot_id = ?',
-            [isWanted ? 1 : 0, row.tech_slot_id]
+            'UPDATE ip_technician_slots SET is_available = ?, branch_id = ? WHERE tech_slot_id = ?',
+            [isWanted ? 1 : 0, isWanted ? keptBranches[0] ?? branchId : branchId, row.tech_slot_id]
           );
+          if (isWanted) await _saveSlotBranches(connection, row.tech_slot_id, keptBranches);
           if (!isWanted) {
             await connection.query(
               'DELETE FROM ip_available_slots WHERE technician_slot_id = ? AND is_available = 1',
@@ -537,12 +585,14 @@ exports.saveSlots = async (req, res) => {
           }
         } else if (sameLength) {
           await connection.query(
-            'UPDATE ip_technician_slots SET is_available = 1 WHERE tech_slot_id = ?',
-            [row.tech_slot_id]
+            'UPDATE ip_technician_slots SET is_available = 1, branch_id = ? WHERE tech_slot_id = ?',
+            [keptBranches[0] ?? branchId, row.tech_slot_id]
           );
+          await _saveSlotBranches(connection, row.tech_slot_id, keptBranches);
           wanted.delete(key);
         } else {
           await connection.query('DELETE FROM ip_available_slots WHERE technician_slot_id = ?', [row.tech_slot_id]);
+          await connection.query('DELETE FROM ip_technician_slot_branches WHERE tech_slot_id = ?', [row.tech_slot_id]);
           await connection.query('DELETE FROM ip_technician_slots WHERE tech_slot_id = ?', [row.tech_slot_id]);
         }
       }
@@ -555,6 +605,7 @@ exports.saveSlots = async (req, res) => {
           const key = slotKey(day.date, slotId);
           if (!wanted.has(key)) continue; // kept as it was above
           const durationMinutes = wanted.get(key);
+          const slotBranches    = wantedBranches.get(key) ?? [];
 
           // When duration is set, calculate interval count first so max_bookings
           // reflects actual capacity rather than a hardcoded guess.
@@ -575,9 +626,10 @@ exports.saveSlots = async (req, res) => {
             `INSERT INTO ip_technician_slots
                (technician_id, slot_id, slot_date, branch_id, max_bookings, is_available, duration_minutes, created_by)
              VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
-            [technicianId, slotId, day.date, branchId, maxBookings, durationMinutes, technicianId]
+            [technicianId, slotId, day.date, slotBranches[0] ?? branchId, maxBookings, durationMinutes, technicianId]
           );
           const techSlotId = ins.insertId;
+          await _saveSlotBranches(connection, techSlotId, slotBranches);
 
           // Insert per-appointment-time rows when duration is set (times already computed above)
           if (durationMinutes && times.length > 0) {
@@ -610,6 +662,17 @@ exports.saveSlots = async (req, res) => {
     res.status(500).json({ success: false, message: e.message });
   }
 };
+
+// The branches a slot is offered at (ip_technician_slot_branches): replaces
+// whatever was saved for it before.
+async function _saveSlotBranches(connection, techSlotId, branchIds) {
+  await connection.query('DELETE FROM ip_technician_slot_branches WHERE tech_slot_id = ?', [techSlotId]);
+  if (!branchIds.length) return;
+  await connection.query(
+    `INSERT INTO ip_technician_slot_branches (tech_slot_id, branch_id) VALUES ${branchIds.map(() => '(?, ?)').join(', ')}`,
+    branchIds.flatMap(b => [techSlotId, b])
+  );
+}
 
 // Puts back the free times of a booked slot the technician ticked again after
 // unticking it. Times that are still booked keep their rows.
@@ -975,15 +1038,59 @@ exports.getQrStatus = (req, res) => {
   res.json({ success: true, paid: session.paid, paymentId: session.paymentId });
 };
 
-// ── PUT /api/technicians/bookings/:bookingId/additional-charge ───────────────
-// Sets the booking's one additional charge (amount + reason) entered by the
-// technician on site — saving again replaces it, amount 0 removes it.
-//   Updated Total = Existing Total + Additional Charge
-// The charge lives inside total_amount, so collectPayment, partial payments
-// and the family payment popup pick it up unchanged; it reaches the ASMX in
-// payment_details at Handed to Lab (clientSync.js). Only allowed from Arrived
-// up to Sample Collected — the visit is finalised from OTP Verified on.
+// ── Additional charges ───────────────────────────────────────────────────────
+// Extra charges the technician puts on a booking on site. Every charge lives
+// inside total_amount (ip_bookings.additional_charge_amount is their sum), so
+// collectPayment, partial payments and the family payment popup pick it up
+// unchanged. Only allowed from Arrived up to Sample Collected — the visit is
+// finalised from OTP Verified on.
 const ADDITIONAL_CHARGE_STATUSES = ['arrived', 'collection_started', 'sample_collected'];
+const CHARGE_WINDOW_MESSAGE = 'Additional charges can be added only after arrival and before OTP verification';
+
+// A booking this technician may charge — same ownership rule as
+// collectPayment (their own booking, or a family sibling of it) — with the
+// visit's collection status and the sum of its charge packages.
+const CHARGEABLE_BOOKING_SQL =
+  `SELECT b.booking_id, b.status, b.total_amount, b.amount_paid, b.payment_status,
+          b.additional_charge_amount, b.visit_group_id,
+          (SELECT COALESCE(SUM(c.price), 0) FROM ip_booking_additional_charges c
+            WHERE c.booking_id = b.booking_id AND c.deleted_at IS NULL) AS package_charges,
+          (SELECT tc.collection_status
+             FROM ip_technician_collection tc
+             JOIN ip_bookings vb ON vb.booking_id = tc.booking_id
+            WHERE tc.technician_id = ?
+              AND (vb.booking_id = b.booking_id
+                   OR (b.visit_group_id IS NOT NULL AND vb.visit_group_id = b.visit_group_id))
+            ORDER BY tc.booking_id ASC LIMIT 1) AS collection_status
+   FROM ip_bookings b
+   WHERE b.booking_id = ? AND b.deleted_at IS NULL
+     AND (
+       EXISTS (SELECT 1 FROM ip_technician_collection tc WHERE tc.booking_id = b.booking_id AND tc.technician_id = ?)
+       OR (b.visit_group_id IS NOT NULL AND EXISTS (
+         SELECT 1 FROM ip_bookings parent
+         INNER JOIN ip_technician_collection tc ON tc.booking_id = parent.booking_id AND tc.technician_id = ?
+         WHERE parent.visit_group_id = b.visit_group_id
+       ))
+     )`;
+const chargeableBookingParams = (technicianId, bookingId) => [technicianId, bookingId, technicianId, technicianId];
+const canChargeBooking = (booking) =>
+  booking.status !== 'cancelled' && ADDITIONAL_CHARGE_STATUSES.includes(booking.collection_status);
+
+const round2 = (n) => Math.round(n * 100) / 100;
+
+// Amount due and payment status once the total changes. Nothing paid yet →
+// payment status unchanged (still unpaid/pending).
+function chargeTotals(booking, newTotal) {
+  const amountPaid = parseFloat(booking.amount_paid) || 0;
+  const amountDue  = Math.max(0, round2(newTotal - amountPaid));
+  const paymentStatus = amountPaid > 0 ? (amountDue <= 0 ? 'paid' : 'partial') : booking.payment_status;
+  return { amountDue, paymentStatus };
+}
+
+// ── PUT /api/technicians/bookings/:bookingId/additional-charge ───────────────
+// The older typed charge (amount + reason), still used by app versions from
+// before charge packages: saving again replaces it, amount 0 removes it.
+// It reaches the ASMX in payment_details at Handed to Lab (clientSync.js).
 
 exports.setAdditionalCharge = async (req, res) => {
   const technicianId = req.user.id;
@@ -1006,55 +1113,30 @@ exports.setAdditionalCharge = async (req, res) => {
   }
 
   try {
-    // Same ownership rule as collectPayment (the technician's own booking, or
-    // a family sibling of it), plus the visit's collection status.
-    const [[booking]] = await db.execute(
-      `SELECT b.booking_id, b.status, b.total_amount, b.amount_paid, b.payment_status,
-              b.additional_charge_amount,
-              (SELECT tc.collection_status
-                 FROM ip_technician_collection tc
-                 JOIN ip_bookings vb ON vb.booking_id = tc.booking_id
-                WHERE tc.technician_id = ?
-                  AND (vb.booking_id = b.booking_id
-                       OR (b.visit_group_id IS NOT NULL AND vb.visit_group_id = b.visit_group_id))
-                ORDER BY tc.booking_id ASC LIMIT 1) AS collection_status
-       FROM ip_bookings b
-       WHERE b.booking_id = ? AND b.deleted_at IS NULL
-         AND (
-           EXISTS (SELECT 1 FROM ip_technician_collection tc WHERE tc.booking_id = b.booking_id AND tc.technician_id = ?)
-           OR (b.visit_group_id IS NOT NULL AND EXISTS (
-             SELECT 1 FROM ip_bookings parent
-             INNER JOIN ip_technician_collection tc ON tc.booking_id = parent.booking_id AND tc.technician_id = ?
-             WHERE parent.visit_group_id = b.visit_group_id
-           ))
-         )`,
-      [technicianId, bookingId, technicianId, technicianId]
-    );
+    const [[booking]] = await db.execute(CHARGEABLE_BOOKING_SQL, chargeableBookingParams(technicianId, bookingId));
     if (!booking) {
       return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
     }
-    if (booking.status === 'cancelled' || !ADDITIONAL_CHARGE_STATUSES.includes(booking.collection_status)) {
-      return res.status(409).json({
-        success: false,
-        message: 'Additional charges can be added only after arrival and before OTP verification',
-      });
+    if (!canChargeBooking(booking)) {
+      return res.status(409).json({ success: false, message: CHARGE_WINDOW_MESSAGE });
     }
 
+    // additional_charge_amount = charge packages + this typed charge. Only
+    // the typed part is replaced here; the packages stay as they are.
+    const packageCharges = parseFloat(booking.package_charges) || 0;
     const oldCharge  = parseFloat(booking.additional_charge_amount) || 0;
+    const oldTyped   = Math.max(0, oldCharge - packageCharges);
     const oldTotal   = parseFloat(booking.total_amount) || 0;
     const amountPaid = parseFloat(booking.amount_paid) || 0;
-    const newTotal   = Math.round((oldTotal - oldCharge + amount) * 100) / 100;
+    const newTotal   = round2(oldTotal - oldTyped + amount);
+    const newCharge  = round2(packageCharges + amount);
     if (newTotal < amountPaid - 0.01) {
       return res.status(400).json({
         success: false,
         message: `₹${amountPaid} is already paid — the total can't go below that`,
       });
     }
-    const newAmountDue = Math.max(0, Math.round((newTotal - amountPaid) * 100) / 100);
-    // Nothing paid yet → payment status unchanged (still unpaid/pending).
-    const newPaymentStatus = amountPaid > 0
-      ? (newAmountDue <= 0 ? 'paid' : 'partial')
-      : booking.payment_status;
+    const { amountDue: newAmountDue, paymentStatus: newPaymentStatus } = chargeTotals(booking, newTotal);
 
     // Guarded on the values read above, so a payment or another edit landing
     // in between is never overwritten with stale totals.
@@ -1063,18 +1145,18 @@ exports.setAdditionalCharge = async (req, res) => {
           SET additional_charge_amount = ?, additional_charge_reason = ?,
               total_amount = ?, amount_due = ?, payment_status = ?, updated_at = NOW()
         WHERE booking_id = ? AND additional_charge_amount = ? AND amount_paid = ? AND total_amount = ?`,
-      [amount, amount > 0 ? reason : null, newTotal, newAmountDue, newPaymentStatus,
+      [newCharge, amount > 0 ? reason : null, newTotal, newAmountDue, newPaymentStatus,
        bookingId, booking.additional_charge_amount, booking.amount_paid, booking.total_amount]
     );
     if (result.affectedRows !== 1) {
       return res.status(409).json({ success: false, message: 'Booking was just updated — please refresh and try again' });
     }
 
-    tlog(`[ADDITIONAL_CHARGE] technician_id=${technicianId} booking_id=${bookingId} charge=₹${oldCharge}→₹${amount} total=₹${oldTotal}→₹${newTotal} due=₹${newAmountDue} reason="${amount > 0 ? reason : ''}"`);
+    tlog(`[ADDITIONAL_CHARGE] technician_id=${technicianId} booking_id=${bookingId} typed=₹${oldTyped}→₹${amount} packages=₹${packageCharges} total=₹${oldTotal}→₹${newTotal} due=₹${newAmountDue} reason="${amount > 0 ? reason : ''}"`);
 
     res.json({
       success: true,
-      additionalChargeAmount: amount,
+      additionalChargeAmount: newCharge,
       additionalChargeReason: amount > 0 ? reason : null,
       totalAmount:   newTotal,
       amountDue:     newAmountDue,
@@ -1083,6 +1165,248 @@ exports.setAdditionalCharge = async (req, res) => {
   } catch (err) {
     console.error('❌ setAdditionalCharge FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── GET /api/technicians/charge-packages ─────────────────────────────────────
+// Every active product the technician can add as a charge package, with the
+// price the server will charge for it.
+exports.getChargePackages = async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT product_id, product_name, test_code, product_price, product_category
+       FROM ip_products
+       WHERE product_active = 1 AND deleted_at IS NULL
+       ORDER BY product_name ASC, product_id ASC`
+    );
+    res.json({
+      success: true,
+      packages: rows.map(r => ({
+        productId: r.product_id,
+        name:      r.product_name,
+        testCode:  r.test_code ?? null,
+        price:     round2(parseFloat(r.product_price) || 0),
+        category:  r.product_category ?? null,
+      })),
+    });
+  } catch (err) {
+    console.error('❌ getChargePackages FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+const mapCharge = (r) => ({
+  chargeId:  r.charge_id,
+  bookingId: r.booking_id,
+  productId: r.product_id,
+  name:      r.product_name,
+  testCode:  r.test_code ?? null,
+  price:     round2(parseFloat(r.price) || 0),
+  reason:    r.reason ?? null,
+});
+
+// ── GET /api/technicians/bookings/:bookingId/additional-charges ──────────────
+// The charge packages on this booking's whole visit (the booking plus its
+// family siblings), and the name of the visit's service charge product for
+// the Billing Summary.
+exports.getAdditionalCharges = async (req, res) => {
+  const technicianId = req.user.id;
+  const bookingId    = parseInt(req.params.bookingId, 10);
+  if (!bookingId) return res.status(400).json({ success: false, message: 'Invalid booking' });
+
+  try {
+    const [[booking]] = await db.execute(CHARGEABLE_BOOKING_SQL, chargeableBookingParams(technicianId, bookingId));
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
+    }
+    const groupId = booking.visit_group_id ?? null;
+
+    const [rows] = await db.execute(
+      `SELECT c.charge_id, c.booking_id, c.product_id, c.product_name, c.test_code, c.price, c.reason
+       FROM ip_booking_additional_charges c
+       JOIN ip_bookings b ON b.booking_id = c.booking_id
+       WHERE c.deleted_at IS NULL AND b.deleted_at IS NULL
+         AND (b.booking_id = ? OR (? IS NOT NULL AND b.visit_group_id = ?))
+       ORDER BY c.charge_id ASC`,
+      [bookingId, groupId, groupId]
+    );
+    // Only the visit's first member carries the service charge product.
+    const [[serviceCharge]] = await db.execute(
+      `SELECT p.product_name
+       FROM ip_bookings b
+       JOIN ip_products p ON p.product_id = b.service_charge_product_id
+       WHERE b.deleted_at IS NULL
+         AND (b.booking_id = ? OR (? IS NOT NULL AND b.visit_group_id = ?))
+       ORDER BY b.booking_id ASC LIMIT 1`,
+      [bookingId, groupId, groupId]
+    );
+
+    // Service charge decided at accept: applied here too if the arrival step
+    // already happened (catch-up), then its details for the Billing Summary.
+    await serviceChargeSvc.applyIfArrived(bookingId);
+    const sc = await serviceChargeSvc.view(bookingId);
+
+    res.json({
+      success: true,
+      charges: rows.map(mapCharge),
+      serviceChargeProductName: sc.status != null ? sc.productName : serviceCharge?.product_name ?? null,
+      // { status, productName, oneWayKm, roundTripKm, amount } — status null:
+      // booked before the service charge moved to accept (booking-time fare).
+      serviceCharge: sc.skipped ? null : sc,
+      canEdit: canChargeBooking(booking),
+    });
+  } catch (err) {
+    console.error('❌ getAdditionalCharges FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── POST /api/technicians/bookings/:bookingId/additional-charges ─────────────
+// Adds one or more charge packages: body { productIds: [..], reason? }. The
+// reason is optional and applies to every package added together. Prices come
+// from ip_products, never from the app, and are added to the booking's total
+// and amount due.
+exports.addAdditionalCharges = async (req, res) => {
+  const technicianId = req.user.id;
+  const bookingId    = parseInt(req.params.bookingId, 10);
+  const raw          = Array.isArray(req.body.productIds) ? req.body.productIds : [];
+  const productIds   = [...new Set(raw.map(v => parseInt(v, 10)))];
+  const reason       = String(req.body.reason ?? '').trim();
+
+  if (!bookingId || productIds.length === 0 || productIds.some(id => !Number.isInteger(id) || id <= 0)) {
+    return res.status(400).json({ success: false, message: 'Select at least one package' });
+  }
+  if (productIds.length > 20) {
+    return res.status(400).json({ success: false, message: 'Add at most 20 packages at a time' });
+  }
+  if (reason.length > 255) {
+    return res.status(400).json({ success: false, message: 'Reason must be 255 characters or fewer' });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    // Locked so a payment or another edit can't land between reading the
+    // totals and writing them back.
+    const [[booking]] = await conn.execute(`${CHARGEABLE_BOOKING_SQL} FOR UPDATE`, chargeableBookingParams(technicianId, bookingId));
+    if (!booking) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
+    }
+    if (!canChargeBooking(booking)) {
+      await conn.rollback();
+      return res.status(409).json({ success: false, message: CHARGE_WINDOW_MESSAGE });
+    }
+
+    const [products] = await conn.execute(
+      `SELECT product_id, product_name, test_code, product_price
+       FROM ip_products
+       WHERE product_active = 1 AND deleted_at IS NULL AND product_id IN (${productIds.map(() => '?').join(',')})`,
+      productIds
+    );
+    const byId = new Map(products.map(p => [Number(p.product_id), p]));
+    if (productIds.some(id => !byId.has(id))) {
+      await conn.rollback();
+      return res.status(409).json({ success: false, message: 'A selected package is no longer available. Please refresh the list.' });
+    }
+
+    let added = 0;
+    for (const id of productIds) {
+      const p     = byId.get(id);
+      const price = round2(parseFloat(p.product_price) || 0);
+      added += price;
+      await conn.execute(
+        `INSERT INTO ip_booking_additional_charges
+           (booking_id, product_id, product_name, test_code, price, reason, technician_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [bookingId, id, p.product_name, p.test_code ?? null, price, reason || null, technicianId]
+      );
+    }
+    added = round2(added);
+
+    const oldTotal  = parseFloat(booking.total_amount) || 0;
+    const newTotal  = round2(oldTotal + added);
+    const newCharge = round2((parseFloat(booking.additional_charge_amount) || 0) + added);
+    const { amountDue, paymentStatus } = chargeTotals(booking, newTotal);
+    await conn.execute(
+      `UPDATE ip_bookings
+          SET additional_charge_amount = ?, total_amount = ?, amount_due = ?, payment_status = ?, updated_at = NOW()
+        WHERE booking_id = ?`,
+      [newCharge, newTotal, amountDue, paymentStatus, bookingId]
+    );
+    await conn.commit();
+
+    tlog(`[CHARGE_PACKAGES_ADDED] technician_id=${technicianId} booking_id=${bookingId} products=${productIds.join(',')} +₹${added} total=₹${oldTotal}→₹${newTotal} due=₹${amountDue} reason="${reason}"`);
+    res.json({ success: true, additionalChargeAmount: newCharge, totalAmount: newTotal, amountDue, paymentStatus });
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    console.error('❌ addAdditionalCharges FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    conn.release();
+  }
+};
+
+// ── DELETE /api/technicians/bookings/:bookingId/additional-charges/:chargeId ─
+// Removes one charge package and takes its price off the total and amount
+// due. Refused when the total would drop below what is already paid.
+exports.removeAdditionalCharge = async (req, res) => {
+  const technicianId = req.user.id;
+  const bookingId    = parseInt(req.params.bookingId, 10);
+  const chargeId     = parseInt(req.params.chargeId, 10);
+  if (!bookingId || !chargeId) return res.status(400).json({ success: false, message: 'Invalid charge' });
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [[booking]] = await conn.execute(`${CHARGEABLE_BOOKING_SQL} FOR UPDATE`, chargeableBookingParams(technicianId, bookingId));
+    if (!booking) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to this technician' });
+    }
+    if (!canChargeBooking(booking)) {
+      await conn.rollback();
+      return res.status(409).json({ success: false, message: CHARGE_WINDOW_MESSAGE });
+    }
+
+    const [[charge]] = await conn.execute(
+      `SELECT charge_id, product_id, price FROM ip_booking_additional_charges
+       WHERE charge_id = ? AND booking_id = ? AND deleted_at IS NULL FOR UPDATE`,
+      [chargeId, bookingId]
+    );
+    if (!charge) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'This charge was already removed' });
+    }
+
+    const price      = round2(parseFloat(charge.price) || 0);
+    const oldTotal   = parseFloat(booking.total_amount) || 0;
+    const amountPaid = parseFloat(booking.amount_paid) || 0;
+    const newTotal   = round2(oldTotal - price);
+    if (newTotal < amountPaid - 0.01) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: `₹${amountPaid} is already paid — the total can't go below that` });
+    }
+    const newCharge = Math.max(0, round2((parseFloat(booking.additional_charge_amount) || 0) - price));
+    const { amountDue, paymentStatus } = chargeTotals(booking, newTotal);
+
+    await conn.execute('UPDATE ip_booking_additional_charges SET deleted_at = NOW() WHERE charge_id = ?', [chargeId]);
+    await conn.execute(
+      `UPDATE ip_bookings
+          SET additional_charge_amount = ?, total_amount = ?, amount_due = ?, payment_status = ?, updated_at = NOW()
+        WHERE booking_id = ?`,
+      [newCharge, newTotal, amountDue, paymentStatus, bookingId]
+    );
+    await conn.commit();
+
+    tlog(`[CHARGE_PACKAGE_REMOVED] technician_id=${technicianId} booking_id=${bookingId} charge_id=${chargeId} product=${charge.product_id} -₹${price} total=₹${oldTotal}→₹${newTotal} due=₹${amountDue}`);
+    res.json({ success: true, additionalChargeAmount: newCharge, totalAmount: newTotal, amountDue, paymentStatus });
+  } catch (err) {
+    try { await conn.rollback(); } catch (_) {}
+    console.error('❌ removeAdditionalCharge FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    conn.release();
   }
 };
 
@@ -1694,7 +2018,9 @@ exports.verifyBookingOtp = async (req, res) => {
         [bookingId, technicianId]
       );
       const remaining = maxAttempts - (row.otp_attempts + 1);
-      return res.status(401).json({
+      // 400, not 401: a wrong code is bad input. The app treats any 401 as
+      // "signed out on another device" and logs the technician out.
+      return res.status(400).json({
         success: false,
         message: remaining > 0
           ? `Incorrect OTP. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
