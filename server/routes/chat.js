@@ -12,16 +12,21 @@ const OpenAI = require('openai');
 
 const VALID_LAYERS = new Set(['all', 'static', 'db', 'web']);
 
-// ip_chatbot_banners.image_path stores a path like "uploads/chatbot_banners/<file>"
-// relative to the admin panel's own host — a different server from this one —
-// e.g. https://adminmicro.neuralarc.com/microlab/uploads/chatbot_banners/<file>.
-// Absolute URLs already in that column are passed through unchanged.
-const CHATBOT_BANNER_BASE_URL = 'https://adminmicro.neuralarc.com/microlab';
-function resolveBannerImageUrl(imagePath) {
+// ip_chatbot_banners.image_path stores a path like "uploads/chatbot_banners/<file>".
+// The actual image files are copied onto this server under server/uploads/,
+// served by the existing /uploads static route in server.js — same origin as
+// the API, so the browser never hits a cross-origin image load at all. The
+// legacy "banners/" bundled-asset path (server/banners/, also statically
+// served) is kept as a fallback prefix in case a row still points there.
+// Absolute URLs already in the column are passed through unchanged.
+function resolveBannerImageUrl(imagePath, baseUrl) {
     if (!imagePath) return null;
     if (/^https?:\/\//i.test(imagePath)) return imagePath;
     const clean = imagePath.replace(/^\/+/, '');
-    return `${CHATBOT_BANNER_BASE_URL}/${clean}`;
+    if (clean.startsWith('banners/') || clean.startsWith('uploads/')) {
+        return `${baseUrl}/${clean}`;
+    }
+    return `${baseUrl}/uploads/chatbot_banners/${clean}`;
 }
 
 // /book-test's optional document attachment (image or PDF) — a plain, unauthenticated
@@ -235,12 +240,6 @@ router.get('/products', async (req, res) => {
  * GET /api/chat/banners
  * Active chatbot promo banners, in carousel order. Replaces the client's
  * hardcoded banner1/2/3 asset list with ip_chatbot_banners rows.
- *
- * image_url points at our own /banner-image/:id proxy below, not straight at
- * adminmicro.neuralarc.com — that host sends no Access-Control-Allow-Origin
- * header, so Flutter web's cross-origin image load is blocked by the browser
- * with no error the user can act on (native apps aren't affected by this,
- * only Chrome/web builds, but the proxy serves both identically).
  */
 router.get('/banners', async (req, res) => {
     try {
@@ -257,46 +256,12 @@ router.get('/banners', async (req, res) => {
                 banner_id: r.banner_id,
                 title: r.title,
                 link_url: r.link_url,
-                image_url: `${baseUrl}/api/chat/banner-image/${r.banner_id}`,
+                image_url: resolveBannerImageUrl(r.image_path, baseUrl),
             }));
         res.json({ success: true, data });
     } catch (error) {
         console.error('Chatbot banners error:', error);
         res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-/**
- * GET /api/chat/banner-image/:bannerId
- * Streams one banner's image through our own server (with a permissive CORS
- * header) instead of the client loading it cross-origin from the admin host.
- */
-router.get('/banner-image/:bannerId', async (req, res) => {
-    try {
-        const bannerId = parseInt(req.params.bannerId, 10);
-        if (!Number.isInteger(bannerId)) {
-            return res.status(400).send('Invalid banner id');
-        }
-        const [rows] = await db.pool.execute(
-            `SELECT image_path FROM ip_chatbot_banners WHERE banner_id = ? AND is_active = 1 LIMIT 1`,
-            [bannerId]
-        );
-        if (!rows.length || !rows[0].image_path) {
-            return res.status(404).send('Banner not found');
-        }
-        const imageUrl = resolveBannerImageUrl(rows[0].image_path);
-        const upstream = await fetch(imageUrl);
-        if (!upstream.ok) {
-            return res.status(502).send(`Upstream error: ${upstream.status}`);
-        }
-        const buffer = Buffer.from(await upstream.arrayBuffer());
-        res.set('Content-Type', upstream.headers.get('content-type') || 'image/jpeg');
-        res.set('Cache-Control', 'public, max-age=3600');
-        res.set('Access-Control-Allow-Origin', '*');
-        res.send(buffer);
-    } catch (error) {
-        console.error('Banner image proxy error:', error);
-        res.status(500).send('Error loading banner image');
     }
 });
 
