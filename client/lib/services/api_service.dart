@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/models.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/screens/shared/onboarding_screen.dart';
+import 'package:microlab/services/socket_service.dart';
 
 class ApiService {
   static const String baseUrl = AppConstants.serverUrl;
@@ -33,6 +34,10 @@ class ApiService {
     if (_redirecting401) return;
     _redirecting401 = true;
     clearToken(); // unawaited — fire-and-forget; navigation is the priority
+    // The session is over, so the socket goes too. Left open, it would still
+    // be registered for this user after the next login on this phone, get
+    // that login's force_logout, and tear down the new session's socket.
+    SocketService.instance.disconnect(); // unawaited, like clearToken above
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _redirecting401 = false;
       navigatorKey.currentState?.pushAndRemoveUntil(
@@ -349,6 +354,23 @@ class ApiService {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  // Whether a time is still free. Only a definite "taken" returns false, so a
+  // network problem here never blocks a payment — the booking step re-checks.
+  static Future<bool> isSlotAvailable(int availableSlotId) async {
+    final token = await getToken();
+    if (token == null) return true;
+    try {
+      final res = await _client.get(
+        Uri.parse('$baseUrl/api/bookings/slot-status/$availableSlotId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 6));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      return body['available'] != false;
+    } catch (_) {
+      return true;
+    }
+  }
+
   static Future<List<TimeSlot>> getSlots({
     required String branchId,
     required DateTime date,
@@ -660,6 +682,7 @@ class ApiService {
     String? razorpayPaymentId,
     required double amount,
     String paymentMethod = 'RAZORPAY',
+    String? partialReason, // why only part of the due was paid
   }) async {
     final token = await getToken();
     if (token == null) return false;
@@ -675,6 +698,7 @@ class ApiService {
           'razorpayPaymentId': razorpayPaymentId,
           'amount': amount,
           'paymentMethod': paymentMethod,
+          if (partialReason != null) 'partialReason': partialReason,
         }),
       ).timeout(const Duration(seconds: 15));
       final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -688,17 +712,26 @@ class ApiService {
 
   // Creates a Razorpay UPI QR code for on-site payment.
   // Returns {success, qrId, imageUrl} on success, null on failure.
+  // Pass [bookingIds] for combined family QR (list of all member booking IDs).
   static Future<Map<String, dynamic>?> createQrCode({
     required int bookingId,
     required double amount,
+    List<int>? bookingIds,
+    String? partialReason,
   }) async {
     final token = await getToken();
     if (token == null) return null;
     try {
+      final payload = <String, dynamic>{
+        ...(bookingIds != null && bookingIds.length > 1
+            ? {'bookingIds': bookingIds, 'amount': amount}
+            : {'bookingId': bookingId, 'amount': amount}),
+        if (partialReason != null) 'partialReason': partialReason,
+      };
       final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/create-qr'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
-        body: jsonEncode({'bookingId': bookingId, 'amount': amount}),
+        body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 20));
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       if (body['success'] == true) return body;
@@ -754,6 +787,100 @@ class ApiService {
       return jsonDecode(res.body) as Map<String, dynamic>;
     } catch (e) {
       debugPrint('[setAdditionalCharge] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
+  // Every active product the technician can add as a charge package:
+  // [{productId, name, testCode, price, category}]. Empty on any failure.
+  static Future<List<Map<String, dynamic>>> getChargePackages() async {
+    final token = await getToken();
+    if (token == null) return [];
+    try {
+      final res = await _client.get(
+        Uri.parse('$baseUrl/api/technicians/charge-packages'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      if (!res.body.trimLeft().startsWith('{')) return [];
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) {
+        return (body['packages'] as List).cast<Map<String, dynamic>>();
+      }
+    } catch (e) {
+      debugPrint('[getChargePackages] ERROR: $e');
+    }
+    return [];
+  }
+
+  // The charge packages on a booking's whole visit plus the visit's service
+  // charge product name: {charges: [...], serviceChargeProductName, canEdit}.
+  // null on failure (e.g. a server without this route).
+  static Future<Map<String, dynamic>?> getAdditionalCharges(int bookingId) async {
+    final token = await getToken();
+    if (token == null) return null;
+    try {
+      final res = await _client.get(
+        Uri.parse('$baseUrl/api/technicians/bookings/$bookingId/additional-charges'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      if (!res.body.trimLeft().startsWith('{')) return null;
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] == true) return body;
+    } catch (e) {
+      debugPrint('[getAdditionalCharges] ERROR: $e');
+    }
+    return null;
+  }
+
+  // Adds charge packages to a booking. The server prices them from the
+  // catalogue and replies with the new totals.
+  static Future<Map<String, dynamic>> addAdditionalCharges({
+    required int bookingId,
+    required List<int> productIds,
+    String? reason,
+  }) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await _client.post(
+        Uri.parse('$baseUrl/api/technicians/bookings/$bookingId/additional-charges'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'productIds': productIds,
+          if (reason != null && reason.isNotEmpty) 'reason': reason,
+        }),
+      ).timeout(const Duration(seconds: 15));
+      if (!res.body.trimLeft().startsWith('{')) {
+        debugPrint('[addAdditionalCharges] HTTP ${res.statusCode} — not a JSON reply (server not updated?)');
+        return {'success': false, 'message': 'Charge packages aren\'t available on the server yet. Please try again later.'};
+      }
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[addAdditionalCharges] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> removeAdditionalCharge({
+    required int bookingId,
+    required int chargeId,
+  }) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await _client.delete(
+        Uri.parse('$baseUrl/api/technicians/bookings/$bookingId/additional-charges/$chargeId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      if (!res.body.trimLeft().startsWith('{')) {
+        return {'success': false, 'message': 'Charge packages aren\'t available on the server yet. Please try again later.'};
+      }
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[removeAdditionalCharge] ERROR: $e');
       return {'success': false, 'message': 'Network error'};
     }
   }

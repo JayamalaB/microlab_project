@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 Future<void> _confirmLogout(BuildContext context, VoidCallback onLogout) async {
   final confirmed = await showDialog<bool>(
@@ -352,6 +353,20 @@ class ProfileScreen extends StatelessWidget {
               onView: onViewMember == null ? null : () => onViewMember!(m),
               onRemove: m.isReadOnly || onRemoveMember == null ? null : () => onRemoveMember!(m),
             )),
+
+        const SizedBox(height: 24),
+        FutureBuilder<PackageInfo>(
+          future: PackageInfo.fromPlatform(),
+          builder: (_, snap) {
+            final version = snap.hasData ? 'v${snap.data!.version}+${snap.data!.buildNumber}' : '';
+            return Text(
+              version,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: AppColors.textHint),
+            );
+          },
+        ),
+        const SizedBox(height: 8),
       ],
     );
 

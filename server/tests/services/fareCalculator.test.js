@@ -42,12 +42,20 @@ describe('fareCalculator.computeFare — pure formula, matches the spec worked e
     expect(r.finalFare).toBe(124);
   });
 
-  // Scenario C — fractional distance.
-  test('Scenario C: 10.5km, included 3km, ₹15/km → ₹161.50', () => {
+  // Scenario C — fractional distance; the fare is rounded to whole rupees.
+  test('Scenario C: 10.5km, included 3km, ₹15/km → ₹112.50 extra rounds to ₹113, fare ₹162', () => {
     const r = computeFare({ distanceKm: 10.5, ratePerKm: 15, baseFare: 49, includedDistanceKm: 3 });
     expect(r.extraDistanceKm).toBe(7.5);
-    expect(r.extraCharge).toBe(112.5);
-    expect(r.finalFare).toBe(161.5);
+    expect(r.extraCharge).toBe(113);
+    expect(r.finalFare).toBe(162);
+  });
+
+  test('fare never carries paise (rounded to the nearest rupee)', () => {
+    const r = computeFare({ distanceKm: 4.37, ratePerKm: 7, baseFare: 49.5, includedDistanceKm: 3 });
+    expect(Number.isInteger(r.extraCharge)).toBe(true);
+    expect(Number.isInteger(r.finalFare)).toBe(true);
+    expect(r.extraCharge).toBe(10);   // 1.37 × 7 = 9.59
+    expect(r.finalFare).toBe(60);     // 49.5 + 10 = 59.5
   });
 
   test('distance exactly at the included boundary charges nothing extra', () => {

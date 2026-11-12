@@ -1,9 +1,49 @@
 const db   = require('../config/db');
 const fs   = require('fs');
 const path = require('path');
-const { haversineKm, _technicianSummaries, _hasAvailableSlots } = require('../services/branchEligibility');
+const { haversineKm, _technicianSummaries, _hasUpcomingSlots } = require('../services/branchEligibility');
+const settings = require('../config/settings');
 const dbLogger = require('../utils/dbLogger');
 const { getBranchCode } = require('../services/branchCodes');
+const { technicianIdsAtBranch, describeTechnicians } = require('../services/technicianBranches');
+const { slotAtBranchSql, slotAtBranchParams } = require('../services/slotBranches');
+
+// Plain-language reason for how the branch was picked, for the log summary.
+const MATCH_REASON_TEXT = {
+  PINCODE_EXACT: 'the branch pincode matches the customer\'s pincode',
+  GPS_NEAREST:   'nearest branch to the customer\'s location that has a bookable time',
+  CITY_LIKE:     'the branch city matches the customer\'s city',
+  NAME_LIKE:     'the branch name matches what the customer entered',
+};
+
+// One easy-to-read block per branch lookup: what the customer sent, which
+// branch was chosen and why, who works there and whether it can be booked.
+async function _logBranchDecision({ inputMethod, pincode, place, lat, lng, branch, matchReason, isFallback, nearestName, window, hasSlots, failure }) {
+  const lines = [
+    '═══════════════ BRANCH SELECTION ═══════════════',
+    `  Customer    : ${inputMethod}   pincode=${pincode ?? '—'}   place=${place ?? '—'}` +
+      `   location=${lat != null ? `${lat},${lng}` : '—'}`,
+  ];
+  if (branch) {
+    const techIds = await technicianIdsAtBranch(branch.branch_id);
+    const hasPoints = lat != null && lng != null && branch.latitude != null && branch.longitude != null;
+    lines.push(
+      `  Chosen      : ${branch.name} (id=${branch.branch_id})`,
+      `  Distance    : ${hasPoints
+        ? `${haversineKm(lat, lng, branch.latitude, branch.longitude).toFixed(2)} km from the customer's location`
+        : `— (${lat == null ? 'customer location not sent' : 'branch has no location saved'})`}`,
+      `  Why         : ${MATCH_REASON_TEXT[matchReason] ?? matchReason}` +
+        (isFallback ? ` — the nearest branch (${nearestName}) had no bookable time` : ''),
+      `  Technicians : ${await describeTechnicians(techIds)}   (own branch or ASMX branch)`,
+      `  Bookable    : ${hasSlots ? 'yes' : 'NO'} — times between ${window.fromDate} and ${window.toDate}` +
+        (hasSlots ? '' : '  ⚠️ the customer will see no times for this branch'),
+    );
+  } else {
+    lines.push(`  Chosen      : none — ${failure}`);
+  }
+  lines.push('════════════════════════════════════════════════');
+  blog(lines.join('\n'));
+}
 
 // One ip_branch_lookup_logs row per lookup (see utils/dbLogger.logBranchLookup).
 // Fire-and-forget: never delays or changes the customer's response. The
@@ -155,14 +195,36 @@ exports.lookupBranch = async (req, res) => {
 
   let matchReason = null; // set on whichever step matches, used in the final summary log
   let isFallback   = false; // GPS path only: true when the winner isn't the true nearest branch
+  let nearestBranchName = null; // GPS path only: the true nearest branch, for the log summary
   let gpsExhausted  = false; // GPS path only: candidates existed but none passed the eligibility walk
 
-  // Date the GPS eligibility walk checks slot availability against. Not sent
-  // by any current caller (branch is picked before date/slot selection in the
-  // UI), so this defaults to "today" IST — the dominant same-day booking case.
-  // A caller can pass ?date=YYYY-MM-DD explicitly if that ever changes.
-  const lookupDate = (req.query.date && String(req.query.date).trim())
-    || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  // The branch is picked before the customer picks a date, so a branch counts
+  // as available when it has a bookable time in the next few days, not only
+  // today (ip_settings 'branch_lookup_days'). A caller that knows the date can
+  // pass ?date=YYYY-MM-DD to check that day alone.
+  const istNow   = new Date(Date.now() + (5 * 60 + 30) * 60 * 1000);
+  const today    = istNow.toISOString().slice(0, 10);
+  const nowTime  = istNow.toISOString().slice(11, 19);
+  const askedFor = req.query.date && String(req.query.date).trim();
+  const days     = parseInt(settings.get('branch_lookup_days', '7'), 10) || 7;
+  const lastDay  = new Date(istNow.getTime() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const window   = { fromDate: askedFor || today, toDate: askedFor || lastDay, today, nowTime };
+  const lookupDate = `${window.fromDate} to ${window.toDate}`;
+
+  // Several branches can share a pincode or match a city: nearest first when
+  // the customer's location is known, then the first with a bookable time.
+  const bestOf = async (matches) => {
+    if (matches.length < 2) return matches;
+    const ordered = (patientLat != null && patientLng != null)
+      ? [...matches].sort((a, b) =>
+          haversineKm(patientLat, patientLng, a.latitude, a.longitude)
+          - haversineKm(patientLat, patientLng, b.latitude, b.longitude))
+      : matches;
+    for (const branch of ordered) {
+      if (await _hasUpcomingSlots(branch.branch_id, window)) return [branch];
+    }
+    return [ordered[0]];
+  };
 
   try {
     let rows = [];
@@ -180,10 +242,17 @@ exports.lookupBranch = async (req, res) => {
                 branch_email AS email, branch_latitude AS latitude,
                 branch_longitude AS longitude
          FROM ip_branches
-         WHERE branch_pincode = ? AND deleted_at IS NULL
-         LIMIT 1`,
+         WHERE branch_pincode = ? AND branch_active = 1 AND deleted_at IS NULL`,
         [pincode.trim()]
       );
+      rows = await bestOf(rows);
+      // A matching branch with nothing bookable, when the customer's location
+      // is known: the nearest-branch walk below finds one that has.
+      if (rows.length && patientLat != null && patientLng != null
+          && !(await _hasUpcomingSlots(rows[0].branch_id, window))) {
+        blog(`   ↷ pincode match id=${rows[0].branch_id} has no bookable time — trying nearest branches`);
+        rows = [];
+      }
       if (rows.length) {
         matchReason = 'PINCODE_EXACT';
         blog(`   ✅ matched by exact pincode — id=${rows[0].branch_id} name=${rows[0].name}`);
@@ -204,7 +273,7 @@ exports.lookupBranch = async (req, res) => {
                 branch_longitude AS longitude
          FROM ip_branches
          WHERE branch_latitude IS NOT NULL AND branch_longitude IS NOT NULL
-           AND deleted_at IS NULL`
+           AND branch_active = 1 AND deleted_at IS NULL`
       );
 
       if (allBranches.length > 0) {
@@ -213,6 +282,7 @@ exports.lookupBranch = async (req, res) => {
           distKm: haversineKm(patientLat, patientLng, b.latitude, b.longitude),
         }));
         withDist.sort((a, b) => a.distKm - b.distKm);
+        nearestBranchName = `${withDist[0].name} (id=${withDist[0].branch_id}, ${withDist[0].distKm.toFixed(2)} km)`;
 
         // Full visibility dump — EVERY nearby branch, unconditionally. Kept
         // separate from the eligibility walk below (which stops early once a
@@ -253,12 +323,14 @@ exports.lookupBranch = async (req, res) => {
           const cand = withDist[i];
           const techSummary   = allTechSummaries.get(cand.branch_id);
           const hasOnlineTech = !!(techSummary && techSummary.online > 0);
-          const hasSlots      = await _hasAvailableSlots(cand.branch_id, lookupDate);
+          const hasSlots      = await _hasUpcomingSlots(cand.branch_id, window);
           const qualifies     = hasSlots;
+          const workingHere   = await describeTechnicians(await technicianIdsAtBranch(cand.branch_id));
 
           blog(
             `      ${i + 1}. id=${cand.branch_id}  ${cand.name}  ${cand.distKm.toFixed(2)} km` +
             `  |  slots=${hasSlots ? 'yes' : 'no'}  |  online-tech=${hasOnlineTech ? 'yes' : 'no'}` +
+            `  |  technicians=${workingHere}` +
             `  → ${qualifies ? 'QUALIFIES' : 'skip'}`
           );
 
@@ -301,10 +373,10 @@ exports.lookupBranch = async (req, res) => {
                 branch_email AS email, branch_latitude AS latitude,
                 branch_longitude AS longitude
          FROM ip_branches
-         WHERE LOWER(branch_city) LIKE LOWER(?) AND deleted_at IS NULL
-         LIMIT 1`,
+         WHERE LOWER(branch_city) LIKE LOWER(?) AND branch_active = 1 AND deleted_at IS NULL`,
         [`%${place.trim()}%`]
       );
+      rows = await bestOf(rows);
       if (rows.length) {
         matchReason = 'CITY_LIKE';
         blog(`   ✅ matched by city LIKE — id=${rows[0].branch_id} name=${rows[0].name}`);
@@ -322,10 +394,10 @@ exports.lookupBranch = async (req, res) => {
                 branch_email AS email, branch_latitude AS latitude,
                 branch_longitude AS longitude
          FROM ip_branches
-         WHERE LOWER(branch_name) LIKE LOWER(?) AND deleted_at IS NULL
-         LIMIT 1`,
+         WHERE LOWER(branch_name) LIKE LOWER(?) AND branch_active = 1 AND deleted_at IS NULL`,
         [`%${place.trim()}%`]
       );
+      rows = await bestOf(rows);
       if (rows.length) {
         matchReason = 'NAME_LIKE';
         blog(`   ✅ matched by name LIKE — id=${rows[0].branch_id} name=${rows[0].name}`);
@@ -347,6 +419,14 @@ exports.lookupBranch = async (req, res) => {
         result: 'no_match', inputMethod, pincode, place, lat: patientLat, lng: patientLng,
         message: gpsExhausted ? 'GPS candidates found but none had an available slot' : 'no branch matched',
       });
+      try {
+        await _logBranchDecision({
+          inputMethod, pincode, place, lat: patientLat, lng: patientLng, window,
+          failure: gpsExhausted
+            ? 'branches are nearby, but none has a bookable time in this period'
+            : 'no branch matches this pincode, location or place',
+        });
+      } catch (_) {} // logging only
       return res.status(404).json({
         success: false,
         message: gpsExhausted
@@ -367,6 +447,13 @@ exports.lookupBranch = async (req, res) => {
       branchId: b.branch_id, branchName: b.name, isFallback,
       message: isFallback ? `nearest branch had no slot for ${lookupDate} — next nearest returned` : null,
     });
+    try {
+      await _logBranchDecision({
+        inputMethod, pincode, place, lat: patientLat, lng: patientLng, window,
+        branch: b, matchReason, isFallback, nearestName: nearestBranchName,
+        hasSlots: await _hasUpcomingSlots(b.branch_id, window),
+      });
+    } catch (_) {} // logging only — never affects the reply
 
     return res.json({
       success: true,
@@ -413,6 +500,8 @@ exports.getAvailableSlots = async (req, res) => {
   blog(`\n🕐 [SLOTS] branchId=${branchId} date=${date}`);
 
   try {
+    // Slots offered at this branch (picked per slot by the technician —
+    // services/slotBranches.js).
     const [rows] = await db.execute(
       `SELECT
          s.slot_id,
@@ -424,14 +513,14 @@ exports.getAvailableSlots = async (req, res) => {
          SUM(ts.max_bookings - ts.booked_count) AS remaining
        FROM ip_technician_slots ts
        JOIN ip_slots s ON s.slot_id = ts.slot_id
-       WHERE ts.branch_id    = ?
+       WHERE ${slotAtBranchSql('ts')}
          AND ts.slot_date    = ?
          AND ts.is_available = 1
          AND ts.booked_count < ts.max_bookings
          AND s.slot_active   = 1
        GROUP BY s.slot_id, s.slot_label, s.slot_start, s.slot_end
        ORDER BY s.slot_start ASC`,
-      [branchId, date]
+      [...slotAtBranchParams(branchId), date]
     );
 
     // For each slot, fetch distinct available appointment times from ip_available_slots
@@ -440,12 +529,12 @@ exports.getAvailableSlots = async (req, res) => {
         `SELECT DISTINCT ias.slot_time
          FROM ip_available_slots ias
          JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
-         WHERE ts.branch_id   = ?
+         WHERE ${slotAtBranchSql('ts')}
            AND ts.slot_id     = ?
            AND ts.slot_date   = ?
            AND ias.is_available = 1
          ORDER BY ias.slot_time ASC`,
-        [branchId, r.slot_id, date]
+        [...slotAtBranchParams(branchId), r.slot_id, date]
       );
 
       const timeIntervals = timeRows.map(t => ({

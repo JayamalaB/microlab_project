@@ -13,6 +13,17 @@
 // anymore). Only the deepest real I/O boundary — Node's http module, which
 // clientSync.js's internal postJson() uses — is mocked, exactly like
 // tests/integration/visitCompletedSync.test.js.
+// Booking access, price and payment checks have their own tests
+// (accessControl, itemPrices, razorpayVerify); this file covers what follows them.
+jest.mock('../../middleware/access', () => ({
+  ...jest.requireActual('../../middleware/access'),
+  requireBookingAccess: (_req, _res, next) => next(),
+  requirePatientAccess: (_req, _res, next) => next(),
+}));
+jest.mock('../../services/itemPrices', () => ({ checkItemPrices: async () => ({ ok: true }) }));
+jest.mock('../../services/razorpayVerify', () => ({
+  verifyRazorpayPayment: async (_id, { amount }) => ({ ok: true, amount: Number(amount) }),
+}));
 jest.mock('../../config/db');
 jest.mock('../../config/settings');
 jest.mock('../../utils/sms');
@@ -74,7 +85,7 @@ describe('OTP verification integration (real wire)', () => {
     const capture = mockJayamalaHttp({ status: 'success' });
 
     const res = await techPost('/api/technicians/booking-otp/verify', { bookingId: 900, otp: '0000' });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(400); // not 401 — the app signs out on any 401
     expect(http.request).not.toHaveBeenCalled();
     expect(capture()).toBeNull();
   });

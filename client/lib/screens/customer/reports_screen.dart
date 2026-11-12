@@ -111,7 +111,7 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
     final amountPaid = double.tryParse(b['amount_paid']?.toString() ?? '') ?? 0.0;
     final additionalCharge = double.tryParse(b['additional_charge_amount']?.toString() ?? '') ?? 0.0;
     final bookingType = b['booking_type'] as String? ?? 'lab_visit';
-    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Visit';
+    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Appointment';
     DateTime date;
     final collDate = b['collection_date'] as String?;
     if (collDate != null && collDate.isNotEmpty) {
@@ -121,7 +121,7 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
     }
     final member = MemberModel(
       id: b['patient_id']?.toString() ?? '0',
-      name: b['patient_name'] as String? ?? 'Patient',
+      name: (b['patient_name'] as String? ?? 'Patient').toUpperCase(),
       mobile: b['patient_mobile'] as String? ?? '',
       gender: '', location: '', address: '',
     );

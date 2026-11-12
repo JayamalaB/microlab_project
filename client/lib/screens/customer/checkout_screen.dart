@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:microlab/constants/app_constants.dart';
@@ -20,9 +21,12 @@ class _FamilyMember {
   final PatientModel patient;
   final List<TestModel> tests;
   final List<Uint8List> prescriptionBytes;
-  _FamilyMember({required this.patient, required this.tests, this.prescriptionBytes = const []});
+  final TextEditingController doctorCtrl;
+  _FamilyMember({required this.patient, required this.tests, this.prescriptionBytes = const [], String? doctorName})
+      : doctorCtrl = TextEditingController(text: doctorName ?? '');
   double get testsTotal => tests.fold(0.0, (s, t) => s + t.finalPrice);
   bool get anyDocRequired => tests.any((t) => t.docRequired);
+  void dispose() => doctorCtrl.dispose();
 }
 
 // ─── Prescription doc model ───────────────────────────────────────────────────
@@ -137,6 +141,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Notes ─────────────────────────────────────────────────
   final TextEditingController _notesController = TextEditingController();
 
+  // ── Doctor name (primary patient) ─────────────────────────
+  final TextEditingController _doctorNameController = TextEditingController();
+
   // ── Address (mutable — user can edit in checkout) ─────────
   late String? _address;
   late String? _pincode;
@@ -164,25 +171,18 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     TechnicianModel(id: 't4', name: 'Meena Devi', mobile: '9876500004', rating: 4.6, totalReviews: 76, experience: '3 years', specializations: ['Vitamins', 'Wellness', 'General'], available: false),
   ];
 
-  // ── Home Collection fare (Branch → Customer distance-based pricing) ──────
-  // Fetched once from GET /api/bookings/fare-quote (see _loadHomeCollectionFare
-  // below) — this is only ever a PREVIEW of what the server will
-  // authoritatively (re)compute for itself at POST /api/bookings time (see
-  // bookingController.js's createBooking, which never trusts a client-sent
-  // fare) — shown here purely so the customer sees the real charge before
-  // confirming, and so the amount actually charged via Razorpay (built from
-  // _grandTotal below) matches what gets billed.
-  double? _homeCollectionFare;
-  double? _homeCollectionDistanceKm;
-  bool    _fareLoading = false;
-  String? _fareErrorMessage;
+  // ── Home Collection service charge ─────────────────────────────────────
+  // Not charged at booking: it is collected by the technician on the spot.
+  // The server works it out when a technician accepts (customer location ↔
+  // that technician's branch, up and down) and adds it to the bill when they
+  // arrive — the booking shows it from then on. Pay Now covers the tests only.
 
   bool get _isHomeCollection => widget.mode != 'Lab Test';
 
   // ── Computed ──────────────────────────────────────────────
   double get _testsTotal => widget.cart.fold(0, (s, t) => s + t.finalPrice);
   double get _familyTotal => _familyMembers.fold(0.0, (s, m) => s + m.testsTotal);
-  double get _serviceCharge => _isHomeCollection ? (_homeCollectionFare ?? 0) : 0;
+  double get _serviceCharge => 0; // collected on the spot, not at booking
   double get _grandTotal => _testsTotal + _familyTotal + _serviceCharge;
 
   bool get _primaryNeedsPrescription => widget.cart.any((t) => t.docRequired);
@@ -202,11 +202,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (_currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null) return false;
     if (widget.isVip && _selectedTechnician == null) return false;
     if (_primaryNeedsPrescription && _prescriptions.isEmpty) return false;
-    // Home Collection can't be confirmed with an unknown or unpriceable
-    // fare — the amount charged via Razorpay is built from _grandTotal
-    // (which includes _serviceCharge/_homeCollectionFare), so proceeding
-    // while it's still loading or failed would charge the wrong amount.
-    if (_isHomeCollection && (_fareLoading || _fareErrorMessage != null)) return false;
     return true;
   }
 
@@ -240,47 +235,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       debugPrint('   pre-slot    : ${widget.preSelectedSlotLabel}');
     }
     debugPrint('────────────────────────────────────────────────────\n');
-
-    if (_isHomeCollection) _loadHomeCollectionFare();
-  }
-
-  // Fetches the Branch → Customer fare quote once (doesn't depend on
-  // date/slot, so — unlike _loadBranchSlots — this doesn't wait for the
-  // user to pick a date). branchId/patientLat/patientLng are the same
-  // values the earlier branch-lookup step already resolved, passed into
-  // this screen as constructor params.
-  Future<void> _loadHomeCollectionFare() async {
-    if (widget.branchId == null || _lat == null || _lng == null) {
-      setState(() => _fareErrorMessage = 'Pickup location unavailable — cannot calculate Home Collection charge');
-      return;
-    }
-    setState(() { _fareLoading = true; _fareErrorMessage = null; });
-    final body = await ApiService.getHomeCollectionFareQuote(
-      branchId: widget.branchId!,
-      lat: _lat!,
-      lng: _lng!,
-    );
-    if (!mounted) return;
-    if (body['success'] == true) {
-      final fare = body['fare'] as Map<String, dynamic>;
-      setState(() {
-        _homeCollectionFare       = (fare['finalFare'] as num).toDouble();
-        _homeCollectionDistanceKm = (fare['distanceKm'] as num).toDouble();
-        _fareLoading   = false;
-        _fareErrorMessage = null;
-      });
-    } else {
-      setState(() {
-        _fareLoading      = false;
-        _fareErrorMessage = AppMessages.serverMessage(body['message'],
-            fallback: 'We couldn\'t calculate the Home Collection charge. Tap to try again.');
-      });
-    }
   }
 
   @override
   void dispose() {
     _notesController.dispose();
+    _doctorNameController.dispose();
+    for (final m in _familyMembers) m.dispose();
     clearRazorpay();
     super.dispose();
   }
@@ -610,13 +571,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 const Text('Pincode', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                 const SizedBox(height: 6),
                 TextField(controller: pincodeCtrl, keyboardType: TextInputType.number,
-                    decoration: _addrInputDecor('6-digit pincode')),
+                    maxLength: 6,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: _addrInputDecor('6-digit pincode').copyWith(counterText: '')),
               ])),
               const SizedBox(width: 12),
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 const Text('City', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                 const SizedBox(height: 6),
                 TextField(controller: cityCtrl, textCapitalization: TextCapitalization.words,
+                    inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
                     decoration: _addrInputDecor('City')),
               ])),
             ]),
@@ -690,6 +654,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         }).toList(),
         'totalAmount':   _testsTotal + _serviceCharge,
         'serviceCharge': _serviceCharge,
+        if (_doctorNameController.text.trim().isNotEmpty)
+          'doctorName': _doctorNameController.text.trim(),
       },
       ..._familyMembers.map((m) => {
         'patientId':    m.patient.patientId,
@@ -700,6 +666,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         }).toList(),
         'totalAmount':   m.testsTotal,
         'serviceCharge': 0,
+        if (m.doctorCtrl.text.trim().isNotEmpty) 'doctorName': m.doctorCtrl.text.trim(),
       }),
     ];
 
@@ -784,8 +751,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
 
     final primaryBookingId = bookings.isNotEmpty ? bookings[0]['bookingId'] as int? : null;
+    final isScheduled = result['isScheduled'] == true;
 
-    if (primaryBookingId != null && widget.mode == 'Home Collection') {
+    if (primaryBookingId != null && widget.mode == 'Home Collection' && !isScheduled) {
       final address = [_address, _city, _pincode]
           .where((s) => s != null && s.isNotEmpty).join(', ');
       final socket = SocketService.instance;
@@ -836,18 +804,32 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (mounted) {
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => _BookingSuccessScreen(
-          booking:           booking,
-          onBookingComplete: widget.onBookingComplete,
-          familyCount:       _familyMembers.length,
-        )),
+        MaterialPageRoute(builder: (_) => isScheduled
+            ? _BookingScheduledScreen(booking: booking)
+            : _BookingSuccessScreen(
+                booking:           booking,
+                onBookingComplete: widget.onBookingComplete,
+                familyCount:       _familyMembers.length,
+              )),
       );
     }
   }
 
   // ── Open Razorpay checkout (or confirm directly for Pay Later) ──────────
-  void _proceedToPayment() {
+  Future<void> _proceedToPayment() async {
     if (!_canProceed) return;
+
+    // Validate doctor name — required for primary patient and all family members
+    if (_doctorNameController.text.trim().isEmpty) {
+      AppMessages.error(context, 'Please enter a doctor name for ${widget.member.name}.');
+      return;
+    }
+    for (final m in _familyMembers) {
+      if (m.doctorCtrl.text.trim().isEmpty) {
+        AppMessages.error(context, 'Please enter a doctor name for ${m.patient.name}.');
+        return;
+      }
+    }
 
     if (_paymentType == 'pay_later') {
       _confirmBooking('pay_later');
@@ -856,13 +838,23 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     setState(() => _isProcessing = true);
 
+    // Don't send the customer to pay for a time someone else just took.
+    final slotId = int.tryParse(_selectedSlot?.id ?? '');
+    if (slotId != null && !await ApiService.isSlotAvailable(slotId)) {
+      if (!mounted) return;
+      setState(() { _isProcessing = false; _selectedSlot = null; _selectedAppointmentTime = null; });
+      AppMessages.error(context, 'This time was just booked by someone else. Please choose another time.');
+      if (_selectedDate != null) _loadBranchSlots(_selectedDate!);
+      return;
+    }
+
     // TODO: fetch order_id from your backend first
     // POST /api/payment/create-order { amount: _payableNow, currency: 'INR' }
     // then use response['order_id'] below
 
     final options = {
       'key': AppConstants.razorpayKeyId,
-      'amount': (_payableNow * 100).toInt(), // paise
+      'amount': (_payableNow * 100).round(), // paise
       'name': 'MicroLab',
       'description': widget.cart.map((t) => t.name).join(', '),
       'prefill': {
@@ -932,6 +924,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'discountAmount': 0,
       'sourceChannel':  'mobile_app',
       'notes':          _notesController.text.trim().isEmpty ? null : _notesController.text.trim(),
+      if (_doctorNameController.text.trim().isNotEmpty) 'doctorName': _doctorNameController.text.trim(),
       'items':          items,
       'paymentType':    isPayNow ? 'full' : 'pay_later',
       if (isPayNow) 'razorpayPaymentId': razorpayPaymentId,
@@ -969,7 +962,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           if (token != null) 'Authorization': 'Bearer $token',
         },
         body: jsonEncode(payload),
-      ).timeout(const Duration(seconds: 10));
+      ).timeout(const Duration(seconds: 20)); // the server confirms the payment with Razorpay
 
       debugPrint('📥 [CHECKOUT] Response ${res.statusCode}: ${res.body}');
 
@@ -1596,52 +1589,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             const SizedBox(height: 14),
           ],
 
-          // ── Family Members (Home Collection only) ─────────
-          if (widget.mode == 'Home Collection') ...[
-            const SizedBox(height: 14),
-            _SectionCard(
-              title: 'Family Members (Same Visit)',
-              icon: Icons.group_outlined,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (_familyMembers.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.only(bottom: 10),
-                      child: Text(
-                        'Add family members to share this home collection visit — single service charge applies.',
-                        style: TextStyle(fontSize: 12, color: AppColors.textHint, height: 1.4),
-                      ),
-                    ),
-                  ..._familyMembers.map((m) => _FamilyMemberTile(
-                    member: m,
-                    onRemove: () => setState(() => _familyMembers.remove(m)),
-                  )),
-                  const SizedBox(height: 4),
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: _showAddMemberSheet,
-                      icon: const Icon(Icons.person_add_outlined, size: 16),
-                      label: const Text('Add Family Member'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.brandGreen,
-                        side: const BorderSide(color: AppColors.brandGreen),
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-
-
-
-          const SizedBox(height: 14),
-
           // ── Notes (optional) ──────────────────────────────
+          const SizedBox(height: 14),
           _SectionCard(
             title: 'Notes',
             icon: Icons.notes_outlined,
@@ -1672,6 +1621,110 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
           ),
 
+          // ── Doctor Name ─────────────────────────────────────
+          const SizedBox(height: 14),
+          _SectionCard(
+            title: 'Doctor Name',
+            required: true,
+            icon: Icons.local_hospital_outlined,
+            child: TextField(
+              controller: _doctorNameController,
+              maxLines: 1,
+              maxLength: 150,
+              textInputAction: TextInputAction.done,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Enter doctor name or Self',
+                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.divider),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.divider),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                counterStyle: const TextStyle(fontSize: 11, color: AppColors.textHint),
+              ),
+            ),
+          ),
+
+          // ── Family Members (Home Collection only) ─────────
+          if (widget.mode == 'Home Collection') ...[
+            const SizedBox(height: 14),
+            _SectionCard(
+              title: 'Family Members (Same Visit)',
+              icon: Icons.group_outlined,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_familyMembers.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 10),
+                      child: Text(
+                        'Add family members to share this home collection visit — single service charge applies.',
+                        style: TextStyle(fontSize: 12, color: AppColors.textHint, height: 1.4),
+                      ),
+                    ),
+                  ..._familyMembers.map((m) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _FamilyMemberTile(
+                        member: m,
+                        onRemove: () { m.dispose(); setState(() => _familyMembers.remove(m)); },
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: TextField(
+                          controller: m.doctorCtrl,
+                          maxLength: 150,
+                          textInputAction: TextInputAction.done,
+                          style: const TextStyle(fontSize: 13),
+                          decoration: InputDecoration(
+                            hintText: 'Doctor name for ${m.patient.name}',
+                            hintStyle: const TextStyle(fontSize: 12, color: AppColors.textHint),
+                            prefixIcon: const Icon(Icons.local_hospital_outlined, size: 16, color: AppColors.textHint),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(color: AppColors.divider),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                            counterStyle: const TextStyle(fontSize: 10, color: AppColors.textHint),
+                          ),
+                        ),
+                      ),
+                    ],
+                  )),
+                  const SizedBox(height: 4),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _showAddMemberSheet,
+                      icon: const Icon(Icons.person_add_outlined, size: 16),
+                      label: const Text('Add Family Member'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.brandGreen,
+                        side: const BorderSide(color: AppColors.brandGreen),
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+
           const SizedBox(height: 14),
 
           // ── Billing Summary ───────────────────────────────
@@ -1682,47 +1735,26 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               children: [
                 _BillRow('${widget.member.name} (Tests)', '₹${_testsTotal.toInt()}'),
                 ..._familyMembers.map((m) => _BillRow('${m.patient.name}', '₹${m.testsTotal.toInt()}')),
-                if (_isHomeCollection) ...[
-                  if (_fareLoading)
-                    _BillRow('Service Charge', 'Calculating…', sub: true)
-                  else if (_fareErrorMessage != null)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          const Text('Service Charge',
-                              style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                          Flexible(
-                            child: GestureDetector(
-                              onTap: _loadHomeCollectionFare,
-                              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                                Flexible(
-                                  child: Text(_fareErrorMessage!,
-                                      textAlign: TextAlign.right,
-                                      style: const TextStyle(fontSize: 11, color: Colors.red)),
-                                ),
-                                const SizedBox(width: 4),
-                                const Icon(Icons.refresh, size: 14, color: AppColors.brandGreen),
-                              ]),
-                            ),
-                          ),
-                        ],
-                      ),
-                    )
-                  else
-                    _BillRow(
-                      'Service Charge${_homeCollectionDistanceKm != null ? ' (${_homeCollectionDistanceKm!.toStringAsFixed(1)} km)' : ''}',
-                      '₹${_serviceCharge.toInt()}',
-                      sub: true,
-                    ),
-                ],
+                if (_isHomeCollection)
+                  _BillRow('Service Charge', 'Collected on the spot', sub: true),
                 const Divider(height: 20),
                 _BillRow('Grand Total', '₹${_grandTotal.toInt()}', bold: true),
                 const SizedBox(height: 8),
                 _BillRow('Pay Now', '₹${_payableNow.toInt()}', bold: true, green: true),
                 if (_paymentType == 'pay_later')
                   _BillRow('Due at Collection', '₹${_payableLater.toInt()}', sub: true),
+                if (_isHomeCollection) ...[
+                  const SizedBox(height: 10),
+                  const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Icon(Icons.info_outline_rounded, size: 14, color: AppColors.textHint),
+                    SizedBox(width: 6),
+                    Expanded(child: Text(
+                      'Service charge is collected by the technician on the spot, based on the distance '
+                      "from their branch. You'll see the amount once the technician arrives.",
+                      style: TextStyle(fontSize: 11, color: AppColors.textSecondary, height: 1.4),
+                    )),
+                  ]),
+                ],
               ],
             ),
           ),
@@ -1753,11 +1785,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                                   ? 'Please choose your preferred technician'
                                   : (_primaryNeedsPrescription && _prescriptions.isEmpty)
                                       ? 'Upload prescription for ${widget.member.name} to continue'
-                                      : (_isHomeCollection && _fareLoading)
-                                          ? 'Calculating Home Collection charge…'
-                                          : (_isHomeCollection && _fareErrorMessage != null)
-                                              ? _fareErrorMessage!
-                                              : '',
+                                      : '',
                   style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)),
                   textAlign: TextAlign.center,
                 ),
@@ -2502,9 +2530,10 @@ class _BillRow extends StatelessWidget {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(label, style: TextStyle(
+            Flexible(child: Text(label, overflow: TextOverflow.ellipsis, style: TextStyle(
                 fontSize: sub ? 12 : 13,
-                color: sub ? AppColors.textSecondary : AppColors.textPrimary)),
+                color: sub ? AppColors.textSecondary : AppColors.textPrimary))),
+            const SizedBox(width: 8),
             Text(value, style: TextStyle(
                 fontSize: sub ? 12 : 14,
                 fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
@@ -2785,6 +2814,11 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   String? _newGender;
   String? _newRelation;
   bool _savingNewMember = false;
+  DateTime? _newDob;
+  String? _nameError;
+  String? _mobileError;
+  String? _dobError;
+  String? _genderError;
   static const _genders   = ['Male', 'Female', 'Other'];
   static const _relations = ['Spouse', 'Father', 'Mother', 'Son', 'Daughter', 'Brother', 'Sister', 'Other'];
 
@@ -2902,15 +2936,25 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   Future<void> _saveNewMember() async {
     final name   = _newNameCtrl.text.trim();
     final mobile = _newMobileCtrl.text.trim();
-    if (name.isEmpty || mobile.isEmpty || _newGender == null) return;
+    final nameErr   = name.isEmpty   ? 'Name is required' : null;
+    final mobileErr = mobile.isEmpty ? 'Mobile number is required'
+                    : mobile.length != 10 ? 'Enter a valid 10-digit mobile number' : null;
+    final dobErr    = _newDob == null ? 'Date of birth is required' : null;
+    final genderErr = _newGender == null ? 'Please select a gender' : null;
+    if (nameErr != null || mobileErr != null || dobErr != null || genderErr != null) {
+      setState(() { _nameError = nameErr; _mobileError = mobileErr; _dobError = dobErr; _genderError = genderErr; });
+      return;
+    }
+    final dobStr = '${_newDob!.year}-${_newDob!.month.toString().padLeft(2, '0')}-${_newDob!.day.toString().padLeft(2, '0')}';
     setState(() => _savingNewMember = true);
     try {
       final result = await ApiService.savePatient({
-        'name':     name,
-        'mobile':   mobile,
-        'gender':   _newGender!,
-        'location': '-',
-        'address':  '-',
+        'name':          name,
+        'mobile':        mobile,
+        'gender':        _newGender!,
+        'date_of_birth': dobStr,
+        'location':      '-',
+        'address':       '-',
         if (_newRelation != null) 'relation': _newRelation,
       });
       if (!mounted) return;
@@ -2918,6 +2962,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
         _newNameCtrl.clear();
         _newMobileCtrl.clear();
         setState(() {
+          _newDob             = null;
           _newGender          = null;
           _newRelation        = null;
           _showNewMemberForm  = false;
@@ -3067,32 +3112,98 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           // Name
-          const Text('Name', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          RichText(text: const TextSpan(style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary), children: [
+            TextSpan(text: 'Name'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ])),
           const SizedBox(height: 6),
           TextField(
             controller: _newNameCtrl,
             textCapitalization: TextCapitalization.words,
-            decoration: _inputDecor('Full name'),
+            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
+            onChanged: (_) { if (_nameError != null) setState(() => _nameError = null); },
+            decoration: _inputDecor('Full name').copyWith(
+              errorText: _nameError,
+              errorStyle: const TextStyle(fontSize: 11),
+            ),
           ),
           const SizedBox(height: 14),
           // Mobile
-          const Text('Mobile', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          RichText(text: const TextSpan(style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary), children: [
+            TextSpan(text: 'Mobile'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ])),
           const SizedBox(height: 6),
           TextField(
             controller: _newMobileCtrl,
             keyboardType: TextInputType.phone,
-            decoration: _inputDecor('10-digit mobile number'),
+            maxLength: 10,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            onChanged: (_) { if (_mobileError != null) setState(() => _mobileError = null); },
+            decoration: _inputDecor('10-digit mobile number').copyWith(
+              counterText: '',
+              errorText: _mobileError,
+              errorStyle: const TextStyle(fontSize: 11),
+            ),
           ),
           const SizedBox(height: 14),
+          // Date of Birth
+          RichText(text: const TextSpan(style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary), children: [
+            TextSpan(text: 'Date of Birth'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ])),
+          const SizedBox(height: 6),
+          GestureDetector(
+            onTap: () async {
+              final picked = await showDatePicker(
+                context: context,
+                initialDate: _newDob ?? DateTime(2000),
+                firstDate: DateTime(1900),
+                lastDate: DateTime.now(),
+              );
+              if (picked != null) setState(() { _newDob = picked; _dobError = null; });
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: _dobError != null ? Colors.red : AppColors.divider),
+              ),
+              child: Row(children: [
+                Icon(Icons.calendar_today_outlined, size: 16,
+                    color: _dobError != null ? Colors.red : AppColors.textHint),
+                const SizedBox(width: 10),
+                Text(
+                  _newDob != null
+                      ? '${_newDob!.day.toString().padLeft(2,'0')}/${_newDob!.month.toString().padLeft(2,'0')}/${_newDob!.year}'
+                      : 'DD/MM/YYYY',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: _newDob != null ? AppColors.textPrimary : AppColors.textHint,
+                  ),
+                ),
+              ]),
+            ),
+          ),
+          if (_dobError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(_dobError!, style: const TextStyle(fontSize: 11, color: Colors.red)),
+            ),
+          const SizedBox(height: 14),
           // Gender
-          const Text('Gender', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          RichText(text: const TextSpan(style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary), children: [
+            TextSpan(text: 'Gender'),
+            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          ])),
           const SizedBox(height: 6),
           Row(children: _genders.map((g) {
             final sel = _newGender == g;
             return Expanded(child: Padding(
               padding: EdgeInsets.only(right: g != _genders.last ? 8 : 0),
               child: GestureDetector(
-                onTap: () => setState(() => _newGender = g),
+                onTap: () => setState(() { _newGender = g; _genderError = null; }),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 150),
                   padding: const EdgeInsets.symmetric(vertical: 10),
@@ -3108,6 +3219,11 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
               ),
             ));
           }).toList()),
+          if (_genderError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(_genderError!, style: const TextStyle(fontSize: 11, color: Colors.red)),
+            ),
           const SizedBox(height: 14),
           // Relation
           const Text('Relation (optional)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
@@ -3122,7 +3238,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
           const SizedBox(height: 20),
           Row(children: [
             Expanded(child: OutlinedButton(
-              onPressed: () => setState(() { _showNewMemberForm = false; _newNameCtrl.clear(); _newMobileCtrl.clear(); _newGender = null; _newRelation = null; }),
+              onPressed: () => setState(() { _showNewMemberForm = false; _newNameCtrl.clear(); _newMobileCtrl.clear(); _newDob = null; _newGender = null; _newRelation = null; _nameError = null; _mobileError = null; _dobError = null; _genderError = null; }),
               style: OutlinedButton.styleFrom(
                 foregroundColor: AppColors.textSecondary,
                 side: const BorderSide(color: AppColors.divider),

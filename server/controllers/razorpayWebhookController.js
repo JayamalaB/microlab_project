@@ -1,6 +1,7 @@
 const crypto   = require('crypto');
 const db       = require('../config/db');
 const qrStore  = require('../services/qrSessionStore');
+const { savePartialReason } = require('../services/partialPaymentReason');
 const { sendToBookingOwner } = require('../services/customerPush');
 
 const WEBHOOK_LOG = require('path').join(__dirname, '..', 'logs', 'razorpay_webhook.log');
@@ -169,6 +170,9 @@ async function handleQrCodeCredited(payload) {
     }
 
     log(`✅ QR payment recorded — booking_id=${bookingId} payment_id=${paymentId} ₹${amount} status=${newStatus}`);
+
+    // Partial-payment reason the technician entered with this QR.
+    await savePartialReason(bookingId, qrCode.notes?.partial_reason);
   } catch (err) {
     log(`❌ handleQrCodeCredited error: ${err.message}`);
   }

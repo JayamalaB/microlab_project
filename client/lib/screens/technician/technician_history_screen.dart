@@ -113,6 +113,7 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
             return TechnicianBooking(
               id:                 'BK${map['booking_id'] ?? ''}',
               referenceNo:        map['reference_no']       as String?,
+              collectionNotes:    map['collection_notes']   as String?,
               customerName:       map['patient_name']       as String? ?? 'Patient',
               customerPhone:      map['patient_mobile']     as String? ?? '',
               address:            map['collection_address'] as String? ?? '',

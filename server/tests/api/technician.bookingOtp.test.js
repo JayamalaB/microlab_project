@@ -126,7 +126,7 @@ describe('POST /api/technicians/booking-otp/verify', () => {
 
     const res = await post('/api/technicians/booking-otp/verify', { bookingId: 900, otp: '0000' });
 
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(400); // not 401 — the app signs out on any 401
     expect(res.body.message).toMatch(/1 attempt remaining/i);
     expect(clientSync.syncVisitCompletionToClient).not.toHaveBeenCalled();
   });

@@ -18,9 +18,18 @@ const storage = multer.diskStorage({
   },
 });
 
+// /uploads is served publicly, so only photos and PDFs are stored: an uploaded
+// .html or .js file would run as a page on this domain.
+const ALLOWED_TYPES = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic', '.pdf']);
+
 const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext === '' || ALLOWED_TYPES.has(ext)) return cb(null, true);
+    cb(new Error('Only photos and PDF files can be uploaded'));
+  },
 });
 
 router.post('/', auth, upload.single('photo'), (req, res) => {

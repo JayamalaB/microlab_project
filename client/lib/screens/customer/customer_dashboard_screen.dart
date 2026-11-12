@@ -71,6 +71,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // Silently auto-detected from pincode — patient never sees or selects this.
   BranchModel? _selectedBranch;
   bool _branchDetecting = false;
+  int  _branchLookupId  = 0;
   // Real patientId from auth session — falls back to 1 if socket not yet connected
   int get _patientId {
     final id = SocketService.instance.userId;
@@ -236,6 +237,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // Patient never sees this — branch is stored and forwarded to CheckoutScreen.
   Future<void> _autoDetectBranch(String pincode, {String? place, bool isGps = false}) async {
     if (!mounted) return;
+    // Lookups can finish out of order; only the latest one may set the branch.
+    final lookup = ++_branchLookupId;
     final effectivePlace = place ?? _city;
     debugPrint('\n🏥 [BRANCH AUTO-DETECT] ─────────────────────────────');
     debugPrint('   pincode     : $pincode');
@@ -268,7 +271,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       debugPrint('   ← status    : ${res.statusCode}');
       debugPrint('   ← body      : ${res.body}');
 
-      if (!mounted) return;
+      if (!mounted || lookup != _branchLookupId) return;
 
       if (res.statusCode == 200) {
         final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -292,10 +295,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       } else {
         setState(() => _branchDetecting = false);
         debugPrint('   ❌ HTTP ${res.statusCode} — branch detection skipped');
-        // GPS-only: surface "no nearby branch has availability" to the
-        // patient instead of failing silently. Manual pincode/place 404s are
-        // deliberately left as-is (silent), per the existing behavior there.
-        if (isGps && res.statusCode == 404 && mounted) {
+        // Tell the patient, or checkout can't proceed with no explanation.
+        if (res.statusCode == 404 && mounted) {
           try {
             final body = jsonDecode(res.body) as Map<String, dynamic>;
             if (body['message'] is String) {
@@ -308,8 +309,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         }
       }
     } catch (e) {
-      if (mounted) setState(() => _branchDetecting = false);
       debugPrint('   ❌ error     : $e');
+      if (mounted && lookup == _branchLookupId) {
+        setState(() => _branchDetecting = false);
+        AppMessages.error(context, 'We couldn\'t find a branch for this location. Please check your connection and try again.');
+      }
     }
     debugPrint('────────────────────────────────────────────────────\n');
   }
@@ -1835,15 +1839,19 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
       }
       else if (_manualSelected && _manualLat != null && _manualLng != null) {
         // Use manual pincode-based location.
-        // city MUST fire before pincode so _city is ready when auto-detect triggers.
+        // city and lat/lng MUST fire before pincode so they are ready when
+        // auto-detect triggers. Address goes last: with the pincode already
+        // set it doesn't scan the address for one — that scan starts a second
+        // lookup, marked as GPS and without coordinates, which matched a
+        // different branch by city name.
         final address = _addressCtrl.text.trim().isNotEmpty
             ? _addressCtrl.text.trim()
             : _manualAddress;
         final city = _cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim();
         widget.onCityChanged(city);                        // 1st — set city
-        widget.onAddressChanged(address);                  // 2nd
         widget.onLatLngChanged?.call(_manualLat, _manualLng);
-        widget.onPincodeChanged(_pincodeCtrl.text.trim()); // last — triggers auto-detect (city already set)
+        widget.onPincodeChanged(_pincodeCtrl.text.trim()); // triggers auto-detect (city + lat/lng already set)
+        widget.onAddressChanged(address);                  // last — pincode already set, no second lookup
       }
       else {
         setState(() => _locationError = true);

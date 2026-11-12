@@ -1,4 +1,6 @@
 const express = require('express');
+const rolloutAuth = require('../middleware/rolloutAuth');
+const { requireTechnician } = require('../middleware/access');
 const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
@@ -332,7 +334,7 @@ router.post('/book-test', (req, res) => {
     });
 });
 
-router.get('/history', async (req, res) => {
+router.get('/history', rolloutAuth, requireTechnician, async (req, res) => {
     try {
         const [history] = await db.pool.execute(
             'SELECT * FROM conversation_history ORDER BY created_at DESC LIMIT 50'

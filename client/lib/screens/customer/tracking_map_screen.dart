@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
+import 'package:microlab/services/api_service.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
@@ -199,7 +200,11 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
     try {
       final url = Uri.parse(
           '${AppConstants.serverUrl}/api/bookings/${widget.bookingId}');
-      final res = await http.get(url).timeout(const Duration(seconds: 6));
+      final token = await ApiService.getToken();
+      final res = await http.get(
+        url,
+        headers: {if (token != null) 'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 6));
       debugPrint('   HTTP ${res.statusCode}: ${res.body}');
       if (!mounted || res.statusCode != 200) return;
       final data = jsonDecode(res.body) as Map<String, dynamic>;
@@ -245,7 +250,11 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
     try {
       final url = Uri.parse(
           '${AppConstants.serverUrl}/api/bookings/${widget.bookingId}/tech-location');
-      final res = await http.get(url).timeout(const Duration(seconds: 6));
+      final token = await ApiService.getToken();
+      final res = await http.get(
+        url,
+        headers: {if (token != null) 'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 6));
       if (!mounted || res.statusCode != 200) return;
       final data = jsonDecode(res.body) as Map<String, dynamic>;
       final lat = (data['lat'] as num?)?.toDouble();

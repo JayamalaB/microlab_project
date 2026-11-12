@@ -160,7 +160,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
     final presStatus = b['prescription_status'] as String?;
 
     final bookingType = b['booking_type'] as String? ?? 'lab_visit';
-    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Visit';
+    final mode = bookingType == 'home_collection' ? 'Home Collection' : 'Lab Appointment';
 
     DateTime date;
     final collDate = b['collection_date'] as String?;
@@ -183,7 +183,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
 
     final member = MemberModel(
       id: b['patient_id']?.toString() ?? '0',
-      name: toTitleCase(b['patient_name'] as String? ?? 'Patient'),
+      name: (b['patient_name'] as String? ?? 'Patient').toUpperCase(),
       mobile: b['patient_mobile'] as String? ?? '',
       gender: '',
       location: '',
@@ -238,6 +238,11 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       rescheduleCount:     b['reschedule_count'] != null ? (b['reschedule_count'] as num).toInt() : 0,
       canReschedule:       b['can_reschedule'] as bool? ?? true,
       referenceNo:         b['reference_no'] as String?,
+      collectionNotes:          b['collection_notes'] as String?,
+      doctorName:               b['doctor_name'] as String?,
+      serviceChargeProductName: b['service_charge_product_name'] as String?,
+      serviceChargeStatus:      b['service_charge_status'] as String?,
+      serviceChargeKm:          double.tryParse(b['service_charge_km']?.toString() ?? ''),
     );
   }
 
@@ -282,8 +287,11 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
         badge = 'Upcoming';
         badgeColor = const Color(0xFF1565C0);
         matched = [...matched]..sort((a, b) => a.date.compareTo(b.date));
-        dateValue = matched.first.date;
-        dateLabel = 'Next appointment';
+        final today = DateTime.now();
+        final todayDate = DateTime(today.year, today.month, today.day);
+        final future = matched.where((b) => !b.date.isBefore(todayDate)).toList();
+        dateValue = (future.isNotEmpty ? future : matched).first.date;
+        dateLabel = future.isNotEmpty ? 'Next appointment' : 'Last booking';
       } else if (filter == 'Completed') {
         badge = 'Completed';
         badgeColor = AppColors.brandGreen;
@@ -302,8 +310,11 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
           badge = 'Upcoming';
           badgeColor = const Color(0xFF1565C0);
           upcoming.sort((a, b) => a.date.compareTo(b.date));
-          dateValue = upcoming.first.date;
-          dateLabel = 'Next appointment';
+          final today = DateTime.now();
+          final todayDate = DateTime(today.year, today.month, today.day);
+          final futureUp = upcoming.where((b) => !b.date.isBefore(todayDate)).toList();
+          dateValue = (futureUp.isNotEmpty ? futureUp : upcoming).first.date;
+          dateLabel = futureUp.isNotEmpty ? 'Next appointment' : 'Last booking';
         } else {
           final completed = g.bookings.where((b) => _completedStatuses.contains(b.status)).toList();
           final pool = completed.isNotEmpty ? completed : g.bookings;
@@ -1831,7 +1842,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                       child: pw.Column(children: [
                         _pdfSummaryRow('Tests Total', 'Rs.${b.testsTotal.toInt()}', base: base),
                         if (b.serviceCharge > 0)
-                          _pdfSummaryRow('Service Charge', 'Rs.${b.serviceCharge.toInt()}', base: base),
+                          _pdfSummaryRow(b.serviceChargeLabel, 'Rs.${b.serviceCharge.toInt()}', base: base),
                         if (b.additionalCharge > 0)
                           _pdfSummaryRow('Additional Charge', 'Rs.${b.additionalCharge.toInt()}', base: base),
                         pw.Divider(thickness: 0.8),
@@ -2062,7 +2073,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
     openRazorpay(
       options: {
         'key':         AppConstants.razorpayKeyId,
-        'amount':      (amount * 100).toInt(),
+        'amount':      (amount * 100).round(),
         'name':        'MicroLab',
         'description': b.tests.map((t) => t.name).join(', '),
         'prefill': {
@@ -2164,6 +2175,8 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                     title: 'Appointment',
                     rows: [
                       _DetailRow(Icons.person_outline, 'Customer', b.member.name),
+                      if (b.doctorName != null && b.doctorName!.isNotEmpty)
+                        _DetailRow(Icons.local_hospital_outlined, 'Doctor', b.doctorName!),
                       _DetailRow(Icons.event_outlined, 'Date', _formatDate(b.date)),
                       _DetailRow(Icons.schedule_outlined, 'Time', b.timeSlot),
                       _DetailRow(
@@ -2180,11 +2193,15 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                         if (b.city != null || b.pincode != null)
                           _DetailRow(Icons.location_on_outlined, 'Area',
                             [b.city, b.pincode].where((s) => s != null && s.isNotEmpty).join(', ')),
+                        if (b.collectionNotes != null && b.collectionNotes!.isNotEmpty)
+                          _DetailRow(Icons.notes_outlined, 'Notes', b.collectionNotes!),
                       ] else ...[
                         if (b.branch != null)
                           _DetailRow(Icons.local_hospital_outlined, 'Branch', b.branch!.name),
                         if (b.branch?.address != null && b.branch!.address.isNotEmpty)
                           _DetailRow(Icons.location_on_outlined, 'Branch Address', b.branch!.address),
+                        if (b.collectionNotes != null && b.collectionNotes!.isNotEmpty)
+                          _DetailRow(Icons.notes_outlined, 'Notes', b.collectionNotes!),
                       ],
                     ],
                   ),
@@ -2318,8 +2335,10 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                     title: 'Payment',
                     rows: [
                       _DetailRow(Icons.receipt_outlined, 'Tests Total', '₹${b.testsTotal.toInt()}'),
-                      if (b.serviceCharge > 0)
-                        _DetailRow(Icons.add_circle_outline, 'Service Charge', '+ ₹${b.serviceCharge.toInt()}'),
+                      if (b.serviceChargeOnSpot && b.serviceChargeStatus != 'no_product')
+                        _DetailRow(Icons.add_circle_outline, 'Service Charge', 'Collected on the spot')
+                      else if (b.serviceCharge > 0)
+                        _DetailRow(Icons.add_circle_outline, b.serviceChargeLabel, '+ ₹${b.serviceCharge.toInt()}'),
                       if (b.additionalCharge > 0)
                         _DetailRow(Icons.add_circle_outline,
                             'Additional Charge${(b.additionalChargeReason ?? '').isNotEmpty ? ' (${b.additionalChargeReason})' : ''}',
@@ -3003,7 +3022,7 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
     ].join(', ');
     try {
       await widget.onSubmit(_rating, comment);
-    } catch (_) {
+    } finally {
       if (mounted) setState(() => _submitting = false);
     }
   }

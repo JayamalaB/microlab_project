@@ -247,7 +247,8 @@ class _BookingConfirmationScreenState
       branchName:     widget.branchName,
       slotId:         _currentSlotId,
       slotLabel:      _currentSlotLabel,
-      // no appointmentTime — new slot, no time selected yet
+      slotChanged:    true,
+      // no appointmentTime — new slot, the server takes its earliest free time
     );
     _restartSearch();
   }
@@ -280,6 +281,7 @@ class _BookingConfirmationScreenState
       slotId:          _currentSlotId,
       slotLabel:       _currentSlotLabel,
       appointmentTime: _currentAppointmentTime,
+      slotChanged:     true,
     );
     _restartSearch();
   }

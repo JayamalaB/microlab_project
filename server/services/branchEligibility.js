@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { slotAtBranchSql, slotAtBranchParams } = require('./slotBranches');
 
 // Shared branch-eligibility primitives — used by both branchController.js
 // (patient-facing branch lookup, single-winner) and bookingSocket.js
@@ -86,17 +87,40 @@ async function _technicianSummaries(branchIds) {
 // capacity/registration logic, just LIMIT 1 instead of fetching full slot +
 // time-interval data.
 async function _hasAvailableSlots(branchId, date) {
+  // Slots offered at this branch (services/slotBranches.js).
   const [[row]] = await db.execute(
     `SELECT 1
      FROM ip_technician_slots ts
      JOIN ip_slots s ON s.slot_id = ts.slot_id
-     WHERE ts.branch_id    = ?
+     WHERE ${slotAtBranchSql('ts')}
        AND ts.slot_date    = ?
        AND ts.is_available = 1
        AND ts.booked_count < ts.max_bookings
        AND s.slot_active   = 1
      LIMIT 1`,
-    [branchId, date]
+    [...slotAtBranchParams(branchId), date]
+  );
+  return !!row;
+}
+
+// Does this branch have a time a customer could still book between fromDate
+// and toDate? Same conditions as the customer's slot list (GET /api/slots),
+// including that a time already past today doesn't count. nowTime is "HH:MM:SS".
+async function _hasUpcomingSlots(branchId, { fromDate, toDate, today, nowTime }) {
+  const [[row]] = await db.execute(
+    `SELECT 1
+     FROM ip_available_slots ias
+     JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
+     JOIN ip_slots s ON s.slot_id = ts.slot_id
+     WHERE ${slotAtBranchSql('ts')}
+       AND ts.slot_date BETWEEN ? AND ?
+       AND ts.is_available = 1
+       AND ts.booked_count < ts.max_bookings
+       AND s.slot_active   = 1
+       AND ias.is_available = 1
+       AND (ts.slot_date != ? OR ias.slot_time > ?)
+     LIMIT 1`,
+    [...slotAtBranchParams(branchId), fromDate, toDate, today, nowTime]
   );
   return !!row;
 }
@@ -122,12 +146,12 @@ async function _hasAvailableTechnicianForTime(branchId, date, requestedStart) {
     `SELECT DISTINCT ts.technician_id
      FROM ip_available_slots ias
      JOIN ip_technician_slots ts ON ts.tech_slot_id = ias.technician_slot_id
-     WHERE ts.branch_id    = ?
+     WHERE ${slotAtBranchSql('ts')}
        AND ts.slot_date    = ?
        AND ts.is_available = 1
        AND ias.slot_time   = ?
        AND ias.is_available = 1`,
-    [branchId, date, slotTime]
+    [...slotAtBranchParams(branchId), date, slotTime]
   );
   if (rows.length === 0) return false;
 
@@ -157,7 +181,7 @@ async function findEligibleBranches(patientLat, patientLng, date, requestedStart
             branch_latitude AS latitude, branch_longitude AS longitude
      FROM ip_branches
      WHERE branch_latitude IS NOT NULL AND branch_longitude IS NOT NULL
-       AND deleted_at IS NULL`
+       AND branch_active = 1 AND deleted_at IS NULL`
   );
   if (allBranches.length === 0) return [];
 
@@ -183,6 +207,7 @@ module.exports = {
   haversineKm,
   _technicianSummaries,
   _hasAvailableSlots,
+  _hasUpcomingSlots,
   _hasAvailableTechnicianForTime,
   findEligibleBranches,
   technicianActiveSlots,

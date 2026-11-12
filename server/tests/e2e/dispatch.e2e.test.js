@@ -20,6 +20,17 @@
 // suite doesn't scale to a function with this many conditional branches
 // without becoming unreadably fragile. Every pattern below is grounded in
 // an actual query read from the source, not guessed.
+// Booking access, price and payment checks have their own tests
+// (accessControl, itemPrices, razorpayVerify); this file covers what follows them.
+jest.mock('../../middleware/access', () => ({
+  ...jest.requireActual('../../middleware/access'),
+  requireBookingAccess: (_req, _res, next) => next(),
+  requirePatientAccess: (_req, _res, next) => next(),
+}));
+jest.mock('../../services/itemPrices', () => ({ checkItemPrices: async () => ({ ok: true }) }));
+jest.mock('../../services/razorpayVerify', () => ({
+  verifyRazorpayPayment: async (_id, { amount }) => ({ ok: true, amount: Number(amount) }),
+}));
 jest.mock('../../config/db');
 jest.mock('../../config/firebase', () => ({ messaging: null }));
 jest.mock('../../services/clientSync');

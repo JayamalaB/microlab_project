@@ -511,7 +511,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                                   child: InkWell(
                                     customBorder: const CircleBorder(),
                                     onTap: () async {
-                                      final uri = Uri(scheme: 'tel', path: '7339535472');
+                                      final uri = Uri(scheme: 'tel', path: '18004251316');
                                       if (await canLaunchUrl(uri)) launchUrl(uri);
                                     },
                                     child: const Tooltip(
