@@ -247,17 +247,33 @@ async function _fetchPatientTestsPayment(booking) {
     TestName: t.name,
     Rate:     t.price,
   }));
-  const testAmount = _round2(tests.reduce((s, t) => s + _toAmount(t.price), 0));
+  let testAmount = _round2(tests.reduce((s, t) => s + _toAmount(t.price), 0));
+
+  // Service charge product: injected into blood_test_list for ASMX
+  // when this booking used the product-based pricing (service_charge_product_id set).
+  // Its price is already in home_collection_fare; set service_charge_amount to 0
+  // so payment_details totals stay consistent.
+  let serviceChargeAmount = _toAmount(booking.home_collection_fare);
+  if (booking.service_charge_product_id && serviceChargeAmount > 0) {
+    const [[scProduct]] = await db.execute(
+      `SELECT test_code, product_name FROM ip_products WHERE product_id = ? LIMIT 1`,
+      [booking.service_charge_product_id]
+    );
+    if (scProduct?.test_code) {
+      bloodTestList.push({ TestId: scProduct.test_code, TestName: scProduct.product_name, Rate: serviceChargeAmount });
+      testAmount       = _round2(testAmount + serviceChargeAmount);
+      serviceChargeAmount = 0;
+    }
+  }
+
   const paymentDetails = {
-    test_amount:           testAmount,
-    service_charge_amount: _toAmount(booking.home_collection_fare),
     total_amount:          booking.total_amount,
     paid_amount:           payment?.amount_paid  ?? 0,
     payment_type:          payment?.payment_type === 'RAZORPAY' ? 'full payment' : 'pay_later',
     razorpay_payment_id:   payment?.gateway_transaction_id ?? null,
   };
   const patientDetails = {
-    name:             patient.patient_name,
+    name:             patient.patient_name?.toUpperCase() ?? null,
     mobile:           patient.patient_mobile,
     gender:           patient.patient_gender?.toLowerCase() ?? null,
     location:         patient.patient_city,
@@ -397,8 +413,8 @@ async function syncBookingToClient(bookingId, initiator) {
     // 1. Booking + slot time
     const [[booking]] = await db.execute(
       `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date,
-              b.total_amount, b.home_collection_fare, b.patient_id, b.client_id,
-              b.status, b.reference_no, b.visit_group_id,
+              b.total_amount, b.home_collection_fare, b.service_charge_product_id,
+              b.patient_id, b.client_id, b.status, b.reference_no, b.visit_group_id,
               TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
        FROM ip_bookings b
        LEFT JOIN ip_available_slots av ON av.available_slot_id = b.available_slot_id
@@ -799,7 +815,8 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     if (primaryBooking.visit_group_id) {
       [bookingRows] = await db.execute(
         `SELECT booking_id, booking_ref, booking_type, booking_date, total_amount,
-                home_collection_fare, additional_charge_amount, additional_charge_reason,
+                home_collection_fare, service_charge_product_id,
+                additional_charge_amount, additional_charge_reason,
                 partial_payment_reason, amount_due,
                 patient_id, client_id, status, reference_no, visit_group_id,
                 TIME_FORMAT(
@@ -814,7 +831,8 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     } else {
       const [[b]] = await db.execute(
         `SELECT b.booking_id, b.booking_ref, b.booking_type, b.booking_date, b.total_amount,
-                b.home_collection_fare, b.additional_charge_amount, b.additional_charge_reason,
+                b.home_collection_fare, b.service_charge_product_id,
+                b.additional_charge_amount, b.additional_charge_reason,
                 b.partial_payment_reason, b.amount_due,
                 b.patient_id, b.client_id, b.status, b.reference_no, b.visit_group_id,
                 TIME_FORMAT(av.slot_time, '%H:%i') AS slot_time
@@ -903,8 +921,6 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
       const totalAmount      = _toAmount(data.paymentDetails.total_amount);
       const additionalCharge = _toAmount(b.additional_charge_amount ?? 0);
       entry.payment_details = {
-        test_amount:              data.paymentDetails.test_amount,
-        service_charge_amount:    _toAmount(b.home_collection_fare),
         additional_charge_amount: additionalCharge,
         additional_charge_reason: b.additional_charge_reason ?? '',
         total_amount:             totalAmount,
