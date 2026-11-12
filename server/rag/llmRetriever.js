@@ -392,10 +392,17 @@ class LLMRetriever {
         // Generic-listing safety-net: clear bad keywords like "available tests", "show all"
         const GENERIC_LIST_TESTS = /\b(show|list|display|what|all)\b.*\b(tests?|packages?|available)\b|\b(tests?|packages?)\b.*(available|all)\b/i;
         const BAD_KEYWORDS       = /^(available\s*tests?|all\s*tests?|show\s*all|list\s*all|tests?|packages?)$/i;
+        // GENERIC_LIST_TESTS also matches a category question shaped like "what
+        // tests are available for thyroid?" (it has "what"..."available" same as
+        // a true generic listing) — CATEGORY_QUALIFIER_PATTERN keeps the nulling
+        // below from wiping out a real "thyroid" keyword GPT already extracted
+        // just because the sentence also happens to contain "available".
+        const CATEGORY_QUALIFIER_PATTERN = /\b(for|related to|about|regarding)\s+\S/i;
         if (intent === 'test_query' && entities.keyword && BAD_KEYWORDS.test(entities.keyword.trim())) {
             entities.keyword = null;
         }
-        if (intent === 'test_query' && GENERIC_LIST_TESTS.test(question) && !entities.product_name) {
+        if (intent === 'test_query' && GENERIC_LIST_TESTS.test(question) && !entities.product_name &&
+            !CATEGORY_QUALIFIER_PATTERN.test(question)) {
             entities.keyword = null;
         }
 
@@ -547,14 +554,21 @@ class LLMRetriever {
             (FAMILY_SCOPE_PATTERN.test(question) || !!entities.relation || !!entities.person_name);
 
         // A generic "show all available tests/packages" style question (no specific
-        // test named, no category keyword either) — uses the curated
+        // test named, no category/condition attached either) — uses the curated
         // ip_chatbot_packages list instead of buildTestQuery's generic ip_products
         // listing, since the chatbot's list is meant to show only those hand-picked
         // products, in their configured sort_order, not an arbitrary sample of
-        // ip_products. "tests" and "packages" trigger it the same way — the
-        // schema prompt itself treats them as synonyms for this same table.
+        // ip_products. "tests" and "packages" trigger it the same way — the schema
+        // prompt itself treats them as synonyms for this same table.
+        //
+        // Belt-and-suspenders: CATEGORY_QUALIFIER_PATTERN already keeps the
+        // nulling above from wiping out a real keyword, but re-checking it here
+        // too means a stray "for X" that genuinely has no matching keyword
+        // (a category GPT didn't recognize at all) still skips the packages
+        // list instead of showing it for an unrecognized category question.
         const isChatbotPackagesListing = intent === 'test_query' &&
-            !entities.product_name && !entities.keyword && /\b(packages?|tests?)\b/i.test(question);
+            !entities.product_name && !entities.keyword && !CATEGORY_QUALIFIER_PATTERN.test(question) &&
+            /\b(packages?|tests?)\b/i.test(question);
 
         const sql = intent === 'patient_profile_query'
             ? this.buildPatientProfileQuery(entities, patientId, isFamilyScope)
