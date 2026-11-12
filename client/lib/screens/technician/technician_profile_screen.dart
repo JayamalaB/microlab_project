@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 String _resolvePhotoUrl(String raw) {
   if (raw.isEmpty) return '';
@@ -663,6 +664,20 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
             ],
           ),
         ],
+
+        const SizedBox(height: 24),
+        FutureBuilder<PackageInfo>(
+          future: PackageInfo.fromPlatform(),
+          builder: (_, snap) {
+            final version = snap.hasData ? 'v${snap.data!.version}+${snap.data!.buildNumber}' : '';
+            return Text(
+              version,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, color: AppColors.textHint),
+            );
+          },
+        ),
+        const SizedBox(height: 8),
       ],
       ),
     );

@@ -987,89 +987,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                             crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                          // Logo row (same as the customer Home header) +
-                          // refresh and the Online switch.
-                          Row(
-                            children: [
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(8),
-                                child: Image.asset('assets/icon/app_icon.png',
-                                    width: 32, height: 32, fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => const Icon(
-                                        Icons.biotech_rounded, color: Colors.white, size: 28)),
-                              ),
-                              const SizedBox(width: 10),
-                              const Expanded(
-                                child: Text('MicroLab',
-                                    style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.w700)),
-                              ),
-                              IconButton(
-                                icon: _isRefreshing
-                                    ? const SizedBox(
-                                        width: 18, height: 18,
-                                        child: CircularProgressIndicator(
-                                            strokeWidth: 2, color: Colors.white))
-                                    : const Icon(Icons.refresh_rounded, color: Colors.white70),
-                                onPressed: _isRefreshing ? null : _manualRefresh,
-                                tooltip: 'Refresh bookings',
-                              ),
-                              _isTogglingOnline
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        AnimatedContainer(
-                                          duration: const Duration(milliseconds: 400),
-                                          width: 8,
-                                          height: 8,
-                                          decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: _isOnline
-                                                ? Colors.greenAccent
-                                                : Colors.white38,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 5),
-                                        Text(
-                                          _isOnline ? 'Online' : 'Offline',
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w600,
-                                            color: _isOnline
-                                                ? Colors.greenAccent
-                                                : Colors.white60,
-                                          ),
-                                        ),
-                                        Transform.scale(
-                                          scale: 0.78,
-                                          child: Switch(
-                                            value: _isOnline,
-                                            onChanged: _isTogglingOnline
-                                                ? null
-                                                : (_) => _toggleAvailability(),
-                                            activeThumbColor: Colors.greenAccent,
-                                            activeTrackColor:
-                                                Colors.greenAccent.withOpacity(0.35),
-                                            inactiveThumbColor: Colors.white54,
-                                            inactiveTrackColor: Colors.white24,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          // Greeting
+                          // Single-row header: avatar + greeting + refresh + online toggle
                           Row(
                             children: [
                               const CircleAvatar(
@@ -1099,6 +1017,57 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                                   ],
                                 ),
                               ),
+                              IconButton(
+                                icon: _isRefreshing
+                                    ? const SizedBox(
+                                        width: 18, height: 18,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2, color: Colors.white))
+                                    : const Icon(Icons.refresh_rounded, color: Colors.white70),
+                                onPressed: _isRefreshing ? null : _manualRefresh,
+                                tooltip: 'Refresh bookings',
+                              ),
+                              _isTogglingOnline
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white,
+                                      ),
+                                    )
+                                  : Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                        Transform.scale(
+                                          scale: 0.78,
+                                          child: Switch(
+                                            value: _isOnline,
+                                            onChanged: _isTogglingOnline
+                                                ? null
+                                                : (_) => _toggleAvailability(),
+                                            activeThumbColor: Colors.greenAccent,
+                                            activeTrackColor:
+                                                Colors.greenAccent.withValues(alpha: 0.35),
+                                            inactiveThumbColor: Colors.white54,
+                                            inactiveTrackColor: Colors.white24,
+                                          ),
+                                        ),
+                                          ],
+                                        ),
+                                        Text(
+                                          _isOnline ? 'Online' : 'Offline',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w600,
+                                            color: _isOnline ? Colors.greenAccent : Colors.white60,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                             ],
                           ),
                             ],

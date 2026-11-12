@@ -621,13 +621,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 const Text('Pincode', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                 const SizedBox(height: 6),
                 TextField(controller: pincodeCtrl, keyboardType: TextInputType.number,
-                    decoration: _addrInputDecor('6-digit pincode')),
+                    maxLength: 6,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: _addrInputDecor('6-digit pincode').copyWith(counterText: '')),
               ])),
               const SizedBox(width: 12),
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 const Text('City', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
                 const SizedBox(height: 6),
                 TextField(controller: cityCtrl, textCapitalization: TextCapitalization.words,
+                    inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
                     decoration: _addrInputDecor('City')),
               ])),
             ]),
@@ -3179,6 +3182,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
           TextField(
             controller: _newNameCtrl,
             textCapitalization: TextCapitalization.words,
+            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
             onChanged: (_) { if (_nameError != null) setState(() => _nameError = null); },
             decoration: _inputDecor('Full name').copyWith(
               errorText: _nameError,

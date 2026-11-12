@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/utils/app_messages.dart';
@@ -194,6 +195,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       TextFormField(
                         controller: _namCtrl,
                         textCapitalization: TextCapitalization.words,
+                        inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
                         style: const TextStyle(
                             fontSize: 14, color: AppColors.textPrimary),
                         decoration: _inputDec(
@@ -297,6 +299,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       TextFormField(
                         controller: _cityCtrl,
                         textCapitalization: TextCapitalization.words,
+                        inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
                         style: const TextStyle(
                             fontSize: 14, color: AppColors.textPrimary),
                         decoration: _inputDec(
