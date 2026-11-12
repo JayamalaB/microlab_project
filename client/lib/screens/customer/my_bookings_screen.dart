@@ -287,8 +287,11 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
         badge = 'Upcoming';
         badgeColor = const Color(0xFF1565C0);
         matched = [...matched]..sort((a, b) => a.date.compareTo(b.date));
-        dateValue = matched.first.date;
-        dateLabel = 'Next appointment';
+        final today = DateTime.now();
+        final todayDate = DateTime(today.year, today.month, today.day);
+        final future = matched.where((b) => !b.date.isBefore(todayDate)).toList();
+        dateValue = (future.isNotEmpty ? future : matched).first.date;
+        dateLabel = future.isNotEmpty ? 'Next appointment' : 'Last booking';
       } else if (filter == 'Completed') {
         badge = 'Completed';
         badgeColor = AppColors.brandGreen;
@@ -307,8 +310,11 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
           badge = 'Upcoming';
           badgeColor = const Color(0xFF1565C0);
           upcoming.sort((a, b) => a.date.compareTo(b.date));
-          dateValue = upcoming.first.date;
-          dateLabel = 'Next appointment';
+          final today = DateTime.now();
+          final todayDate = DateTime(today.year, today.month, today.day);
+          final futureUp = upcoming.where((b) => !b.date.isBefore(todayDate)).toList();
+          dateValue = (futureUp.isNotEmpty ? futureUp : upcoming).first.date;
+          dateLabel = futureUp.isNotEmpty ? 'Next appointment' : 'Last booking';
         } else {
           final completed = g.bookings.where((b) => _completedStatuses.contains(b.status)).toList();
           final pool = completed.isNotEmpty ? completed : g.bookings;

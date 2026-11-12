@@ -1332,6 +1332,7 @@ Future<void> _showHandOverToLabDialog() async {
                 TextField(
                   controller: receivedByCtrl,
                   onChanged: (_) => setDialogState(() {}),
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
                   style: const TextStyle(fontSize: 14),
                   decoration: InputDecoration(
                     hintText: 'Name of person receiving the samples',
@@ -6183,6 +6184,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
               controller: _mobileCtrl,
               keyboardType: TextInputType.phone,
               maxLength: 10,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               autofocus: true,
               style: const TextStyle(fontSize: 15),
               decoration: InputDecoration(
@@ -6265,6 +6267,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         TextField(
           controller: _nameCtrl,
           keyboardType: TextInputType.name,
+          inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
           style: const TextStyle(fontSize: 14),
           decoration: InputDecoration(
             hintText: 'Enter full name',
