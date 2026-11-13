@@ -469,6 +469,10 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   _Layer _layer   = _Layer.all;
   final String _sid = 'ml_${DateTime.now().millisecondsSinceEpoch}';
 
+  // Banner carousel images — starts with the bundled fallback, replaced by
+  // ip_chatbot_banners (active, sort_order) once /api/chat/banners responds.
+  List<String> _bannerUrls = List.from(_kBannerUrls);
+
   // Patient auth — set from widget.patientId (app login) or from inline form
   String? _verifiedPatientId;
 
@@ -551,6 +555,28 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
       layer: _Layer.all,
     ));
     _msgs.add(const _Msg(kind: _MsgKind.promo)); // YouTube + banners
+    _loadBanners();
+  }
+
+  // Replaces the hardcoded banner assets with ip_chatbot_banners once fetched —
+  // silently keeps the bundled fallback on any failure or empty result so the
+  // carousel is never left blank.
+  Future<void> _loadBanners() async {
+    try {
+      final res = await http
+          .get(Uri.parse('$_kChatApiBase/api/chat/banners'))
+          .timeout(const Duration(seconds: 10));
+      if (!mounted || res.statusCode != 200) return;
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] != true) return;
+      final urls = (body['data'] as List? ?? [])
+          .map((b) => (b as Map<String, dynamic>)['image_url'] as String?)
+          .whereType<String>()
+          .toList();
+      if (urls.isNotEmpty) setState(() => _bannerUrls = urls);
+    } catch (_) {
+      // Keep the bundled fallback.
+    }
   }
 
   @override
@@ -1465,7 +1491,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
             _YoutubeCard(),
             SizedBox(height: 10),
           ],
-          const _BannerCarousel(imageUrls: _kBannerUrls),
+          _BannerCarousel(key: ValueKey(_bannerUrls.join(',')), imageUrls: _bannerUrls),
         ],
       ),
     );
@@ -2425,7 +2451,7 @@ class _YoutubeCardState extends State<_YoutubeCard> {
 // ── Banner carousel ───────────────────────────────────────────────────────────
 class _BannerCarousel extends StatefulWidget {
   final List<String> imageUrls;
-  const _BannerCarousel({required this.imageUrls});
+  const _BannerCarousel({super.key, required this.imageUrls});
   @override
   State<_BannerCarousel> createState() => _BannerCarouselState();
 }

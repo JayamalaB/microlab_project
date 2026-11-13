@@ -392,10 +392,17 @@ class LLMRetriever {
         // Generic-listing safety-net: clear bad keywords like "available tests", "show all"
         const GENERIC_LIST_TESTS = /\b(show|list|display|what|all)\b.*\b(tests?|packages?|available)\b|\b(tests?|packages?)\b.*(available|all)\b/i;
         const BAD_KEYWORDS       = /^(available\s*tests?|all\s*tests?|show\s*all|list\s*all|tests?|packages?)$/i;
+        // GENERIC_LIST_TESTS also matches a category question shaped like "what
+        // tests are available for thyroid?" (it has "what"..."available" same as
+        // a true generic listing) — CATEGORY_QUALIFIER_PATTERN keeps the nulling
+        // below from wiping out a real "thyroid" keyword GPT already extracted
+        // just because the sentence also happens to contain "available".
+        const CATEGORY_QUALIFIER_PATTERN = /\b(for|related to|about|regarding)\s+\S/i;
         if (intent === 'test_query' && entities.keyword && BAD_KEYWORDS.test(entities.keyword.trim())) {
             entities.keyword = null;
         }
-        if (intent === 'test_query' && GENERIC_LIST_TESTS.test(question) && !entities.product_name) {
+        if (intent === 'test_query' && GENERIC_LIST_TESTS.test(question) && !entities.product_name &&
+            !CATEGORY_QUALIFIER_PATTERN.test(question)) {
             entities.keyword = null;
         }
 
@@ -546,11 +553,30 @@ class LLMRetriever {
         const isFamilyScope = intent === 'patient_profile_query' &&
             (FAMILY_SCOPE_PATTERN.test(question) || !!entities.relation || !!entities.person_name);
 
+        // A generic "show all available tests/packages" style question (no specific
+        // test named, no category/condition attached either) — uses the curated
+        // ip_chatbot_packages list instead of buildTestQuery's generic ip_products
+        // listing, since the chatbot's list is meant to show only those hand-picked
+        // products, in their configured sort_order, not an arbitrary sample of
+        // ip_products. "tests" and "packages" trigger it the same way — the schema
+        // prompt itself treats them as synonyms for this same table.
+        //
+        // Belt-and-suspenders: CATEGORY_QUALIFIER_PATTERN already keeps the
+        // nulling above from wiping out a real keyword, but re-checking it here
+        // too means a stray "for X" that genuinely has no matching keyword
+        // (a category GPT didn't recognize at all) still skips the packages
+        // list instead of showing it for an unrecognized category question.
+        const isChatbotPackagesListing = intent === 'test_query' &&
+            !entities.product_name && !entities.keyword && !CATEGORY_QUALIFIER_PATTERN.test(question) &&
+            /\b(packages?|tests?)\b/i.test(question);
+
         const sql = intent === 'patient_profile_query'
             ? this.buildPatientProfileQuery(entities, patientId, isFamilyScope)
             : intent === 'client_account_query'
                 ? this.buildClientAccountQuery(patientId)
-                : this.buildTestQuery(entities);
+                : isChatbotPackagesListing
+                    ? this.buildChatbotPackagesQuery()
+                    : this.buildTestQuery(entities);
         const queryType = intent;
 
         let data  = [];
@@ -571,11 +597,15 @@ class LLMRetriever {
         // Personal-data intents get dedicated formatters — no LLM needed, keeps PII
         // out of the general-purpose prompt and avoids noisy/inconsistent formatting.
         // (branch_query has its own dedicated block above and never reaches here.)
+        // The curated packages list also bypasses the LLM formatter so its
+        // sort_order is shown exactly as configured, never reshuffled.
         const formattedResponse = (intent === 'patient_profile_query')
             ? this.formatPatientProfile(data, error, isFamilyScope)
             : (intent === 'client_account_query')
                 ? this.formatClientAccount(data, error)
-                : await llmService.formatResponse(question, intent, entities, data, error);
+                : isChatbotPackagesListing
+                    ? this.formatChatbotPackages(data, error)
+                    : await llmService.formatResponse(question, intent, entities, data, error);
 
         this._updateSession(sessionId, intent, entities);
         llmService.saveToMemory(sessionId, question, formattedResponse);
@@ -622,6 +652,17 @@ class LLMRetriever {
             return `SELECT ${TEST_COLS} FROM ip_products WHERE product_active = 1 LIMIT 20`;
         }
         return `SELECT ${TEST_COLS} FROM ip_products WHERE (${conditions.join(' OR ')}) AND product_active = 1`;
+    }
+
+    // Only the products an admin has curated into ip_chatbot_packages, in the
+    // order they configured — not every ip_products row that happens to look
+    // like a package. See formatChatbotPackages() for how the ordering is kept.
+    buildChatbotPackagesQuery() {
+        return `SELECT p.product_name, p.product_price
+                FROM ip_chatbot_packages cp
+                JOIN ip_products p ON p.product_id = cp.product_id
+                WHERE p.product_active = 1
+                ORDER BY cp.sort_order ASC`;
     }
 
     buildBranchQuery(entities) {
@@ -1215,6 +1256,19 @@ class LLMRetriever {
                `📱 Mobile: ${row.client_mobile_no || 'N/A'}\n` +
                `⭐ Subscription: ${row.subscription_tier || 'N/A'}\n` +
                `✅ Status: ${row.client_account_status || 'N/A'}`;
+    }
+
+    // Deterministic — no LLM — so buildChatbotPackagesQuery's ORDER BY sort_order
+    // is shown exactly as the admin configured it, same "N. Name — ₹Price" shape
+    // every other test/package listing in this chatbot already uses.
+    formatChatbotPackages(data, error) {
+        if (error) return `⚠️ Could not fetch available packages. Please try again or call 0422 4354242.`;
+        if (!data || data.length === 0) {
+            return `🔍 No packages are available right now. Please call 0422 4354242.`;
+        }
+        return data
+            .map((d, i) => `${i + 1}. ${d.product_name} — ₹${Math.round(d.product_price)}`)
+            .join('\n');
     }
 }
 
