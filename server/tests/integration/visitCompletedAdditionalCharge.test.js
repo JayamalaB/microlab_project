@@ -1,6 +1,7 @@
-// services/clientSync.js: syncVisitCompletionToClient — the technician's
-// additional charge (amount + reason) reaches the ASMX in each booking's
-// payment_details at Handed to Lab, with total_amount = the updated total.
+// services/clientSync.js: syncVisitCompletionToClient — what each booking's
+// payment_details carries at Handed to Lab. The technician's additional
+// charge is inside total_amount; it is not sent as its own field
+// (additional_charge_amount / additional_charge_reason were removed).
 //
 // DB answers are keyed on the SQL text (not call order), so this only pins
 // what the payment_details carry.
@@ -29,7 +30,7 @@ function wireDb(bookingRows) {
       return [[{ booking_id: 900, booking_ref: '100000900', patient_id: 501, client_id: 10, branch_id: 4,
         status: 'completed', reference_no: null, visit_group_id: bookingRows.length > 1 ? 'VG1' : null }]];
     }
-    if (/additional_charge_amount, (b\.)?additional_charge_reason/.test(sql)) return [bookingRows];
+    if (/partial_payment_reason, (b\.)?amount_due/.test(sql)) return [bookingRows];
     if (/FROM ip_patients WHERE patient_id = \?/.test(sql)) return [[patient(params[0], `J${params[0]}`)]];
     if (/FROM ip_booking_items bi/.test(sql)) {
       return params[1] === 901
@@ -80,7 +81,7 @@ const row = (over) => ({
   ...over,
 });
 
-test('payment_details: test + service charge + additional charge = total, with the reason', async () => {
+test('payment_details: the agreed fields and order — no additional charge fields', async () => {
   wireDb([row()]);
   const payload = captureAsmx();
   await syncVisitCompletionToClient(900, { mobile: '9000000001', type: 'technician', technicianId: 17 });
@@ -88,27 +89,23 @@ test('payment_details: test + service charge + additional charge = total, with t
   expect(http.request).toHaveBeenCalledTimes(1);
   // Exact keys and order of the agreed structure.
   expect(JSON.stringify(payload().bookings[0].payment_details)).toBe(JSON.stringify({
-    test_amount:              1200,
-    service_charge_amount:    49,
-    additional_charge_amount: 50,
-    additional_charge_reason: 'Waited 30 min at customer location',
-    total_amount:             1299,
-    paid_amount:              1299,
-    partial_payment_reason:   '',
-    payment_type:             'pay_later',
-    razorpay_payment_id:      null,
+    total_amount:           1299,
+    paid_amount:            1299,
+    partial_payment_reason: '',
+    payment_type:           'pay_later',
+    razorpay_payment_id:    null,
   }));
 });
 
-test('a booking without an additional charge sends 0 and an empty reason', async () => {
+test('a booking without an additional charge has the same fields', async () => {
   wireDb([row({ total_amount: '1249.00', additional_charge_amount: '0.00', additional_charge_reason: null })]);
   const payload = captureAsmx();
   await syncVisitCompletionToClient(900, { mobile: '9000000001', type: 'technician', technicianId: 17 });
 
-  expect(payload().bookings[0].payment_details).toMatchObject({
-    test_amount: 1200, service_charge_amount: 49,
-    additional_charge_amount: 0, additional_charge_reason: '', total_amount: 1249,
-  });
+  const pd = payload().bookings[0].payment_details;
+  expect(pd.total_amount).toBe(1249);
+  expect(pd).not.toHaveProperty('additional_charge_amount');
+  expect(pd).not.toHaveProperty('additional_charge_reason');
 });
 
 test('partial payment: the reason is sent while a balance remains', async () => {
@@ -142,7 +139,7 @@ test('nothing left to pay: an old reason is not sent', async () => {
   expect(payload().bookings[0].payment_details.partial_payment_reason).toBe('');
 });
 
-test('family visit — each booking carries its own additional charge', async () => {
+test('family visit — each booking sends its own total', async () => {
   wireDb([
     row({ visit_group_id: 'VG1' }),
     row({ booking_id: 901, booking_ref: '100000901', patient_id: 502, visit_group_id: 'VG1',
@@ -153,8 +150,7 @@ test('family visit — each booking carries its own additional charge', async ()
   await syncVisitCompletionToClient(900, { mobile: '9000000001', type: 'technician', technicianId: 17 });
 
   const [self, member] = payload().bookings;
-  expect(self.payment_details).toMatchObject({ test_amount: 1200, service_charge_amount: 49, additional_charge_amount: 50, total_amount: 1299 });
-  expect(member.payment_details).toMatchObject({
-    test_amount: 300, service_charge_amount: 0, additional_charge_amount: 0, additional_charge_reason: '', total_amount: 300,
-  });
+  expect(self.payment_details.total_amount).toBe(1299);
+  expect(member.payment_details.total_amount).toBe(300);
+  for (const b of [self, member]) expect(b.payment_details).not.toHaveProperty('additional_charge_amount');
 });

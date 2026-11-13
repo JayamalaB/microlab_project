@@ -131,15 +131,18 @@ describe('multi-branch dispatch (default branch + assigned branches, nearest fir
 
   test('invalid or unknown branch codes are ignored — the technician is not treated as assigned to them', async () => {
     // 631 lists "XX" and "99" (99 is not in ip_branches): a branch-99 booking
-    // must not count them as branch 99, so the any-branch fallback picks the
-    // nearest technician (632) instead.
+    // must not count it as working at branch 99. Nobody else works there and
+    // no other branch qualifies here, so nobody is offered the job — the
+    // request-time fallback walks branches by customer distance instead of
+    // jumping to the nearest technician of any branch (see
+    // branchDistanceDispatch.test.js).
     const t631 = await goOnline(631, 7, 17.10, 84.30);   // ~6 km
     const t632 = await goOnline(632, 5, 17.051, 84.251); // ~0.1 km
     let patient;
     try {
-      const offer = firstOffer({ 631: t631, 632: t632 });
+      const offer = firstOffer({ 631: t631, 632: t632 }, 1500);
       patient = await requestBooking(80003, 99, 17.05, 84.25);
-      expect(await offer).toBe(632);
+      await expect(offer).rejects.toThrow('no booking_request received');
     } finally {
       patient?.disconnect(); t631.disconnect(); t632.disconnect();
     }

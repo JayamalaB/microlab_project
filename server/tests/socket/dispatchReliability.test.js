@@ -6,6 +6,12 @@ jest.mock('../../config/firebase', () => ({ messaging: null }));
 jest.mock('../../services/customerPush', () => ({ sendToBookingOwner: jest.fn() }));
 jest.mock('../../services/clientSync', () => ({ syncVisitCompletionToClient: jest.fn() }));
 jest.mock('../../utils/dbLogger');
+// Who works at a branch is tested in tests/services/technicianBranches.test.js;
+// here every branch has technicians, so the slot queries run.
+jest.mock('../../services/technicianBranches', () => ({
+  technicianIdsAtBranch: jest.fn(async () => [3501, 3502]),
+  placeholders: (ids) => ids.map(() => '?').join(', '),
+}));
 const db = require('../../config/db');
 const bookingSocket = require('../../socket/bookingSocket');
 
@@ -39,9 +45,9 @@ function connect(id) {
   return { handlers, emitted, socket };
 }
 
-async function online(socketId, technicianId, lat = 13.05) {
+async function online(socketId, technicianId, lat = 13.05, branchId = undefined) {
   const tech = connect(socketId);
-  tech.handlers.technician_online({ technicianId, technicianName: `Tech ${technicianId}`, lat, lng: 80.25 });
+  tech.handlers.technician_online({ technicianId, technicianName: `Tech ${technicianId}`, lat, lng: 80.25, ...(branchId != null && { branchId }) });
   brought.add(technicianId);
   await flush();
   return tech;
@@ -243,9 +249,9 @@ describe('the time on accept', () => {
 
 describe('a slot picked again after no technician was found', () => {
   test('is saved on the booking before the search restarts', async () => {
-    const tech = await online('s-pick', 3451);
+    const tech = await online('s-pick', 3451, 13.05, 4); // works at the booking's branch
     answers = [
-      [/FROM ip_available_slots ias[\s\S]*ts\.branch_id = \?/, [{ available_slot_id: 77, technician_slot_id: 9, slot_time: '11:30:00' }]],
+      [/FROM ip_available_slots ias[\s\S]*ip_technician_slot_branches/, [{ available_slot_id: 77, technician_slot_id: 9, slot_time: '11:30:00' }]],
       [/SELECT available_slot_id, visit_group_id/, [{ available_slot_id: 55, visit_group_id: 'VG-1' }]],
     ];
     await requestDispatch(connect('p10'), 7351, { branchId: 4, slotId: 3, slotChanged: true });

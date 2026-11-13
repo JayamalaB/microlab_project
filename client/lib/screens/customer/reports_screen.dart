@@ -121,7 +121,7 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
     }
     final member = MemberModel(
       id: b['patient_id']?.toString() ?? '0',
-      name: b['patient_name'] as String? ?? 'Patient',
+      name: (b['patient_name'] as String? ?? 'Patient').toUpperCase(),
       mobile: b['patient_mobile'] as String? ?? '',
       gender: '', location: '', address: '',
     );

@@ -1,7 +1,7 @@
 ﻿const crypto = require('crypto');
 const db       = require('../config/db');
 const settings = require('../config/settings');
-const { calculateHomeCollectionFare, FareCalculationError } = require('../services/fareCalculator');
+const { calculateHomeCollectionProduct, FareCalculationError } = require('../services/fareCalculator');
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { messaging } = require('../config/firebase');
@@ -46,6 +46,8 @@ function blog(msg) {
   fs.appendFileSync(BOOKING_LOG, line, 'utf8');
 }
 const { triggerScheduledDispatch, freeTechnician, unassignAndRedispatch, stopDispatch, redispatchBooking } = require('../socket/bookingSocket');
+const { recordServingBranch, technicianBranchId, formatDifference } = require('../services/dispatchDistance');
+const serviceCharge = require('../services/serviceCharge');
 const { checkItemPrices } = require('../services/itemPrices');
 const { verifyRazorpayPayment } = require('../services/razorpayVerify');
 const { captureRazorpayPayment } = require('../services/razorpayCapture');
@@ -107,6 +109,7 @@ exports.createBooking = async (req, res) => {
     paymentType       = 'pay_later',
     razorpayPaymentId = null,
     razorpayOrderId   = null,
+    doctorName        = null,
   } = req.body;
   // Recomputed server-side below from the checked item prices and the
   // authoritative fare, never trusted as sent.
@@ -120,7 +123,7 @@ exports.createBooking = async (req, res) => {
   // (Branch → Customer distance) — checked before any DB work starts, same
   // as the patientId check above.
   if (bookingType === 'home_collection' && (collectionLatitude == null || collectionLongitude == null)) {
-    return res.status(422).json({ success: false, message: 'Pickup location is required for Home Collection bookings' });
+    return res.status(422).json({ success: false, message: 'Collection location is required for Home Collection bookings' });
   }
 
   const isPaid     = paymentType === 'full' && razorpayPaymentId;
@@ -147,19 +150,14 @@ exports.createBooking = async (req, res) => {
       return res.status(409).json({ success: false, message: prices.message });
     }
 
-    // Home Collection fare — Branch → Customer distance, computed
-    // authoritatively here, never trusted from the client (see
-    // fareCalculator.js).
-    let homeCollectionFare = null;
-    if (bookingType === 'home_collection') {
-      homeCollectionFare = await calculateHomeCollectionFare({
-        branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude, dbConn: conn,
-      });
-      blog(`💰 [CREATE BOOKING] Home Collection fare — distanceKm=${homeCollectionFare.distanceKm} finalFare=₹${homeCollectionFare.finalFare} rateId=${homeCollectionFare.rateId}`);
-    }
+    // No Home Collection service charge at booking — it is collected on the
+    // spot: worked out when a technician accepts (customer ↔ that branch, up
+    // and down) and added to the bill when they arrive (services/serviceCharge.js).
+    // The total and any pay-now payment are the tests only.
+    const homeCollectionFare = null;
 
     const itemsTotal = items.reduce((sum, item) => sum + (Number(item.finalPrice) || 0), 0);
-    totalAmount = Number((itemsTotal + (homeCollectionFare?.finalFare ?? 0)).toFixed(2));
+    totalAmount = Number(itemsTotal.toFixed(2));
 
     // Pay-now: the customer authorised this payment before this request was
     // sent. It is only taken (captured) after the booking is saved, so if
@@ -216,18 +214,18 @@ exports.createBooking = async (req, res) => {
          (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
           booking_type, status, total_amount, discount_amount,
           amount_paid, amount_due,
-          source_channel, notes, collection_address, postal_code, city,
+          source_channel, notes, doctor_name, collection_address, postal_code, city,
           collection_latitude, collection_longitude,
-          home_collection_fare, home_collection_distance_km, km_rate_id,
+          home_collection_fare, home_collection_distance_km, service_charge_product_id,
           patient_id, patient_id_ref, product_id,
           payment_status, start_datetime, end_datetime, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW(), ?, NOW())`,
       [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
        bookingType, bookingStatus, totalAmount, discountAmount ?? 0, amountPaid, amountDue,
-       sourceChannel, notes ?? null,
+       sourceChannel, notes ?? null, doctorName ?? null,
        collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
        collectionLatitude ?? null, collectionLongitude ?? null,
-       homeCollectionFare?.finalFare ?? null, homeCollectionFare?.distanceKm ?? null, homeCollectionFare?.rateId ?? null,
+       homeCollectionFare?.finalFare ?? null, homeCollectionFare?.distanceKm ?? null, homeCollectionFare?.product?.product_id ?? null,
        patientId, resolvedPatientIdRef,
        isPaid ? 'paid' : 'unpaid',
        userId ?? null]
@@ -244,6 +242,10 @@ exports.createBooking = async (req, res) => {
     const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
     await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
     blog(`✅ ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef} branch_id=${branchId ?? 'NULL'}`);
+    if (bookingType === 'home_collection') {
+      const sc = await serviceCharge.markPending(conn, bookingId);
+      blog(`💰 [CREATE BOOKING] service charge collected on the spot — ${sc.skipped ? `not marked: ${sc.skipped}` : 'pending until a technician accepts'}`);
+    }
 
     // 2. Patient → booking link
     await conn.execute(
@@ -379,11 +381,10 @@ exports.createBooking = async (req, res) => {
   } catch (err) {
     await conn.rollback();
     if (err instanceof FareCalculationError) {
-      // RATE_NOT_FOUND / RATE_CONFIG_INCOMPLETE mean the fare *system* isn't
-      // ready (503, an ops problem) — everything else (missing coordinates,
-      // missing branch location, outside service area) is this specific
-      // request being unable to be priced (422).
-      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
+      // PRODUCT_NOT_FOUND means the fare system isn't configured for this distance (503).
+      // Everything else (missing/invalid coordinates, branch location unavailable) is a
+      // request-level problem (422).
+      const status = err.code === 'PRODUCT_NOT_FOUND' ? 503 : 422;
       blog(`❌ [CREATE BOOKING] fare calculation failed — code=${err.code} ${err.message}`);
       res.status(status).json({ success: false, code: err.code, message: err.message });
     } else {
@@ -416,11 +417,21 @@ exports.getHomeCollectionFareQuote = async (req, res) => {
   }
 
   try {
-    const fare = await calculateHomeCollectionFare({ branchId, pickupLat, pickupLng });
-    res.json({ success: true, fare });
+    const result = await calculateHomeCollectionProduct({ branchId, pickupLat, pickupLng });
+    res.json({
+      success: true,
+      fare: {
+        distanceKm:  result.distanceKm,
+        doubledKm:   result.doubledKm,
+        finalFare:   result.finalFare,
+        productName: result.product.product_name,
+        testCode:    result.product.test_code,
+        productId:   result.product.product_id,
+      },
+    });
   } catch (err) {
     if (err instanceof FareCalculationError) {
-      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
+      const status = err.code === 'PRODUCT_NOT_FOUND' ? 503 : 422;
       return res.status(status).json({ success: false, code: err.code, message: err.message });
     }
     console.error('❌ [FARE QUOTE] failed:', err.message);
@@ -463,6 +474,15 @@ exports.getMyBookings = async (req, res) => {
          b.postal_code             AS collection_pincode,
          b.city                    AS collection_city,
          b.notes                   AS collection_notes,
+         b.doctor_name,
+         -- Service charge collected on the spot: shown once it is in the bill
+         -- (technician arrived, status 'applied'); bookings from before this
+         -- change (status NULL) show their booking-time charge as before.
+         CASE WHEN b.service_charge_status IS NULL OR b.service_charge_status = 'applied'
+              THEN sc_p.product_name END AS service_charge_product_name,
+         b.service_charge_status,
+         b.service_charge_km,
+         b.home_collection_distance_km,
          br.branch_name            AS branch_name,
          br.branch_address         AS branch_address,
          br.branch_city            AS branch_location,
@@ -570,6 +590,7 @@ exports.getMyBookings = async (req, res) => {
        LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id
        LEFT JOIN ip_users u          ON u.user_id = tech.user_id
        LEFT JOIN ip_feedback f        ON f.booking_id = b.booking_id
+       LEFT JOIN ip_products sc_p    ON sc_p.product_id = b.service_charge_product_id
        WHERE b.deleted_at IS NULL
        GROUP BY b.booking_id
        ORDER BY b.created_at DESC
@@ -1993,6 +2014,13 @@ exports.updateAdminStatus = async (req, res) => {
       // If no row and no technicianId provided, skip — can't create without a tech
     }
 
+    // Admin moved the visit to arrival or later: the service charge worked out
+    // at accept goes into the bill now (no-op when there is none to add).
+    if (collectionStatus && serviceCharge.ARRIVED_OR_LATER.includes(collectionStatus)) {
+      const sc = await serviceCharge.applyOnArrival(bookingId);
+      if (!sc.skipped) blog(`💰 [ADMIN STATUS] booking_id=${bookingId} service charge ₹${sc.fare} added on ${collectionStatus} — due ₹${sc.amountDue}`);
+    }
+
     // ── 3. Update ip_booking_requests ─────────────────────────────────────
     if (status === 'technician_assigned') {
       // Resolve the technician to record against the request
@@ -2029,6 +2057,27 @@ exports.updateAdminStatus = async (req, res) => {
            WHERE booking_id = ? AND technician_id != ? AND request_status = 'pending'`,
           [bookingId, assignedTechId]
         );
+
+        // Admin assignment: the serving branch is the assigned technician's
+        // own branch, measured customer → branch like dispatch. Logging only
+        // if it fails — the assignment itself is already saved.
+        try {
+          const served = await recordServingBranch(bookingId, {
+            servedBranchId: await technicianBranchId(assignedTechId),
+          });
+          blog(served.skipped
+            ? `📏 [ADMIN ASSIGN] booking_id=${bookingId} distance not saved — ${served.skipped}`
+            : `📏 [ADMIN ASSIGN] booking_id=${bookingId} tech=${assignedTechId} served branch=${served.servedBranchId ?? '-'} ` +
+              `${served.servedDistanceKm ?? '?'} km | original branch=${served.originalBranchId ?? '-'} ${served.originalDistanceKm ?? '?'} km` +
+              ` | difference ${formatDifference(served.differenceKm)}`);
+          // Service charge from the technician's branch, up and down — added
+          // to the bill when they arrive.
+          const sc = await serviceCharge.calculateOnAccept(bookingId, { servedDistanceKm: served.servedDistanceKm ?? null });
+          blog(`💰 [ADMIN ASSIGN] booking_id=${bookingId} service charge ${sc.skipped ? `skipped — ${sc.skipped}`
+            : `${sc.status} — ${sc.productName ?? 'no product'} ${sc.price != null ? `₹${sc.price}` : ''} for ${sc.roundTripKm} km up & down`}`);
+        } catch (distErr) {
+          blog(`⚠️  [ADMIN ASSIGN] booking_id=${bookingId} distance not saved — ${distErr.message}`);
+        }
 
         // Same notification the natural in-app accept flow sends
         // (bookingSocket.js's booking_accepted handler) — admin-assigned
@@ -2457,6 +2506,14 @@ exports.createFamilyBooking = async (req, res) => {
   if (members.length > maxMembers) {
     return res.status(400).json({ success: false, message: `Maximum ${maxMembers} members allowed per visit` });
   }
+  // The collection location decides the service charge when a technician
+  // accepts (customer ↔ branch distance) — same check as createBooking.
+  if (bookingType === 'home_collection' && (collectionLatitude == null || collectionLongitude == null)) {
+    return res.status(422).json({
+      success: false, code: 'MISSING_COORDINATES',
+      message: 'Collection location is required for Home Collection bookings',
+    });
+  }
 
   const isPaid = paymentType === 'full' && razorpayPaymentId;
 
@@ -2490,24 +2547,10 @@ exports.createFamilyBooking = async (req, res) => {
     } catch (_) {}
   }
 
-  // Calculate home collection fare once for the whole visit (only the primary
-  // member is charged; siblings carry 0). Done before the DB transaction so a
-  // fare error rejects the request cleanly without a partial rollback.
-  let familyFare = null; // set for home_collection only; null = lab_test
-  if (bookingType === 'home_collection') {
-    try {
-      familyFare = await calculateHomeCollectionFare({
-        branchId, pickupLat: collectionLatitude, pickupLng: collectionLongitude,
-      });
-    } catch (err) {
-      if (!(err instanceof FareCalculationError)) throw err;
-      // Same replies as createBooking: 503 when rates aren't set up, 422 when
-      // this request can't be priced (e.g. outside the service area).
-      const status = (err.code === 'RATE_NOT_FOUND' || err.code === 'RATE_CONFIG_INCOMPLETE') ? 503 : 422;
-      return res.status(status).json({ success: false, code: err.code, message: err.message });
-    }
-    blog(`💰 [CREATE FAMILY BOOKING] fare — distanceKm=${familyFare.distanceKm} finalFare=₹${familyFare.finalFare} rateId=${familyFare.rateId}`);
-  }
+  // No Home Collection service charge at booking — it is collected on the
+  // spot: worked out when a technician accepts and added to the bill when they
+  // arrive (services/serviceCharge.js). The first member carries it, as before.
+  const familyFare = null;
 
   const conn = await db.getConnection();
   try {
@@ -2537,7 +2580,7 @@ exports.createFamilyBooking = async (req, res) => {
     }
 
     for (const member of members) {
-      const { patientId, items = [] } = member;
+      const { patientId, items = [], doctorName: memberDoctorName = null } = member;
       if (!patientId) continue;
 
       // Resolve patient_id_ref
@@ -2552,10 +2595,10 @@ exports.createFamilyBooking = async (req, res) => {
       if (patRow?.patient_id_ref) resolvedPatientIdRef = patRow.patient_id_ref;
 
       // Primary member carries the service charge; additional members have 0.
-      const memberFare       = (isFirstMember && familyFare) ? familyFare.finalFare  : 0;
-      const totalAmount      = Number((sumPrices(items) + memberFare).toFixed(2));
-      const memberDistanceKm = (isFirstMember && familyFare) ? familyFare.distanceKm : null;
-      const memberRateId     = (isFirstMember && familyFare) ? familyFare.rateId     : null;
+      const memberFare        = (isFirstMember && familyFare) ? familyFare.finalFare           : 0;
+      const totalAmount       = Number((sumPrices(items) + memberFare).toFixed(2));
+      const memberDistanceKm  = (isFirstMember && familyFare) ? familyFare.distanceKm          : null;
+      const memberScProductId = (isFirstMember && familyFare) ? familyFare.product.product_id : null;
 
       const amountPaid  = isPaid ? totalAmount : 0;
       const amountDue   = isPaid ? 0 : totalAmount;
@@ -2565,26 +2608,31 @@ exports.createFamilyBooking = async (req, res) => {
         `INSERT INTO ip_bookings
            (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
             booking_type, status, total_amount, discount_amount,
-            amount_paid, amount_due, source_channel, notes,
+            amount_paid, amount_due, source_channel, notes, doctor_name,
             collection_address, postal_code, city,
             collection_latitude, collection_longitude,
-            home_collection_fare, home_collection_distance_km, km_rate_id,
+            home_collection_fare, home_collection_distance_km, service_charge_product_id,
             patient_id, patient_id_ref, product_id,
             payment_status, visit_group_id, start_datetime, end_datetime, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'mobile_app', ?,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'mobile_app', ?, ?,
                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), ?, NOW())`,
         [null, clientId, branchId ?? null, collectionDate ?? null, labSlotId ?? null, availableSlotId ?? null,
-         bookingType, bookingStatus, totalAmount, amountPaid, amountDue, notes ?? null,
+         bookingType, bookingStatus, totalAmount, amountPaid, amountDue, notes ?? null, memberDoctorName ?? null,
          collectionAddress ?? null, collectionPincode ?? null, collectionCity ?? null,
          collectionLatitude ?? null, collectionLongitude ?? null,
-         memberFare, memberDistanceKm, memberRateId,
+         memberFare, memberDistanceKm, memberScProductId,
          patientId, resolvedPatientIdRef,
          isPaid ? 'paid' : 'unpaid',
          visitGroupId, userId ?? null]
       );
+      const carriesServiceCharge = isFirstMember && bookingType === 'home_collection';
       isFirstMember = false;
       const bookingId  = bResult.insertId;
       blog(`[family-notes] INSERT done — booking_id=${bookingId} patient_id=${patientId} notes_stored=${JSON.stringify(notes ?? null)}`);
+      if (carriesServiceCharge) {
+        const sc = await serviceCharge.markPending(conn, bookingId);
+        blog(`💰 [CREATE FAMILY BOOKING] service charge collected on the spot — ${sc.skipped ? `not marked: ${sc.skipped}` : `carried by booking_id=${bookingId}, pending until a technician accepts`}`);
+      }
       // Same booking_id + offset scheme as createBooking above — see that
       // function's own comment. visit_group_id (below) intentionally keeps
       // its separate VG-XXXXXX format; only booking_ref changes.

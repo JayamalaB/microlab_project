@@ -194,57 +194,49 @@ describe('POST /api/bookings', () => {
 // createBooking), so every test here relies on that default rather than
 // stating it explicitly, matching how a real Home Collection request from
 // checkout_screen.dart is actually shaped.
-describe('POST /api/bookings — Home Collection fare', () => {
-  const activeRateRow = {
-    rate_id: 3, rate_per_km: '15.00', base_fare: '49.00',
-    included_distance_km: '3.00', max_service_distance_km: null,
-    effective_from: '2026-01-01', notes: 'test rate',
-  };
-  const branchCoordsRow = { latitude: '13.0827', longitude: '80.2707' }; // Chennai
-  // ~8km north of the branch coords above — chosen so Scenario B's example
-  // (8km, ₹124) is realistic without hand-tuning haversine inputs precisely;
-  // the exact distance isn't asserted here (fareCalculator.test.js does
-  // that), only that a fare was computed and folded into totalAmount.
+describe('POST /api/bookings — Home Collection service charge collected on the spot', () => {
+  // No service charge at booking any more: it is worked out when a technician
+  // accepts and added to the bill when they arrive (services/serviceCharge.js,
+  // tests/services/serviceCharge.test.js). The booking total is the tests only.
   const pickupCoords = { collectionLatitude: 13.155, collectionLongitude: 80.2707 };
 
-  test('a pay-later Home Collection booking gets a server-computed fare folded into totalAmount', async () => {
-    primeAuthCheck(db, token);
+  // conn.execute answered by SQL text, so the order of queries doesn't matter.
+  function wireConn(bookingId) {
     const conn = createMockConnection();
+    conn.execute.mockImplementation(async (sql) => {
+      if (/SELECT patient_id_ref, client_id FROM ip_patients/.test(sql)) return [[{ patient_id_ref: null }]];
+      if (/^\s*INSERT INTO ip_bookings/.test(sql)) return [{ insertId: bookingId }];
+      if (/FROM ip_products WHERE product_id = \?/.test(sql)) return [[{ product_id: 7, product_name: 'CBC', document_required: 0 }]];
+      if (/^\s*INSERT/.test(sql)) return [{ insertId: 1 }];
+      return [{}];
+    });
     db.getConnection.mockResolvedValue(conn);
-    conn.execute
-      .mockResolvedValueOnce([[branchCoordsRow]])                        // 1. fareCalculator: branch coords
-      .mockResolvedValueOnce([[activeRateRow]])                          // 2. fareCalculator: active rate
-      .mockResolvedValueOnce([[{ patient_id_ref: null }]])               // 3. patient_id_ref lookup
-      .mockResolvedValueOnce([{ insertId: 950 }])                        // 4. INSERT ip_bookings
-      .mockResolvedValueOnce([{}])                                       // 5. UPDATE booking_ref
-      .mockResolvedValueOnce([{}])                                       // 6. INSERT ip_patient_bookings
-      .mockResolvedValueOnce([[{ product_id: 7, product_name: 'CBC', document_required: 0 }]]) // 7. item lookup
-      .mockResolvedValueOnce([{ insertId: 1 }])                          // 8. INSERT ip_booking_items
-      .mockResolvedValueOnce([{}]);                                      // 9. INSERT ip_payment_transactions
+    return conn;
+  }
+  const bookingInsert = (conn) => conn.execute.mock.calls.find(c => /^\s*INSERT INTO ip_bookings/.test(c[0]))[1];
+  const markedPending = (conn) => conn.execute.mock.calls.filter(c => /SET service_charge_status = 'pending'/.test(c[0]));
+
+  test('a pay-later booking: total is the tests only, no fare, service charge pending', async () => {
+    primeAuthCheck(db, token);
+    const conn = wireConn(950);
 
     const res = await request(app).post('/api/bookings')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        patientId: 501, branchId: 3, paymentType: 'pay_later',
-        totalAmount: 500, // client's own (untrusted) figure — server recomputes it
+        patientId: 501, branchId: 3, paymentType: 'pay_later', totalAmount: 575,
         ...pickupCoords,
         items: [{ packageId: 7, originalPrice: 500, finalPrice: 500 }],
       });
 
     expect(res.status).toBe(201);
-    expect(res.body.success).toBe(true);
-    // totalAmount stored on the booking row must be itemsTotal(500) +
-    // server-computed fare, NOT the client's own totalAmount(500 — which
-    // would coincidentally equal itemsTotal alone, proving nothing) — the
-    // 4th conn.execute call is the ip_bookings INSERT.
-    const insertBookingParams = conn.execute.mock.calls[3][1];
-    expect(insertBookingParams[8]).toBeGreaterThan(500); // total_amount column
-    // home_collection_fare / home_collection_distance_km / km_rate_id are
-    // columns 19, 20, 21 in the INSERT's value array (0-indexed) — see
-    // bookingController.js's own column-list comment for the exact order.
-    expect(insertBookingParams[19]).toBeGreaterThan(0);  // home_collection_fare
-    expect(insertBookingParams[20]).toBeGreaterThan(0);  // home_collection_distance_km
-    expect(insertBookingParams[21]).toBe(3);             // km_rate_id
+    const params = bookingInsert(conn);
+    expect(params[8]).toBe(500);    // total_amount = tests only
+    expect(params[20]).toBeNull();  // home_collection_fare
+    expect(params[21]).toBeNull();  // home_collection_distance_km
+    expect(params[22]).toBeNull();  // service_charge_product_id
+    expect(markedPending(conn).map(c => c[1])).toEqual([[950]]);
+    // No fare lookup at booking.
+    expect(conn.execute.mock.calls.some(c => /from_km|FROM ip_branches/.test(c[0]))).toBe(false);
   });
 
   test('a Home Collection booking with no pickup coordinates is rejected before touching the database', async () => {
@@ -257,69 +249,39 @@ describe('POST /api/bookings — Home Collection fare', () => {
     expect(db.getConnection).not.toHaveBeenCalled();
   });
 
-  test('a branch with no coordinates on file is reported, not silently priced at 0 or via technician location', async () => {
+  test('a paid-in-full booking pays the tests only — the service charge is collected on the spot', async () => {
     primeAuthCheck(db, token);
-    const conn = createMockConnection();
-    db.getConnection.mockResolvedValue(conn);
-    conn.execute.mockResolvedValueOnce([[]]); // fareCalculator: branch coords lookup finds nothing
-
-    const res = await request(app).post('/api/bookings')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ patientId: 501, branchId: 3, totalAmount: 500, ...pickupCoords, items: [] });
-
-    expect(res.status).toBe(422);
-    expect(res.body.code).toBe('BRANCH_LOCATION_UNAVAILABLE');
-    expect(conn.rollback).toHaveBeenCalled();
-  });
-
-  test('no active fare configuration is a clear 503, never a guessed rate', async () => {
-    primeAuthCheck(db, token);
-    const conn = createMockConnection();
-    db.getConnection.mockResolvedValue(conn);
-    conn.execute
-      .mockResolvedValueOnce([[branchCoordsRow]]) // branch coords found
-      .mockResolvedValueOnce([[]]);               // no active ip_km_rates row
-
-    const res = await request(app).post('/api/bookings')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ patientId: 501, branchId: 3, totalAmount: 500, ...pickupCoords, items: [] });
-
-    expect(res.status).toBe(503);
-    expect(res.body.code).toBe('RATE_NOT_FOUND');
-  });
-
-  // The total is always the server's own figure. A payment that doesn't match
-  // it is refused by the Razorpay check (bookings.paymentChecks.test.js), and
-  // nothing is captured until the booking is saved.
-  test('a paid-in-full booking stores the server-computed total, not the one the app sent', async () => {
-    primeAuthCheck(db, token);
-    const conn = createMockConnection();
-    db.getConnection.mockResolvedValue(conn);
-    conn.execute
-      .mockResolvedValueOnce([[branchCoordsRow]])
-      .mockResolvedValueOnce([[activeRateRow]])
-      .mockResolvedValueOnce([[{ patient_id_ref: null }]])
-      .mockResolvedValueOnce([{ insertId: 951 }])
-      .mockResolvedValueOnce([{}])
-      .mockResolvedValueOnce([{}])
-      .mockResolvedValueOnce([[{ product_id: 7, product_name: 'CBC', document_required: 0 }]])
-      .mockResolvedValueOnce([{ insertId: 1 }])
-      .mockResolvedValueOnce([{}])
-      .mockResolvedValueOnce([{}]); // auto-confirm UPDATE (same-day + paid)
+    const conn = wireConn(951);
 
     const res = await request(app).post('/api/bookings')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        patientId: 501, branchId: 3, paymentType: 'full',
-        razorpayPaymentId: 'pay_test999',
+        patientId: 501, branchId: 3, paymentType: 'full', razorpayPaymentId: 'pay_test999',
         totalAmount: 1, // the app's own figure, ignored
         ...pickupCoords,
         items: [{ packageId: 7, originalPrice: 500, finalPrice: 500 }],
       });
 
     expect(res.status).toBe(201);
-    const insertBookingParams = conn.execute.mock.calls[3][1];
-    expect(insertBookingParams[8]).toBe(500 + insertBookingParams[19]); // total_amount = items + fare
-    expect(insertBookingParams[19]).toBeGreaterThan(0);                 // home_collection_fare
+    const params = bookingInsert(conn);
+    expect(params[8]).toBe(500);   // total_amount
+    expect(params[10]).toBe(500);  // amount_paid
+    expect(params[11]).toBe(0);    // amount_due
+    expect(markedPending(conn)).toHaveLength(1);
+  });
+
+  test('a Lab Visit is not marked for a service charge', async () => {
+    primeAuthCheck(db, token);
+    const conn = wireConn(952);
+
+    const res = await request(app).post('/api/bookings')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        patientId: 501, branchId: 3, bookingType: 'lab_visit', paymentType: 'pay_later', totalAmount: 500,
+        items: [{ packageId: 7, originalPrice: 500, finalPrice: 500 }],
+      });
+
+    expect(res.status).toBe(201);
+    expect(markedPending(conn)).toHaveLength(0);
   });
 });

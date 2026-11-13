@@ -65,10 +65,14 @@ function member(patientId, price = 300) {
 // INSERT ip_patient_bookings, item-lookup, INSERT ip_booking_items,
 // INSERT ip_payment_transactions, doc-required lookup — in that exact real
 // order.
-function queueMemberCalls(conn, bookingId) {
+// firstMember: the visit's first member also gets the service charge marked
+// pending (collected on the spot) right after its insert.
+function queueMemberCalls(conn, bookingId, firstMember = false) {
   conn.execute
     .mockResolvedValueOnce([[{ patient_id_ref: null }]])
-    .mockResolvedValueOnce([{ insertId: bookingId }])
+    .mockResolvedValueOnce([{ insertId: bookingId }]);
+  if (firstMember) conn.execute.mockResolvedValueOnce([{}]); // service_charge_status = 'pending'
+  conn.execute
     .mockResolvedValueOnce([{}]) // UPDATE booking_ref
     .mockResolvedValueOnce([{}])
     .mockResolvedValueOnce([[{ product_id: 7, product_name: 'CBC' }]])
@@ -128,19 +132,19 @@ describe('POST /api/bookings/family', () => {
     primeAuthCheck(db, token);
     const conn = createMockConnection();
     db.getConnection.mockResolvedValue(conn);
-    queueMemberCalls(conn, 900);
+    queueMemberCalls(conn, 900, true);
     queueMemberCalls(conn, 901);
 
     const res = await request(app).post('/api/bookings/family')
       .set('Authorization', `Bearer ${token}`)
-      .send({ members: [member(501), member(502)], paymentType: 'pay_later' });
+      .send({ members: [member(501), member(502)], paymentType: 'pay_later', collectionLatitude: 13.05, collectionLongitude: 80.25 });
 
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
     expect(res.body.bookings).toHaveLength(2);
     expect(res.body.bookings.map(b => b.bookingId)).toEqual([900, 901]);
     expect(conn.commit).toHaveBeenCalled();
-    expect(conn.execute).toHaveBeenCalledTimes(16); // 8 per member × 2 members
+    expect(conn.execute).toHaveBeenCalledTimes(17); // 8 per member × 2 members (+1: first member's service charge marked pending)
     // visit_group_id is now derived from the FIRST member's own real
     // booking_id (guaranteed unique by the database) instead of Date.now()
     // — see bookingController.js's own comment on why (LT-011 fix). The
@@ -153,14 +157,16 @@ describe('POST /api/bookings/family', () => {
     // visit_group_id, created_by — so visit_group_id is 2nd-from-last.)
     const firstMemberInsertVisitGroupId = conn.execute.mock.calls[1][1].at(-2);
     expect(firstMemberInsertVisitGroupId).toBeNull();
-    const firstMemberUpdateParams = conn.execute.mock.calls[2][1];
+    // calls[2] is the first member's service charge marked pending.
+    expect(conn.execute.mock.calls[2][1]).toEqual([900]);
+    const firstMemberUpdateParams = conn.execute.mock.calls[3][1];
     // booking_ref = booking_id + ip_settings 'booking_ref_offset' (see
     // change_booking_ref_to_sequential.sql) — this file's blanket
     // settings.get mock (top of file) returns '4' for every key including
     // this one, so bookingRef = 900 + 4 = '904'. visit_group_id is
     // unaffected — it intentionally keeps its VG-XXXXXX format.
     expect(firstMemberUpdateParams).toEqual(['904', 'VG-000900', 900]);
-    const secondMemberInsertVisitGroupId = conn.execute.mock.calls[9][1].at(-2);
+    const secondMemberInsertVisitGroupId = conn.execute.mock.calls[10][1].at(-2);
     expect(secondMemberInsertVisitGroupId).toBe('VG-000900');
     // Unpaid — no immediate Jayamala sync for either sibling.
     expect(clientSync.syncBookingToClient).not.toHaveBeenCalled();
@@ -179,6 +185,7 @@ describe('POST /api/bookings/family', () => {
     conn.execute
       .mockResolvedValueOnce([[{ patient_id_ref: null }]])
       .mockResolvedValueOnce([{ insertId: 900 }])
+      .mockResolvedValueOnce([{}])   // service_charge_status = 'pending' (first member)
       .mockResolvedValueOnce([{}])   // UPDATE booking_ref
       .mockResolvedValueOnce([{}])
       .mockResolvedValueOnce([[{ product_id: 7, product_name: 'CBC' }]])
@@ -200,11 +207,11 @@ describe('POST /api/bookings/family', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         members: [member(501), member(502)],
-        paymentType: 'full', razorpayPaymentId: 'pay_fam123',
+        paymentType: 'full', razorpayPaymentId: 'pay_fam123', collectionLatitude: 13.05, collectionLongitude: 80.25,
       });
 
     expect(res.status).toBe(201);
-    expect(conn.execute).toHaveBeenCalledTimes(18); // 9 per member × 2 members
+    expect(conn.execute).toHaveBeenCalledTimes(19); // 9 per member × 2 members + the first member's pending mark
     expect(clientSync.syncBookingToClient).toHaveBeenCalledTimes(2);
     expect(clientSync.syncBookingToClient).toHaveBeenCalledWith(900, expect.objectContaining({ action: 'new_booking' }));
     expect(clientSync.syncBookingToClient).toHaveBeenCalledWith(901, expect.objectContaining({ action: 'new_booking' }));

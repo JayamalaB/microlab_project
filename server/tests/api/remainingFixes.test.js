@@ -126,7 +126,7 @@ describe('technician Razorpay collection', () => {
   });
 });
 
-test('a family visit outside the service area is told why', async () => {
+test('a family Home Collection visit without a collection location is refused', async () => {
   primeAuthCheck(db, custToken);
   db.getConnection.mockResolvedValue(createMockConnection());
   const res = await request(bookings).post('/api/bookings/family')

@@ -1,4 +1,6 @@
 const db   = require('../config/db');
+const { describeTechnicians } = require('../services/technicianBranches');
+const { slotAtBranchSql, slotAtBranchParams } = require('../services/slotBranches');
 const fs   = require('fs');
 const path = require('path');
 
@@ -17,6 +19,26 @@ function writeLog(msg) {
   const line = `[${ist}] ${msg}\n`;
   process.stdout.write(line);
   fs.appendFileSync(LOG_FILE, line, 'utf8');
+}
+
+// One easy-to-read block per home-collection slot request: which technicians
+// count for the branch, and exactly which times the customer was shown.
+async function _logSlotSummary({ branchId, date, isToday, cutoffTime, techIds, rows }) {
+  const times = rows.map(r => `${r.label} (${Number(r.remaining)} left)`).join(', ');
+  const why = techIds.length === 0
+    ? 'no technician offers a slot at this branch on this date'
+    : rows.length === 0
+      ? 'these technicians have no free time left on this date'
+      : null;
+  writeLog([
+    '─────────── AVAILABLE SLOTS (Home Collection) ───────────',
+    `  Branch      : ${branchId}    Date: ${date}${isToday ? `  (today — times before ${cutoffTime.slice(0, 5)} hidden)` : ''}`,
+    `  Technicians : ${await describeTechnicians(techIds)}`,
+    '                (whose slots are offered at this branch — picked per slot when saving availability)',
+    `  Times shown : ${rows.length}${rows.length ? ` → ${times}` : ''}`,
+    ...(why ? [`  Why none    : ${why}`] : []),
+    '──────────────────────────────────────────────────────────',
+  ].join('\n'));
 }
 
 // ── GET /api/slots?branch_id=&date=&slot_type= ───────────────────────────────
@@ -42,6 +64,7 @@ exports.getSlots = async (req, res) => {
 
   try {
     let rows;
+    let techIds = null; // home collection: technicians whose slots are offered at the branch
 
     if (slot_type === 'home_collection') {
       writeLog(`[getSlots] querying ip_available_slots for home_collection date=${date} branch_id=${branch_id}`);
@@ -54,13 +77,16 @@ exports.getSlots = async (req, res) => {
       );
       writeLog(`[getSlots] ip_available_slots rows for date=${date}: ${JSON.stringify(avDebug)}`);
 
-      // Debug: what tech_slot_ids exist in ip_technician_slots for this branch?
+      // Slots offered at this branch: the technician picked it for the slot
+      // when saving availability (services/slotBranches.js).
       const [tsDebug] = await db.execute(
-        `SELECT tech_slot_id, branch_id, booked_count, max_bookings FROM ip_technician_slots
-         WHERE branch_id = ? AND slot_date = ?`,
-        [branch_id, date]
+        `SELECT ts.tech_slot_id, ts.technician_id, ts.branch_id, ts.booked_count, ts.max_bookings
+         FROM ip_technician_slots ts
+         WHERE ${slotAtBranchSql('ts')} AND ts.slot_date = ?`,
+        [...slotAtBranchParams(branch_id), date]
       );
-      writeLog(`[getSlots] ip_technician_slots rows for branch_id=${branch_id} date=${date}: ${JSON.stringify(tsDebug)}`);
+      techIds = [...new Set((tsDebug ?? []).map(r => Number(r.technician_id)))];
+      writeLog(`[getSlots] ip_technician_slots rows offered at branch_id=${branch_id} date=${date}: ${JSON.stringify(tsDebug)}`);
       [rows] = await db.execute(
         `SELECT
            MIN(av.available_slot_id)               AS time_slot_id,
@@ -73,13 +99,13 @@ exports.getSlots = async (req, res) => {
            ON ts.tech_slot_id = av.technician_slot_id
          WHERE av.slot_date    = ?
            AND av.booking_type = 'home_collection'
-           AND ts.branch_id    = ?
+           AND ${slotAtBranchSql('ts')}
            AND av.is_available = 1
            AND ts.booked_count < ts.max_bookings
            AND (? != ? OR av.slot_time > ?)
          GROUP BY av.slot_time
          ORDER BY av.slot_time`,
-        [date, branch_id, date, todayIST, cutoffTime]
+        [date, ...slotAtBranchParams(branch_id), date, todayIST, cutoffTime]
       );
     } else {
       if (!branch_id) {
@@ -113,6 +139,11 @@ exports.getSlots = async (req, res) => {
     }
 
     writeLog(`[getSlots] found ${rows.length} slot(s) — ${JSON.stringify(rows.map(r => ({ id: r.time_slot_id, label: r.label, remaining: r.remaining })))}`);
+    if (techIds) {
+      try {
+        await _logSlotSummary({ branchId: branch_id, date, isToday: date === todayIST, cutoffTime, techIds, rows });
+      } catch (_) {} // logging only — never affects the reply
+    }
 
     let fallback = null;
 

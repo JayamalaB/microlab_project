@@ -35,6 +35,24 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
 
   static const _durationOptions = [15, 30, 40];
 
+  // Branches this technician works at ({branchId, name, isDefault}), and per
+  // day the branches each selected slot is offered at. One slot can be offered
+  // at several branches — the first booking takes it for all of them. Only
+  // shown when the technician has more than one branch.
+  List<Map<String, dynamic>> _branches = [];
+  final Map<String, Map<int, List<int>>> _selectedBranches = {};
+  final Map<String, Map<int, List<int>>> _savedBranches    = {};
+
+  bool get _multiBranch => _branches.length > 1;
+
+  int? get _defaultBranchId {
+    if (_branches.isEmpty) return null;
+    final def = _branches.firstWhere((b) => b['isDefault'] == true, orElse: () => _branches.first);
+    return (def['branchId'] as num?)?.toInt();
+  }
+
+  List<int> get _defaultBranches => _defaultBranchId != null ? [_defaultBranchId!] : <int>[];
+
   bool _isSaving = false;
   Timer? _slotRefreshTimer;
 
@@ -80,6 +98,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
     for (final d in _days) {
       _selectedSlots[_key(d)]     = <int>{};
       _selectedDurations[_key(d)] = <int, int?>{};
+      _selectedBranches[_key(d)]  = <int, List<int>>{};
     }
     _loadSlots();
     _loadTodayAppointments();
@@ -126,6 +145,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
       final body      = jsonDecode(res.body) as Map<String, dynamic>;
       final masterRaw = body['masterSlots'] as List<dynamic>? ?? [];
       final techRaw   = body['techSlots']   as List<dynamic>? ?? [];
+      final branchRaw = body['branches']    as List<dynamic>? ?? [];
 
       // Deduplicate by slot_id — guards against duplicate rows in ip_slots table.
       final seenIds = <int>{};
@@ -137,6 +157,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
       // Pre-select slots and durations that match our 3 days
       final Map<String, Set<int>>       preSelected  = { for (final d in _days) _key(d): <int>{} };
       final Map<String, Map<int, int?>> preDurations = { for (final d in _days) _key(d): <int, int?>{} };
+      final Map<String, Map<int, List<int>>> preBranches = { for (final d in _days) _key(d): <int, List<int>>{} };
 
       for (final ts in techRaw) {
         final dateStr = (ts['slot_date'] as String).substring(0, 10);
@@ -146,6 +167,8 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
         if (avail == 1 && preSelected.containsKey(dateStr)) {
           preSelected[dateStr]!.add(slotId);
           preDurations[dateStr]![slotId] = dur;
+          preBranches[dateStr]![slotId] = (ts['branch_ids'] as List<dynamic>? ?? [])
+              .map((b) => (b as num).toInt()).toList();
         }
       }
 
@@ -165,16 +188,21 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
 
       setState(() {
         _masterSlots = master;
+        _branches    = branchRaw.map((b) => b as Map<String, dynamic>).toList();
         _selectedSlots.clear();
         _savedSlots.clear();
         _selectedDurations.clear();
         _savedDurations.clear();
+        _selectedBranches.clear();
+        _savedBranches.clear();
         for (final d in _days) {
           final k = _key(d);
           _selectedSlots[k]     = Set.from(preSelected[k]  ?? {});
           _savedSlots[k]        = Set.from(preSelected[k]  ?? {});
           _selectedDurations[k] = Map.from(preDurations[k] ?? {});
           _savedDurations[k]    = Map.from(preDurations[k] ?? {});
+          _selectedBranches[k]  = { for (final e in (preBranches[k] ?? {}).entries) e.key: List<int>.from(e.value) };
+          _savedBranches[k]     = { for (final e in (preBranches[k] ?? {}).entries) e.key: List<int>.from(e.value) };
         }
         _slotsLoading = false;
       });
@@ -274,6 +302,9 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
       final savDur = _savedDurations[k]    ?? {};
       for (final slotId in cur) {
         if (curDur[slotId] != savDur[slotId]) return true;
+        final curBr = {...(_selectedBranches[k]?[slotId] ?? const <int>[])};
+        final savBr = {...(_savedBranches[k]?[slotId] ?? const <int>[])};
+        if (curBr.length != savBr.length || !curBr.containsAll(savBr)) return true;
       }
     }
     return false;
@@ -292,20 +323,42 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
       if (s.contains(slotId)) {
         s.remove(slotId);
         _selectedDurations[k]?.remove(slotId);
+        _selectedBranches[k]?.remove(slotId);
       } else {
         s.add(slotId);
+        // Offered at the default branch until the technician picks others.
+        _selectedBranches[k]![slotId] = List<int>.from(_defaultBranches);
       }
     });
   }
 
-  void _selectAll(String k) => setState(() =>
-      _selectedSlots[k] = {
-        for (final s in _masterSlots)
-          if (!_isPast(k, s)) s['slot_id'] as int,
+  void _selectAll(String k) => setState(() {
+        _selectedSlots[k] = {
+          for (final s in _masterSlots)
+            if (!_isPast(k, s)) s['slot_id'] as int,
+        };
+        for (final slotId in _selectedSlots[k]!) {
+          _selectedBranches[k]!.putIfAbsent(slotId, () => List<int>.from(_defaultBranches));
+        }
       });
 
-  void _clearAll(String k) =>
-      setState(() { _selectedSlots[k] = {}; _selectedDurations[k] = {}; });
+  void _clearAll(String k) => setState(() {
+        _selectedSlots[k] = {};
+        _selectedDurations[k] = {};
+        _selectedBranches[k] = {};
+      });
+
+  // Ticks / unticks a branch for one slot on one day. The last branch can't
+  // be unticked — a slot is always offered somewhere.
+  void _toggleBranch(String k, int slotId, int branchId) {
+    final list = _selectedBranches[k]!.putIfAbsent(slotId, () => List<int>.from(_defaultBranches));
+    if (list.contains(branchId)) {
+      if (list.length == 1) return;
+      setState(() => list.remove(branchId));
+    } else {
+      setState(() => list.add(branchId));
+    }
+  }
 
   // Returns true when [slot] is past for today — its slot_end has been reached.
   // Always false for tomorrow and future dates.
@@ -321,7 +374,25 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
     return !now.isBefore(end); // now >= slot_end → locked
   }
 
+  // Every selected slot needs an appointment duration: without one the slot
+  // has no bookable times, so customers could never book it. Save stays
+  // disabled while this lists anything ("Today – 2:00–4:00 PM", …).
+  List<String> get _missingDurations {
+    final missing = <String>[];
+    for (final d in _days) {
+      final k = _key(d);
+      for (final slotId in (_selectedSlots[k] ?? <int>{})) {
+        if (_selectedDurations[k]?[slotId] != null) continue;
+        final slot = _masterSlots.firstWhere((s) => s['slot_id'] == slotId,
+            orElse: () => {'slot_label': 'Slot $slotId'});
+        missing.add('${_dayLabel(d)} – ${slot['slot_label']}');
+      }
+    }
+    return missing;
+  }
+
   Future<void> _save() async {
+    if (_missingDurations.isNotEmpty) return; // the button is disabled then too
     setState(() => _isSaving = true);
     try {
       final prefs  = await SharedPreferences.getInstance();
@@ -335,10 +406,18 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
           final dur = _selectedDurations[k]?[slotId];
           if (dur != null) durMap[slotId.toString()] = dur;
         }
+        // Branches per slot — only when there is a choice; otherwise the
+        // server uses the technician's own branch.
+        final branchMap = <String, List<int>>{
+          if (_multiBranch)
+            for (final slotId in (_selectedSlots[k] ?? {}))
+              slotId.toString(): _selectedBranches[k]?[slotId] ?? _defaultBranches,
+        };
         return {
           'date':     k,
           'slot_ids': (_selectedSlots[k] ?? {}).toList(),
           if (durMap.isNotEmpty) 'durations': durMap,
+          if (branchMap.isNotEmpty) 'branches': branchMap,
         };
       }).toList();
 
@@ -357,10 +436,14 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
         setState(() {
           _savedSlots.clear();
           _savedDurations.clear();
+          _savedBranches.clear();
           for (final d in _days) {
             final k = _key(d);
             _savedSlots[k]     = Set.from(_selectedSlots[k]     ?? {});
             _savedDurations[k] = Map.from(_selectedDurations[k] ?? {});
+            _savedBranches[k]  = {
+              for (final e in (_selectedBranches[k] ?? {}).entries) e.key: List<int>.from(e.value)
+            };
           }
         });
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -669,7 +752,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
           ),
           const SizedBox(height: 4),
           const Text(
-            'Set how long each appointment takes (optional)',
+            'Set how long each appointment takes — required for every selected slot',
             style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
           ),
           const SizedBox(height: 10),
@@ -678,14 +761,15 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
                 orElse: () => {'slot_label': 'Slot $slotId'});
             final label = slot['slot_label'] as String;
             final curDur = _selectedDurations[k]?[slotId];
+            final durationMissing = curDur == null;
 
             return Container(
               margin: const EdgeInsets.only(bottom: 8),
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: durationMissing ? const Color(0xFFFFF5F5) : Colors.white,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.divider),
+                border: Border.all(color: durationMissing ? const Color(0xFFD32F2F) : AppColors.divider),
               ),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text(label,
@@ -718,6 +802,47 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
                     )),
                   ],
                 ),
+                if (durationMissing) ...[
+                  const SizedBox(height: 6),
+                  const Text('Please choose a duration',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFD32F2F))),
+                ],
+                if (_multiBranch) ...[
+                  const SizedBox(height: 10),
+                  const Text('Offer this slot at',
+                      style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: _branches.map((b) {
+                      final branchId = (b['branchId'] as num).toInt();
+                      final on = (_selectedBranches[k]?[slotId] ?? _defaultBranches).contains(branchId);
+                      return GestureDetector(
+                        onTap: () => _toggleBranch(k, slotId, branchId),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 140),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: on ? AppColors.brandGreenSurface : const Color(0xFFF5F5F5),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: on ? AppColors.brandGreen : AppColors.divider),
+                          ),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(on ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
+                                size: 14, color: on ? AppColors.brandGreen : AppColors.textHint),
+                            const SizedBox(width: 4),
+                            Text(b['name'] as String? ?? 'Branch',
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: on ? AppColors.brandGreen : AppColors.textSecondary)),
+                          ]),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ],
               ]),
             );
           }),
@@ -780,6 +905,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
   Widget _buildSaveButton({required double bottomPadding}) {
     final hasChanges = _hasChanges;
     final total      = _totalSlots;
+    final missing    = _missingDurations;
     return Container(
       padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPadding),
       decoration: BoxDecoration(
@@ -790,11 +916,26 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
             blurRadius: 12,
             offset: const Offset(0, -4))],
       ),
-      child: SizedBox(
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        // Why Save is disabled: the selected slots still without a duration.
+        if (hasChanges && missing.isNotEmpty) ...[
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFFE65100)),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'Duration needed: ${missing.join(', ')}',
+                style: const TextStyle(fontSize: 11.5, color: Color(0xFFE65100), height: 1.35),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 8),
+        ],
+        SizedBox(
         width: double.infinity,
         height: 52,
         child: ElevatedButton(
-          onPressed: (!hasChanges || _isSaving) ? null : _save,
+          onPressed: (!hasChanges || _isSaving || missing.isNotEmpty) ? null : _save,
           style: ElevatedButton.styleFrom(
             backgroundColor: AppColors.brandGreen,
             disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
@@ -817,9 +958,11 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    hasChanges
-                        ? 'Save Availability  •  $total slot${total != 1 ? 's' : ''}'
-                        : 'All Changes Saved',
+                    !hasChanges
+                        ? 'All Changes Saved'
+                        : missing.isNotEmpty
+                            ? 'Choose a duration  •  ${missing.length} slot${missing.length != 1 ? 's' : ''}'
+                            : 'Save Availability  •  $total slot${total != 1 ? 's' : ''}',
                     style: const TextStyle(
                         color: Colors.white,
                         fontSize: 15,
@@ -827,7 +970,8 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
                   ),
                 ]),
         ),
-      ),
+        ),
+      ]),
     );
   }
 

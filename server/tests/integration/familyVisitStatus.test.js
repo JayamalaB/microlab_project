@@ -12,7 +12,7 @@ const bookingSocket = require('../../socket/bookingSocket');
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 20));
 const callsMatching = (re) => db.execute.mock.calls.filter(c => re.test(c[0]));
-const SIBLING_ASSIGN = /SET status = 'assigned', technician_id = \?, technician_name = \?, updated_at/;
+const SIBLING_ASSIGN = /SET status = 'assigned', technician_id = \?, technician_name = \?,\s+branch_id = COALESCE\(\?, branch_id\), updated_at = NOW\(\)\s+WHERE visit_group_id = \?/;
 
 beforeAll(() => { jest.spyOn(console, 'log').mockImplementation(() => {}); });
 beforeEach(() => {
@@ -37,7 +37,10 @@ describe('technician accepts a family visit', () => {
     await flush();
 
     const [[assign, params]] = callsMatching(SIBLING_ASSIGN);
-    expect(params).toEqual([17, 'Suresh', 'VG-000900', 900]);
+    // Branch: the main booking's serving branch (none here — no dispatch state,
+    // so COALESCE keeps each member's own).
+    expect(params).toEqual([17, 'Suresh', null, 'VG-000900', 900]);
+    expect(assign).toMatch(/branch_id = COALESCE\(\?, branch_id\)/);
     expect(assign).toMatch(/status != 'cancelled'/);
 
     const [, [job]]   = callsMatching(/INSERT INTO ip_technician_collection/);

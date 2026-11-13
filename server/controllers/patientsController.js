@@ -62,7 +62,7 @@ exports.getPatients = async (req, res) => {
                    patient_email=?, patient_dob=?, patient_age=?, patient_relation=?,
                    health_conditions=?, patient_photo=?, updated_by=?, updated_at=NOW()
                WHERE patient_id_ref=? AND client_id=?`,
-              [p.name, p.gender, p.location, p.address, p.email || null,
+              [(p.name || '').toUpperCase(), p.gender, p.location, p.address, p.email || null,
                dob, p.age || null, p.relation || null, p.health_condition || null, p.photo || null,
                createdBy, p.patient_id, client_id]
             );
@@ -73,7 +73,7 @@ exports.getPatients = async (req, res) => {
                   patient_city, patient_address, patient_email, patient_dob, patient_age,
                   patient_relation, health_conditions, patient_photo, created_by)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-              [p.patient_id, client_id, p.name, mobile, p.gender, p.location, p.address,
+              [p.patient_id, client_id, (p.name || '').toUpperCase(), mobile, p.gender, p.location, p.address,
                p.email || null, dob, p.age || null, p.relation || null,
                p.health_condition || null, p.photo || null, createdBy]
             );
@@ -147,7 +147,7 @@ exports.savePatient = async (req, res) => {
           patient_address, patient_email, patient_dob, patient_age, patient_relation,
           health_conditions, patient_photo, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [client_id, name, mobile, gender, location, address,
+      [client_id, name.toUpperCase(), mobile, gender, location, address,
        email || null, date_of_birth || null, age || null,
        relation || null, health_condition || null, photo_url || null, createdBy]
     );
@@ -196,7 +196,7 @@ exports.updatePatient = async (req, res) => {
            health_conditions=?, patient_photo=?, updated_by=?,
            created_by=COALESCE(NULLIF(created_by,''), ?), updated_at=NOW()`;
 
-    const fields = [name, mobile, gender, location, address,
+    const fields = [name.toUpperCase(), mobile, gender, location, address,
       email || null, date_of_birth || null, age || null,
       relation || null, health_condition || null, photo_url || null, updatedBy, updatedBy];
 

@@ -38,6 +38,7 @@ dependencies:
   flutter_local_notifications: ^17.2.2
   flutter_foreground_task: ^8.14.0
   connectivity_plus: ^6.0.5
+  package_info_plus: ^8.0.0
   device_info_plus: ^10.1.0
   open_filex: ^4.3.4
 
@@ -58,6 +59,7 @@ flutter:
     - assets/banners/banner3.png
     - assets/sounds/beeb_sound.mp3
     - assets/icon/app_icon.png
+    - assets/icon/microbes.png
     - assets/icon/MicroLab-Logo.jpeg
     - assets/icon/microbes-logo.png
     - assets/icon/49-years-badge.png
@@ -74,14 +76,14 @@ flutter_launcher_icons:
   # and OTP screens) so the home-screen icon's adaptive mask never clips the
   # logo — see tool/build_launcher_icon.py for how the padding is built.
   # Regenerate with: python tool/build_launcher_icon.py && dart run flutter_launcher_icons
-  image_path: "assets/icon/app_launcher_icon.png"
+  image_path: "assets/icon/microbes.png"
   # Without these, Android API 26+ launchers treat this as a legacy (non-
   # adaptive) icon and synthesize their own padded/framed version of it —
   # the source "outer rounded rectangle" border reported on a real device,
   # even though none of the generated files themselves contain one. Giving
   # Android explicit background/foreground layers stops it from guessing.
   adaptive_icon_background: "#437A41"
-  adaptive_icon_foreground: "assets/icon/app_launcher_icon.png"
+  adaptive_icon_foreground: "assets/icon/microbes.png"
   min_sdk_android: 21
   remove_alpha_ios: true
 

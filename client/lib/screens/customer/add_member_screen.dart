@@ -423,6 +423,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                 controller: _nameController,
                 hint: 'Enter full name',
                 icon: Icons.person_outline,
+                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
                 validator: (v) => (v == null || v.trim().isEmpty)
                     ? 'Name is required'
                     : null,
@@ -468,6 +469,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                 controller: _locationController,
                 hint: 'e.g. Chennai',
                 icon: Icons.location_city_outlined,
+                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
                 validator: (v) => (v == null || v.trim().isEmpty)
                     ? 'Location is required'
                     : null,
