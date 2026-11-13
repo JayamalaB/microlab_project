@@ -746,12 +746,10 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
               const SizedBox(height: 16),
 
-              // ── Row 1: Special Offers + Group (audience) chips ───
-              SizedBox(
-                height: 34,
-                child: ListView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  scrollDirection: Axis.horizontal,
+              // ── Filters: Special Offers + Group dropdown + Category dropdown ───
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
                   children: [
                     // Special Offers chip
                     GestureDetector(
@@ -761,8 +759,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                       },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
-                        margin: const EdgeInsets.only(right: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                         decoration: BoxDecoration(
                           color: _showOffersOnly ? const Color(0xFFE65100) : Colors.white,
                           borderRadius: BorderRadius.circular(20),
@@ -786,104 +783,137 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                         ),
                       ),
                     ),
-                    // Group chips: All / General / Men / Women / Kids
-                    ...['All', 'General', 'Men', 'Women', 'Kids'].map((g) {
-                      final selected = _selectedAudience == g;
-                      return GestureDetector(
-                        onTap: () {
-                          if (_selectedAudience == g) return;
-                          setState(() => _selectedAudience = g);
+                    const SizedBox(width: 8),
+                    // Group dropdown
+                    Expanded(
+                      child: PopupMenuButton<String>(
+                        onSelected: (v) {
+                          setState(() => _selectedAudience = v);
                           _loadTests();
                         },
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        itemBuilder: (_) => ['All', 'General', 'Men', 'Women', 'Kids']
+                            .map((g) => PopupMenuItem(
+                                  value: g,
+                                  height: 40,
+                                  child: Row(children: [
+                                    if (_selectedAudience == g)
+                                      const Icon(Icons.check_rounded, size: 14, color: AppColors.brandGreen),
+                                    if (_selectedAudience == g) const SizedBox(width: 6),
+                                    Text(g, style: TextStyle(
+                                        fontSize: 13,
+                                        color: _selectedAudience == g ? AppColors.brandGreen : AppColors.textPrimary,
+                                        fontWeight: _selectedAudience == g ? FontWeight.w600 : FontWeight.w400)),
+                                  ]),
+                                ))
+                            .toList(),
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 180),
-                          margin: const EdgeInsets.only(right: 8),
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                           decoration: BoxDecoration(
-                            color: selected ? AppColors.brandGreen : Colors.white,
+                            color: _selectedAudience != 'All' ? AppColors.brandGreen : Colors.white,
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(
-                              color: selected ? AppColors.brandGreen : AppColors.divider,
+                              color: _selectedAudience != 'All' ? AppColors.brandGreen : AppColors.divider,
                             ),
                           ),
-                          child: Text(g,
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                  color: selected ? Colors.white : AppColors.textSecondary)),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  _selectedAudience == 'All' ? 'Group' : _selectedAudience,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                      color: _selectedAudience != 'All' ? Colors.white : AppColors.textSecondary),
+                                ),
+                              ),
+                              Icon(Icons.keyboard_arrow_down_rounded,
+                                  size: 16,
+                                  color: _selectedAudience != 'All' ? Colors.white : AppColors.textSecondary),
+                            ],
+                          ),
                         ),
-                      );
-                    }),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    // Category dropdown
+                    Expanded(
+                      child: PopupMenuButton<int?>(
+                        onSelected: (v) {
+                          setState(() => _selectedPackageCategoryId = v);
+                          _loadTests();
+                        },
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        itemBuilder: (_) => [
+                          PopupMenuItem<int?>(
+                            value: null,
+                            height: 40,
+                            child: Row(children: [
+                              if (_selectedPackageCategoryId == null)
+                                const Icon(Icons.check_rounded, size: 14, color: AppColors.brandGreen),
+                              if (_selectedPackageCategoryId == null) const SizedBox(width: 6),
+                              Text('All', style: TextStyle(
+                                  fontSize: 13,
+                                  color: _selectedPackageCategoryId == null ? AppColors.brandGreen : AppColors.textPrimary,
+                                  fontWeight: _selectedPackageCategoryId == null ? FontWeight.w600 : FontWeight.w400)),
+                            ]),
+                          ),
+                          ..._packageCategories.map((cat) => PopupMenuItem<int?>(
+                                value: cat.id,
+                                height: 40,
+                                child: Row(children: [
+                                  if (_selectedPackageCategoryId == cat.id)
+                                    const Icon(Icons.check_rounded, size: 14, color: AppColors.brandGreen),
+                                  if (_selectedPackageCategoryId == cat.id) const SizedBox(width: 6),
+                                  Text(cat.name, style: TextStyle(
+                                      fontSize: 13,
+                                      color: _selectedPackageCategoryId == cat.id ? AppColors.brandGreen : AppColors.textPrimary,
+                                      fontWeight: _selectedPackageCategoryId == cat.id ? FontWeight.w600 : FontWeight.w400)),
+                                ]),
+                              )),
+                        ],
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                          decoration: BoxDecoration(
+                            color: _selectedPackageCategoryId != null ? AppColors.brandGreen : Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: _selectedPackageCategoryId != null ? AppColors.brandGreen : AppColors.divider,
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  _selectedPackageCategoryId == null
+                                      ? 'Category'
+                                      : (_packageCategories
+                                              .where((c) => c.id == _selectedPackageCategoryId)
+                                              .firstOrNull
+                                              ?.name ?? 'Category'),
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                      color: _selectedPackageCategoryId != null ? Colors.white : AppColors.textSecondary),
+                                ),
+                              ),
+                              Icon(Icons.keyboard_arrow_down_rounded,
+                                  size: 16,
+                                  color: _selectedPackageCategoryId != null ? Colors.white : AppColors.textSecondary),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),
-
-              const SizedBox(height: 8),
-
-              // ── Row 2: Package category chips ───
-              if (_packageCategories.isNotEmpty)
-                SizedBox(
-                  height: 34,
-                  child: ListView(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    scrollDirection: Axis.horizontal,
-                    children: [
-                      // All chip
-                      GestureDetector(
-                        onTap: () {
-                          if (_selectedPackageCategoryId == null) return;
-                          setState(() => _selectedPackageCategoryId = null);
-                          _loadTests();
-                        },
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          margin: const EdgeInsets.only(right: 8),
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: _selectedPackageCategoryId == null ? AppColors.brandGreen : Colors.white,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: _selectedPackageCategoryId == null ? AppColors.brandGreen : AppColors.divider,
-                            ),
-                          ),
-                          child: Text('All',
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                  color: _selectedPackageCategoryId == null ? Colors.white : AppColors.textSecondary)),
-                        ),
-                      ),
-                      // Category chips from ip_package_categories
-                      ..._packageCategories.map((cat) {
-                        final selected = _selectedPackageCategoryId == cat.id;
-                        return GestureDetector(
-                          onTap: () {
-                            if (_selectedPackageCategoryId == cat.id) return;
-                            setState(() => _selectedPackageCategoryId = cat.id);
-                            _loadTests();
-                          },
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 180),
-                            margin: const EdgeInsets.only(right: 8),
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                            decoration: BoxDecoration(
-                              color: selected ? AppColors.brandGreen : Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: selected ? AppColors.brandGreen : AppColors.divider,
-                              ),
-                            ),
-                            child: Text(cat.name,
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                    color: selected ? Colors.white : AppColors.textSecondary)),
-                          ),
-                        );
-                      }),
-                    ],
-                  ),
-                ),
 
               const SizedBox(height: 20),
 
