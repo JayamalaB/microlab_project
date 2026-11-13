@@ -87,7 +87,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   bool _loadingTests = false;
   String _searchQuery = '';
   int?   _selectedPackageCategoryId;  // null = All
-  String _selectedAudience = 'All';   // All / General / Men / Women / Kids
+  String _selectedAudience = 'General'; // General (= all) / Men / Women / Kids
   bool _showOffersOnly = false;
 
   final List<BranchModel> _branches = [];
@@ -148,7 +148,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       final page = await ApiService.getPackagesPage(
         search:             _searchQuery,
         packageCategoryId:  _selectedPackageCategoryId,
-        audience:           _selectedAudience == 'All' ? null : _selectedAudience.toLowerCase(),
+        audience:           _selectedAudience == 'General' ? null : _selectedAudience.toLowerCase(),
         offersOnly:         _showOffersOnly,
         limit:              _pageSize,
         mode:               _isLabTest ? 'lab' : 'home',
@@ -175,7 +175,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       final page = await ApiService.getPackagesPage(
         search:             _searchQuery,
         packageCategoryId:  _selectedPackageCategoryId,
-        audience:           _selectedAudience == 'All' ? null : _selectedAudience.toLowerCase(),
+        audience:           _selectedAudience == 'General' ? null : _selectedAudience.toLowerCase(),
         offersOnly:         _showOffersOnly,
         limit:              _pageSize,
         offset:             _allTests.length,
@@ -792,7 +792,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                           _loadTests();
                         },
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        itemBuilder: (_) => ['All', 'General', 'Men', 'Women', 'Kids']
+                        itemBuilder: (_) => ['General', 'Men', 'Women', 'Kids']
                             .map((g) => PopupMenuItem(
                                   value: g,
                                   height: 40,
@@ -811,10 +811,10 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                           duration: const Duration(milliseconds: 180),
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                           decoration: BoxDecoration(
-                            color: _selectedAudience != 'All' ? AppColors.brandGreen : Colors.white,
+                            color: _selectedAudience != 'General' ? AppColors.brandGreen : Colors.white,
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(
-                              color: _selectedAudience != 'All' ? AppColors.brandGreen : AppColors.divider,
+                              color: _selectedAudience != 'General' ? AppColors.brandGreen : AppColors.divider,
                             ),
                           ),
                           child: Row(
@@ -822,17 +822,17 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                             children: [
                               Flexible(
                                 child: Text(
-                                  _selectedAudience == 'All' ? 'Group' : _selectedAudience,
+                                  _selectedAudience == 'General' ? 'Group' : _selectedAudience,
                                   overflow: TextOverflow.ellipsis,
                                   style: TextStyle(
                                       fontSize: 12,
                                       fontWeight: FontWeight.w500,
-                                      color: _selectedAudience != 'All' ? Colors.white : AppColors.textSecondary),
+                                      color: _selectedAudience != 'General' ? Colors.white : AppColors.textSecondary),
                                 ),
                               ),
                               Icon(Icons.keyboard_arrow_down_rounded,
                                   size: 16,
-                                  color: _selectedAudience != 'All' ? Colors.white : AppColors.textSecondary),
+                                  color: _selectedAudience != 'General' ? Colors.white : AppColors.textSecondary),
                             ],
                           ),
                         ),
