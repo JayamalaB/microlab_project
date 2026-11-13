@@ -86,7 +86,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // ── Tests/Packages ────────────────────────────────────────
   bool _loadingTests = false;
   String _searchQuery = '';
-  String _selectedCategory = 'All';
+  int?   _selectedPackageCategoryId;  // null = All
+  String _selectedAudience = 'General'; // General (= all) / Men / Women / Kids
   bool _showOffersOnly = false;
 
   final List<BranchModel> _branches = [];
@@ -105,11 +106,9 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   // can't overwrite the results of the current one.
   int  _testsRequestId = 0;
   Timer? _searchDebounce;
-  List<String> _categoryNames = [];
+  List<({int id, String name})> _packageCategories = [];
 
   List<TestModel> get _filteredTests => _allTests;
-
-  List<String> get _categories => ['All', ..._categoryNames];
 
   @override
   void initState() {
@@ -147,11 +146,12 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     setState(() { _loadingTests = true; _loadingMoreTests = false; });
     try {
       final page = await ApiService.getPackagesPage(
-        search:     _searchQuery,
-        category:   _selectedCategory,
-        offersOnly: _showOffersOnly,
-        limit:      _pageSize,
-        mode:       _isLabTest ? 'lab' : 'home',
+        search:             _searchQuery,
+        packageCategoryId:  _selectedPackageCategoryId,
+        audience:           _selectedAudience == 'General' ? null : _selectedAudience.toLowerCase(),
+        offersOnly:         _showOffersOnly,
+        limit:              _pageSize,
+        mode:               _isLabTest ? 'lab' : 'home',
       );
       if (!mounted || requestId != _testsRequestId) return;
       setState(() {
@@ -173,12 +173,13 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     setState(() => _loadingMoreTests = true);
     try {
       final page = await ApiService.getPackagesPage(
-        search:     _searchQuery,
-        category:   _selectedCategory,
-        offersOnly: _showOffersOnly,
-        limit:      _pageSize,
-        offset:     _allTests.length,
-        mode:       _isLabTest ? 'lab' : 'home',
+        search:             _searchQuery,
+        packageCategoryId:  _selectedPackageCategoryId,
+        audience:           _selectedAudience == 'General' ? null : _selectedAudience.toLowerCase(),
+        offersOnly:         _showOffersOnly,
+        limit:              _pageSize,
+        offset:             _allTests.length,
+        mode:               _isLabTest ? 'lab' : 'home',
       );
       if (!mounted || requestId != _testsRequestId) return;
       setState(() {
@@ -196,8 +197,8 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
   Future<void> _loadCategories() async {
     try {
-      final names = await ApiService.getPackageCategories();
-      if (mounted) setState(() => _categoryNames = names);
+      final cats = await ApiService.getPackageCategories();
+      if (mounted) setState(() => _packageCategories = cats);
     } catch (e) {
       debugPrint('[Tests] categories failed: $e');
     }
@@ -745,14 +746,12 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
               const SizedBox(height: 16),
 
-              // ── Filters: Offers toggle + Category chips ───
-              SizedBox(
-                height: 34,
-                child: ListView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  scrollDirection: Axis.horizontal,
+              // ── Filters: Special Offers + Group dropdown + Category dropdown ───
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
                   children: [
-                    // Special Offers chip (always first)
+                    // Special Offers chip
                     GestureDetector(
                       onTap: () {
                         setState(() => _showOffersOnly = !_showOffersOnly);
@@ -760,8 +759,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                       },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
-                        margin: const EdgeInsets.only(right: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                         decoration: BoxDecoration(
                           color: _showOffersOnly ? const Color(0xFFE65100) : Colors.white,
                           borderRadius: BorderRadius.circular(20),
@@ -785,34 +783,135 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                         ),
                       ),
                     ),
-                    // Category chips
-                    ..._categories.map((cat) {
-                      final selected = _selectedCategory == cat;
-                      return GestureDetector(
-                        onTap: () {
-                          if (_selectedCategory == cat) return;
-                          setState(() => _selectedCategory = cat);
+                    const SizedBox(width: 8),
+                    // Group dropdown
+                    Expanded(
+                      child: PopupMenuButton<String>(
+                        onSelected: (v) {
+                          setState(() => _selectedAudience = v);
                           _loadTests();
                         },
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        itemBuilder: (_) => ['General', 'Men', 'Women', 'Kids']
+                            .map((g) => PopupMenuItem(
+                                  value: g,
+                                  height: 40,
+                                  child: Row(children: [
+                                    if (_selectedAudience == g)
+                                      const Icon(Icons.check_rounded, size: 14, color: AppColors.brandGreen),
+                                    if (_selectedAudience == g) const SizedBox(width: 6),
+                                    Text(g, style: TextStyle(
+                                        fontSize: 13,
+                                        color: _selectedAudience == g ? AppColors.brandGreen : AppColors.textPrimary,
+                                        fontWeight: _selectedAudience == g ? FontWeight.w600 : FontWeight.w400)),
+                                  ]),
+                                ))
+                            .toList(),
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 180),
-                          margin: const EdgeInsets.only(right: 8),
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                           decoration: BoxDecoration(
-                            color: selected ? AppColors.brandGreen : Colors.white,
+                            color: _selectedAudience != 'General' ? AppColors.brandGreen : Colors.white,
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(
-                              color: selected ? AppColors.brandGreen : AppColors.divider,
+                              color: _selectedAudience != 'General' ? AppColors.brandGreen : AppColors.divider,
                             ),
                           ),
-                          child: Text(cat,
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                  color: selected ? Colors.white : AppColors.textSecondary)),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  _selectedAudience == 'General' ? 'Group' : _selectedAudience,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                      color: _selectedAudience != 'General' ? Colors.white : AppColors.textSecondary),
+                                ),
+                              ),
+                              Icon(Icons.keyboard_arrow_down_rounded,
+                                  size: 16,
+                                  color: _selectedAudience != 'General' ? Colors.white : AppColors.textSecondary),
+                            ],
+                          ),
                         ),
-                      );
-                    }),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    // Category dropdown — uses 0 as sentinel for "All" because
+                    // PopupMenuButton<int?> never fires onSelected for null values.
+                    Expanded(
+                      child: PopupMenuButton<int>(
+                        onSelected: (v) {
+                          setState(() => _selectedPackageCategoryId = v == 0 ? null : v);
+                          _loadTests();
+                        },
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        itemBuilder: (_) => [
+                          PopupMenuItem<int>(
+                            value: 0,
+                            height: 40,
+                            child: Row(children: [
+                              if (_selectedPackageCategoryId == null)
+                                const Icon(Icons.check_rounded, size: 14, color: AppColors.brandGreen),
+                              if (_selectedPackageCategoryId == null) const SizedBox(width: 6),
+                              Text('All', style: TextStyle(
+                                  fontSize: 13,
+                                  color: _selectedPackageCategoryId == null ? AppColors.brandGreen : AppColors.textPrimary,
+                                  fontWeight: _selectedPackageCategoryId == null ? FontWeight.w600 : FontWeight.w400)),
+                            ]),
+                          ),
+                          ..._packageCategories.map((cat) => PopupMenuItem<int>(
+                                value: cat.id,
+                                height: 40,
+                                child: Row(children: [
+                                  if (_selectedPackageCategoryId == cat.id)
+                                    const Icon(Icons.check_rounded, size: 14, color: AppColors.brandGreen),
+                                  if (_selectedPackageCategoryId == cat.id) const SizedBox(width: 6),
+                                  Text(cat.name, style: TextStyle(
+                                      fontSize: 13,
+                                      color: _selectedPackageCategoryId == cat.id ? AppColors.brandGreen : AppColors.textPrimary,
+                                      fontWeight: _selectedPackageCategoryId == cat.id ? FontWeight.w600 : FontWeight.w400)),
+                                ]),
+                              )),
+                        ],
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                          decoration: BoxDecoration(
+                            color: _selectedPackageCategoryId != null ? AppColors.brandGreen : Colors.white,
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: _selectedPackageCategoryId != null ? AppColors.brandGreen : AppColors.divider,
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  _selectedPackageCategoryId == null
+                                      ? 'Category'
+                                      : (_packageCategories
+                                              .where((c) => c.id == _selectedPackageCategoryId)
+                                              .firstOrNull
+                                              ?.name ?? 'Category'),
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                      color: _selectedPackageCategoryId != null ? Colors.white : AppColors.textSecondary),
+                                ),
+                              ),
+                              Icon(Icons.keyboard_arrow_down_rounded,
+                                  size: 16,
+                                  color: _selectedPackageCategoryId != null ? Colors.white : AppColors.textSecondary),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),
