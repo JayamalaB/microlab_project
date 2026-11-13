@@ -1339,9 +1339,12 @@ class ApiService {
     }
   }
 
+  // noPaymentReason: required by the server when nothing has been paid toward
+  // the visit yet — saved like a partial-payment reason.
   static Future<Map<String, dynamic>?> verifyBookingOtp({
     required int bookingId,
     required String otp,
+    String? noPaymentReason,
   }) async {
     final token = await getToken();
     if (token == null) return null;
@@ -1349,7 +1352,11 @@ class ApiService {
       final res = await _client.post(
         Uri.parse('$baseUrl/api/technicians/booking-otp/verify'),
         headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
-        body: jsonEncode({'bookingId': bookingId, 'otp': otp}),
+        body: jsonEncode({
+          'bookingId': bookingId,
+          'otp': otp,
+          if (noPaymentReason != null && noPaymentReason.isNotEmpty) 'noPaymentReason': noPaymentReason,
+        }),
       ).timeout(const Duration(seconds: 15));
       return jsonDecode(res.body) as Map<String, dynamic>;
     } catch (e) {

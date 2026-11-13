@@ -140,6 +140,7 @@ describe('POST /api/technicians/booking-otp/verify', () => {
     primeAuthCheck(db, token);
     db.execute
       .mockResolvedValueOnce([[{ collection_otp: '1234', otp_attempts: 0, is_expired: 0 }]]) // OTP check
+      .mockResolvedValueOnce([[{ paid: '500.00', due: '0.00' }]]) // visit payment — paid, no reason needed
       .mockResolvedValueOnce([{}])                              // UPDATE ip_technician_collection → otp_verified
       .mockResolvedValueOnce([{}])                              // mirror UPDATE ip_patient_bookings
       .mockResolvedValueOnce([[{ visit_group_id: null }]]);     // no sibling group — cascade skipped
@@ -148,7 +149,7 @@ describe('POST /api/technicians/booking-otp/verify', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(db.execute).toHaveBeenCalledTimes(5); // auth check + the 4 above
+    expect(db.execute).toHaveBeenCalledTimes(6); // auth check + the 5 above
     expect(clientSync.syncVisitCompletionToClient).not.toHaveBeenCalled();
   });
 
@@ -159,6 +160,7 @@ describe('POST /api/technicians/booking-otp/verify', () => {
     primeAuthCheck(db, token);
     db.execute
       .mockResolvedValueOnce([[{ collection_otp: '1234', otp_attempts: 0, is_expired: 0 }]])
+      .mockResolvedValueOnce([[{ paid: '200.00', due: '300.00' }]]) // visit payment — part paid
       .mockResolvedValueOnce([{}])
       .mockResolvedValueOnce([{}])
       .mockResolvedValueOnce([[{ visit_group_id: 'VG123' }]])   // sibling group found
@@ -168,11 +170,11 @@ describe('POST /api/technicians/booking-otp/verify', () => {
     const res = await post('/api/technicians/booking-otp/verify', { bookingId: 900, otp: '1234' });
 
     expect(res.status).toBe(200);
-    // auth check + 6 controller calls
-    expect(db.execute).toHaveBeenCalledTimes(7);
-    expect(db.execute.mock.calls[5][0]).toMatch(/ip_technician_collection tc/);
-    expect(db.execute.mock.calls[5][1]).toEqual(['VG123', 900]);
-    expect(db.execute.mock.calls[6][0]).toMatch(/ip_patient_bookings pb/);
+    // auth check + 7 controller calls (incl. the visit payment check)
+    expect(db.execute).toHaveBeenCalledTimes(8);
+    expect(db.execute.mock.calls[6][0]).toMatch(/ip_technician_collection tc/);
+    expect(db.execute.mock.calls[6][1]).toEqual(['VG123', 900]);
+    expect(db.execute.mock.calls[7][0]).toMatch(/ip_patient_bookings pb/);
   });
 });
 
@@ -196,5 +198,64 @@ describe('POST /api/technicians/booking-otp/resend', () => {
 
     expect(res.status).toBe(200);
     expect(sms.sendBookingOtp).toHaveBeenCalled();
+  });
+});
+
+// OTP without any payment toward the visit: allowed only with a reason, which
+// is saved like a partial-payment reason (ip_bookings.partial_payment_reason).
+describe('POST /api/technicians/booking-otp/verify — nothing paid', () => {
+  const correctOtp = [[{ collection_otp: '1234', otp_attempts: 0, is_expired: 0 }]];
+  const nothingPaid = [[{ paid: '0.00', due: '500.00' }]];
+
+  test('nothing paid and no reason: refused, the OTP is not used up', async () => {
+    primeAuthCheck(db, token);
+    db.execute.mockResolvedValueOnce(correctOtp).mockResolvedValueOnce(nothingPaid);
+    const res = await post('/api/technicians/booking-otp/verify', { bookingId: 900, otp: '1234' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('NO_PAYMENT_REASON_REQUIRED');
+    expect(db.execute.mock.calls.some(c => /collection_status\s+= 'otp_verified'/.test(c[0]))).toBe(false);
+    expect(db.execute.mock.calls.some(c => /otp_attempts = otp_attempts \+ 1/.test(c[0]))).toBe(false);
+  });
+
+  test('a blank reason counts as none', async () => {
+    primeAuthCheck(db, token);
+    db.execute.mockResolvedValueOnce(correctOtp).mockResolvedValueOnce(nothingPaid);
+    const res = await post('/api/technicians/booking-otp/verify', { bookingId: 900, otp: '1234', noPaymentReason: '   ' });
+    expect(res.status).toBe(400);
+  });
+
+  test('nothing paid with a reason: verified, and the reason saved for the visit', async () => {
+    primeAuthCheck(db, token);
+    db.execute
+      .mockResolvedValueOnce(correctOtp)
+      .mockResolvedValueOnce(nothingPaid)
+      .mockResolvedValueOnce([{}])                           // otp_verified
+      .mockResolvedValueOnce([{}])                           // mirror
+      .mockResolvedValueOnce([[{ visit_group_id: null }]]);  // no family
+    const res = await post('/api/technicians/booking-otp/verify', {
+      bookingId: 900, otp: '1234', noPaymentReason: '  Customer will pay at report delivery  ',
+    });
+    expect(res.status).toBe(200);
+    const saved = db.execute.mock.calls.find(c => /SET b\.partial_payment_reason = \?/.test(c[0]));
+    expect(saved[1]).toEqual([900, 'Customer will pay at report delivery', 900]);
+  });
+
+  test('a wrong OTP is still just a wrong OTP, reason or not', async () => {
+    primeAuthCheck(db, token);
+    db.execute.mockResolvedValueOnce([[{ collection_otp: '1234', otp_attempts: 0, is_expired: 0 }]]).mockResolvedValueOnce([{}]);
+    const res = await post('/api/technicians/booking-otp/verify', { bookingId: 900, otp: '0000', noPaymentReason: 'x' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/Incorrect OTP/);
+  });
+
+  test('nothing due at all (₹0 visit): no reason needed', async () => {
+    primeAuthCheck(db, token);
+    db.execute
+      .mockResolvedValueOnce(correctOtp)
+      .mockResolvedValueOnce([[{ paid: '0.00', due: '0.00' }]])
+      .mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}])
+      .mockResolvedValueOnce([[{ visit_group_id: null }]]);
+    const res = await post('/api/technicians/booking-otp/verify', { bookingId: 900, otp: '1234' });
+    expect(res.status).toBe(200);
   });
 });

@@ -275,6 +275,10 @@ class _TechnicianBookingDetailScreenState
   final List<FocusNode> _otpFocusNodes =
       List.generate(4, (_) => FocusNode());
   bool _isVerifyingOtp  = false;
+  // Why nothing was paid, when the technician verifies the OTP without any
+  // payment toward the visit — sent with the OTP and saved by the server like
+  // a partial-payment reason.
+  String? _noPaymentReason;
   bool _isResendingOtp  = false;
   bool _otpError        = false;
   String _otpErrorText  = 'Invalid OTP. Please try again.';
@@ -1058,12 +1062,9 @@ void _advanceStatus() {
     return;
   }
 
-  // Final step: payment check, then confirm, then emit handed_to_lab
+  // Final step: confirm, then emit handed_to_lab. No payment check here —
+  // the OTP step before it already required a payment or a no-payment reason.
   if (next == 'Handed to Lab') {
-    if (!_visitPaymentStarted) {
-      _showCompleteSheet();
-      return;
-    }
     _showHandOverToLabDialog();
     return;
   }
@@ -1448,6 +1449,60 @@ void _resumeJourney() {
 }
  // ── OTP dialog ────────────────────────────────────────────
 
+  // Nothing paid toward the visit: asks why before the OTP (required, up to
+  // 255 characters). Returns the reason, or null if the technician backs out.
+  Future<String?> _askNoPaymentReason() async {
+    final ctrl = TextEditingController(text: _noPaymentReason ?? '');
+    String? error;
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => AlertDialog(
+          title: const Text('No payment collected'),
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Enter the reason for not collecting any payment, then verify the OTP.',
+                style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              maxLength: 255,
+              maxLines: 3,
+              minLines: 1,
+              textCapitalization: TextCapitalization.sentences,
+              onChanged: (_) { if (error != null) setDlg(() => error = null); },
+              decoration: InputDecoration(
+                labelText: 'Reason for no payment *',
+                hintText: 'e.g. Customer will pay at report delivery',
+                errorText: error,
+                border: const OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            ElevatedButton(
+              onPressed: () {
+                final text = ctrl.text.trim();
+                if (text.isEmpty) {
+                  setDlg(() => error = 'Please enter the reason');
+                  return;
+                }
+                Navigator.pop(ctx, text);
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: AppColors.brandGreen, foregroundColor: Colors.white),
+              child: const Text('Continue to OTP'),
+            ),
+          ],
+        ),
+      ),
+    );
+    // Disposed after the dialog's closing animation, which still reads it.
+    Future.delayed(const Duration(milliseconds: 400), ctrl.dispose);
+    return reason;
+  }
+
   Future<void> _showOtpDialog() async {
     for (final c in _otpControllers) { c.clear(); }
     setState(() { _otpError = false; _otpErrorText = 'Invalid OTP. Please try again.'; });
@@ -1640,7 +1695,12 @@ void _resumeJourney() {
     setDialogState(() {});
 
     final bookingId = int.tryParse(widget.booking.id) ?? 0;
-    final result = await ApiService.verifyBookingOtp(bookingId: bookingId, otp: otp);
+    final result = await ApiService.verifyBookingOtp(
+      bookingId: bookingId,
+      otp: otp,
+      // Nothing paid yet: the reason the technician gave (_askNoPaymentReason).
+      noPaymentReason: _visitPaymentStarted ? null : _noPaymentReason,
+    );
 
     if (!mounted) return;
 
@@ -2600,27 +2660,36 @@ void _resumeJourney() {
 
               const SizedBox(height: 12),
 
-              // Step 2: OTP
+              // Step 2: OTP — open even with nothing paid, but then the
+              // technician must give the reason first (_askNoPaymentReason).
               _CompleteStep(
                 number: '2',
                 title: 'Verify OTP',
-                subtitle: 'Ask customer for the OTP sent to their phone',
+                subtitle: _visitPaymentStarted
+                    ? 'Ask customer for the OTP sent to their phone'
+                    : 'No payment yet — you\'ll be asked for the reason, then the OTP',
                 done: _currentStatus == 'OTP Verified' || _isCompleted,
-                locked: !_visitPaymentStarted,
-                buttonLabel: (_currentStatus == 'OTP Verified' || _isCompleted) ? 'Verified ✓' : 'Verify OTP',
+                locked: false,
+                buttonLabel: (_currentStatus == 'OTP Verified' || _isCompleted)
+                    ? 'Verified ✓'
+                    : _visitPaymentStarted ? 'Verify OTP' : 'Verify OTP without payment',
                 buttonColor: AppColors.brandGreen,
-                onTap: (!_visitPaymentStarted || _currentStatus == 'OTP Verified' || _isCompleted)
+                onTap: (_currentStatus == 'OTP Verified' || _isCompleted)
                     ? null
-                    : () {
+                    : () async {
                         Navigator.pop(ctx);
+                        if (!_visitPaymentStarted) {
+                          final reason = await _askNoPaymentReason();
+                          if (reason == null || !mounted) return;
+                          _noPaymentReason = reason;
+                        }
                         _showOtpDialog();
                       },
               ),
 
               const SizedBox(height: 20),
 
-              // Only while nothing has been paid toward the visit — once any
-              // payment (even partial) is recorded, Verify OTP is open.
+              // Only while nothing has been paid toward the visit.
               if (!_visitPaymentStarted)
                 Container(
                   padding: const EdgeInsets.all(12),
@@ -2633,7 +2702,7 @@ void _resumeJourney() {
                     Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFE65100)),
                     SizedBox(width: 8),
                     Expanded(child: Text(
-                      'Collect a payment first (part payment is fine), then verify OTP to finish the booking.',
+                      'Collect a payment (part payment is fine) — or verify the OTP without payment by entering the reason.',
                       style: TextStyle(fontSize: 12, color: Color(0xFF795548), height: 1.4),
                     )),
                   ]),

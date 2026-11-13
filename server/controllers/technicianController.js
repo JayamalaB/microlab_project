@@ -1979,7 +1979,7 @@ exports.generateBookingOtp = async (req, res) => {
 // On success: sets collection_status = 'otp_verified', clears OTP fields.
 exports.verifyBookingOtp = async (req, res) => {
   const technicianId      = req.user.id;
-  const { bookingId, otp } = req.body;
+  const { bookingId, otp, noPaymentReason } = req.body;
 
   if (!bookingId || !otp) {
     return res.status(400).json({ success: false, message: 'bookingId and otp are required' });
@@ -2026,6 +2026,29 @@ exports.verifyBookingOtp = async (req, res) => {
           ? `Incorrect OTP. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
           : 'Too many failed attempts. Please resend OTP.',
         attemptsExhausted: remaining <= 0,
+      });
+    }
+
+    // Nothing paid toward the visit yet (and something is due): the OTP may
+    // still be verified, but only with a reason — saved like a partial-payment
+    // reason (ip_bookings.partial_payment_reason, sent to the ASMX at Handed
+    // to Lab). Checked before the OTP is used up, so the technician can add
+    // the reason and try again with the same OTP.
+    const reasonText = String(noPaymentReason ?? '').trim().slice(0, 255);
+    const [[visitPay]] = await db.execute(
+      `SELECT COALESCE(SUM(b.amount_paid), 0) AS paid, COALESCE(SUM(b.amount_due), 0) AS due
+       FROM ip_bookings b
+       JOIN ip_bookings p ON p.booking_id = ?
+       WHERE b.deleted_at IS NULL AND b.status != 'cancelled'
+         AND (b.booking_id = p.booking_id
+              OR (p.visit_group_id IS NOT NULL AND b.visit_group_id = p.visit_group_id))`,
+      [bookingId]
+    );
+    const nothingPaid = Number(visitPay?.paid ?? 0) <= 0 && Number(visitPay?.due ?? 0) > 0;
+    if (nothingPaid && !reasonText) {
+      return res.status(400).json({
+        success: false, code: 'NO_PAYMENT_REASON_REQUIRED',
+        message: 'No payment has been collected. Please enter the reason to verify the OTP.',
       });
     }
 
@@ -2085,6 +2108,15 @@ exports.verifyBookingOtp = async (req, res) => {
     // it is sent at the Handed to Lab step instead, together with the
     // handover branch and received-by name (socket/bookingSocket.js,
     // 'handed_to_lab' → syncVisitCompletionToClient).
+
+    if (nothingPaid) {
+      try {
+        await savePartialReason(bookingId, reasonText);
+        tlog(`[OTP_WITHOUT_PAYMENT] technician_id=${technicianId} booking_id=${bookingId} reason="${reasonText}"`);
+      } catch (reasonErr) {
+        console.error(`⚠️  verifyBookingOtp — no-payment reason not saved booking_id=${bookingId}: ${reasonErr.message}`);
+      }
+    }
 
     console.log(`✅ verifyBookingOtp — booking_id=${bookingId} OTP verified by technician_id=${technicianId}`);
     res.json({ success: true });
