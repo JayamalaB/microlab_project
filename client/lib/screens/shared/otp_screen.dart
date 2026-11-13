@@ -323,31 +323,6 @@ class _OtpScreenState extends State<OtpScreen> {
 
                 const SizedBox(height: 28),
 
-                // Logo
-                Row(
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: Image.asset(
-                        'assets/icon/app_icon.png',
-                        width: 36,
-                        height: 36,
-                        fit: BoxFit.contain,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    const Text(
-                      'MicroLab',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 32),
 
                 const Text(
                   'Verify OTP',
