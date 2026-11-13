@@ -1305,6 +1305,38 @@ class ApiService {
     return null;
   }
 
+  // Removes one family member (their own booking) from the visit. Returns
+  // {success, message}; on refusal message says why (samples collected,
+  // already paid, main patient) and is shown as-is.
+  static Future<Map<String, dynamic>> removeVisitMember({
+    required int bookingId,
+    String? reason,
+  }) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await _client.post(
+        Uri.parse('$baseUrl/api/technicians/remove-visit-member'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'bookingId': bookingId,
+          if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+        }),
+      ).timeout(const Duration(seconds: 20));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] != true) {
+        debugPrint('[removeVisitMember] failed: ${body['message']}');
+      }
+      return body;
+    } catch (e) {
+      debugPrint('[removeVisitMember] ERROR: $e');
+      return {'success': false, 'message': 'Could not remove the member. Please try again.'};
+    }
+  }
+
   static Future<List<Map<String, dynamic>>> getBookingFamily(int bookingId) async {
     final token = await getToken();
     if (token == null) return [];
