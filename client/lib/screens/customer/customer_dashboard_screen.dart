@@ -839,17 +839,18 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    // Category dropdown
+                    // Category dropdown — uses 0 as sentinel for "All" because
+                    // PopupMenuButton<int?> never fires onSelected for null values.
                     Expanded(
-                      child: PopupMenuButton<int?>(
+                      child: PopupMenuButton<int>(
                         onSelected: (v) {
-                          setState(() => _selectedPackageCategoryId = v);
+                          setState(() => _selectedPackageCategoryId = v == 0 ? null : v);
                           _loadTests();
                         },
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         itemBuilder: (_) => [
-                          PopupMenuItem<int?>(
-                            value: null,
+                          PopupMenuItem<int>(
+                            value: 0,
                             height: 40,
                             child: Row(children: [
                               if (_selectedPackageCategoryId == null)
@@ -861,7 +862,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                                   fontWeight: _selectedPackageCategoryId == null ? FontWeight.w600 : FontWeight.w400)),
                             ]),
                           ),
-                          ..._packageCategories.map((cat) => PopupMenuItem<int?>(
+                          ..._packageCategories.map((cat) => PopupMenuItem<int>(
                                 value: cat.id,
                                 height: 40,
                                 child: Row(children: [
