@@ -73,14 +73,14 @@ describe('GET /api/tests — paged', () => {
     expect(db.execute.mock.calls[0][0]).toMatch(/LIMIT 20 OFFSET 0/);
   });
 
-  test('search matches name, category or description, with LIKE wildcards escaped', async () => {
+  test('search matches name, category, description, search name or keywords, with LIKE wildcards escaped', async () => {
     db.execute.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[{ total: 0 }]]);
 
     await request(app).get('/api/tests?limit=20&search=' + encodeURIComponent(' 100%_vit '));
 
     const [sql, params] = db.execute.mock.calls[0];
-    expect(sql).toMatch(/product_name LIKE \? OR product_category LIKE \? OR product_description LIKE \?/);
-    expect(params).toEqual(['%100\\%\\_vit%', '%100\\%\\_vit%', '%100\\%\\_vit%']);
+    expect(sql).toMatch(/product_name LIKE \? OR product_category LIKE \? OR product_description LIKE \? OR search_name LIKE \? OR search_keywords LIKE \?/);
+    expect(params).toEqual(Array(5).fill('%100\\%\\_vit%'));
     // The COUNT query uses the same filter and params.
     expect(db.execute.mock.calls[1][1]).toEqual(params);
   });
