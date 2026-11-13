@@ -49,11 +49,17 @@ function _likeEscape(s) {
 // member sheet and My Bookings' edit-tests screen still rely on that.
 exports.getCatalog = async (req, res) => {
   try {
-    const { type, search, category, offer } = req.query;
+    const { type, search, category, offer, mode } = req.query;
     const paged = req.query.limit !== undefined || req.query.offset !== undefined;
 
     let where    = 'WHERE product_active = 1 AND deleted_at IS NULL';
     const params = [];
+
+    if (mode === 'home') {
+      where += ' AND available_for_home = 1';
+    } else if (mode === 'lab') {
+      where += ' AND available_for_lab = 1';
+    }
 
     if (type) {
       where += ' AND product_type = ?';
@@ -62,8 +68,8 @@ exports.getCatalog = async (req, res) => {
     const term = typeof search === 'string' ? search.trim() : '';
     if (term) {
       const like = `%${_likeEscape(term)}%`;
-      where += ' AND (product_name LIKE ? OR product_category LIKE ? OR product_description LIKE ?)';
-      params.push(like, like, like);
+      where += ' AND (product_name LIKE ? OR product_category LIKE ? OR product_description LIKE ? OR search_name LIKE ? OR search_keywords LIKE ?)';
+      params.push(like, like, like, like, like);
     }
     if (category && category !== 'All') {
       // mapProduct shows a NULL category as 'General', so filter the same way.

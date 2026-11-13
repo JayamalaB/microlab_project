@@ -151,6 +151,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         category:   _selectedCategory,
         offersOnly: _showOffersOnly,
         limit:      _pageSize,
+        mode:       _isLabTest ? 'lab' : 'home',
       );
       if (!mounted || requestId != _testsRequestId) return;
       setState(() {
@@ -177,6 +178,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         offersOnly: _showOffersOnly,
         limit:      _pageSize,
         offset:     _allTests.length,
+        mode:       _isLabTest ? 'lab' : 'home',
       );
       if (!mounted || requestId != _testsRequestId) return;
       setState(() {
@@ -378,6 +380,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
             }
             if (m == prev) debugPrint('   ℹ️  mode unchanged — state preserved');
           });
+          if (m != prev) _loadTests();
         },
         // Lab Test only — patient manually picks a branch.
         onBranchChanged: (b) {

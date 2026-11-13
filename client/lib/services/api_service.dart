@@ -182,6 +182,7 @@ class ApiService {
     bool offersOnly = false,
     int limit = 20,
     int offset = 0,
+    String? mode, // 'home' or 'lab'
   }) async {
     final params = <String, String>{
       'limit':  '$limit',
@@ -189,6 +190,7 @@ class ApiService {
       if (search.trim().isNotEmpty) 'search': search.trim(),
       if (category != null && category != 'All') 'category': category,
       if (offersOnly) 'offer': 'yes',
+      if (mode != null) 'mode': mode,
     };
     final res = await http
         .get(Uri.parse('$baseUrl/api/tests').replace(queryParameters: params))

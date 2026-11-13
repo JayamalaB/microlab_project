@@ -1646,6 +1646,7 @@ exports.addVisitMember = async (req, res) => {
       const {
         patientId: existingPatientId,
         name, mobile, email, dob, age, gender, relation, healthNotes,
+        doctorName = null,
         tests = [],
       } = member;
 
@@ -1729,17 +1730,18 @@ exports.addVisitMember = async (req, res) => {
         `INSERT INTO ip_bookings
            (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
             booking_type, status, total_amount, discount_amount,
-            amount_paid, amount_due, source_channel, notes,
+            amount_paid, amount_due, source_channel, notes, doctor_name,
             collection_address, postal_code, city,
             collection_latitude, collection_longitude,
             patient_id, patient_id_ref, product_id,
             payment_status, visit_group_id, technician_id, technician_name,
             start_datetime, end_datetime, created_by, created_at)
          VALUES (NULL, ?, ?, ?, NULL, ?, 'home_collection', 'confirmed', ?, 0, 0, ?,
-                 'technician_app', NULL, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?,
+                 'technician_app', NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?,
                  NOW(), NOW(), ?, NOW())`,
         [parent.client_id, parent.branch_id || null, parent.booking_date,
          parent.available_slot_id || null, totalAmount, totalAmount,
+         doctorName || null,
          parent.collection_address, parent.postal_code, parent.city,
          parent.collection_latitude, parent.collection_longitude,
          patientId, patientIdRef,

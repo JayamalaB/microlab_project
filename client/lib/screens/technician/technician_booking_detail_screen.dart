@@ -333,7 +333,7 @@ class _TechnicianBookingDetailScreenState
         },
         ..._linkedPatients.map((p) => {
               'id':        (p['patient_id'] as num?)?.toInt(),
-              'name':      p['patient_name'] as String? ?? 'Family Member',
+              'name':      (p['patient_name'] as String? ?? 'Family Member').toUpperCase(),
               'isPrimary': false,
               'bookingId': (p['booking_id'] as num?)?.toInt(),
             }),
@@ -614,7 +614,7 @@ class _TechnicianBookingDetailScreenState
     if (bookingId == int.tryParse(widget.booking.id)) return widget.booking.customerName;
     final p = _linkedPatients.firstWhere(
         (p) => (p['booking_id'] as num?)?.toInt() == bookingId, orElse: () => const {});
-    return p['patient_name'] as String? ?? 'Visit Member';
+    return (p['patient_name'] as String? ?? 'Visit Member').toUpperCase();
   }
 
   // The service charge line(s) of the Billing Summary. Collected on the spot:
@@ -716,7 +716,7 @@ class _TechnicianBookingDetailScreenState
         _BillRow('${widget.booking.customerName} (Tests)', '₹${_inr(_testsTotal)}'),
         for (final m in members) ...[
           const SizedBox(height: 4),
-          _BillRow('${m['patient_name'] ?? 'Visit Member'} (Tests)',
+          _BillRow('${(m['patient_name'] as String? ?? 'Visit Member').toUpperCase()} (Tests)',
               '₹${_inr(amountOf(m['total_amount']) - amountOf(m['additional_charge_amount']))}'),
         ],
         ..._serviceChargeRows(),
@@ -5661,9 +5661,10 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   bool _isSearching = false;
   Map<String, dynamic>? _foundPatient;
   bool _searchedWithNoResult = false;
-  final _nameCtrl   = TextEditingController();
-  final _dobCtrl    = TextEditingController();
-  final _healthCtrl = TextEditingController();
+  final _nameCtrl           = TextEditingController();
+  final _dobCtrl            = TextEditingController();
+  final _healthCtrl         = TextEditingController();
+  final List<TextEditingController> _doctorNameCtrls = [];
   DateTime? _dob;
   int? _age;
   String? _gender;
@@ -5727,6 +5728,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     _nameCtrl.dispose();
     _dobCtrl.dispose();
     _healthCtrl.dispose();
+    for (final c in _doctorNameCtrls) { c.dispose(); }
     super.dispose();
   }
 
@@ -5842,14 +5844,14 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     String? dobStr;
 
     if (_mode == 'select') {
-      name      = (_selectedFamilyMember?['patient_name']   as String? ?? '').trim();
+      name      = (_selectedFamilyMember?['patient_name']   as String? ?? '').trim().toUpperCase();
       mobile    = (_selectedFamilyMember?['patient_mobile'] as String? ?? '').trim();
       patientId = (_selectedFamilyMember?['patient_id']     as num?)?.toInt();
       age       = (_selectedFamilyMember?['patient_age']    as num?)?.toInt();
       gender    = _selectedFamilyMember?['patient_gender']  as String?;
       relation  = _selectedFamilyMember?['patient_relation'] as String?;
     } else {
-      name      = _nameCtrl.text.trim();
+      name      = _nameCtrl.text.trim().toUpperCase();
       mobile    = _mobileCtrl.text.trim();
       patientId = (_foundPatient?['patient_id'] as num?)?.toInt();
       age       = _age;
@@ -5884,6 +5886,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         'tests': tests,
         'total': totalAmount,  // UI-only field, stripped before API call
       });
+      _doctorNameCtrls.add(TextEditingController());
       _step = 2;
     });
   }
@@ -5907,12 +5910,27 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
 
   Future<void> _submitAll() async {
     if (_queuedMembers.isEmpty) return;
+
+    // Validate doctor name — required for every member
+    for (int i = 0; i < _queuedMembers.length; i++) {
+      if (_doctorNameCtrls[i].text.trim().isEmpty) {
+        final name = _queuedMembers[i]['name'] as String? ?? 'member ${i + 1}';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Please enter a doctor name for $name'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ));
+        return;
+      }
+    }
+
     setState(() => _isSaving = true);
 
-    // Strip the UI-only 'total' field before sending to server
-    final apiMembers = _queuedMembers.map((m) {
-      final copy = Map<String, dynamic>.from(m);
+    // Strip UI-only 'total'; attach doctor name from per-member controllers
+    final apiMembers = _queuedMembers.asMap().entries.map((e) {
+      final copy = Map<String, dynamic>.from(e.value);
       copy.remove('total');
+      copy['doctorName'] = _doctorNameCtrls[e.key].text.trim();
       return copy;
     }).toList();
 
@@ -6581,48 +6599,84 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
           final color  = _avatarColor(name);
           final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
 
-          return Container(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.divider),
-            ),
-            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              CircleAvatar(
-                radius: 20,
-                backgroundColor: color.withValues(alpha: 0.15),
-                child: Text(initial,
-                    style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 15)),
-              ),
-              const SizedBox(width: 12),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [
-                  Expanded(child: Text(name,
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary))),
-                  Text('₹${_inr(total)}',
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
-                          color: AppColors.textPrimary)),
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                margin: const EdgeInsets.only(bottom: 6),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.divider),
+                ),
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  CircleAvatar(
+                    radius: 20,
+                    backgroundColor: color.withValues(alpha: 0.15),
+                    child: Text(initial,
+                        style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 15)),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      Expanded(child: Text(name,
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                              color: AppColors.textPrimary))),
+                      Text('₹${_inr(total)}',
+                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
+                              color: AppColors.textPrimary)),
+                    ]),
+                    if (mobile.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(mobile,
+                          style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                    ],
+                    const SizedBox(height: 6),
+                    Text('${tests.length} test${tests.length == 1 ? '' : 's'} selected',
+                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                  ])),
+                  GestureDetector(
+                    onTap: () => setState(() {
+                      _queuedMembers.removeAt(i);
+                      _doctorNameCtrls[i].dispose();
+                      _doctorNameCtrls.removeAt(i);
+                    }),
+                    child: const Padding(
+                      padding: EdgeInsets.only(left: 8),
+                      child: Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                    ),
+                  ),
                 ]),
-                if (mobile.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(mobile,
-                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                ],
-                const SizedBox(height: 6),
-                Text('${tests.length} test${tests.length == 1 ? '' : 's'} selected',
-                    style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-              ])),
-              GestureDetector(
-                onTap: () => setState(() => _queuedMembers.removeAt(i)),
-                child: const Padding(
-                  padding: EdgeInsets.only(left: 8),
-                  child: Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: TextField(
+                  controller: _doctorNameCtrls[i],
+                  maxLength: 150,
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z .]'))],
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    hintText: 'Doctor name for $name *',
+                    hintStyle: const TextStyle(fontSize: 12, color: AppColors.textHint),
+                    prefixIcon: const Icon(Icons.local_hospital_outlined, size: 16, color: AppColors.textHint),
+                    counterText: '',
+                    filled: true,
+                    fillColor: AppColors.background,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: AppColors.divider),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  ),
                 ),
               ),
-            ]),
+            ],
           );
         }),
 
