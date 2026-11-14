@@ -16,6 +16,7 @@ const FARE_LOG = path.join(__dirname, '..', 'logs', 'fare.log');
 function logFare(msg) {
   const ist = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
   const line = `[${ist}] ${msg}\n`;
+  process.stdout.write(line);
   try { fs.appendFileSync(FARE_LOG, line, 'utf8'); } catch (_) {}
 }
 
@@ -28,7 +29,10 @@ class FareCalculationError extends Error {
 }
 
 async function getBranchCoordinates(branchId, dbConn = pool) {
-  if (!branchId) return null;
+  if (!branchId) {
+    logFare(`GET_BRANCH_COORDS branchId=null → skipped`);
+    return null;
+  }
   const [[branch]] = await dbConn.execute(
     `SELECT branch_latitude AS latitude, branch_longitude AS longitude
      FROM ip_branches
@@ -37,6 +41,11 @@ async function getBranchCoordinates(branchId, dbConn = pool) {
      LIMIT 1`,
     [branchId]
   );
+  if (!branch) {
+    logFare(`GET_BRANCH_COORDS branchId=${branchId} → NOT FOUND (missing, deleted, or no coordinates)`);
+  } else {
+    logFare(`GET_BRANCH_COORDS branchId=${branchId} → lat=${branch.latitude} lng=${branch.longitude}`);
+  }
   return branch ?? null;
 }
 
@@ -49,12 +58,17 @@ function _isInsideIndia(lat, lng) {
 // Returns the ip_products row whose from_km ≤ doubledKm ≤ to_km, or null.
 async function _getProductForDistance(doubledKm, dbConn = pool) {
   const [[product]] = await dbConn.execute(
-    `SELECT product_id, product_name, test_code, product_price
+    `SELECT product_id, product_name, test_code, product_price, from_km, to_km
      FROM ip_products
      WHERE from_km <= ? AND to_km >= ? AND product_active = 1
      LIMIT 1`,
     [doubledKm, doubledKm]
   );
+  if (!product) {
+    logFare(`PRODUCT_LOOKUP doubledKm=${doubledKm} → NO MATCHING PRODUCT (check ip_products from_km/to_km ranges)`);
+  } else {
+    logFare(`PRODUCT_LOOKUP doubledKm=${doubledKm} → productId=${product.product_id} name="${product.product_name}" range=[${product.from_km}–${product.to_km}km] price=₹${product.product_price}`);
+  }
   return product ?? null;
 }
 
@@ -65,38 +79,41 @@ async function _getProductForDistance(doubledKm, dbConn = pool) {
 //   BRANCH_LOCATION_UNAVAILABLE — branch missing/soft-deleted/no coordinates
 //   PRODUCT_NOT_FOUND           — no active ip_products row covers the doubled km
 async function calculateHomeCollectionProduct({ branchId, pickupLat, pickupLng, dbConn = pool }) {
+  logFare(`─── FARE CALC START branchId=${branchId} pickup=${pickupLat},${pickupLng}`);
   const latNum = Number(pickupLat);
   const lngNum = Number(pickupLng);
   if (pickupLat == null || pickupLng == null || !Number.isFinite(latNum) || !Number.isFinite(lngNum)) {
+    logFare(`FARE CALC ERROR branchId=${branchId} → MISSING_COORDINATES (pickupLat=${pickupLat} pickupLng=${pickupLng})`);
     throw new FareCalculationError('MISSING_COORDINATES', 'Please set your collection location to see the Home Collection charge.');
   }
   if (!_isInsideIndia(latNum, lngNum)) {
-    logFare(`HOME_COLLECTION_FARE branchId=${branchId} pickup=${latNum},${lngNum} result=INVALID_COORDINATES`);
+    logFare(`FARE CALC ERROR branchId=${branchId} pickup=${latNum},${lngNum} → INVALID_COORDINATES (outside India bounds)`);
     throw new FareCalculationError('INVALID_COORDINATES', 'Your collection location looks incorrect. Please set your location again or enter your pincode.');
   }
 
   const branch = await getBranchCoordinates(branchId, dbConn);
   if (!branch) {
-    logFare(`HOME_COLLECTION_FARE branchId=${branchId} result=BRANCH_LOCATION_UNAVAILABLE (branch missing, deleted or has no coordinates)`);
+    logFare(`FARE CALC ERROR branchId=${branchId} → BRANCH_LOCATION_UNAVAILABLE`);
     throw new FareCalculationError('BRANCH_LOCATION_UNAVAILABLE', 'We can\'t calculate the Home Collection charge for this branch right now. Please try again later.');
   }
 
   const distanceKm = haversineKm(branch.latitude, branch.longitude, latNum, lngNum);
   const doubledKm  = Number((distanceKm * 2).toFixed(2));
+  logFare(`HAVERSINE branchId=${branchId} branch=(${branch.latitude},${branch.longitude}) pickup=(${latNum},${lngNum}) oneWayKm=${distanceKm.toFixed(2)} roundTripKm=${doubledKm}`);
 
   const product = await _getProductForDistance(doubledKm, dbConn);
   if (!product) {
-    logFare(`HOME_COLLECTION_FARE branchId=${branchId} pickup=${latNum},${lngNum} distanceKm=${distanceKm.toFixed(2)} doubledKm=${doubledKm} result=PRODUCT_NOT_FOUND`);
+    logFare(`FARE CALC ERROR branchId=${branchId} roundTripKm=${doubledKm} → PRODUCT_NOT_FOUND`);
     throw new FareCalculationError('PRODUCT_NOT_FOUND', 'Home Collection pricing isn\'t available for your location right now. Please try again later.');
   }
 
   const finalFare = Math.round(Number(product.product_price));
 
   logFare(
-    `HOME_COLLECTION_FARE branchId=${branchId} pickup=${latNum},${lngNum}` +
-    ` distanceKm=${distanceKm.toFixed(2)} doubledKm=${doubledKm}` +
+    `─── FARE CALC OK branchId=${branchId} pickup=(${latNum},${lngNum})` +
+    ` oneWayKm=${distanceKm.toFixed(2)} roundTripKm=${doubledKm}` +
     ` productId=${product.product_id} productName="${product.product_name}"` +
-    ` testCode=${product.test_code} finalFare=${finalFare}`
+    ` testCode=${product.test_code} finalFare=₹${finalFare}`
   );
 
   return {
@@ -137,12 +154,23 @@ async function serviceChargeForKm(oneWayKm, dbConn = pool) {
 // If branchId belongs to a sub-branch, return its parent main branch id.
 // Otherwise return branchId unchanged.
 async function resolveMainBranchId(branchId, dbConn = pool) {
-  if (!branchId) return branchId;
+  if (!branchId) {
+    logFare(`RESOLVE_BRANCH branchId=null → skipped`);
+    return branchId;
+  }
   const [[row]] = await dbConn.execute(
-    `SELECT is_main_branch, base_branch_id FROM ip_branches WHERE branch_id = ? AND deleted_at IS NULL LIMIT 1`,
+    `SELECT branch_name, is_main_branch, base_branch_id FROM ip_branches WHERE branch_id = ? AND deleted_at IS NULL LIMIT 1`,
     [branchId]
   );
-  if (!row || row.is_main_branch == 1 || !row.base_branch_id) return branchId;
+  if (!row) {
+    logFare(`RESOLVE_BRANCH branchId=${branchId} → NOT FOUND in ip_branches`);
+    return branchId;
+  }
+  if (row.is_main_branch == 1 || !row.base_branch_id) {
+    logFare(`RESOLVE_BRANCH branchId=${branchId} name="${row.branch_name}" is_main_branch=${row.is_main_branch} → already main, no change`);
+    return branchId;
+  }
+  logFare(`RESOLVE_BRANCH branchId=${branchId} name="${row.branch_name}" is_main_branch=${row.is_main_branch} base_branch_id=${row.base_branch_id} → resolved to mainBranchId=${row.base_branch_id}`);
   return row.base_branch_id;
 }
 
