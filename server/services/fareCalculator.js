@@ -134,9 +134,22 @@ async function serviceChargeForKm(oneWayKm, dbConn = pool) {
   };
 }
 
+// If branchId belongs to a sub-branch, return its parent main branch id.
+// Otherwise return branchId unchanged.
+async function resolveMainBranchId(branchId, dbConn = pool) {
+  if (!branchId) return branchId;
+  const [[row]] = await dbConn.execute(
+    `SELECT is_main_branch, base_branch_id FROM ip_branches WHERE branch_id = ? AND deleted_at IS NULL LIMIT 1`,
+    [branchId]
+  );
+  if (!row || row.is_main_branch == 1 || !row.base_branch_id) return branchId;
+  return row.base_branch_id;
+}
+
 module.exports = {
   calculateHomeCollectionProduct,
   serviceChargeForKm,
   getBranchCoordinates,
+  resolveMainBranchId,
   FareCalculationError,
 };

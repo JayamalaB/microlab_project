@@ -1,7 +1,7 @@
 ﻿const crypto = require('crypto');
 const db       = require('../config/db');
 const settings = require('../config/settings');
-const { calculateHomeCollectionProduct, FareCalculationError } = require('../services/fareCalculator');
+const { calculateHomeCollectionProduct, FareCalculationError, resolveMainBranchId } = require('../services/fareCalculator');
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { messaging } = require('../config/firebase');
@@ -150,14 +150,30 @@ exports.createBooking = async (req, res) => {
       return res.status(409).json({ success: false, message: prices.message });
     }
 
-    // No Home Collection service charge at booking — it is collected on the
-    // spot: worked out when a technician accepts (customer ↔ that branch, up
-    // and down) and added to the bill when they arrive (services/serviceCharge.js).
-    // The total and any pay-now payment are the tests only.
-    const homeCollectionFare = null;
+    // Calculate Home Collection service charge at booking time:
+    // resolve nearest branch → its main branch → distance round trip → ip_products lookup.
+    let homeCollectionFare = null;
+    if (bookingType === 'home_collection' && branchId) {
+      try {
+        const mainBranchId = await resolveMainBranchId(branchId, conn);
+        homeCollectionFare = await calculateHomeCollectionProduct({
+          branchId: mainBranchId,
+          pickupLat: collectionLatitude,
+          pickupLng: collectionLongitude,
+          dbConn: conn,
+        });
+        blog(`💰 [CREATE BOOKING] fare calculated: branchId=${branchId}→mainBranchId=${mainBranchId} distanceKm=${homeCollectionFare.distanceKm} fare=₹${homeCollectionFare.finalFare}`);
+      } catch (err) {
+        if (err instanceof FareCalculationError) {
+          blog(`⚠️  [CREATE BOOKING] fare calculation failed: ${err.code} — ${err.message}`);
+        } else {
+          throw err;
+        }
+      }
+    }
 
     const itemsTotal = items.reduce((sum, item) => sum + (Number(item.finalPrice) || 0), 0);
-    totalAmount = Number(itemsTotal.toFixed(2));
+    totalAmount = Number((itemsTotal + (homeCollectionFare?.finalFare ?? 0)).toFixed(2));
 
     // Pay-now: the customer authorised this payment before this request was
     // sent. It is only taken (captured) after the booking is saved, so if
@@ -242,9 +258,10 @@ exports.createBooking = async (req, res) => {
     const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
     await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
     blog(`✅ ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef} branch_id=${branchId ?? 'NULL'}`);
-    if (bookingType === 'home_collection') {
+    if (bookingType === 'home_collection' && !homeCollectionFare) {
+      // Fare calculation failed at booking time — fall back to on-the-spot collection.
       const sc = await serviceCharge.markPending(conn, bookingId);
-      blog(`💰 [CREATE BOOKING] service charge collected on the spot — ${sc.skipped ? `not marked: ${sc.skipped}` : 'pending until a technician accepts'}`);
+      blog(`💰 [CREATE BOOKING] fare unavailable at booking — ${sc.skipped ? `not marked: ${sc.skipped}` : 'pending until a technician accepts'}`);
     }
 
     // 2. Patient → booking link
@@ -417,7 +434,8 @@ exports.getHomeCollectionFareQuote = async (req, res) => {
   }
 
   try {
-    const result = await calculateHomeCollectionProduct({ branchId, pickupLat, pickupLng });
+    const mainBranchId = await resolveMainBranchId(branchId);
+    const result = await calculateHomeCollectionProduct({ branchId: mainBranchId, pickupLat, pickupLng });
     res.json({
       success: true,
       fare: {

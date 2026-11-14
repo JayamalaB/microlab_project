@@ -171,18 +171,41 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     TechnicianModel(id: 't4', name: 'Meena Devi', mobile: '9876500004', rating: 4.6, totalReviews: 76, experience: '3 years', specializations: ['Vitamins', 'Wellness', 'General'], available: false),
   ];
 
-  // ── Home Collection service charge ─────────────────────────────────────
-  // Not charged at booking: it is collected by the technician on the spot.
-  // The server works it out when a technician accepts (customer location ↔
-  // that technician's branch, up and down) and adds it to the bill when they
-  // arrive — the booking shows it from then on. Pay Now covers the tests only.
-
   bool get _isHomeCollection => widget.mode != 'Lab Test';
+
+  // ── Home Collection service charge ─────────────────────────────────────
+  double? _fareAmount;
+  bool    _fareLoading = false;
+  String? _fareError;
+
+  Future<void> _loadFare() async {
+    if (!_isHomeCollection) return;
+    final bId = widget.branchId;
+    final lat = _lat;
+    final lng = _lng;
+    if (bId == null || lat == null || lng == null) return;
+    setState(() { _fareLoading = true; _fareError = null; });
+    try {
+      final result = await ApiService.getHomeCollectionFareQuote(
+        branchId: bId, lat: lat, lng: lng,
+      );
+      if (mounted) {
+        setState(() {
+          _fareAmount  = (result['fare']?['finalFare'] as num?)?.toDouble();
+          _fareLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() { _fareLoading = false; _fareError = 'Service charge unavailable'; });
+      }
+    }
+  }
 
   // ── Computed ──────────────────────────────────────────────
   double get _testsTotal => widget.cart.fold(0, (s, t) => s + t.finalPrice);
   double get _familyTotal => _familyMembers.fold(0.0, (s, m) => s + m.testsTotal);
-  double get _serviceCharge => 0; // collected on the spot, not at booking
+  double get _serviceCharge => _fareAmount ?? 0;
   double get _grandTotal => _testsTotal + _familyTotal + _serviceCharge;
 
   bool get _primaryNeedsPrescription => widget.cart.any((t) => t.docRequired);
@@ -235,6 +258,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       debugPrint('   pre-slot    : ${widget.preSelectedSlotLabel}');
     }
     debugPrint('────────────────────────────────────────────────────\n');
+    _loadFare();
   }
 
   @override
@@ -1736,25 +1760,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 _BillRow('${widget.member.name} (Tests)', '₹${_testsTotal.toInt()}'),
                 ..._familyMembers.map((m) => _BillRow('${m.patient.name}', '₹${m.testsTotal.toInt()}')),
                 if (_isHomeCollection)
-                  _BillRow('Service Charge', 'Collected on the spot', sub: true),
+                  _fareLoading
+                    ? const _BillRow('Service Charge', '…')
+                    : _fareError != null
+                      ? _BillRow('Service Charge', _fareError!, sub: true)
+                      : _fareAmount != null
+                        ? _BillRow('Service Charge', '₹${_fareAmount!.toInt()}')
+                        : const _BillRow('Service Charge', 'N/A', sub: true),
                 const Divider(height: 20),
                 _BillRow('Grand Total', '₹${_grandTotal.toInt()}', bold: true),
                 const SizedBox(height: 8),
                 _BillRow('Pay Now', '₹${_payableNow.toInt()}', bold: true, green: true),
                 if (_paymentType == 'pay_later')
                   _BillRow('Due at Collection', '₹${_payableLater.toInt()}', sub: true),
-                if (_isHomeCollection) ...[
-                  const SizedBox(height: 10),
-                  const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Icon(Icons.info_outline_rounded, size: 14, color: AppColors.textHint),
-                    SizedBox(width: 6),
-                    Expanded(child: Text(
-                      'Service charge is collected by the technician on the spot, based on the distance '
-                      "from their branch. You'll see the amount once the technician arrives.",
-                      style: TextStyle(fontSize: 11, color: AppColors.textSecondary, height: 1.4),
-                    )),
-                  ]),
-                ],
               ],
             ),
           ),
