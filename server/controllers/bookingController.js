@@ -2567,11 +2567,6 @@ exports.createFamilyBooking = async (req, res) => {
     } catch (_) {}
   }
 
-  // No Home Collection service charge at booking — it is collected on the
-  // spot: worked out when a technician accepts and added to the bill when they
-  // arrive (services/serviceCharge.js). The first member carries it, as before.
-  const familyFare = null;
-
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
@@ -2584,6 +2579,27 @@ exports.createFamilyBooking = async (req, res) => {
     if (!prices.ok) {
       await conn.rollback();
       return res.status(409).json({ success: false, message: prices.message });
+    }
+
+    // Calculate Home Collection service charge at booking time for the primary member.
+    let familyFare = null;
+    if (bookingType === 'home_collection' && branchId) {
+      try {
+        const mainBranchId = await resolveMainBranchId(branchId, conn);
+        familyFare = await calculateHomeCollectionProduct({
+          branchId: mainBranchId,
+          pickupLat: collectionLatitude,
+          pickupLng: collectionLongitude,
+          dbConn: conn,
+        });
+        blog(`💰 [CREATE FAMILY BOOKING] fare calculated: branchId=${branchId}→mainBranchId=${mainBranchId} distanceKm=${familyFare.distanceKm} fare=₹${familyFare.finalFare}`);
+      } catch (err) {
+        if (err instanceof FareCalculationError) {
+          blog(`⚠️  [CREATE FAMILY BOOKING] fare calculation failed: ${err.code} — ${err.message}`);
+        } else {
+          throw err;
+        }
+      }
     }
 
     // One Razorpay payment covers every member. Same rule as createBooking:
@@ -2649,9 +2665,10 @@ exports.createFamilyBooking = async (req, res) => {
       isFirstMember = false;
       const bookingId  = bResult.insertId;
       blog(`[family-notes] INSERT done — booking_id=${bookingId} patient_id=${patientId} notes_stored=${JSON.stringify(notes ?? null)}`);
-      if (carriesServiceCharge) {
+      if (carriesServiceCharge && !familyFare) {
+        // Fare calculation failed — fall back to on-the-spot collection for primary member.
         const sc = await serviceCharge.markPending(conn, bookingId);
-        blog(`💰 [CREATE FAMILY BOOKING] service charge collected on the spot — ${sc.skipped ? `not marked: ${sc.skipped}` : `carried by booking_id=${bookingId}, pending until a technician accepts`}`);
+        blog(`💰 [CREATE FAMILY BOOKING] fare unavailable — ${sc.skipped ? `not marked: ${sc.skipped}` : `pending until a technician accepts (booking_id=${bookingId})`}`);
       }
       // Same booking_id + offset scheme as createBooking above — see that
       // function's own comment. visit_group_id (below) intentionally keeps
