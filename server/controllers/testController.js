@@ -26,6 +26,8 @@ function mapProduct(r) {
     report_sts:     r.report_tat_hours != null ? Number(r.report_tat_hours) : null,
     available_for_home: r.available_for_home ?? 1,
     available_for_lab:  r.available_for_lab  ?? 1,
+    is_recommended:     r.is_recommended === 1 || r.is_recommended === '1' || r.is_recommended === true,
+    recommended_ids:    r.recommended_ids ?? null,
   };
 }
 

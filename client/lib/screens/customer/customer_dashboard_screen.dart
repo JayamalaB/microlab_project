@@ -218,6 +218,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         _cart.removeWhere((t) => t.id == test.id);
       } else {
         _cart.add(test);
+        debugPrint(
+          '🎯 [RECOMMENDED] "${test.name}" (id=${test.id}) '
+          'isRecommended=${test.isRecommended} '
+          'recommendedIds=${test.recommendedIds.isEmpty ? '(none)' : test.recommendedIds.join(', ')}',
+        );
       }
     });
   }
@@ -428,6 +433,93 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     );
   }
 
+  // Recommended packages for whatever's in the cart right now, mapped to the
+  // cart item(s) each one is an alternative TO — a recommendation is an
+  // either/or swap, not an add-on: choosing it replaces the item(s) that
+  // recommended it rather than sitting alongside them. Excludes ids already
+  // in the cart.
+  Map<String, List<TestModel>> _pendingRecommendations() {
+    final inCart = _cart.map((t) => t.id).toSet();
+    final map = <String, List<TestModel>>{};
+    for (final t in _cart) {
+      if (!t.isRecommended) continue;
+      for (final id in t.recommendedIds) {
+        if (inCart.contains(id)) continue;
+        map.putIfAbsent(id, () => []).add(t);
+      }
+    }
+    return map;
+  }
+
+  // Swaps every selected recommendation in for whichever cart item(s)
+  // suggested it — applied together as one batch when the customer confirms,
+  // not the instant they tap a single recommendation, so they can pick
+  // several (e.g. both HAEMOGLOBIN and the panel instead of just RFT).
+  void _applyRecommendations(List<TestModel> selected, Map<String, List<TestModel>> replaces) {
+    if (selected.isEmpty) return;
+    setState(() {
+      for (final rec in selected) {
+        final sources = replaces[rec.id] ?? const <TestModel>[];
+        _cart.removeWhere((t) => sources.any((s) => s.id == t.id));
+        _cart.add(rec);
+      }
+    });
+  }
+
+  void _navigateToCheckout() {
+    // Guard: branch detection still in flight — don't proceed with null branchId
+    if (_branchDetecting && _mode == 'Home Collection') {
+      debugPrint('🛑 [CHECKOUT BLOCKED] branch detection still running — showing wait message');
+      AppMessages.info(context, 'Finding your nearest branch... please wait a moment');
+      return;
+    }
+    final branchId = _selectedBranch != null
+        ? int.tryParse(_selectedBranch!.id)
+        : null;
+    debugPrint('\n🛒 [CHECKOUT] ────────────────────────────────────');
+    debugPrint('   mode        : $_mode');
+    debugPrint('   pincode     : ${_pincode ?? '—'}');
+    debugPrint('   branch      : ${_selectedBranch?.name ?? '⚠️ none'}');
+    debugPrint('   branchId    : ${branchId ?? '⚠️ null'}');
+    debugPrint('   detecting   : $_branchDetecting');
+    debugPrint('   patientId   : $_patientId');
+    debugPrint('   cart items  : ${_cart.length}');
+    debugPrint('──────────────────────────────────────────────────\n');
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CheckoutScreen(
+          member:     widget.member,
+          cart:       List.from(_cart),
+          mode:       _mode,
+          address:    _address,
+          pincode:    _pincode,
+          city:       _city,
+          branch:     _selectedBranch,
+          isVip:      widget.isVip,
+          patientId:  int.tryParse(widget.member.id) ?? _patientId,
+          patientLat: _lat,
+          patientLng: _lng,
+          branchId:   branchId,
+          onMemberAdded: widget.onMemberAdded,
+          onBookingComplete: () {
+            _bookingCompleted = true;
+            widget.onDraftSave?.call(BookingDraft());
+            setState(() {
+              _cart.clear();
+              _address        = null;
+              _pincode        = null;
+              _city           = null;
+              _lat            = null;
+              _lng            = null;
+              _selectedBranch = null;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
   void _showCart() {
     showModalBottomSheet(
       context: context,
@@ -436,58 +528,32 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       builder: (_) => _CartSheet(
         cart: _cart,
         onRemove: (t) => setState(() => _cart.removeWhere((x) => x.id == t.id)),
-        onCheckout: () {
-          // Guard: branch detection still in flight — don't proceed with null branchId
-          if (_branchDetecting && _mode == 'Home Collection') {
-            debugPrint('🛑 [CHECKOUT BLOCKED] branch detection still running — showing wait message');
+        onCheckout: () async {
+          final recommendations = _pendingRecommendations();
+          if (recommendations.isEmpty) {
             Navigator.pop(context); // close cart sheet
-            AppMessages.info(context, 'Finding your nearest branch... please wait a moment');
+            _navigateToCheckout();
             return;
           }
-          final branchId = _selectedBranch != null
-              ? int.tryParse(_selectedBranch!.id)
-              : null;
-          debugPrint('\n🛒 [CHECKOUT] ────────────────────────────────────');
-          debugPrint('   mode        : $_mode');
-          debugPrint('   pincode     : ${_pincode ?? '—'}');
-          debugPrint('   branch      : ${_selectedBranch?.name ?? '⚠️ none'}');
-          debugPrint('   branchId    : ${branchId ?? '⚠️ null'}');
-          debugPrint('   detecting   : $_branchDetecting');
-          debugPrint('   patientId   : $_patientId');
-          debugPrint('   cart items  : ${_cart.length}');
-          debugPrint('──────────────────────────────────────────────────\n');
-          Navigator.pop(context);
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (_) => CheckoutScreen(
-                member:     widget.member,
-                cart:       List.from(_cart),
-                mode:       _mode,
-                address:    _address,
-                pincode:    _pincode,
-                city:       _city,
-                branch:     _selectedBranch,
-                isVip:      widget.isVip,
-                patientId:  int.tryParse(widget.member.id) ?? _patientId,
-                patientLat: _lat,
-                patientLng: _lng,
-                branchId:   branchId,
-                onMemberAdded: widget.onMemberAdded,
-                onBookingComplete: () {
-                  _bookingCompleted = true;
-                  widget.onDraftSave?.call(BookingDraft());
-                  setState(() {
-                    _cart.clear();
-                    _address        = null;
-                    _pincode        = null;
-                    _city           = null;
-                    _lat            = null;
-                    _lng            = null;
-                    _selectedBranch = null;
-                  });
-                },
-              ),
+          Navigator.pop(context); // close cart sheet, show recommendations instead
+          final recommended = await ApiService.getPackagesByIds(recommendations.keys);
+          if (!mounted) return;
+          if (recommended.isEmpty) {
+            _navigateToCheckout();
+            return;
+          }
+          showModalBottomSheet(
+            context: context,
+            isScrollControlled: true,
+            backgroundColor: Colors.transparent,
+            builder: (_) => _RecommendedTestsSheet(
+              tests: recommended,
+              replaces: recommendations,
+              onContinue: (selected) {
+                Navigator.pop(context); // close recommendations sheet
+                _applyRecommendations(selected, recommendations);
+                _navigateToCheckout();
+              },
             ),
           );
         },
@@ -2909,6 +2975,254 @@ class _InfoRow extends StatelessWidget {
                     color: highlight
                         ? AppColors.brandGreen
                         : AppColors.textPrimary)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Recommended Tests Sheet ────────────────────────────────────────────────
+// Shown once, before checkout, when any cart item is flagged is_recommended
+// with a non-empty recommended_ids list (ip_products). Each one is an
+// either/or alternative to whatever cart item suggested it, not an add-on —
+// choosing a recommendation swaps it in for that item. The customer can
+// equally just continue with what they already picked; nothing here is
+// required.
+
+class _RecommendedTestsSheet extends StatefulWidget {
+  final List<TestModel> tests;
+  final Map<String, List<TestModel>> replaces; // recommended id -> cart item(s) it replaces
+  final ValueChanged<List<TestModel>> onContinue; // all currently-selected tests
+  const _RecommendedTestsSheet({
+    required this.tests,
+    required this.replaces,
+    required this.onContinue,
+  });
+
+  @override
+  State<_RecommendedTestsSheet> createState() => _RecommendedTestsSheetState();
+}
+
+class _RecommendedTestsSheetState extends State<_RecommendedTestsSheet> {
+  // Multi-select: a customer can pick more than one alternative (e.g. swap
+  // RFT for both HAEMOGLOBIN and the panel) — nothing is applied to the cart
+  // until one of the two bottom buttons is tapped.
+  final Set<String> _selectedIds = {};
+
+  void _toggle(String id) {
+    setState(() {
+      if (!_selectedIds.remove(id)) _selectedIds.add(id);
+    });
+  }
+
+  // Every cart item named as a "replaces" target by at least one
+  // recommendation — i.e. what "Continue with My Selection" below keeps.
+  List<TestModel> get _originalItems {
+    final seen = <String>{};
+    final result = <TestModel>[];
+    for (final group in widget.replaces.values) {
+      for (final t in group) {
+        if (seen.add(t.id)) result.add(t);
+      }
+    }
+    return result;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.75),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Center(
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                  color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.auto_awesome_rounded, size: 18, color: AppColors.brandGreen),
+                    const SizedBox(width: 8),
+                    const Text('Recommended for you',
+                        style: TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'An alternative to what you\'ve already selected — choosing one '
+                  'replaces it. Optional, you can continue with your original pick.',
+                  style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppColors.background,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.divider),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Your current selection',
+                      style: TextStyle(
+                          fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+                  const SizedBox(height: 4),
+                  for (final o in _originalItems)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text('${o.name}  ·  ₹${o.finalPrice.toInt()}',
+                          style: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Divider(height: 1),
+          Flexible(
+            child: ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              shrinkWrap: true,
+              itemCount: widget.tests.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              itemBuilder: (_, i) {
+                final t = widget.tests[i];
+                final selected = _selectedIds.contains(t.id);
+                final replacesNames =
+                    (widget.replaces[t.id] ?? const <TestModel>[]).map((r) => r.name).join(', ');
+                // Same circular-checkbox selection style as the main test list
+                // (_TestCard) — tapping anywhere on the card toggles it.
+                return GestureDetector(
+                  onTap: () => _toggle(t.id),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: selected ? AppColors.brandGreenSurface : Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                          color: selected ? AppColors.brandGreen : AppColors.divider,
+                          width: selected ? 1.5 : 1),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: Checkbox(
+                            value: selected,
+                            onChanged: (_) => _toggle(t.id),
+                            activeColor: AppColors.brandGreen,
+                            shape: const CircleBorder(),
+                            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(t.name,
+                                  style: const TextStyle(
+                                      fontSize: 13, fontWeight: FontWeight.w600,
+                                      color: AppColors.textPrimary)),
+                              const SizedBox(height: 2),
+                              Text('₹${t.finalPrice.toInt()}',
+                                  style: const TextStyle(
+                                      fontSize: 12, color: AppColors.textSecondary)),
+                              if (replacesNames.isNotEmpty) ...[
+                                const SizedBox(height: 2),
+                                Text('Instead of: $replacesNames',
+                                    style: const TextStyle(
+                                        fontSize: 11, color: AppColors.textHint,
+                                        fontStyle: FontStyle.italic)),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+                20, 8, 20, MediaQuery.of(context).padding.bottom + 16),
+            child: Column(
+              children: [
+                // Always available — explicitly keeps the original cart
+                // untouched, regardless of what's checked above.
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: OutlinedButton(
+                    onPressed: () => widget.onContinue(const []),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppColors.brandGreen,
+                      side: const BorderSide(color: AppColors.brandGreen, width: 1.4),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                    ),
+                    child: const Text('Continue with My Selection',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                // Only enabled once at least one recommendation is checked —
+                // applies the swap(s) then proceeds.
+                SizedBox(
+                  width: double.infinity,
+                  height: 50,
+                  child: ElevatedButton(
+                    onPressed: _selectedIds.isEmpty
+                        ? null
+                        : () => widget.onContinue(
+                              widget.tests.where((t) => _selectedIds.contains(t.id)).toList(),
+                            ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.brandGreen,
+                      disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                    ),
+                    child: Text(
+                      _selectedIds.isEmpty
+                          ? 'Continue with Recommended'
+                          : 'Continue with Recommended  ·  ${_selectedIds.length} selected',
+                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),

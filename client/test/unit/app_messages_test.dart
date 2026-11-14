@@ -6,7 +6,7 @@ import 'package:microlab/utils/app_messages.dart';
 
 class SocketException implements Exception {
   @override
-  String toString() => "SocketException: Failed host lookup: 'chat.neuralarc.com'";
+  String toString() => "SocketException: Failed host lookup: 'appu.neuralarc.com'";
 }
 
 void main() {
