@@ -17,6 +17,7 @@ const { getTechnicianBranches } = require('../services/technicianBranches');
 const serviceChargeSvc = require('../services/serviceCharge');
 const { verifyRazorpayPayment } = require('../services/razorpayVerify');
 const { captureRazorpayPayment } = require('../services/razorpayCapture');
+const { syncBookingToClient } = require('../services/clientSync');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -1730,7 +1731,7 @@ exports.addVisitMember = async (req, res) => {
         `INSERT INTO ip_bookings
            (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
             booking_type, status, total_amount, discount_amount,
-            amount_paid, amount_due, source_channel, notes, doctor_name,
+            amount_paid, amount_due, source_channel, notes, referring_doctor,
             collection_address, postal_code, city,
             collection_latitude, collection_longitude,
             patient_id, patient_id_ref, product_id,
@@ -1840,6 +1841,163 @@ exports.addVisitMember = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error', detail });
   } finally {
     conn.release();
+  }
+};
+
+// ── POST /api/technicians/remove-visit-member ────────────────────────────────
+// Removes one family member's booking from the visit the technician is on.
+// Body: { bookingId, reason? }   (bookingId = the member's own booking)
+//
+// Allowed only while none of that member's samples are collected and nothing
+// has been paid for it. The main member (the visit's first booking, which also
+// carries the service charge) can't be removed.
+//
+// The booking is kept, marked cancelled, and detached from the visit
+// (visit_group_id = NULL) so every visit-wide step — sample_collected,
+// handed_to_lab, OTP, the ASMX visit_completed request — leaves it out. Which
+// visit it came from, who removed it and why are written to
+// cancellation_reason. Not technician_cancel_*: those mean the technician
+// dropped the whole job, and History lists them as such.
+//
+// A member the technician added was never sent to ASMX (it goes only with
+// visit_completed), so nothing to cancel there. One that came from the
+// customer's own booking and was already synced gets the ASMX cancel.
+const MEMBER_COLLECTED_STATUSES = [
+  'sample_collected', 'all_collected', 'otp_verified', 'collected',
+  'handed_to_lab_pending', 'handed_to_lab', 'sample_received', 'test_in_progress',
+  'report_ready', 'completed',
+];
+
+exports.removeVisitMember = async (req, res) => {
+  const technicianId = req.user.id;
+  const bookingId    = Number(req.body?.bookingId);
+  const reasonText   = String(req.body?.reason ?? '').trim().slice(0, 150);
+
+  if (!Number.isInteger(bookingId) || bookingId <= 0) {
+    return res.status(400).json({ success: false, message: 'bookingId is required' });
+  }
+
+  try {
+    const [[member]] = await db.execute(
+      `SELECT b.booking_id, b.booking_ref, b.reference_no, b.visit_group_id, b.status,
+              COALESCE(b.amount_paid, 0) AS amount_paid, b.service_charge_status,
+              b.client_sync_status, p.patient_name
+       FROM ip_bookings b
+       LEFT JOIN ip_patients p ON p.patient_id = b.patient_id
+       WHERE b.booking_id = ? AND b.deleted_at IS NULL
+       LIMIT 1`,
+      [bookingId]
+    );
+    if (!member || !member.visit_group_id) {
+      return res.status(404).json({ success: false, message: 'Visit member not found' });
+    }
+    const name = member.patient_name || 'This member';
+
+    // The technician must be on this visit.
+    const [[onVisit]] = await db.execute(
+      `SELECT 1 AS ok
+       FROM ip_technician_collection tc
+       JOIN ip_bookings b ON b.booking_id = tc.booking_id
+       WHERE tc.technician_id = ? AND b.visit_group_id = ? AND b.deleted_at IS NULL
+         AND tc.collection_status != 'cancelled'
+       LIMIT 1`,
+      [technicianId, member.visit_group_id]
+    );
+    if (!onVisit) {
+      return res.status(404).json({ success: false, message: 'Visit member not found' });
+    }
+
+    if (member.status === 'cancelled') {
+      return res.status(400).json({ success: false, message: `${name} has already been removed` });
+    }
+
+    // The main member holds the visit (and its service charge) together.
+    const [[main]] = await db.execute(
+      `SELECT booking_id, booking_ref FROM ip_bookings
+       WHERE visit_group_id = ? AND deleted_at IS NULL AND status != 'cancelled'
+       ORDER BY booking_id ASC LIMIT 1`,
+      [member.visit_group_id]
+    );
+    if (!main || Number(main.booking_id) === bookingId || member.service_charge_status != null) {
+      return res.status(400).json({ success: false, code: 'MAIN_MEMBER', message: `${name} is the main patient of this visit and can't be removed` });
+    }
+
+    // Samples already taken → keep the member.
+    const [[collected]] = await db.execute(
+      `SELECT
+         (SELECT tc.collection_status FROM ip_technician_collection tc WHERE tc.booking_id = ? LIMIT 1) AS collection_status,
+         (SELECT COUNT(*) FROM ip_booking_items bi
+           WHERE bi.booking_id = ? AND (bi.item_status = 'completed' OR bi.collected_at IS NOT NULL)) AS collected_items`,
+      [bookingId, bookingId]
+    );
+    if (MEMBER_COLLECTED_STATUSES.includes(collected?.collection_status)
+        || MEMBER_COLLECTED_STATUSES.includes(member.status)
+        || Number(collected?.collected_items ?? 0) > 0) {
+      return res.status(400).json({ success: false, code: 'SAMPLES_COLLECTED', message: `Samples are already collected for ${name} — can't remove` });
+    }
+
+    // Anything paid → refunds stay with admin.
+    const [[paid]] = await db.execute(
+      `SELECT COALESCE(SUM(amount_paid), 0) AS paid FROM ip_payment_transactions
+       WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
+      [bookingId]
+    );
+    if (Number(member.amount_paid) > 0 || Number(paid?.paid ?? 0) > 0) {
+      return res.status(400).json({ success: false, code: 'MEMBER_PAID', message: `Payment already collected for ${name} — can't remove` });
+    }
+
+    const [[tech]] = await db.execute(
+      `SELECT u.user_name FROM ip_technicians t JOIN ip_users u ON u.user_id = t.user_id
+       WHERE t.technician_id = ? LIMIT 1`,
+      [technicianId]
+    );
+    const cancellationReason = (
+      `Removed from visit ${member.visit_group_id} (main booking ${main.booking_ref}) ` +
+      `by technician ${tech?.user_name ?? ''} #${technicianId}` +
+      (reasonText ? `: ${reasonText}` : '')
+    ).replace(/\s+/g, ' ').slice(0, 255);
+
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [upd] = await conn.execute(
+        `UPDATE ip_bookings
+         SET status = 'cancelled', cancelled_at = NOW(), cancellation_reason = ?,
+             visit_group_id = NULL, updated_at = NOW()
+         WHERE booking_id = ? AND status != 'cancelled'`,
+        [cancellationReason, bookingId]
+      );
+      if (upd.affectedRows === 0) {
+        await conn.rollback();
+        return res.status(400).json({ success: false, message: `${name} has already been removed` });
+      }
+      await conn.execute(
+        `UPDATE ip_technician_collection SET collection_status = 'cancelled', updated_at = NOW()
+         WHERE booking_id = ?`,
+        [bookingId]
+      );
+      await conn.commit();
+    } catch (txErr) {
+      await conn.rollback();
+      throw txErr;
+    } finally {
+      conn.release();
+    }
+
+    tlog(`[REMOVE_VISIT_MEMBER] technician_id=${technicianId} booking_id=${bookingId} ref=${member.booking_ref} ` +
+         `visit_group=${member.visit_group_id} main=${main.booking_id} reason=${reasonText || '—'}`);
+
+    // Only a booking ASMX already knows about needs cancelling there.
+    if (member.reference_no || member.client_sync_status === 'synced') {
+      syncBookingToClient(bookingId, { mobile: req.user.mobile, type: 'technician', action: 'cancel' })
+        .catch(err => tlog(`[REMOVE_VISIT_MEMBER] ASMX cancel failed booking_id=${bookingId}: ${err.message}`));
+    }
+
+    res.json({ success: true, message: `${name} removed from this visit` });
+  } catch (e) {
+    tlog(`[REMOVE_VISIT_MEMBER] ERROR technician_id=${technicianId} booking_id=${bookingId}: ${e.message}`);
+    console.error('[removeVisitMember]', e.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 

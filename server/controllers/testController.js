@@ -51,7 +51,7 @@ function _likeEscape(s) {
 // member sheet and My Bookings' edit-tests screen still rely on that.
 exports.getCatalog = async (req, res) => {
   try {
-    const { type, search, category, offer, mode } = req.query;
+    const { type, search, offer, mode, packageCategoryId, audience } = req.query;
     const paged = req.query.limit !== undefined || req.query.offset !== undefined;
 
     let where    = 'WHERE product_active = 1 AND deleted_at IS NULL';
@@ -73,10 +73,16 @@ exports.getCatalog = async (req, res) => {
       where += ' AND (product_name LIKE ? OR product_category LIKE ? OR product_description LIKE ? OR search_name LIKE ? OR search_keywords LIKE ?)';
       params.push(like, like, like, like, like);
     }
-    if (category && category !== 'All') {
-      // mapProduct shows a NULL category as 'General', so filter the same way.
-      where += " AND COALESCE(NULLIF(product_category, ''), 'General') = ?";
-      params.push(category);
+    if (packageCategoryId) {
+      const catId = parseInt(packageCategoryId, 10);
+      if (Number.isInteger(catId) && catId > 0) {
+        where += ' AND package_category_id = ?';
+        params.push(catId);
+      }
+    }
+    if (audience && audience !== 'all') {
+      where += ' AND FIND_IN_SET(?, product_audience) > 0';
+      params.push(audience.toLowerCase());
     }
     if (offer === 'yes') {
       where += " AND offer IN ('yes', '1')";
@@ -125,18 +131,17 @@ exports.getCatalog = async (req, res) => {
   }
 };
 
-// GET /api/tests/categories — every category that has at least one active
-// product, for the app's filter chips (the app only holds one page of
-// products, so it can't work the list out from what it has loaded).
+// GET /api/tests/categories — package categories from ip_package_categories,
+// for the app's filter chips.
 exports.getCategories = async (req, res) => {
   try {
     const [rows] = await db.execute(
-      `SELECT DISTINCT COALESCE(NULLIF(product_category, ''), 'General') AS category
-       FROM ip_products
-       WHERE product_active = 1 AND deleted_at IS NULL
-       ORDER BY category`
+      `SELECT category_id AS id, category_name AS name
+       FROM ip_package_categories
+       WHERE is_active = 1
+       ORDER BY sort_order`
     );
-    res.json({ success: true, data: rows.map((r) => r.category) });
+    res.json({ success: true, data: rows });
   } catch (err) {
     console.error('getCategories:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });

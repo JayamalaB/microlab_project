@@ -1828,6 +1828,70 @@ void _resumeJourney() {
     }
   }
 
+  // ✕ on a Visit Members card: confirm (with an optional reason), then remove
+  // that member's booking from the visit. The server refuses when samples are
+  // collected, something is paid, or it is the main patient — its message is
+  // shown as-is.
+  Future<void> _confirmRemoveMember(Map<String, dynamic> member, int memberBookingId) async {
+    if (_isFinalized) return;
+    final name = (member['patient_name'] as String?)?.trim().isNotEmpty == true
+        ? member['patient_name'] as String
+        : 'this member';
+    final reasonCtrl = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Remove $name?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('$name and their tests will be removed from this visit.',
+                style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonCtrl,
+              maxLength: 150,
+              decoration: const InputDecoration(
+                labelText: 'Reason (optional)',
+                hintText: 'e.g. Added by mistake',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    final reason = reasonCtrl.text;
+    reasonCtrl.dispose();
+    if (confirmed != true || !mounted) return;
+
+    final result = await ApiService.removeVisitMember(bookingId: memberBookingId, reason: reason);
+    if (!mounted) return;
+    final ok = result['success'] == true;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text((result['message'] as String?) ?? (ok ? '$name removed' : 'Could not remove $name')),
+      backgroundColor: ok ? null : Colors.red,
+      behavior: SnackBarBehavior.floating,
+    ));
+    if (!ok) return;
+    setState(() {
+      _linkedPatients = _linkedPatients
+          .where((p) => (p['booking_id'] as num?)?.toInt() != memberBookingId)
+          .toList();
+      _familyItems.remove(memberBookingId);
+    });
+    await _loadLinkedPatients();
+    _refreshPaymentInfo();
+  }
+
   Future<void> _addFamilyTest(Map<String, String> t, int familyBookingId) async {
     if (_isFinalized) return;
     final items = _familyItems[familyBookingId] ?? [];
@@ -4734,6 +4798,11 @@ void _resumeJourney() {
                     final hasPayment  = (c['booking_id'] as num?) != null && totalAmount > 0;
                     final memberBookingId = (c['booking_id'] as num?)?.toInt();
                     final memberItems     = memberBookingId != null ? _familyItems[memberBookingId] : null;
+                    // ✕ only while removal is possible: nothing collected and
+                    // nothing paid for this member (the server checks again).
+                    final anyCollected = memberItems?.any((t) => t['collected'] == 'completed') ?? false;
+                    final paidSome     = totalAmount - amountDue > 0.009;
+                    final canRemove    = !_isFinalized && memberBookingId != null && !anyCollected && !paidSome;
                     return Container(
                       margin: const EdgeInsets.only(bottom: 8),
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -4756,6 +4825,18 @@ void _resumeJourney() {
                               if ((c['reference_no'] as String?) != null)
                                 Text(c['reference_no'] as String,
                                     style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                              if ((c['doctor_name']?.toString().trim() ?? '').isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Row(children: [
+                                    const Icon(Icons.local_hospital_outlined, size: 12, color: AppColors.textSecondary),
+                                    const SizedBox(width: 4),
+                                    Expanded(
+                                      child: Text('Doctor: ${c['doctor_name'].toString().trim()}',
+                                          style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                                    ),
+                                  ]),
+                                ),
                             ],
                           )),
                           if (hasPayment)
@@ -4778,6 +4859,17 @@ void _resumeJourney() {
                                   child: Text('₹${_inr(amountDue)} due',
                                       style: const TextStyle(fontSize: 11, color: Color(0xFF1565C0), fontWeight: FontWeight.w600)),
                                 ),
+                          if (canRemove) ...[
+                            const SizedBox(width: 6),
+                            InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: () => _confirmRemoveMember(c, memberBookingId),
+                              child: const Padding(
+                                padding: EdgeInsets.all(4),
+                                child: Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                              ),
+                            ),
+                          ],
                         ]),
                         // Family member's tests — always shown (edit + checklist).
                         if (memberBookingId != null && memberItems != null && memberItems.isNotEmpty) ...[
@@ -5665,6 +5757,9 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   final _dobCtrl            = TextEditingController();
   final _healthCtrl         = TextEditingController();
   final List<TextEditingController> _doctorNameCtrls = [];
+  // Set when Submit is tapped with a doctor name missing: every empty doctor
+  // field then shows its error. (A SnackBar would open behind this sheet.)
+  bool _showDoctorNameErrors = false;
   DateTime? _dob;
   int? _age;
   String? _gender;
@@ -5887,6 +5982,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         'total': totalAmount,  // UI-only field, stripped before API call
       });
       _doctorNameCtrls.add(TextEditingController());
+      _showDoctorNameErrors = false; // a new member starts without an error
       _step = 2;
     });
   }
@@ -5911,17 +6007,14 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   Future<void> _submitAll() async {
     if (_queuedMembers.isEmpty) return;
 
-    // Validate doctor name — required for every member
-    for (int i = 0; i < _queuedMembers.length; i++) {
-      if (_doctorNameCtrls[i].text.trim().isEmpty) {
-        final name = _queuedMembers[i]['name'] as String? ?? 'member ${i + 1}';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Please enter a doctor name for $name'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-        ));
-        return;
-      }
+    // Validate doctor name — required for every member. Shown on the fields
+    // themselves: a SnackBar would appear behind this sheet, unseen.
+    final missingDoctor = _doctorNameCtrls
+        .take(_queuedMembers.length)
+        .any((c) => c.text.trim().isEmpty);
+    if (missingDoctor) {
+      setState(() => _showDoctorNameErrors = true);
+      return;
     }
 
     setState(() => _isSaving = true);
@@ -6656,8 +6749,21 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                   maxLength: 150,
                   inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z .]'))],
                   style: const TextStyle(fontSize: 13),
+                  // Rebuild so the error clears as soon as a name is typed.
+                  onChanged: (_) { if (_showDoctorNameErrors) setState(() {}); },
                   decoration: InputDecoration(
-                    hintText: 'Doctor name for $name *',
+                    hintText: 'Self or doctor name for $name *',
+                    errorText: _showDoctorNameErrors && _doctorNameCtrls[i].text.trim().isEmpty
+                        ? 'Enter "Self" or the doctor name'
+                        : null,
+                    errorBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: Colors.red),
+                    ),
+                    focusedErrorBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: Colors.red, width: 1.5),
+                    ),
                     hintStyle: const TextStyle(fontSize: 12, color: AppColors.textHint),
                     prefixIcon: const Icon(Icons.local_hospital_outlined, size: 16, color: AppColors.textHint),
                     counterText: '',

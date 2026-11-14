@@ -178,7 +178,8 @@ class ApiService {
   // keep what it already shows.
   static Future<({List<TestModel> items, int total, bool hasMore})> getPackagesPage({
     String search = '',
-    String? category,
+    int? packageCategoryId,
+    String? audience, // 'general', 'men', 'women', 'kids' — null = all
     bool offersOnly = false,
     int limit = 20,
     int offset = 0,
@@ -188,7 +189,8 @@ class ApiService {
       'limit':  '$limit',
       'offset': '$offset',
       if (search.trim().isNotEmpty) 'search': search.trim(),
-      if (category != null && category != 'All') 'category': category,
+      if (packageCategoryId != null) 'packageCategoryId': '$packageCategoryId',
+      if (audience != null) 'audience': audience,
       if (offersOnly) 'offer': 'yes',
       if (mode != null) 'mode': mode,
     };
@@ -226,15 +228,17 @@ class ApiService {
         .toList();
   }
 
-  // Category names for the filter chips (all active products, not just the
-  // loaded page).
-  static Future<List<String>> getPackageCategories() async {
+  // Package categories for the filter chips, loaded from ip_package_categories.
+  static Future<List<({int id, String name})>> getPackageCategories() async {
     final res = await http
         .get(Uri.parse('$baseUrl/api/tests/categories'))
         .timeout(const Duration(seconds: 15));
     final body = jsonDecode(res.body) as Map<String, dynamic>;
     if (body['success'] == true) {
-      return (body['data'] as List).map((c) => c.toString()).toList();
+      return (body['data'] as List).map((c) {
+        final m = c as Map<String, dynamic>;
+        return (id: (m['id'] as num).toInt(), name: m['name'].toString());
+      }).toList();
     }
     return [];
   }
@@ -1303,6 +1307,38 @@ class ApiService {
       debugPrint('[addVisitMembers] ERROR: $e');
     }
     return null;
+  }
+
+  // Removes one family member (their own booking) from the visit. Returns
+  // {success, message}; on refusal message says why (samples collected,
+  // already paid, main patient) and is shown as-is.
+  static Future<Map<String, dynamic>> removeVisitMember({
+    required int bookingId,
+    String? reason,
+  }) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await _client.post(
+        Uri.parse('$baseUrl/api/technicians/remove-visit-member'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'bookingId': bookingId,
+          if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+        }),
+      ).timeout(const Duration(seconds: 20));
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['success'] != true) {
+        debugPrint('[removeVisitMember] failed: ${body['message']}');
+      }
+      return body;
+    } catch (e) {
+      debugPrint('[removeVisitMember] ERROR: $e');
+      return {'success': false, 'message': 'Could not remove the member. Please try again.'};
+    }
   }
 
   static Future<List<Map<String, dynamic>>> getBookingFamily(int bookingId) async {

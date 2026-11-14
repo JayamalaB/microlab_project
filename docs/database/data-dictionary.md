@@ -208,7 +208,7 @@ One row per patient per order. This is the central table.
 | `booking_type` | `home_collection` / `lab_visit` |
 | `status` | `scheduled` (future date) → `pending` (today, searching) → `assigned` → `collected` → `handed_to_lab_pending` → `completed`; also `confirmed`, `cancelled` |
 | `booking_date`, `available_slot_id`, `slot_id`, `lab_slot_id`, `slot_time`, `start_datetime`, `end_datetime` | |
-| `product_id`, `notes`, `doctor_name` | `doctor_name`: `add_doctor_name_to_bookings.sql` |
+| `product_id`, `notes`, `referring_doctor` | *Referring doctor, or "Self" (per member). API field: `doctorName` / `doctor_name`.* `add_referring_doctor_to_bookings.sql`. The old `doctor_name` column is removed by `drop_doctor_name_from_bookings.sql` |
 | `reschedule_count` INT | `005_add_reschedule.sql` |
 | `created_at`, `updated_at`, `deleted_at` | |
 
@@ -394,7 +394,7 @@ Run by hand, in this order for a new database. All are in `server/migrations/`.
 | `add_technician_slot_branches.sql` | Per-slot branches |
 | `add_technician_asmx_branches.sql`, `add_technician_id_ref.sql`, `add_ip_branches_branch_code.sql` | ASMX ids and branch codes |
 | `add_technician_alert_columns.sql` | Reminder / late-alert claims |
-| `add_doctor_name_to_bookings.sql`, `add_ip_users_deleted_at.sql`, `add_api_auth_required_setting.sql` | Misc |
+| `add_referring_doctor_to_bookings.sql` + `drop_doctor_name_from_bookings.sql` (replace `add_doctor_name_to_bookings.sql`, do not run that one), `add_ip_users_deleted_at.sql`, `add_api_auth_required_setting.sql` | Misc |
 | `change_booking_ref_to_sequential.sql` | One-off renumbering of `booking_ref` |
 | `create_log_tables.sql`, `create_ip_asmx_logs.sql`, `create_ip_branch_lookup_logs.sql`, `create_ip_report_status_log.sql` | Log tables |
 | `create_dynamic_keys_table.sql`, `add_dynamic_keys_version_unique.sql`, `create_test_dynamic_key_table.sql` | Dynamic keys |
