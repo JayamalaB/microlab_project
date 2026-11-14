@@ -749,16 +749,19 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                     // ── Accept / Decline buttons ──────────────────────────────
                     Row(
                       children: [
-                        // Decline
+                        // Decline (2 : 3 with Accept so "Decline" stays on one line)
                         Expanded(
+                          flex: 2,
                           child: SizedBox(
                             height: TechSize.buttonHeight,
                             child: OutlinedButton.icon(
                               onPressed: _responding ? null : _reject,
                               icon: const Icon(Icons.close_rounded, size: 20),
-                              label: const Text('Decline'),
+                              label: const Text('Decline',
+                                  maxLines: 1, softWrap: false, overflow: TextOverflow.fade),
                               style: OutlinedButton.styleFrom(
                                 foregroundColor: TechColors.error,
+                                padding: const EdgeInsets.symmetric(horizontal: 12),
                                 side: const BorderSide(color: TechColors.error, width: 1.5),
                                 shape: const RoundedRectangleBorder(borderRadius: TechRadius.mdAll),
                                 textStyle: TechText.button,
@@ -767,9 +770,9 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                           ),
                         ),
                         const SizedBox(width: TechSpace.md),
-                        // Accept (2× wider)
+                        // Accept (wider)
                         Expanded(
-                          flex: 2,
+                          flex: 3,
                           child: SizedBox(
                             height: TechSize.buttonHeight,
                             child: FilledButton.icon(

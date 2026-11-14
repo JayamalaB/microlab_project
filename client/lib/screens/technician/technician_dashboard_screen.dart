@@ -1335,15 +1335,18 @@ class _PendingBookingCard extends StatelessWidget {
                 children: [
                   Icon(_statusIcon, size: 16, color: _statusColor),
                   const SizedBox(width: 6),
-                  Flexible(
+                  // Expanded (not Flexible + Spacer) so the reference
+                  // number sits right in the corner.
+                  Expanded(
                     child: Text(booking.status,
                         overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
                         style: TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.w700,
                             color: _statusColor)),
                   ),
-                  const Spacer(),
+                  const SizedBox(width: TechSpace.sm),
                   if (booking.isVip)
                     const TechStatusChip(label: 'VIP', icon: Icons.star_rounded, tone: TechTone.warning),
                   if (booking.isVip) const SizedBox(width: TechSpace.sm),

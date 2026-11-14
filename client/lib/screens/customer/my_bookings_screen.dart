@@ -1304,12 +1304,15 @@ class _BookingCard extends StatelessWidget {
                   children: [
                     Icon(_statusIcon(booking.status), size: 17, color: sc),
                     const SizedBox(width: 6),
-                    Flexible(
+                    // Expanded (not Flexible + Spacer) so the reference
+                    // number sits right in the corner.
+                    Expanded(
                       child: Text(booking.status,
                           overflow: TextOverflow.ellipsis,
+                          maxLines: 1,
                           style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: sc)),
                     ),
-                    const Spacer(),
+                    const SizedBox(width: CxSpace.sm),
                     if (booking.referenceNo != null)
                       Text(booking.referenceNo!, style: CxText.caption),
                   ],
