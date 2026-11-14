@@ -830,10 +830,13 @@ exports.cancelBooking = async (req, res) => {
     // Transfer service charge to the next active sibling so they carry it going forward
     if (siblingToTransfer && bookingServiceCharge > 0) {
       await db.execute(
-        `UPDATE ip_bookings SET total_amount = total_amount + ? WHERE booking_id = ?`,
-        [bookingServiceCharge, siblingToTransfer.booking_id]
+        `UPDATE ip_bookings
+         SET total_amount = total_amount + ?,
+             amount_due   = amount_due + ?
+         WHERE booking_id = ?`,
+        [bookingServiceCharge, bookingServiceCharge, siblingToTransfer.booking_id]
       );
-      logRefund(`[transfer] ₹${bookingServiceCharge} added to booking_id=${siblingToTransfer.booking_id} ref=${siblingToTransfer.booking_ref}`);
+      logRefund(`[transfer] ₹${bookingServiceCharge} added to booking_id=${siblingToTransfer.booking_id} ref=${siblingToTransfer.booking_ref} (total_amount + amount_due)`);
     }
 
     // Cascade to ip_technician_collection so the technician's dashboard list
