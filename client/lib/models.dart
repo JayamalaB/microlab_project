@@ -121,6 +121,8 @@ class TestModel {
   final String? endDate;
   final String reportStatus;
   final String? preInstructions;
+  final bool isRecommended;
+  final List<String> recommendedIds;
 
   TestModel({
     required this.id,
@@ -136,6 +138,8 @@ class TestModel {
     this.startDate,
     this.endDate,
     required this.reportStatus,
+    this.isRecommended = false,
+    this.recommendedIds = const [],
     this.preInstructions,
   });
 
@@ -166,6 +170,12 @@ class TestModel {
       endDate: j['end_date']?.toString(),
       reportStatus: j['report_sts']?.toString() ?? '',
       preInstructions: j['pre_instrs']?.toString().isNotEmpty == true ? j['pre_instrs'].toString() : null,
+      isRecommended: j['is_recommended'] == true || j['is_recommended'] == 1 || j['is_recommended'] == '1',
+      recommendedIds: (j['recommended_ids']?.toString() ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList(),
     );
   }
 }
