@@ -17,7 +17,6 @@ const { getTechnicianBranches } = require('../services/technicianBranches');
 const serviceChargeSvc = require('../services/serviceCharge');
 const { verifyRazorpayPayment } = require('../services/razorpayVerify');
 const { captureRazorpayPayment } = require('../services/razorpayCapture');
-const { syncBookingToClient } = require('../services/clientSync');
 
 const TECH_LOG = path.join(__dirname, '..', 'logs', 'technician.log');
 function tlog(msg) {
@@ -1845,33 +1844,43 @@ exports.addVisitMember = async (req, res) => {
 };
 
 // ── POST /api/technicians/remove-visit-member ────────────────────────────────
-// Removes one family member's booking from the visit the technician is on.
-// Body: { bookingId, reason? }   (bookingId = the member's own booking)
+// Removes one family member the technician added during the visit.
+// Body: { bookingId }   (bookingId = the member's own booking)
 //
-// Allowed only while none of that member's samples are collected and nothing
-// has been paid for it. The main member (the visit's first booking, which also
-// carries the service charge) can't be removed.
+// Who can be removed:
+//   • only members the technician added (source_channel 'technician_app').
+//     Family members booked by the customer stay with the booking.
+//   • only while none of that member's samples are collected and nothing has
+//     been paid for it.
+//   • never the main member (the visit's first booking, which also carries the
+//     service charge).
 //
-// The booking is kept, marked cancelled, and detached from the visit
-// (visit_group_id = NULL) so every visit-wide step — sample_collected,
-// handed_to_lab, OTP, the ASMX visit_completed request — leaves it out. Which
-// visit it came from, who removed it and why are written to
-// cancellation_reason. Not technician_cancel_*: those mean the technician
-// dropped the whole job, and History lists them as such.
-//
-// A member the technician added was never sent to ASMX (it goes only with
-// visit_completed), so nothing to cancel there. One that came from the
-// customer's own booking and was already synced gets the ASMX cancel.
+// The member is deleted outright — booking, tests, charge packages, document
+// rows, the patient link, the technician job and the unpaid pay-later row —
+// as if never added. The patient (ip_patients) is kept: they are still the
+// customer's family member and can be booked again. Uploaded files are left in
+// uploads/, as with every other document removal. A technician-added member
+// reaches ASMX only at handover (visit_completed), so nothing to cancel there.
+// One line in technician.log is the only trace.
 const MEMBER_COLLECTED_STATUSES = [
   'sample_collected', 'all_collected', 'otp_verified', 'collected',
   'handed_to_lab_pending', 'handed_to_lab', 'sample_received', 'test_in_progress',
   'report_ready', 'completed',
 ];
 
+// Child rows first, the booking last.
+const MEMBER_DELETE_SQL = [
+  'DELETE FROM ip_booking_items WHERE booking_id = ?',
+  'DELETE FROM ip_booking_additional_charges WHERE booking_id = ?',
+  'DELETE FROM ip_booking_documents WHERE booking_id = ?',
+  'DELETE FROM ip_patient_bookings WHERE booking_id = ?',
+  'DELETE FROM ip_technician_collection WHERE booking_id = ?',
+  'DELETE FROM ip_payment_transactions WHERE booking_id = ?',
+];
+
 exports.removeVisitMember = async (req, res) => {
   const technicianId = req.user.id;
   const bookingId    = Number(req.body?.bookingId);
-  const reasonText   = String(req.body?.reason ?? '').trim().slice(0, 150);
 
   if (!Number.isInteger(bookingId) || bookingId <= 0) {
     return res.status(400).json({ success: false, message: 'bookingId is required' });
@@ -1879,9 +1888,9 @@ exports.removeVisitMember = async (req, res) => {
 
   try {
     const [[member]] = await db.execute(
-      `SELECT b.booking_id, b.booking_ref, b.reference_no, b.visit_group_id, b.status,
+      `SELECT b.booking_id, b.booking_ref, b.visit_group_id, b.status, b.source_channel,
               COALESCE(b.amount_paid, 0) AS amount_paid, b.service_charge_status,
-              b.client_sync_status, p.patient_name
+              p.patient_name
        FROM ip_bookings b
        LEFT JOIN ip_patients p ON p.patient_id = b.patient_id
        WHERE b.booking_id = ? AND b.deleted_at IS NULL
@@ -1907,13 +1916,14 @@ exports.removeVisitMember = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Visit member not found' });
     }
 
-    if (member.status === 'cancelled') {
-      return res.status(400).json({ success: false, message: `${name} has already been removed` });
+    // Family members from the customer's booking stay.
+    if (member.source_channel !== 'technician_app') {
+      return res.status(400).json({ success: false, code: 'BOOKED_BY_CUSTOMER', message: `${name} was booked by the customer and can't be removed` });
     }
 
     // The main member holds the visit (and its service charge) together.
     const [[main]] = await db.execute(
-      `SELECT booking_id, booking_ref FROM ip_bookings
+      `SELECT booking_id FROM ip_bookings
        WHERE visit_group_id = ? AND deleted_at IS NULL AND status != 'cancelled'
        ORDER BY booking_id ASC LIMIT 1`,
       [member.visit_group_id]
@@ -1936,7 +1946,7 @@ exports.removeVisitMember = async (req, res) => {
       return res.status(400).json({ success: false, code: 'SAMPLES_COLLECTED', message: `Samples are already collected for ${name} — can't remove` });
     }
 
-    // Anything paid → refunds stay with admin.
+    // Anything paid → keep the member; money is never deleted.
     const [[paid]] = await db.execute(
       `SELECT COALESCE(SUM(amount_paid), 0) AS paid FROM ip_payment_transactions
        WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
@@ -1946,36 +1956,23 @@ exports.removeVisitMember = async (req, res) => {
       return res.status(400).json({ success: false, code: 'MEMBER_PAID', message: `Payment already collected for ${name} — can't remove` });
     }
 
-    const [[tech]] = await db.execute(
-      `SELECT u.user_name FROM ip_technicians t JOIN ip_users u ON u.user_id = t.user_id
-       WHERE t.technician_id = ? LIMIT 1`,
-      [technicianId]
-    );
-    const cancellationReason = (
-      `Removed from visit ${member.visit_group_id} (main booking ${main.booking_ref}) ` +
-      `by technician ${tech?.user_name ?? ''} #${technicianId}` +
-      (reasonText ? `: ${reasonText}` : '')
-    ).replace(/\s+/g, ' ').slice(0, 255);
-
     const conn = await db.getConnection();
     try {
       await conn.beginTransaction();
-      const [upd] = await conn.execute(
-        `UPDATE ip_bookings
-         SET status = 'cancelled', cancelled_at = NOW(), cancellation_reason = ?,
-             visit_group_id = NULL, updated_at = NOW()
-         WHERE booking_id = ? AND status != 'cancelled'`,
-        [cancellationReason, bookingId]
-      );
-      if (upd.affectedRows === 0) {
-        await conn.rollback();
-        return res.status(400).json({ success: false, message: `${name} has already been removed` });
+      for (const sql of MEMBER_DELETE_SQL) {
+        await conn.execute(sql, [bookingId]);
       }
-      await conn.execute(
-        `UPDATE ip_technician_collection SET collection_status = 'cancelled', updated_at = NOW()
-         WHERE booking_id = ?`,
+      // Re-checks inside the transaction: still technician-added and unpaid.
+      const [del] = await conn.execute(
+        `DELETE FROM ip_bookings
+         WHERE booking_id = ? AND source_channel = 'technician_app'
+           AND COALESCE(amount_paid, 0) = 0`,
         [bookingId]
       );
+      if (del.affectedRows === 0) {
+        await conn.rollback();
+        return res.status(400).json({ success: false, message: `${name} can no longer be removed — refresh and try again` });
+      }
       await conn.commit();
     } catch (txErr) {
       await conn.rollback();
@@ -1984,14 +1981,8 @@ exports.removeVisitMember = async (req, res) => {
       conn.release();
     }
 
-    tlog(`[REMOVE_VISIT_MEMBER] technician_id=${technicianId} booking_id=${bookingId} ref=${member.booking_ref} ` +
-         `visit_group=${member.visit_group_id} main=${main.booking_id} reason=${reasonText || '—'}`);
-
-    // Only a booking ASMX already knows about needs cancelling there.
-    if (member.reference_no || member.client_sync_status === 'synced') {
-      syncBookingToClient(bookingId, { mobile: req.user.mobile, type: 'technician', action: 'cancel' })
-        .catch(err => tlog(`[REMOVE_VISIT_MEMBER] ASMX cancel failed booking_id=${bookingId}: ${err.message}`));
-    }
+    tlog(`[REMOVE_VISIT_MEMBER] deleted — technician_id=${technicianId} booking_id=${bookingId} ref=${member.booking_ref} ` +
+         `patient=${member.patient_name ?? '—'} visit_group=${member.visit_group_id} main=${main.booking_id}`);
 
     res.json({ success: true, message: `${name} removed from this visit` });
   } catch (e) {

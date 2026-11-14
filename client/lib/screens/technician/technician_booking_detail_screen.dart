@@ -1828,38 +1828,21 @@ void _resumeJourney() {
     }
   }
 
-  // ✕ on a Visit Members card: confirm (with an optional reason), then remove
-  // that member's booking from the visit. The server refuses when samples are
-  // collected, something is paid, or it is the main patient — its message is
-  // shown as-is.
+  // ✕ on a Visit Members card (members the technician added this visit):
+  // confirm, then the member's booking is deleted. The server refuses when the
+  // customer booked them, samples are collected, something is paid, or it is
+  // the main patient — its message is shown as-is.
   Future<void> _confirmRemoveMember(Map<String, dynamic> member, int memberBookingId) async {
     if (_isFinalized) return;
     final name = (member['patient_name'] as String?)?.trim().isNotEmpty == true
         ? member['patient_name'] as String
         : 'this member';
-    final reasonCtrl = TextEditingController();
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('Remove $name?'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('$name and their tests will be removed from this visit.',
-                style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-            const SizedBox(height: 12),
-            TextField(
-              controller: reasonCtrl,
-              maxLength: 150,
-              decoration: const InputDecoration(
-                labelText: 'Reason (optional)',
-                hintText: 'e.g. Added by mistake',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
+        content: Text('$name and their tests will be removed from this visit.',
+            style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
           TextButton(
@@ -1869,11 +1852,9 @@ void _resumeJourney() {
         ],
       ),
     );
-    final reason = reasonCtrl.text;
-    reasonCtrl.dispose();
     if (confirmed != true || !mounted) return;
 
-    final result = await ApiService.removeVisitMember(bookingId: memberBookingId, reason: reason);
+    final result = await ApiService.removeVisitMember(bookingId: memberBookingId);
     if (!mounted) return;
     final ok = result['success'] == true;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -4798,11 +4779,14 @@ void _resumeJourney() {
                     final hasPayment  = (c['booking_id'] as num?) != null && totalAmount > 0;
                     final memberBookingId = (c['booking_id'] as num?)?.toInt();
                     final memberItems     = memberBookingId != null ? _familyItems[memberBookingId] : null;
-                    // ✕ only while removal is possible: nothing collected and
-                    // nothing paid for this member (the server checks again).
+                    // ✕ only for members the technician added this visit, while
+                    // nothing is collected or paid for them. Members from the
+                    // customer's booking stay (the server checks all of it again).
+                    final addedByTech  = c['source_channel'] == 'technician_app';
                     final anyCollected = memberItems?.any((t) => t['collected'] == 'completed') ?? false;
                     final paidSome     = totalAmount - amountDue > 0.009;
-                    final canRemove    = !_isFinalized && memberBookingId != null && !anyCollected && !paidSome;
+                    final canRemove    = !_isFinalized && memberBookingId != null && addedByTech
+                        && !anyCollected && !paidSome;
                     return Container(
                       margin: const EdgeInsets.only(bottom: 8),
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),

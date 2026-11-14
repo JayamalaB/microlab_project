@@ -1305,12 +1305,12 @@ class ApiService {
     return null;
   }
 
-  // Removes one family member (their own booking) from the visit. Returns
-  // {success, message}; on refusal message says why (samples collected,
-  // already paid, main patient) and is shown as-is.
+  // Removes a family member the technician added during this visit (their
+  // booking is deleted). Returns {success, message}; on refusal message says
+  // why (booked by the customer, samples collected, already paid, main
+  // patient) and is shown as-is.
   static Future<Map<String, dynamic>> removeVisitMember({
     required int bookingId,
-    String? reason,
   }) async {
     final token = await getToken();
     if (token == null) return {'success': false, 'message': 'Not logged in'};
@@ -1321,10 +1321,7 @@ class ApiService {
           'Authorization': 'Bearer $token',
           'Content-Type': 'application/json',
         },
-        body: jsonEncode({
-          'bookingId': bookingId,
-          if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
-        }),
+        body: jsonEncode({'bookingId': bookingId}),
       ).timeout(const Duration(seconds: 20));
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       if (body['success'] != true) {

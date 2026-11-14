@@ -1795,7 +1795,7 @@ exports.getLinkedPatients = async (req, res) => {
               NULL AS booking_ref, NULL AS reference_no, NULL AS booking_id,
               NULL AS total_amount, NULL AS amount_due, NULL AS payment_status,
               NULL AS additional_charge_amount, NULL AS additional_charge_reason,
-              NULL AS doctor_name
+              NULL AS doctor_name, NULL AS source_channel
        FROM ip_patient_bookings pb
        JOIN ip_patients p ON p.patient_id = pb.patient_id
        WHERE pb.booking_id = ?
@@ -1809,7 +1809,7 @@ exports.getLinkedPatients = async (req, res) => {
               b2.booking_ref, b2.reference_no, b2.booking_id,
               b2.total_amount, b2.amount_due, b2.payment_status,
               b2.additional_charge_amount, b2.additional_charge_reason,
-              b2.referring_doctor AS doctor_name
+              b2.referring_doctor AS doctor_name, b2.source_channel
        FROM ip_bookings b1
        JOIN ip_bookings b2 ON b2.visit_group_id = b1.visit_group_id
                            AND b2.booking_id != b1.booking_id

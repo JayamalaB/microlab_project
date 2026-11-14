@@ -1,10 +1,11 @@
 // Tests POST /api/technicians/remove-visit-member — technicianController.removeVisitMember
 //
-// A family member's booking is removed from the visit (marked cancelled and
-// detached via visit_group_id = NULL) only while nothing is collected or paid
-// for it, never for the main member, and only by the technician on the visit.
-// The DB mock answers by SQL text, so the order of the controller's checks can
-// change without breaking these tests.
+// Only a family member the technician added during the visit
+// (source_channel 'technician_app') can be removed, only while nothing is
+// collected or paid for it, never the main member, and only by the technician
+// on the visit. Removal deletes the member's booking and its child rows; the
+// patient is kept. The DB mock answers by SQL text, so the order of the
+// controller's checks can change without breaking these tests.
 jest.mock('../../config/db');
 jest.mock('../../services/clientSync');
 const db         = require('../../config/db');
@@ -27,15 +28,15 @@ let state;
 function defaults() {
   return {
     member: {
-      booking_id: MEMBER, booking_ref: '180591', reference_no: null, visit_group_id: 'VG1',
-      status: 'confirmed', amount_paid: '0.00', service_charge_status: null,
-      client_sync_status: null, patient_name: 'KEN',
+      booking_id: MEMBER, booking_ref: '180591', visit_group_id: 'VG1', status: 'confirmed',
+      source_channel: 'technician_app', amount_paid: '0.00', service_charge_status: null,
+      patient_name: 'KEN',
     },
     onVisit: true,
-    main: { booking_id: MAIN, booking_ref: '180590' },
+    main: { booking_id: MAIN },
     collection: { collection_status: 'arrived', collected_items: 0 },
     paid: '0.00',
-    updateAffected: 1,
+    bookingDeleted: 1,
   };
 }
 
@@ -44,7 +45,7 @@ beforeEach(() => {
   clientSync.syncBookingToClient.mockReset().mockResolvedValue(undefined);
   conn = createMockConnection();
   conn.execute.mockImplementation(async (sql) => {
-    if (/UPDATE ip_bookings/.test(sql)) return [{ affectedRows: state.updateAffected }];
+    if (/DELETE FROM ip_bookings/.test(sql)) return [{ affectedRows: state.bookingDeleted }];
     return [{ affectedRows: 1 }];
   });
   db.getConnection.mockReset().mockResolvedValue(conn);
@@ -55,7 +56,6 @@ beforeEach(() => {
     if (/ORDER BY booking_id ASC LIMIT 1/.test(sql)) return [[state.main].filter(Boolean)];
     if (/collected_items/.test(sql)) return [[state.collection]];
     if (/FROM ip_payment_transactions/.test(sql)) return [[{ paid: state.paid }]];
-    if (/FROM ip_technicians t JOIN ip_users/.test(sql)) return [[{ user_name: 'Nirosh' }]];
     return [[], {}];
   });
 });
@@ -66,7 +66,7 @@ function post(body) {
     .set('Authorization', `Bearer ${token}`).send(body);
 }
 
-const bookingUpdate = () => conn.execute.mock.calls.find(c => /UPDATE ip_bookings/.test(c[0]));
+const deletes = () => conn.execute.mock.calls.filter(c => /^\s*DELETE/.test(c[0]));
 
 describe('POST /api/technicians/remove-visit-member', () => {
   test('rejects an unauthenticated request', async () => {
@@ -79,43 +79,62 @@ describe('POST /api/technicians/remove-visit-member', () => {
     expect(res.status).toBe(400);
   });
 
-  test('removes the member: cancelled, detached from the visit, reason recorded', async () => {
-    const res = await post({ bookingId: MEMBER, reason: '  Added by mistake  ' });
+  test('deletes the member: booking and every child row, in one transaction', async () => {
+    const res = await post({ bookingId: MEMBER });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
 
-    const [sql, params] = bookingUpdate();
-    expect(sql).toMatch(/status = 'cancelled'/);
-    expect(sql).toMatch(/visit_group_id = NULL/);
-    expect(sql).not.toMatch(/technician_cancel/); // that means "dropped the job"
-    expect(params[0]).toBe('Removed from visit VG1 (main booking 180590) by technician Nirosh #17: Added by mistake');
-    expect(params[1]).toBe(MEMBER);
-
-    expect(conn.execute.mock.calls.some(c => /UPDATE ip_technician_collection SET collection_status = 'cancelled'/.test(c[0]))).toBe(true);
+    const tables = deletes().map(c => c[0].match(/DELETE FROM (\w+)/)[1]);
+    expect(tables).toEqual([
+      'ip_booking_items', 'ip_booking_additional_charges', 'ip_booking_documents',
+      'ip_patient_bookings', 'ip_technician_collection', 'ip_payment_transactions',
+      'ip_bookings',
+    ]);
+    // ip_bookings goes last, after its children.
+    expect(tables[tables.length - 1]).toBe('ip_bookings');
+    for (const c of deletes()) expect(c[1]).toEqual([MEMBER]);
+    expect(conn.beginTransaction).toHaveBeenCalled();
     expect(conn.commit).toHaveBeenCalled();
   });
 
-  test('the reason is optional', async () => {
-    const res = await post({ bookingId: MEMBER });
-    expect(res.status).toBe(200);
-    expect(bookingUpdate()[1][0]).toBe('Removed from visit VG1 (main booking 180590) by technician Nirosh #17');
+  test('the patient is kept and no cancelled record is written', async () => {
+    await post({ bookingId: MEMBER });
+    const sql = conn.execute.mock.calls.map(c => c[0]).join('\n');
+    expect(sql).not.toMatch(/ip_patients/);
+    expect(sql).not.toMatch(/UPDATE/);
+    expect(sql).not.toMatch(/cancelled/);
   });
 
-  test('a member ASMX never received is not cancelled there', async () => {
+  test('the booking delete re-checks technician-added and unpaid', async () => {
+    await post({ bookingId: MEMBER });
+    const del = deletes().find(c => /DELETE FROM ip_bookings/.test(c[0]));
+    expect(del[0]).toMatch(/source_channel = 'technician_app'/);
+    expect(del[0]).toMatch(/COALESCE\(amount_paid, 0\) = 0/);
+  });
+
+  test('nothing is sent to ASMX (a technician-added member reaches it only at handover)', async () => {
     await post({ bookingId: MEMBER });
     expect(clientSync.syncBookingToClient).not.toHaveBeenCalled();
   });
 
-  test('a member already synced to ASMX is cancelled there too', async () => {
-    state.member.reference_no = 'REF123';
-    await post({ bookingId: MEMBER });
-    expect(clientSync.syncBookingToClient).toHaveBeenCalledWith(
-      MEMBER, expect.objectContaining({ type: 'technician', action: 'cancel' })
-    );
+  test('a member booked by the customer cannot be removed', async () => {
+    state.member.source_channel = 'mobile_app';
+    const res = await post({ bookingId: MEMBER });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('BOOKED_BY_CUSTOMER');
+    expect(res.body.message).toMatch(/KEN was booked by the customer/);
+    expect(db.getConnection).not.toHaveBeenCalled();
+  });
+
+  test('a member with no source_channel (admin / older bookings) cannot be removed', async () => {
+    state.member.source_channel = null;
+    const res = await post({ bookingId: MEMBER });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('BOOKED_BY_CUSTOMER');
   });
 
   test('the main member cannot be removed', async () => {
-    state.main = { booking_id: MEMBER, booking_ref: '180591' };
+    state.main = { booking_id: MEMBER };
     const res = await post({ bookingId: MEMBER });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('MAIN_MEMBER');
@@ -137,7 +156,7 @@ describe('POST /api/technicians/remove-visit-member', () => {
     expect(db.getConnection).not.toHaveBeenCalled();
   });
 
-  test('blocked once the member\'s collection is past sample collection', async () => {
+  test("blocked once the member's collection is past sample collection", async () => {
     state.collection = { collection_status: 'otp_verified', collected_items: 0 };
     const res = await post({ bookingId: MEMBER });
     expect(res.status).toBe(400);
@@ -166,15 +185,14 @@ describe('POST /api/technicians/remove-visit-member', () => {
     expect(res.status).toBe(404);
   });
 
-  test('already removed → 400, nothing written', async () => {
-    state.member.status = 'cancelled';
+  test('already gone → 404', async () => {
+    state.member = null;
     const res = await post({ bookingId: MEMBER });
-    expect(res.status).toBe(400);
-    expect(db.getConnection).not.toHaveBeenCalled();
+    expect(res.status).toBe(404);
   });
 
-  test('removed at the same moment by another request → 400 and rolled back', async () => {
-    state.updateAffected = 0;
+  test('paid or changed in the meantime → booking delete matches nothing, all rolled back', async () => {
+    state.bookingDeleted = 0;
     const res = await post({ bookingId: MEMBER });
     expect(res.status).toBe(400);
     expect(conn.rollback).toHaveBeenCalled();
