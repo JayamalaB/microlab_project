@@ -20,6 +20,8 @@ import 'technician_active_job_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/tech/tech_widgets.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/screens/shared/onboarding_screen.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -307,13 +309,8 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
       });
     }
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('Booking #${booking.bookingId} accepted — start when ready'),
-      backgroundColor: AppColors.brandGreen,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      duration: const Duration(seconds: 3),
-    ));
+    AppMessages.success(context, 'Booking #${booking.bookingId} accepted — start when ready',
+        duration: const Duration(seconds: 3));
   }
 
   // Called in initState() to handle any notification action that fired during
@@ -551,12 +548,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
             permission == LocationPermission.deniedForever) {
           debugPrint('[TOGGLE] location denied — cannot go online');
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: const Text('Location permission is required to go online'),
-              backgroundColor: const Color(0xFFD32F2F),
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ));
+            AppMessages.error(context, 'Location permission is required to go online');
           }
           return;
         }
@@ -573,18 +565,16 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
             debugPrint('[TOGGLE] notification after request=$notifStatus');
           }
           if (notifStatus.isPermanentlyDenied && mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: const Text(
-                'Enable notifications in Settings → Apps → MicroLab → Notifications.',
-              ),
+            AppMessages.warning(
+              context,
+              'Enable notifications in Settings → Apps → MicroLab → Notifications.',
               action: const SnackBarAction(
                 label: 'Open Settings',
+                textColor: Colors.white,
                 onPressed: openAppSettings,
               ),
               duration: const Duration(seconds: 8),
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ));
+            );
           }
         }
 
@@ -645,37 +635,31 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
             showDialog<void>(
               context: context,
               barrierDismissible: false,
-              builder: (ctx) => AlertDialog(
-                icon: const Icon(
-                  Icons.error_outline_rounded,
-                  color: Colors.orange,
-                  size: 48,
-                ),
-                title: const Text('Cannot Go Online'),
-                content: const Text(
+              builder: (ctx) => TechDialog(
+                icon: Icons.error_outline_rounded,
+                tone: TechTone.warning,
+                centered: true,
+                title: 'Cannot Go Online',
+                message:
                   'The background service failed to start after 3 attempts.\n\n'
                   'Your phone\'s battery settings may be restricting MicroLab '
                   'from running in the background.\n\n'
                   'Open Battery Settings, find MicroLab, and set it to '
                   '"Unrestricted", then try again.',
-                ),
-                actionsAlignment: MainAxisAlignment.spaceEvenly,
                 actions: [
-                  OutlinedButton.icon(
-                    icon: const Icon(Icons.settings_outlined, size: 16),
-                    label: const Text('Battery Settings'),
+                  TechButton.secondary(
+                    icon: Icons.settings_outlined,
+                    label: 'Battery Settings',
+                    compact: true,
                     onPressed: () {
                       Navigator.pop(ctx);
                       ForegroundService.instance.openBatterySettings();
                     },
                   ),
-                  ElevatedButton.icon(
-                    icon: const Icon(Icons.refresh_rounded, size: 16),
-                    label: const Text('Retry'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1565C0),
-                      foregroundColor: Colors.white,
-                    ),
+                  TechButton(
+                    icon: Icons.refresh_rounded,
+                    label: 'Retry',
+                    compact: true,
                     onPressed: () {
                       Navigator.pop(ctx);
                       // _isTogglingOnline is already false when this fires
@@ -714,16 +698,10 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
           debugPrint('[TOGGLE] background location status=$bgStatus');
           if (!bgStatus.isGranted) {
             if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: const Text(
+              AppMessages.info(context,
                   'Set location to "Allow all the time" for live tracking '
                   'when the screen is off.',
-                ),
-                backgroundColor: const Color(0xFF1565C0),
-                behavior: SnackBarBehavior.floating,
-                duration: const Duration(seconds: 4),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ));
+                  duration: const Duration(seconds: 4));
             }
             await Permission.locationAlways.request();
             debugPrint('[TOGGLE] background location after request='
@@ -967,6 +945,9 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   Widget build(BuildContext context) {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.light.copyWith(statusBarColor: Colors.transparent),
+      // Technician look for the dashboard and its tabs (schedule, history,
+      // profile are embedded below).
+      child: TechThemeScope(
       child: Scaffold(
         backgroundColor: AppColors.background,
         appBar: _selectedIndex == 0
@@ -1008,7 +989,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                                       'Welcome, ${SocketService.instance.userName.trim().isNotEmpty ? SocketService.instance.userName.trim().split(RegExp(r"\s+")).first : "Technician"}!',
                                       style: const TextStyle(
                                           color: Colors.white,
-                                          fontSize: 19,
+                                          fontSize: 17,
                                           fontWeight: FontWeight.w700),
                                       overflow: TextOverflow.ellipsis,
                                     ),
@@ -1102,7 +1083,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                                     onRefresh: _loadActiveBookings,
                                     color: AppColors.brandGreen,
                                     child: ListView.builder(
-                                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+                                      padding: const EdgeInsets.fromLTRB(TechSpace.lg, TechSpace.lg, TechSpace.lg, 100),
                                       itemCount: _pending.length,
                                       itemBuilder: (_, i) => _PendingBookingCard(
                                         booking: _pending[i],
@@ -1159,17 +1140,21 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
             ),
           ],
         ),
-        bottomNavigationBar: BottomNavigationBar(
+        bottomNavigationBar: Container(
+          decoration: const BoxDecoration(
+            border: Border(top: BorderSide(color: TechColors.border)),
+          ),
+          child: BottomNavigationBar(
           currentIndex: _selectedIndex,
           onTap: _onNavTap,
           type: BottomNavigationBarType.fixed,
-          selectedItemColor: AppColors.brandGreen,
-          unselectedItemColor: AppColors.textSecondary,
+          selectedItemColor: TechColors.brand,
+          unselectedItemColor: TechColors.textSecondary,
           backgroundColor: Colors.white,
           selectedLabelStyle:
-              const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
-          unselectedLabelStyle: const TextStyle(fontSize: 11),
-          elevation: 8,
+              const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+          unselectedLabelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+          elevation: 0,
           items: const [
             BottomNavigationBarItem(
               icon: Icon(Icons.dashboard_outlined),
@@ -1192,109 +1177,65 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
               label: 'Profile',
             ),
           ],
+          ),
         ),
       ),
+      ),   // TechThemeScope
     );
   }
 
   Widget _offlineState() => Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 72,
-              height: 72,
-              decoration: const BoxDecoration(
-                color: Color(0xFFF3F4F6),
-                shape: BoxShape.circle,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const TechIconBadge(icon: Icons.wifi_off_rounded, tone: TechTone.neutral, size: 72),
+              const SizedBox(height: TechSpace.lg),
+              const Text('You are Offline', style: TechText.sectionTitle),
+              const SizedBox(height: 6),
+              const Text(
+                'Toggle Online to start receiving bookings',
+                style: TechText.bodySecondary,
+                textAlign: TextAlign.center,
               ),
-              child: const Icon(Icons.wifi_off_rounded,
-                  size: 32, color: Color(0xFF9CA3AF)),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'You are Offline',
-              style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.textPrimary),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Toggle Online to start receiving bookings',
-              style:
-                  TextStyle(fontSize: 13, color: AppColors.textSecondary),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            _isTogglingOnline
-                ? const SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: AppColors.brandGreen))
-                : ElevatedButton.icon(
-                    onPressed: _toggleAvailability,
-                    icon: const Icon(Icons.power_settings_new_rounded,
-                        size: 18),
-                    label: const Text('Go Online',
-                        style: TextStyle(
-                            fontSize: 14, fontWeight: FontWeight.w600)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.brandGreen,
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 28, vertical: 12),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                    ),
-                  ),
-          ],
+              const SizedBox(height: TechSpace.xxl),
+              TechButton(
+                onPressed: _isTogglingOnline ? null : _toggleAvailability,
+                loading: _isTogglingOnline,
+                icon: Icons.power_settings_new_rounded,
+                label: 'Go Online',
+                expand: false,
+              ),
+            ],
+          ),
         ),
       );
 
-  Widget _emptyState(String msg, IconData icon) => Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 72, height: 72,
-              decoration: const BoxDecoration(
-                  color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-              child: Icon(icon, size: 32, color: AppColors.brandGreen),
-            ),
-            const SizedBox(height: 16),
-            Text(msg,
-                style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textPrimary)),
-          ],
-        ),
+  Widget _emptyState(String msg, IconData icon) => TechEmptyState(
+        icon: icon,
+        title: msg,
+        message: 'New bookings assigned to you will appear here.',
       );
 
   Widget _offlineBanner() => Container(
         width: double.infinity,
-        color: const Color(0xFFFFF3CD),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        color: TechColors.warningSurface,
+        padding: const EdgeInsets.fromLTRB(TechSpace.lg, 4, 4, 4),
         child: Row(
           children: [
-            const Icon(Icons.wifi_off_rounded, size: 15, color: Color(0xFF856404)),
-            const SizedBox(width: 8),
+            const Icon(Icons.wifi_off_rounded, size: 18, color: TechColors.warning),
+            const SizedBox(width: TechSpace.sm),
             const Expanded(
               child: Text(
                 'You are offline — new bookings paused. Toggle Online to receive requests.',
-                style: TextStyle(fontSize: 12, color: Color(0xFF856404)),
+                style: TextStyle(fontSize: 13, color: TechColors.textPrimary, height: 1.35),
               ),
             ),
-            GestureDetector(
-              onTap: _toggleAvailability,
-              child: const Text('Go Online',
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF856404))),
+            TextButton(
+              onPressed: _toggleAvailability,
+              style: TextButton.styleFrom(foregroundColor: TechColors.warning),
+              child: const Text('Go Online', style: TextStyle(fontWeight: FontWeight.w700)),
             ),
           ],
         ),
@@ -1363,109 +1304,110 @@ class _PendingBookingCard extends StatelessWidget {
                          booking.status == 'Arrived' ||
                          booking.status == 'Destination Reached' ||
                          booking.status == 'Collection Started';
-    
+
     // Determine if booking is confirmed (ready to start)
     final isConfirmed = booking.status == 'Confirmed';
+    final name = booking.customerName;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: TechSpace.md),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: TechRadius.lgAll,
         border: Border.all(
-          // ✅ FIXED: withValues → withOpacity
           color: isInProgress
-              ? const Color(0xFF1565C0).withOpacity(0.4)
-              : AppColors.divider,
+              ? _statusColor.withValues(alpha: 0.45)
+              : TechColors.border,
           width: isInProgress ? 1.5 : 1,
         ),
+        boxShadow: const [BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2))],
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(13),
+        borderRadius: TechRadius.lgAll,
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Status strip
             Container(
-              // ✅ FIXED: withValues → withOpacity
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              color: _statusColor.withOpacity(0.08),
+              padding: const EdgeInsets.symmetric(horizontal: TechSpace.lg, vertical: 10),
+              color: _statusColor.withValues(alpha: 0.08),
               child: Row(
                 children: [
-                  Icon(_statusIcon, size: 13, color: _statusColor),
+                  Icon(_statusIcon, size: 16, color: _statusColor),
                   const SizedBox(width: 6),
-                  Text(booking.status,
-                      style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: _statusColor)),
+                  Flexible(
+                    child: Text(booking.status,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            color: _statusColor)),
+                  ),
                   const Spacer(),
                   if (booking.isVip)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFFB300),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(Icons.star_rounded, size: 9, color: Colors.white),
-                        SizedBox(width: 3),
-                        Text('VIP', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: Colors.white)),
-                      ]),
-                    ),
-                  if (booking.isVip) const SizedBox(width: 8),
+                    const TechStatusChip(label: 'VIP', icon: Icons.star_rounded, tone: TechTone.warning),
+                  if (booking.isVip) const SizedBox(width: TechSpace.sm),
                   if (booking.referenceNo != null)
-                    Text(booking.referenceNo!,
-                        style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                    Text(booking.referenceNo!, style: TechText.caption),
                 ],
               ),
             ),
 
             Padding(
-              padding: const EdgeInsets.all(14),
+              padding: const EdgeInsets.all(TechSpace.lg),
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   // Customer name + call
                   Row(
                     children: [
+                      CircleAvatar(
+                        radius: 20,
+                        backgroundColor: TechColors.brandSurface,
+                        child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
+                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700,
+                                color: TechColors.brand)),
+                      ),
+                      const SizedBox(width: TechSpace.md),
                       Expanded(
-                        child: Text(booking.customerName,
+                        child: Text(name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                                 fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.textPrimary)),
+                                fontWeight: FontWeight.w700,
+                                color: TechColors.textPrimary)),
                       ),
-                      GestureDetector(
-                        onTap: onCall,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 7),
-                          decoration: BoxDecoration(
-                            color: AppColors.brandGreenSurface,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: AppColors.brandGreenLight),
+                      const SizedBox(width: TechSpace.sm),
+                      Material(
+                        color: TechColors.brandSurface,
+                        shape: const StadiumBorder(),
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          onTap: onCall,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              const Icon(Icons.phone_outlined, size: 16, color: TechColors.brand),
+                              const SizedBox(width: 5),
+                              Text(booking.customerPhone,
+                                  style: const TextStyle(
+                                      fontSize: 13,
+                                      color: TechColors.brand,
+                                      fontWeight: FontWeight.w600)),
+                            ]),
                           ),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            const Icon(Icons.phone_outlined,
-                                size: 14, color: AppColors.brandGreen),
-                            const SizedBox(width: 5),
-                            Text(booking.customerPhone,
-                                style: const TextStyle(
-                                    fontSize: 12,
-                                    color: AppColors.brandGreen,
-                                    fontWeight: FontWeight.w500)),
-                          ]),
                         ),
                       ),
                     ],
                   ),
 
-                  const SizedBox(height: 10),
+                  const SizedBox(height: TechSpace.md),
 
                   // Date + time
                   _InfoRow(Icons.event_outlined,
                       '${_formatDate(booking.date)}  ·  ${booking.timeSlot}'),
-                  const SizedBox(height: 5),
+                  const SizedBox(height: 6),
 
                   // Location
                   _InfoRow(
@@ -1476,77 +1418,55 @@ class _PendingBookingCard extends StatelessWidget {
                         .where((s) => s.isNotEmpty)
                         .join(', '),
                   ),
-                  const SizedBox(height: 5),
+                  const SizedBox(height: 6),
 
                   // Tests
                   _InfoRow(Icons.science_outlined,
                       booking.testNames.join(', ')),
 
                   if (booking.docRequired) ...[
-                    const SizedBox(height: 5),
-                    const Row(children: [
-                      Icon(Icons.description_outlined,
-                          size: 13, color: Color(0xFFE65100)),
-                      SizedBox(width: 6),
-                      Text('Prescription required',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: Color(0xFFE65100),
-                              fontWeight: FontWeight.w500)),
-                    ]),
+                    const SizedBox(height: TechSpace.sm),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: TechStatusChip(
+                        label: 'Prescription required',
+                        icon: Icons.description_outlined,
+                        tone: TechTone.warning,
+                      ),
+                    ),
                   ],
 
-                  const SizedBox(height: 12),
+                  const SizedBox(height: TechSpace.lg),
 
                   // Action buttons
                   Row(
                     children: [
                       Expanded(
-                        child: OutlinedButton.icon(
+                        child: TechButton.secondary(
                           onPressed: onManage,
-                          icon: const Icon(Icons.edit_note_rounded, size: 16),
-                          label: const Text('Manage', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: AppColors.brandGreen,
-                            side: const BorderSide(color: AppColors.brandGreen),
-                            padding: const EdgeInsets.symmetric(vertical: 9),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                          ),
+                          icon: Icons.edit_note_rounded,
+                          label: 'Manage',
+                          compact: true,
                         ),
                       ),
-                      const SizedBox(width: 8),
                       if (isConfirmed) ...[
+                        const SizedBox(width: TechSpace.sm),
                         Expanded(
-                          child: ElevatedButton.icon(
+                          child: TechButton(
                             onPressed: onStartCollection,
-                            icon: const Icon(Icons.directions_bike_rounded, size: 16),
-                            label: const Text('Start Journey',
-                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF1565C0),
-                              foregroundColor: Colors.white,
-                              elevation: 0,
-                              padding: const EdgeInsets.symmetric(vertical: 9),
-                              shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(10)),
-                            ),
+                            icon: Icons.directions_bike_rounded,
+                            label: 'Start Journey',
+                            compact: true,
                           ),
                         ),
                       ] else if (isInProgress) ...[
+                        const SizedBox(width: TechSpace.sm),
                         Expanded(
-                          child: ElevatedButton.icon(
+                          child: TechButton(
                             onPressed: onResume,
-                            icon: const Icon(Icons.directions_bike_rounded, size: 16),
-                            label: const Text('Continue Journey',
-                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF1565C0),
-                              foregroundColor: Colors.white,
-                              elevation: 0,
-                              padding: const EdgeInsets.symmetric(vertical: 9),
-                              shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(10)),
-                            ),
+                            icon: Icons.directions_bike_rounded,
+                            label: 'Continue Journey',
+                            compact: true,
                           ),
                         ),
                       ],
@@ -1571,12 +1491,15 @@ class _InfoRow extends StatelessWidget {
   Widget build(BuildContext context) => Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 13, color: AppColors.textHint),
-          const SizedBox(width: 6),
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Icon(icon, size: 16, color: TechColors.textHint),
+          ),
+          const SizedBox(width: TechSpace.sm),
           Expanded(
             child: Text(text,
                 style: const TextStyle(
-                    fontSize: 12, color: AppColors.textSecondary)),
+                    fontSize: 13, color: TechColors.textSecondary, height: 1.35)),
           ),
         ],
       );

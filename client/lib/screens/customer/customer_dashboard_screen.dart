@@ -13,6 +13,7 @@ import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/notification_service.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 import '../shared/location_picker_screen.dart';
 import 'customer_home_screen.dart';
 import 'checkout_screen.dart';
@@ -579,60 +580,72 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     final bottomPad = MediaQuery.of(context).padding.bottom;
 
     final pill = Container(
-      padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+      padding: const EdgeInsets.fromLTRB(CxSpace.md, 10, 10, 10),
       decoration: BoxDecoration(
-        color: AppColors.brandGreen,
-        borderRadius: BorderRadius.circular(14),
+        color: CxColors.brand,
+        borderRadius: CxRadius.lgAll,
         boxShadow: [
           BoxShadow(
-            color: AppColors.brandGreen.withValues(alpha: 0.30),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
+            color: CxColors.brand.withValues(alpha: 0.30),
+            blurRadius: 14,
+            offset: const Offset(0, 4),
           ),
         ],
       ),
       child: Row(
         children: [
           Container(
-            width: 32, height: 32,
+            width: 38, height: 38,
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.20),
-              shape: BoxShape.circle,
+              color: Colors.white.withValues(alpha: 0.18),
+              borderRadius: CxRadius.mdAll,
             ),
-            child: Center(
-              child: Text('${_cart.length}',
-                  style: const TextStyle(
-                      color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700)),
-            ),
+            child: Stack(alignment: Alignment.center, children: [
+              const Icon(Icons.shopping_bag_outlined, color: Colors.white, size: 20),
+              Positioned(
+                right: 2, top: 2,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                  decoration: const BoxDecoration(color: Colors.white, borderRadius: CxRadius.pill),
+                  child: Text('${_cart.length}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: CxColors.brand, fontSize: 11, fontWeight: FontWeight.w700)),
+                ),
+              ),
+            ]),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: CxSpace.md),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text('${_cart.length} item${_cart.length > 1 ? 's' : ''} added',
-                    style: const TextStyle(
-                        color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
                 Text('₹${_cartTotal.toInt()} total',
+                    style: const TextStyle(
+                        color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+                Text('${_cart.length} item${_cart.length > 1 ? 's' : ''} added',
                     style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.80), fontSize: 11)),
+                        color: Colors.white.withValues(alpha: 0.85), fontSize: 12)),
               ],
             ),
           ),
-          ElevatedButton(
+          FilledButton(
             onPressed: _showCart,
-            style: ElevatedButton.styleFrom(
+            style: FilledButton.styleFrom(
               backgroundColor: Colors.white,
-              foregroundColor: AppColors.brandGreen,
-              elevation: 0,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-              minimumSize: Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              foregroundColor: CxColors.brand,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              minimumSize: const Size(0, 42),
+              shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
+              textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
             ),
-            child: const Text('View Cart',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            child: const Row(mainAxisSize: MainAxisSize.min, children: [
+              Text('View Cart'),
+              SizedBox(width: 4),
+              Icon(Icons.arrow_forward_rounded, size: 18),
+            ]),
           ),
         ],
       ),
@@ -643,12 +656,18 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
     // Non-embedded: full-width bottom bar with safe-area padding
     return Container(
-      padding: EdgeInsets.fromLTRB(16, 10, 16, bottomPad + 10),
+      padding: EdgeInsets.fromLTRB(CxSpace.gutter, 10, CxSpace.gutter, bottomPad + 10),
       decoration: const BoxDecoration(
         color: Colors.white,
-        border: Border(top: BorderSide(color: AppColors.divider)),
+        border: Border(top: BorderSide(color: CxColors.border)),
       ),
-      child: pill,
+      child: Center(
+        heightFactor: 1,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: CxSize.contentMaxWidth),
+          child: pill,
+        ),
+      ),
     );
   }
 
@@ -688,11 +707,13 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           leading: widget.embedded
               ? IconButton(
                   icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                      color: Colors.white, size: 18),
+                      color: Colors.white, size: 20),
+                  tooltip: 'Back',
                   onPressed: widget.onBack,
                 )
               : IconButton(
                   icon: const Icon(Icons.menu_rounded, color: Colors.white),
+                  tooltip: 'Menu',
                   onPressed: () => _scaffoldKey.currentState?.openDrawer(),
                 ),
           title: _HeaderTitle(member: widget.member, isVip: widget.isVip),
@@ -703,25 +724,29 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 IconButton(
                   icon: const Icon(Icons.shopping_cart_outlined,
                       color: Colors.white, size: 24),
+                  tooltip: _cart.isEmpty ? 'Cart is empty' : 'View cart (${_cart.length})',
                   onPressed: _cart.isEmpty ? null : _showCart,
                 ),
                 if (_cart.isNotEmpty)
                   Positioned(
-                    right: 6,
-                    top: 6,
-                    child: Container(
-                      width: 18,
-                      height: 18,
-                      decoration: const BoxDecoration(
-                        color: Colors.orange,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Center(
-                        child: Text('${_cart.length}',
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w700)),
+                    right: 5,
+                    top: 5,
+                    child: IgnorePointer(
+                      child: Container(
+                        constraints: const BoxConstraints(minWidth: 19, minHeight: 19),
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        decoration: BoxDecoration(
+                          color: CxColors.offer,
+                          borderRadius: CxRadius.pill,
+                          border: Border.all(color: CxColors.brand, width: 1.5),
+                        ),
+                        child: Center(
+                          child: Text('${_cart.length}',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700)),
+                        ),
                       ),
                     ),
                   ),
@@ -733,7 +758,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
             preferredSize: const Size.fromHeight(60),
             child: Container(
               color: AppColors.brandGreen,
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              padding: const EdgeInsets.fromLTRB(CxSpace.md, 0, CxSpace.md, CxSpace.md),
               child: _LocationBar(
                 mode: _mode,
                 selectedBranch: _selectedBranch,
@@ -758,98 +783,119 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SizedBox(height: 16),
+              const SizedBox(height: CxSpace.lg),
 
               // ── Search + Upload ───────────────────────
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
                 child: Row(
                   children: [
                     Expanded(
                       child: Container(
-                        height: 46,
+                        height: 48,
                         decoration: BoxDecoration(
                           color: Colors.white,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: AppColors.divider),
+                          borderRadius: CxRadius.mdAll,
+                          border: Border.all(color: CxColors.border),
+                          boxShadow: const [
+                            BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2)),
+                          ],
                         ),
                         child: TextField(
                           controller: _searchController,
+                          textInputAction: TextInputAction.search,
                           style: const TextStyle(
-                              fontSize: 14, color: AppColors.textPrimary),
+                              fontSize: 14, color: CxColors.textPrimary),
                           decoration: const InputDecoration(
                             hintText: 'Search tests & packages…',
                             hintStyle: TextStyle(
-                                fontSize: 14, color: AppColors.textHint),
+                                fontSize: 14, color: CxColors.textHint),
                             prefixIcon: Icon(Icons.search_rounded,
-                                size: 20, color: AppColors.textHint),
+                                size: 22, color: CxColors.textHint),
+                            filled: false,
                             border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
                             contentPadding:
-                                EdgeInsets.symmetric(vertical: 12),
+                                EdgeInsets.symmetric(vertical: 13),
                           ),
                         ),
                       ),
                     ),
                     const SizedBox(width: 10),
                     // Upload prescription
-                    GestureDetector(
-                      onTap: _uploadPrescription,
-                      child: Container(
-                        width: 46,
-                        height: 46,
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: AppColors.divider),
+                    Tooltip(
+                      message: 'Upload prescription',
+                      child: Material(
+                        color: CxColors.brandSurface,
+                        shape: const RoundedRectangleBorder(
+                          borderRadius: CxRadius.mdAll,
+                          side: BorderSide(color: CxColors.brandLight),
                         ),
-                        child: const Icon(Icons.upload_file_outlined,
-                            size: 22, color: AppColors.brandGreen),
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          onTap: _uploadPrescription,
+                          child: const SizedBox(
+                            width: 48,
+                            height: 48,
+                            child: Icon(Icons.upload_file_outlined,
+                                size: 22, color: CxColors.brand),
+                          ),
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
 
-              const SizedBox(height: 16),
+              const SizedBox(height: CxSpace.md),
 
               // ── Filters: Special Offers + Group dropdown + Category dropdown ───
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
                 child: Row(
                   children: [
                     // Special Offers chip
-                    GestureDetector(
-                      onTap: () {
-                        setState(() => _showOffersOnly = !_showOffersOnly);
-                        _loadTests();
-                      },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                        decoration: BoxDecoration(
-                          color: _showOffersOnly ? const Color(0xFFE65100) : Colors.white,
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: _showOffersOnly ? const Color(0xFFE65100) : AppColors.divider,
+                    Semantics(
+                      button: true,
+                      selected: _showOffersOnly,
+                      child: Material(
+                        color: _showOffersOnly ? CxColors.offer : CxColors.offerSurface,
+                        shape: StadiumBorder(
+                          side: BorderSide(
+                            color: _showOffersOnly ? CxColors.offer : CxColors.offer.withValues(alpha: 0.25),
                           ),
                         ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.local_offer_rounded,
-                                size: 12,
-                                color: _showOffersOnly ? Colors.white : const Color(0xFFE65100)),
-                            const SizedBox(width: 5),
-                            Text('Special Offers',
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: _showOffersOnly ? Colors.white : const Color(0xFFE65100))),
-                          ],
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          onTap: () {
+                            setState(() => _showOffersOnly = !_showOffersOnly);
+                            _loadTests();
+                          },
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(minHeight: 38),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.local_offer_rounded,
+                                      size: 15,
+                                      color: _showOffersOnly ? Colors.white : CxColors.offer),
+                                  const SizedBox(width: 5),
+                                  Text('Special Offers',
+                                      style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                          color: _showOffersOnly ? Colors.white : CxColors.offer)),
+                                ],
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: CxSpace.sm),
                     // Group dropdown
                     Expanded(
                       child: PopupMenuButton<String>(
@@ -873,34 +919,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                                   ]),
                                 ))
                             .toList(),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                          decoration: BoxDecoration(
-                            color: _selectedAudience != 'General' ? AppColors.brandGreen : Colors.white,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: _selectedAudience != 'General' ? AppColors.brandGreen : AppColors.divider,
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  _selectedAudience == 'General' ? 'Group' : _selectedAudience,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w500,
-                                      color: _selectedAudience != 'General' ? Colors.white : AppColors.textSecondary),
-                                ),
-                              ),
-                              Icon(Icons.keyboard_arrow_down_rounded,
-                                  size: 16,
-                                  color: _selectedAudience != 'General' ? Colors.white : AppColors.textSecondary),
-                            ],
-                          ),
+                        tooltip: 'Filter by group',
+                        child: _DropdownPill(
+                          icon: Icons.people_outline_rounded,
+                          label: _selectedAudience == 'General' ? 'Group' : _selectedAudience,
+                          active: _selectedAudience != 'General',
                         ),
                       ),
                     ),
@@ -942,39 +965,16 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                                 ]),
                               )),
                         ],
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                          decoration: BoxDecoration(
-                            color: _selectedPackageCategoryId != null ? AppColors.brandGreen : Colors.white,
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: _selectedPackageCategoryId != null ? AppColors.brandGreen : AppColors.divider,
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Flexible(
-                                child: Text(
-                                  _selectedPackageCategoryId == null
-                                      ? 'Category'
-                                      : (_packageCategories
-                                              .where((c) => c.id == _selectedPackageCategoryId)
-                                              .firstOrNull
-                                              ?.name ?? 'Category'),
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w500,
-                                      color: _selectedPackageCategoryId != null ? Colors.white : AppColors.textSecondary),
-                                ),
-                              ),
-                              Icon(Icons.keyboard_arrow_down_rounded,
-                                  size: 16,
-                                  color: _selectedPackageCategoryId != null ? Colors.white : AppColors.textSecondary),
-                            ],
-                          ),
+                        tooltip: 'Filter by category',
+                        child: _DropdownPill(
+                          icon: Icons.category_outlined,
+                          label: _selectedPackageCategoryId == null
+                              ? 'Category'
+                              : (_packageCategories
+                                      .where((c) => c.id == _selectedPackageCategoryId)
+                                      .firstOrNull
+                                      ?.name ?? 'Category'),
+                          active: _selectedPackageCategoryId != null,
                         ),
                       ),
                     ),
@@ -987,35 +987,24 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
               // ── Content ───────────────────────────────
               if (!_modeChosen)
                 const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 40, horizontal: 16),
-                  child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.touch_app_outlined, size: 36, color: AppColors.brandGreen),
-                        SizedBox(height: 12),
-                        Text(
-                          'Select a booking type to see available tests',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(fontSize: 14, color: AppColors.textSecondary, height: 1.5),
-                        ),
-                      ],
-                    ),
+                  padding: EdgeInsets.symmetric(vertical: CxSpace.xl),
+                  child: CxEmptyState(
+                    icon: Icons.touch_app_outlined,
+                    title: 'Select a booking type to see available tests',
                   ),
                 )
               else if (_loadingTests)
                 const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 60),
-                  child: Center(
-                    child: CircularProgressIndicator(color: AppColors.brandGreen),
-                  ),
+                  padding: EdgeInsets.symmetric(vertical: 40),
+                  child: CxLoading(label: 'Loading tests…'),
                 )
               else if (_filteredTests.isEmpty)
                 const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 40, horizontal: 16),
-                  child: Center(
-                    child: Text('No tests found',
-                        style: TextStyle(fontSize: 14, color: AppColors.textSecondary)),
+                  padding: EdgeInsets.symmetric(vertical: CxSpace.xl),
+                  child: CxEmptyState(
+                    icon: Icons.search_off_rounded,
+                    title: 'No tests found',
+                    message: 'Try another search or change the filters.',
                   ),
                 )
               else ...[
@@ -1029,9 +1018,9 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                   ListView.separated(
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
                     itemCount: _filteredTests.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    separatorBuilder: (_, __) => const SizedBox(height: 10),
                     itemBuilder: (_, i) => _TestCard(
                       test: _filteredTests[i],
                       inCart: _inCart(_filteredTests[i]),
@@ -1041,23 +1030,17 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                   ),
                   // Next page on its way (fetched by _onTestsScroll).
                   if (_loadingMoreTests)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 20),
-                      child: Center(
-                        child: SizedBox(
-                          width: 24, height: 24,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
-                        ),
-                      ),
-                    )
+                    const CxLoading()
                   // Fallback when the list is too short to scroll, or the
                   // last page request failed.
                   else if (_hasMoreTests)
-                    Center(
-                      child: TextButton(
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, 0),
+                      child: CxButton.secondary(
                         onPressed: _loadMoreTests,
-                        style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
-                        child: Text('Show more (${_totalTests - _filteredTests.length} more)'),
+                        icon: Icons.expand_more_rounded,
+                        compact: true,
+                        label: 'Show more (${_totalTests - _filteredTests.length} more)',
                       ),
                     ),
                 ],
@@ -1146,28 +1129,40 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
 
     if (widget.embedded) {
       final bottomPad = MediaQuery.of(context).padding.bottom;
-      return Stack(
-        children: [
-          body,
-          if (_cart.isNotEmpty)
-            Positioned(
-              left: 16,
-              right: 16,
-              bottom: bottomPad + 8,
-              child: _buildCartBar(context),
-            ),
-          Positioned(
-            left: 0, right: 0,
-            bottom: _cart.isNotEmpty ? bottomPad + 78 : bottomPad + 8,
-            child: banners,
+      // Customer look for this screen and the sheets it opens.
+      return CustomerThemeScope(
+        child: ColoredBox(
+          color: CxColors.page,
+          child: Stack(
+            children: [
+              body,
+              if (_cart.isNotEmpty)
+                Positioned(
+                  left: CxSpace.gutter,
+                  right: CxSpace.gutter,
+                  bottom: bottomPad + 8,
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: CxSize.contentMaxWidth),
+                      child: _buildCartBar(context),
+                    ),
+                  ),
+                ),
+              Positioned(
+                left: 0, right: 0,
+                bottom: _cart.isNotEmpty ? bottomPad + 78 : bottomPad + 8,
+                child: banners,
+              ),
+            ],
           ),
-        ],
+        ),
       );
     }
 
-    return Scaffold(
+    return CustomerThemeScope(
+      child: Scaffold(
       key: _scaffoldKey,
-      backgroundColor: AppColors.background,
+      backgroundColor: CxColors.page,
       drawer: _AppDrawer(member: widget.member, isVip: widget.isVip),
       body: Stack(
         children: [
@@ -1180,6 +1175,45 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         ],
       ),
       bottomNavigationBar: _cart.isNotEmpty ? _buildCartBar(context) : null,
+      ),
+    );
+  }
+}
+
+// Visual for the Group / Category filter menus (the PopupMenuButton around
+// it handles the tap and the choices).
+class _DropdownPill extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool active;
+  const _DropdownPill({required this.icon, required this.label, required this.active});
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = active ? Colors.white : CxColors.textPrimary;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      constraints: const BoxConstraints(minHeight: 38),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: active ? CxColors.brand : Colors.white,
+        borderRadius: CxRadius.pill,
+        border: Border.all(color: active ? CxColors.brand : CxColors.border),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 15, color: active ? Colors.white : CxColors.textSecondary),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: fg),
+            ),
+          ),
+          Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: fg),
+        ],
+      ),
     );
   }
 }
@@ -1204,8 +1238,8 @@ class _HeaderTitle extends StatelessWidget {
                 member.name,
                 style: const TextStyle(
                     color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
                     letterSpacing: -0.2),
                 overflow: TextOverflow.ellipsis,
               ),
@@ -1213,17 +1247,17 @@ class _HeaderTitle extends StatelessWidget {
             if (isVip) ...[
               const SizedBox(width: 6),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFFB300),
-                  borderRadius: BorderRadius.circular(20),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: const BoxDecoration(
+                  color: Color(0xFFFFB300),
+                  borderRadius: CxRadius.pill,
                 ),
                 child: const Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.star_rounded, size: 10, color: Colors.white),
+                    Icon(Icons.star_rounded, size: 12, color: Colors.white),
                     SizedBox(width: 3),
-                    Text('VIP', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white, letterSpacing: 0.5)),
+                    Text('VIP', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white, letterSpacing: 0.5)),
                   ],
                 ),
               ),
@@ -1234,7 +1268,7 @@ class _HeaderTitle extends StatelessWidget {
           Text(
             member.relation!,
             style: TextStyle(
-                color: Colors.white.withOpacity(0.75), fontSize: 11),
+                color: Colors.white.withValues(alpha: 0.8), fontSize: 12),
           ),
       ],
     );
@@ -1268,52 +1302,58 @@ class _LocationBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        height: 40,
-        decoration: BoxDecoration(
-          color: Colors.white.withOpacity(0.15),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.white.withOpacity(0.25)),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: Row(
-          children: [
-            Icon(
-              mode == 'Lab Test'
-                  ? Icons.local_hospital_outlined
-                  : Icons.home_outlined,
-              size: 16,
-              color: Colors.white,
+    // White card on the green header: mode chip, location, chevron.
+    return Semantics(
+      button: true,
+      label: 'Change location. $mode, $_locationLabel',
+      excludeSemantics: true,
+      child: Material(
+        color: Colors.white,
+        borderRadius: CxRadius.mdAll,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Container(
+            height: 44,
+            padding: const EdgeInsets.symmetric(horizontal: CxSpace.md),
+            child: Row(
+              children: [
+                Icon(
+                  mode == 'Lab Test'
+                      ? Icons.local_hospital_outlined
+                      : Icons.home_outlined,
+                  size: 18,
+                  color: CxColors.brand,
+                ),
+                const SizedBox(width: CxSpace.sm),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: const BoxDecoration(
+                    color: CxColors.brandSurface,
+                    borderRadius: CxRadius.pill,
+                  ),
+                  child: Text(mode,
+                      style: const TextStyle(
+                          fontSize: 11,
+                          color: CxColors.brand,
+                          fontWeight: FontWeight.w700)),
+                ),
+                const SizedBox(width: CxSpace.sm),
+                Expanded(
+                  child: Text(
+                    _locationLabel,
+                    style: const TextStyle(
+                        fontSize: 14,
+                        color: CxColors.textPrimary,
+                        fontWeight: FontWeight.w600),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const Icon(Icons.keyboard_arrow_down_rounded,
+                    color: CxColors.textSecondary, size: 22),
+              ],
             ),
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(0.2),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(mode,
-                  style: const TextStyle(
-                      fontSize: 10,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600)),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                _locationLabel,
-                style: TextStyle(
-                    fontSize: 13,
-                    color: Colors.white.withOpacity(0.9),
-                    fontWeight: FontWeight.w400),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            const Icon(Icons.keyboard_arrow_down_rounded,
-                color: Colors.white, size: 18),
-          ],
+          ),
         ),
       ),
     );
@@ -2061,34 +2101,27 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     final safeBottom = MediaQuery.of(context).padding.bottom;
-    return Container(
+    return CustomerThemeScope(
+      child: Align(
+      alignment: Alignment.bottomCenter,
+      child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: CxSize.sheetMaxWidth),
+      child: Container(
       decoration: const BoxDecoration(
         color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: CxRadius.sheetTop,
       ),
-      padding: EdgeInsets.fromLTRB(20, 0, 20, bottomInset + safeBottom + 20),
+      padding: EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, bottomInset + safeBottom + CxSpace.xl),
       child: SingleChildScrollView(
         keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Center(
-              child: Container(
-                margin: const EdgeInsets.symmetric(vertical: 12),
-                width: 40, height: 4,
-                decoration: BoxDecoration(
-                    color: AppColors.divider,
-                    borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
+            const CxDragHandle(),
 
-            const Text('Collection Mode',
-                style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textPrimary)),
-            const SizedBox(height: 14),
+            const Text('Collection Mode', style: CxText.sheetTitle),
+            const SizedBox(height: CxSpace.md),
 
             // Mode selector
             Row(
@@ -2098,7 +2131,14 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                   child: Padding(
                     padding: EdgeInsets.only(
                         right: m == widget.modes.first ? 8 : 0),
-                    child: GestureDetector(
+                    child: Material(
+                      color: sel ? CxColors.brand : Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: CxRadius.mdAll,
+                        side: BorderSide(color: sel ? CxColors.brand : CxColors.border),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
                       onTap: () {
                         final prev = _mode;
                         setState(() => _mode = m);
@@ -2114,34 +2154,28 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                           _getCurrentLocation();
                         }
                       },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        decoration: BoxDecoration(
-                          color: sel ? AppColors.brandGreen : AppColors.white,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                              color: sel ? AppColors.brandGreen : AppColors.divider),
-                        ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 14),
                         child: Column(
                           children: [
                             Icon(
                               m == 'Home Collection'
                                   ? Icons.home_outlined
                                   : Icons.local_hospital_outlined,
-                              size: 22,
-                              color: sel ? Colors.white : AppColors.textSecondary,
+                              size: 24,
+                              color: sel ? Colors.white : CxColors.textSecondary,
                             ),
-                            const SizedBox(height: 4),
+                            const SizedBox(height: 6),
                             Text(m,
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                    color: sel ? Colors.white : AppColors.textSecondary)),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: sel ? Colors.white : CxColors.textPrimary)),
                           ],
                         ),
                       ),
+                    ),
                     ),
                   ),
                 );
@@ -2151,34 +2185,32 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
             const SizedBox(height: 20),
 
             if (_mode == 'Home Collection') ...[
-              const Text('Select Location Method',
-                  style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary)),
-              const SizedBox(height: 12),
-              
+              const Text('Select Location Method', style: CxText.label),
+              const SizedBox(height: CxSpace.md),
+
               // Option 1: GPS Current Location Button
-              GestureDetector(
+              Material(
+                color: _gpsSelected ? CxColors.brandSurface : Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: CxRadius.lgAll,
+                  side: BorderSide(
+                    color: _gpsSelected ? CxColors.brand : CxColors.border,
+                    width: _gpsSelected ? 2 : 1,
+                  ),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
                 onTap: _isGeocoding ? null : _getCurrentLocation,
                 child: Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: _gpsSelected ? AppColors.brandGreenSurface : Colors.white,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: _gpsSelected ? AppColors.brandGreen : AppColors.divider,
-                      width: _gpsSelected ? 2 : 1,
-                    ),
-                  ),
+                  padding: const EdgeInsets.all(CxSpace.lg),
                   child: Row(
                     children: [
                       Container(
-                        width: 50,
-                        height: 50,
-                        decoration: BoxDecoration(
-                          color: AppColors.brandGreenSurface,
-                          borderRadius: BorderRadius.circular(12),
+                        width: 48,
+                        height: 48,
+                        decoration: const BoxDecoration(
+                          color: CxColors.brandSurface,
+                          borderRadius: CxRadius.mdAll,
                         ),
                         child: _isGeocoding && !_manualSelected
                             ? const Center(
@@ -2191,18 +2223,14 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                                 ),
                               )
                             : const Icon(Icons.my_location_rounded,
-                                size: 28, color: AppColors.brandGreen),
+                                size: 26, color: CxColors.brand),
                       ),
-                      const SizedBox(width: 16),
+                      const SizedBox(width: 14),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text('Use Current Location',
-                                style: TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.textPrimary)),
+                            const Text('Use Current Location', style: CxText.cardTitle),
                             const SizedBox(height: 4),
                             Text(
                               _gpsSelected && _gpsAddress != null
@@ -2213,8 +2241,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                                           ? 'Checking your location…'
                                           : 'Get your real-time location using GPS',
                               style: TextStyle(
-                                  fontSize: 12,
-                                  color: _gpsSelected ? AppColors.brandGreen : AppColors.textSecondary),
+                                  fontSize: 13,
+                                  color: _gpsSelected ? CxColors.brand : CxColors.textSecondary),
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
                             ),
@@ -2223,9 +2251,10 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                       ),
                       if (_gpsSelected)
                         const Icon(Icons.check_circle_rounded,
-                            color: AppColors.brandGreen, size: 24),
+                            color: CxColors.brand, size: 24),
                     ],
                   ),
+                ),
                 ),
               ),
 
@@ -2243,30 +2272,29 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                   final issue? when !_gpsSelected && !_manualSelected => Padding(
                     padding: const EdgeInsets.only(top: 10),
                     child: Container(
-                      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFFF3E0),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: const Color(0xFFFFCC80)),
+                      padding: const EdgeInsets.fromLTRB(CxSpace.md, 6, 4, 6),
+                      decoration: const BoxDecoration(
+                        color: CxColors.warningSurface,
+                        borderRadius: CxRadius.mdAll,
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.location_off_outlined, size: 18, color: Color(0xFFE65100)),
-                          const SizedBox(width: 8),
+                          const Icon(Icons.location_off_outlined, size: 18, color: CxColors.warning),
+                          const SizedBox(width: CxSpace.sm),
                           Expanded(
                             child: Text(issue.message,
-                                style: const TextStyle(fontSize: 12, color: Color(0xFFE65100))),
+                                style: const TextStyle(fontSize: 13, color: CxColors.textPrimary, height: 1.35)),
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 4),
                           TextButton(
                             onPressed: _isGeocoding ? null : issue.onAction,
                             style: TextButton.styleFrom(
-                              foregroundColor: AppColors.brandGreen,
-                              padding: const EdgeInsets.symmetric(horizontal: 10),
-                              minimumSize: const Size(0, 36),
+                              foregroundColor: CxColors.brand,
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              minimumSize: const Size(0, 40),
                             ),
                             child: Text(_isGeocoding ? 'Checking…' : issue.action,
-                                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
                           ),
                         ],
                       ),
@@ -2287,12 +2315,12 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                   });
                 },
                 child: Container(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(CxSpace.lg),
                   decoration: BoxDecoration(
-                    color: _manualSelected ? AppColors.brandGreenSurface : Colors.white,
-                    borderRadius: BorderRadius.circular(16),
+                    color: _manualSelected ? CxColors.brandSurface : Colors.white,
+                    borderRadius: CxRadius.lgAll,
                     border: Border.all(
-                      color: _manualSelected ? AppColors.brandGreen : AppColors.divider,
+                      color: _manualSelected ? CxColors.brand : CxColors.border,
                       width: _manualSelected ? 2 : 1,
                     ),
                   ),
@@ -2301,34 +2329,21 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                     children: [
                       Row(
                         children: [
-                          Container(
-                            width: 50,
-                            height: 50,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFEEF4FB),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: const Icon(Icons.edit_location_rounded,
-                                size: 28, color: Color(0xFF1565C0)),
-                          ),
-                          const SizedBox(width: 16),
+                          const CxIconBadge(icon: Icons.edit_location_rounded, tone: CxTone.info, size: 48),
+                          const SizedBox(width: 14),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text('Enter Address Manually',
-                                    style: TextStyle(
-                                        fontSize: 15,
-                                        fontWeight: FontWeight.w700,
-                                        color: AppColors.textPrimary)),
+                                const Text('Enter Address Manually', style: CxText.cardTitle),
                                 const SizedBox(height: 4),
                                 Text(
                                   _manualSelected && _manualAddress != null
                                       ? _manualAddress!
                                       : 'Enter pincode to auto-detect location',
                                   style: TextStyle(
-                                      fontSize: 12,
-                                      color: _manualSelected ? AppColors.brandGreen : AppColors.textSecondary),
+                                      fontSize: 13,
+                                      color: _manualSelected ? CxColors.brand : CxColors.textSecondary),
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                 ),
@@ -2430,42 +2445,13 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                         
                         // Detected area result
                         if (_detectedArea != null && _detectedArea != 'Not found' && _manualSelected) ...[
-                          const SizedBox(height: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: AppColors.brandGreenSurface,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text('Detected: $_detectedArea',
-                                      style: const TextStyle(fontSize: 12, color: AppColors.brandGreen)),
-                                ),
-                              ],
-                            ),
-                          ),
+                          const SizedBox(height: CxSpace.sm),
+                          CxBanner(tone: CxTone.success, message: 'Detected: $_detectedArea'),
                         ] else if (_detectedArea == 'Not found') ...[
-                          const SizedBox(height: 8),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFFF3E0),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Row(
-                              children: [
-                                Icon(Icons.info_outline_rounded, size: 16, color: Color(0xFFE65100)),
-                                SizedBox(width: 8),
-                                Expanded(
-                                  child: Text('Pincode not found — enter city manually',
-                                      style: TextStyle(fontSize: 12, color: Color(0xFFE65100))),
-                                ),
-                              ],
-                            ),
+                          const SizedBox(height: CxSpace.sm),
+                          const CxBanner(
+                            tone: CxTone.warning,
+                            message: 'Pincode not found — enter city manually',
                           ),
                         ],
                       ],
@@ -2475,24 +2461,10 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
               ),
               
               if (_locationError) ...[
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFF5F5),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xFFFFCDD2)),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(Icons.error_outline, size: 16, color: Color(0xFFD32F2F)),
-                      SizedBox(width: 8),
-                      Expanded(
-                        child: Text('Please select a location method or enter valid pincode',
-                            style: TextStyle(fontSize: 12, color: Color(0xFFD32F2F))),
-                      ),
-                    ],
-                  ),
+                const SizedBox(height: CxSpace.md),
+                const CxBanner(
+                  tone: CxTone.error,
+                  message: 'Please select a location method or enter valid pincode',
                 ),
               ],
             ],
@@ -2501,8 +2473,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
               RichText(
                 text: const TextSpan(
                   text: 'Pincode or City',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textPrimary),
-                  children: [TextSpan(text: '  (to find nearby branches)', style: TextStyle(fontSize: 11, color: AppColors.textSecondary, fontWeight: FontWeight.w400))],
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: CxColors.textPrimary),
+                  children: [TextSpan(text: '  (to find nearby branches)', style: TextStyle(fontSize: 12, color: CxColors.textSecondary, fontWeight: FontWeight.w400))],
                 ),
               ),
               const SizedBox(height: 8),
@@ -2562,8 +2534,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
               RichText(
                 text: const TextSpan(
                   text: 'Select Branch',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textPrimary),
-                  children: [TextSpan(text: ' *', style: TextStyle(color: Color(0xFFD32F2F)))],
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: CxColors.textPrimary),
+                  children: [TextSpan(text: ' *', style: TextStyle(color: CxColors.error))],
                 ),
               ),
               const SizedBox(height: 8),
@@ -2576,9 +2548,9 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                     border: Border.all(color: AppColors.divider),
                   ),
                   child: const Row(children: [
-                    SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                    SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: CxColors.brand)),
                     SizedBox(width: 10),
-                    Text('Loading branches…', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+                    Text('Loading branches…', style: TextStyle(fontSize: 13, color: CxColors.textSecondary)),
                   ]),
                 )
               else if (_filteredBranches.isEmpty)
@@ -2632,44 +2604,36 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
               if (_branchMatchNote != null && _branch != null && !_labPinLookup) ...[
                 const SizedBox(height: 6),
                 Row(children: [
-                  const Icon(Icons.check_circle_outline_rounded, size: 13, color: AppColors.brandGreen),
-                  const SizedBox(width: 4),
+                  const Icon(Icons.check_circle_outline_rounded, size: 16, color: CxColors.brand),
+                  const SizedBox(width: 6),
                   Expanded(
                     child: Text(_branchMatchNote!,
-                        style: const TextStyle(fontSize: 12, color: AppColors.brandGreen)),
+                        style: const TextStyle(fontSize: 13, color: CxColors.brand)),
                   ),
                 ]),
               ],
               if (_branchError) ...[
                 const SizedBox(height: 6),
                 const Row(children: [
-                  Icon(Icons.error_outline, size: 13, color: Color(0xFFD32F2F)),
-                  SizedBox(width: 4),
-                  Text('Please select a branch', style: TextStyle(fontSize: 12, color: Color(0xFFD32F2F))),
+                  Icon(Icons.error_outline, size: 16, color: CxColors.error),
+                  SizedBox(width: 6),
+                  Text('Please select a branch', style: TextStyle(fontSize: 13, color: CxColors.error)),
                 ]),
               ],
             ],
 
-            const SizedBox(height: 24),
+            const SizedBox(height: CxSpace.xxl),
 
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: _apply,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.brandGreen,
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                ),
-                child: const Text('Apply Location',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-              ),
+            CxButton(
+              onPressed: _apply,
+              icon: Icons.check_rounded,
+              label: 'Apply Location',
             ),
           ],
         ),
+      ),
+      ),
+      ),
       ),
     );
   }
@@ -2690,134 +2654,116 @@ class _TestCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    // Tapping the card adds / removes the test (same as before).
+    return Semantics(
+      button: true,
+      selected: inCart,
+      child: Material(
+      color: inCart ? CxColors.brandSurface : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: CxRadius.lgAll,
+        side: BorderSide(
+            color: inCart ? CxColors.brand : CxColors.border,
+            width: inCart ? 1.5 : 1),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
       onTap: onAdd,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: inCart ? AppColors.brandGreenSurface : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-              color: inCart ? AppColors.brandGreen : AppColors.divider,
-              width: inCart ? 1.5 : 1),
-        ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(CxSpace.md, CxSpace.md, CxSpace.lg, CxSpace.md),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             // Checkbox
             SizedBox(
-              width: 22,
-              height: 22,
+              width: 24,
+              height: 24,
               child: Checkbox(
                 value: inCart,
                 onChanged: (_) => onAdd(),
-                activeColor: AppColors.brandGreen,
+                activeColor: CxColors.brand,
+                side: const BorderSide(color: CxColors.textHint, width: 1.5),
                 shape: const CircleBorder(),
                 materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 visualDensity: VisualDensity.compact,
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: CxSpace.md),
             // Content
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
                     children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: test.type == 'package'
-                              ? const Color(0xFFE8F5F1)
-                              : const Color(0xFFEEF4FB),
-                          borderRadius: BorderRadius.circular(5),
-                        ),
-                        child: Text(
-                          test.type == 'package' ? 'Package' : 'Test',
-                          style: TextStyle(
-                              fontSize: 9,
-                              fontWeight: FontWeight.w600,
-                              color: test.type == 'package'
-                                  ? AppColors.brandGreen
-                                  : const Color(0xFF1565C0)),
-                        ),
+                      CxChip(
+                        label: test.type == 'package' ? 'Package' : 'Test',
+                        icon: test.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
+                        tone: test.type == 'package' ? CxTone.brand : CxTone.info,
                       ),
-                      if (test.hasOffer) ...[
-                        const SizedBox(width: 5),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFFF3E0),
-                            borderRadius: BorderRadius.circular(5),
-                          ),
-                          child: Text(
-                            '${(test.offerPercent ?? 0).toInt()}% OFF',
-                            style: const TextStyle(
-                                fontSize: 9,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFFE65100)),
-                          ),
+                      if (test.hasOffer)
+                        CxChip(
+                          label: '${(test.offerPercent ?? 0).toInt()}% OFF',
+                          tone: CxTone.offer,
                         ),
-                      ],
                     ],
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Text(test.name,
-                      style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary)),
-                  const SizedBox(height: 3),
-                  Row(
+                      style: CxText.cardTitle),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 2,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Icon(Icons.schedule_outlined,
-                          size: 11, color: AppColors.textHint),
-                      const SizedBox(width: 3),
-                      Text(test.reportStatus,
-                          style: const TextStyle(
-                              fontSize: 11, color: AppColors.textHint)),
-                      const SizedBox(width: 8),
-                      Icon(Icons.category_outlined,
-                          size: 11, color: AppColors.textHint),
-                      const SizedBox(width: 3),
-                      Text(test.category,
-                          style: const TextStyle(
-                              fontSize: 11, color: AppColors.textHint)),
-                      if (test.docRequired) ...[
-                        const SizedBox(width: 8),
-                        const Icon(Icons.description_outlined,
-                            size: 11, color: Color(0xFFE65100)),
+                      Row(mainAxisSize: MainAxisSize.min, children: [
+                        const Icon(Icons.schedule_outlined,
+                            size: 14, color: CxColors.textHint),
                         const SizedBox(width: 3),
-                        const Text('Rx',
-                            style: TextStyle(
-                                fontSize: 11, color: Color(0xFFE65100))),
-                      ],
+                        Text(test.reportStatus, style: CxText.caption),
+                      ]),
+                      Row(mainAxisSize: MainAxisSize.min, children: [
+                        const Icon(Icons.category_outlined,
+                            size: 14, color: CxColors.textHint),
+                        const SizedBox(width: 3),
+                        Text(test.category, style: CxText.caption),
+                      ]),
+                      if (test.docRequired)
+                        const Row(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.description_outlined,
+                              size: 14, color: CxColors.warning),
+                          SizedBox(width: 3),
+                          Text('Rx',
+                              style: TextStyle(
+                                  fontSize: 12, fontWeight: FontWeight.w600, color: CxColors.warning)),
+                        ]),
                     ],
                   ),
                 ],
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: CxSpace.md),
             // Price
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Text('₹${test.finalPrice.toInt()}',
-                    style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.textPrimary)),
+                    style: CxText.price),
                 if (test.hasOffer)
                   Text('₹${test.originalPrice.toInt()}',
                       style: const TextStyle(
-                          fontSize: 11,
-                          color: AppColors.textHint,
+                          fontSize: 12,
+                          color: CxColors.textHint,
                           decoration: TextDecoration.lineThrough)),
               ],
             ),
           ],
         ),
+      ),
+      ),
       ),
     );
   }
@@ -2832,12 +2778,8 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Text(title,
-          style: const TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w600,
-              color: AppColors.textPrimary)),
+      padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
+      child: Text(title, style: CxText.sectionTitle),
     );
   }
 }
@@ -2866,140 +2808,72 @@ class _TestDetailSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return CustomerThemeScope(
+      child: Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
       decoration: const BoxDecoration(
         color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: CxRadius.sheetTop,
       ),
       constraints: BoxConstraints(
+          maxWidth: CxSize.sheetMaxWidth,
           maxHeight: MediaQuery.of(context).size.height * 0.80),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Center(
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 40, height: 4,
-              decoration: BoxDecoration(
-                  color: AppColors.divider,
-                  borderRadius: BorderRadius.circular(2)),
-            ),
-          ),
+          const CxDragHandle(),
           Flexible(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+              padding: const EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, CxSpace.xl),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
+                  Wrap(
+                    spacing: CxSpace.sm,
+                    runSpacing: 4,
                     children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: test.type == 'package'
-                              ? AppColors.brandGreenSurface
-                              : const Color(0xFFEEF4FB),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          test.type == 'package' ? 'Package' : 'Test',
-                          style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: test.type == 'package'
-                                  ? AppColors.brandGreen
-                                  : const Color(0xFF1565C0)),
-                        ),
+                      CxChip(
+                        label: test.type == 'package' ? 'Package' : 'Test',
+                        icon: test.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
+                        tone: test.type == 'package' ? CxTone.brand : CxTone.info,
                       ),
-                      if (test.hasOffer) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFFF3E0),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            '${(test.offerPercent ?? 0).toInt()}% OFF',
-                            style: const TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFFE65100)),
-                          ),
+                      if (test.hasOffer)
+                        CxChip(
+                          label: '${(test.offerPercent ?? 0).toInt()}% OFF',
+                          icon: Icons.local_offer_outlined,
+                          tone: CxTone.offer,
                         ),
-                      ],
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  Text(test.name,
-                      style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary)),
-                  const SizedBox(height: 6),
-                  Text(test.description,
-                      style: const TextStyle(
-                          fontSize: 13,
-                          color: AppColors.textSecondary,
-                          height: 1.5)),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: CxSpace.md),
+                  Text(test.name, style: CxText.pageTitle),
+                  const SizedBox(height: CxSpace.sm),
+                  Text(test.description, style: CxText.body.copyWith(color: CxColors.textSecondary)),
+                  const SizedBox(height: CxSpace.lg),
                   const Divider(height: 1),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: CxSpace.md),
                   _InfoRow('Category', test.category),
                   _InfoRow('Report Status', _formatTat(test.reportStatus)),
                   _InfoRow('Prescription',
                       test.docRequired ? 'Required' : 'Not required',
                       highlight: test.docRequired),
                   if (test.preInstructions != null) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE8F5E9),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: AppColors.brandGreen.withValues(alpha: 0.3)),
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Icon(Icons.checklist_rounded, size: 13, color: AppColors.brandGreen),
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              'Preparation: ${test.preInstructions!}',
-                              style: const TextStyle(fontSize: 11, color: AppColors.brandGreen, height: 1.4),
-                            ),
-                          ),
-                        ],
-                      ),
+                    const SizedBox(height: CxSpace.sm),
+                    CxBanner(
+                      tone: CxTone.success,
+                      icon: Icons.checklist_rounded,
+                      message: 'Preparation: ${test.preInstructions!}',
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: CxSpace.sm),
                   ],
                   if (test.docRequired) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFFF3E0),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: const Color(0xFFFFCC02).withOpacity(0.4)),
-                      ),
-                      child: const Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFE65100)),
-                          SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              'Full payment is available only after a technician verifies your uploaded prescription.',
-                              style: TextStyle(fontSize: 11, color: Color(0xFF795548), height: 1.4),
-                            ),
-                          ),
-                        ],
-                      ),
+                    const SizedBox(height: CxSpace.sm),
+                    const CxBanner(
+                      tone: CxTone.warning,
+                      message: 'Full payment is available only after a technician verifies your uploaded prescription.',
                     ),
+                    const SizedBox(height: CxSpace.xs),
                   ],
                   _InfoRow('Original Price', '₹${test.originalPrice.toInt()}'),
                   if (test.hasOffer) ...[
@@ -3015,32 +2889,50 @@ class _TestDetailSheet extends StatelessWidget {
               ),
             ),
           ),
-          Padding(
+          Container(
             padding: EdgeInsets.fromLTRB(
-                20, 0, 20, MediaQuery.of(context).padding.bottom + 16),
-            child: SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: () {
-                  onToggleCart();
-                  Navigator.pop(context);
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor:
-                      inCart ? Colors.red[700] : AppColors.brandGreen,
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                ),
-                child: Text(inCart ? 'Remove from cart' : 'Add to cart',
-                    style: const TextStyle(
-                        fontSize: 15, fontWeight: FontWeight.w500)),
-              ),
+                CxSpace.xl, CxSpace.md, CxSpace.xl, MediaQuery.of(context).padding.bottom + CxSpace.lg),
+            decoration: const BoxDecoration(
+              border: Border(top: BorderSide(color: CxColors.border)),
             ),
+            child: Row(children: [
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Price', style: CxText.caption),
+                  CxPrice(
+                    price: '₹${test.finalPrice.toInt()}',
+                    originalPrice: test.hasOffer ? '₹${test.originalPrice.toInt()}' : null,
+                    fontSize: 18,
+                  ),
+                ],
+              ),
+              const SizedBox(width: CxSpace.lg),
+              Expanded(
+                child: inCart
+                    ? CxButton.destructive(
+                        icon: Icons.remove_shopping_cart_outlined,
+                        label: 'Remove from cart',
+                        onPressed: () {
+                          onToggleCart();
+                          Navigator.pop(context);
+                        },
+                      )
+                    : CxButton(
+                        icon: Icons.add_shopping_cart_rounded,
+                        label: 'Add to cart',
+                        onPressed: () {
+                          onToggleCart();
+                          Navigator.pop(context);
+                        },
+                      ),
+              ),
+            ]),
           ),
         ],
+      ),
+      ),
       ),
     );
   }
@@ -3057,23 +2949,22 @@ class _InfoRow extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 7),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
             width: 130,
-            child: Text(label,
-                style: const TextStyle(
-                    fontSize: 13, color: AppColors.textSecondary)),
+            child: Text(label, style: CxText.bodySecondary),
           ),
           Expanded(
             child: Text(value,
                 style: TextStyle(
-                    fontSize: 13,
+                    fontSize: 14,
                     fontWeight: highlight
                         ? FontWeight.w700
                         : FontWeight.w500,
                     color: highlight
-                        ? AppColors.brandGreen
-                        : AppColors.textPrimary)),
+                        ? CxColors.brand
+                        : CxColors.textPrimary)),
           ),
         ],
       ),
@@ -3130,83 +3021,76 @@ class _RecommendedTestsSheetState extends State<_RecommendedTestsSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return CustomerThemeScope(
+      child: Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
       decoration: const BoxDecoration(
         color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: CxRadius.sheetTop,
       ),
       constraints: BoxConstraints(
+          maxWidth: CxSize.sheetMaxWidth,
           maxHeight: MediaQuery.of(context).size.height * 0.75),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Center(
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 40, height: 4,
-              decoration: BoxDecoration(
-                  color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+          const CxDragHandle(),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, 4),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.auto_awesome_rounded, size: 18, color: AppColors.brandGreen),
-                    const SizedBox(width: 8),
-                    const Text('Recommended for you',
-                        style: TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                    CxIconBadge(icon: Icons.auto_awesome_rounded, size: 36),
+                    SizedBox(width: CxSpace.md),
+                    Expanded(child: Text('Recommended for you', style: CxText.sheetTitle)),
                   ],
                 ),
-                const SizedBox(height: 4),
-                const Text(
+                SizedBox(height: CxSpace.sm),
+                Text(
                   'An alternative to what you\'ve already selected — choosing one '
                   'replaces it. Optional, you can continue with your original pick.',
-                  style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                  style: CxText.bodySecondary,
                 ),
               ],
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+            padding: const EdgeInsets.fromLTRB(CxSpace.xl, CxSpace.md, CxSpace.xl, 0),
             child: Container(
               width: double.infinity,
-              padding: const EdgeInsets.all(10),
+              padding: const EdgeInsets.all(CxSpace.md),
               decoration: BoxDecoration(
-                color: AppColors.background,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.divider),
+                color: CxColors.surfaceMuted,
+                borderRadius: CxRadius.mdAll,
+                border: Border.all(color: CxColors.border),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Your current selection',
-                      style: TextStyle(
-                          fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+                  const Text('Your current selection', style: CxText.caption),
                   const SizedBox(height: 4),
                   for (final o in _originalItems)
                     Padding(
                       padding: const EdgeInsets.only(top: 2),
                       child: Text('${o.name}  ·  ₹${o.finalPrice.toInt()}',
                           style: const TextStyle(
-                              fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                              fontSize: 14, fontWeight: FontWeight.w600, color: CxColors.textPrimary)),
                     ),
                 ],
               ),
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: CxSpace.md),
           const Divider(height: 1),
           Flexible(
             child: ListView.separated(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, CxSpace.md),
               shrinkWrap: true,
               itemCount: widget.tests.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              separatorBuilder: (_, __) => const SizedBox(height: CxSpace.sm),
               itemBuilder: (_, i) {
                 final t = widget.tests[i];
                 final selected = _selectedIds.contains(t.id);
@@ -3214,116 +3098,103 @@ class _RecommendedTestsSheetState extends State<_RecommendedTestsSheet> {
                     (widget.replaces[t.id] ?? const <TestModel>[]).map((r) => r.name).join(', ');
                 // Same circular-checkbox selection style as the main test list
                 // (_TestCard) — tapping anywhere on the card toggles it.
-                return GestureDetector(
+                return Semantics(
+                  button: true,
+                  selected: selected,
+                  child: Material(
+                  color: selected ? CxColors.brandSurface : Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: CxRadius.lgAll,
+                    side: BorderSide(
+                        color: selected ? CxColors.brand : CxColors.border,
+                        width: selected ? 1.5 : 1),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
                   onTap: () => _toggle(t.id),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: selected ? AppColors.brandGreenSurface : Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                          color: selected ? AppColors.brandGreen : AppColors.divider,
-                          width: selected ? 1.5 : 1),
-                    ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(CxSpace.md),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         SizedBox(
-                          width: 22,
-                          height: 22,
+                          width: 24,
+                          height: 24,
                           child: Checkbox(
                             value: selected,
                             onChanged: (_) => _toggle(t.id),
-                            activeColor: AppColors.brandGreen,
+                            activeColor: CxColors.brand,
+                            side: const BorderSide(color: CxColors.textHint, width: 1.5),
                             shape: const CircleBorder(),
                             materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                             visualDensity: VisualDensity.compact,
                           ),
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: CxSpace.md),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(t.name,
-                                  style: const TextStyle(
-                                      fontSize: 13, fontWeight: FontWeight.w600,
-                                      color: AppColors.textPrimary)),
-                              const SizedBox(height: 2),
-                              Text('₹${t.finalPrice.toInt()}',
-                                  style: const TextStyle(
-                                      fontSize: 12, color: AppColors.textSecondary)),
+                              Text(t.name, style: CxText.cardTitle),
                               if (replacesNames.isNotEmpty) ...[
-                                const SizedBox(height: 2),
-                                Text('Instead of: $replacesNames',
-                                    style: const TextStyle(
-                                        fontSize: 11, color: AppColors.textHint,
-                                        fontStyle: FontStyle.italic)),
+                                const SizedBox(height: 4),
+                                Row(children: [
+                                  const Icon(Icons.swap_horiz_rounded, size: 15, color: CxColors.textHint),
+                                  const SizedBox(width: 4),
+                                  Expanded(
+                                    child: Text('Instead of: $replacesNames',
+                                        style: CxText.caption.copyWith(fontStyle: FontStyle.italic)),
+                                  ),
+                                ]),
                               ],
                             ],
                           ),
                         ),
+                        const SizedBox(width: CxSpace.sm),
+                        Text('₹${t.finalPrice.toInt()}', style: CxText.price),
                       ],
                     ),
+                  ),
+                  ),
                   ),
                 );
               },
             ),
           ),
-          Padding(
+          Container(
             padding: EdgeInsets.fromLTRB(
-                20, 8, 20, MediaQuery.of(context).padding.bottom + 16),
+                CxSpace.xl, CxSpace.md, CxSpace.xl, MediaQuery.of(context).padding.bottom + CxSpace.lg),
+            decoration: const BoxDecoration(
+              border: Border(top: BorderSide(color: CxColors.border)),
+            ),
             child: Column(
               children: [
-                // Always available — explicitly keeps the original cart
-                // untouched, regardless of what's checked above.
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: OutlinedButton(
-                    onPressed: () => widget.onContinue(const []),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: AppColors.brandGreen,
-                      side: const BorderSide(color: AppColors.brandGreen, width: 1.4),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                    ),
-                    child: const Text('Continue with My Selection',
-                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-                  ),
-                ),
-                const SizedBox(height: 10),
                 // Only enabled once at least one recommendation is checked —
                 // applies the swap(s) then proceeds.
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: ElevatedButton(
-                    onPressed: _selectedIds.isEmpty
-                        ? null
-                        : () => widget.onContinue(
-                              widget.tests.where((t) => _selectedIds.contains(t.id)).toList(),
-                            ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.brandGreen,
-                      disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                    ),
-                    child: Text(
-                      _selectedIds.isEmpty
-                          ? 'Continue with Recommended'
-                          : 'Continue with Recommended  ·  ${_selectedIds.length} selected',
-                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                    ),
-                  ),
+                CxButton(
+                  onPressed: _selectedIds.isEmpty
+                      ? null
+                      : () => widget.onContinue(
+                            widget.tests.where((t) => _selectedIds.contains(t.id)).toList(),
+                          ),
+                  icon: Icons.auto_awesome_rounded,
+                  label: _selectedIds.isEmpty
+                      ? 'Continue with Recommended'
+                      : 'Continue with Recommended  ·  ${_selectedIds.length} selected',
+                ),
+                const SizedBox(height: CxSpace.sm),
+                // Always available — explicitly keeps the original cart
+                // untouched, regardless of what's checked above.
+                CxButton.secondary(
+                  onPressed: () => widget.onContinue(const []),
+                  label: 'Continue with My Selection',
                 ),
               ],
             ),
           ),
         ],
+      ),
+      ),
       ),
     );
   }
@@ -3356,117 +3227,84 @@ class _CartSheetState extends State<_CartSheet> {
   @override
   Widget build(BuildContext context) {
     final cart = widget.cart;
-    return Container(
+    return CustomerThemeScope(
+      child: Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
       decoration: const BoxDecoration(
         color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: CxRadius.sheetTop,
       ),
       constraints: BoxConstraints(
+          maxWidth: CxSize.sheetMaxWidth,
           maxHeight: MediaQuery.of(context).size.height * 0.75),
       child: cart.isEmpty
           ? Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Center(
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(vertical: 12),
-                    width: 40, height: 4,
-                    decoration: BoxDecoration(
-                        color: AppColors.divider,
-                        borderRadius: BorderRadius.circular(2)),
-                  ),
+                const CxDragHandle(),
+                const CxEmptyState(
+                  icon: Icons.shopping_cart_outlined,
+                  title: 'Cart is empty',
                 ),
-                const SizedBox(height: 24),
-                const Icon(Icons.shopping_cart_outlined,
-                    size: 40, color: AppColors.textHint),
-                const SizedBox(height: 12),
-                const Text('Cart is empty',
-                    style: TextStyle(fontSize: 15, color: AppColors.textSecondary)),
-                SizedBox(height: MediaQuery.of(context).padding.bottom + 32),
+                SizedBox(height: MediaQuery.of(context).padding.bottom + CxSpace.lg),
               ],
             )
           : Column(
               children: [
-                Center(
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(vertical: 12),
-                    width: 40, height: 4,
-                    decoration: BoxDecoration(
-                        color: AppColors.divider,
-                        borderRadius: BorderRadius.circular(2)),
-                  ),
-                ),
+                const CxDragHandle(),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                  padding: const EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, CxSpace.md),
                   child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text('Cart  (${cart.length} item${cart.length > 1 ? 's' : ''})',
-                          style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.textPrimary)),
-                      Text('₹${_total.toInt()}',
-                          style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                              color: AppColors.brandGreen)),
+                      const Expanded(child: Text('Your cart', style: CxText.sheetTitle)),
+                      CxChip(
+                        label: '${cart.length} item${cart.length > 1 ? 's' : ''}',
+                        tone: CxTone.brand,
+                      ),
                     ],
                   ),
                 ),
                 const Divider(height: 1),
                 Expanded(
                   child: ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                    padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, CxSpace.md),
                     itemCount: cart.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    separatorBuilder: (_, __) => const SizedBox(height: CxSpace.sm),
                     itemBuilder: (_, i) {
                       final t = cart[i];
                       return Container(
-                        padding: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.fromLTRB(CxSpace.md, CxSpace.md, 4, CxSpace.md),
                         decoration: BoxDecoration(
-                          color: AppColors.background,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: AppColors.divider),
+                          color: Colors.white,
+                          borderRadius: CxRadius.lgAll,
+                          border: Border.all(color: CxColors.border),
                         ),
                         child: Row(
                           children: [
+                            CxIconBadge(
+                              icon: t.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
+                              tone: t.type == 'package' ? CxTone.brand : CxTone.info,
+                              size: 40,
+                            ),
+                            const SizedBox(width: CxSpace.md),
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text(t.name,
-                                      style: const TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                          color: AppColors.textPrimary)),
+                                  Text(t.name, style: CxText.cardTitle),
                                   const SizedBox(height: 2),
-                                  Text(t.category,
-                                      style: const TextStyle(
-                                          fontSize: 12,
-                                          color: AppColors.textSecondary)),
+                                  Text(t.category, style: CxText.caption),
                                 ],
                               ),
                             ),
-                            Text('₹${t.finalPrice.toInt()}',
-                                style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: AppColors.textPrimary)),
-                            const SizedBox(width: 10),
-                            GestureDetector(
-                              onTap: () => _remove(t),
-                              child: Container(
-                                width: 28,
-                                height: 28,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFFFF5F5),
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border.all(color: const Color(0xFFFFCDD2)),
-                                ),
-                                child: const Icon(Icons.close_rounded,
-                                    size: 16, color: Color(0xFFD32F2F)),
-                              ),
+                            const SizedBox(width: CxSpace.sm),
+                            Text('₹${t.finalPrice.toInt()}', style: CxText.price),
+                            CxIconButton(
+                              icon: Icons.delete_outline_rounded,
+                              tooltip: 'Remove ${t.name}',
+                              color: CxColors.error,
+                              onPressed: () => _remove(t),
                             ),
                           ],
                         ),
@@ -3474,29 +3312,33 @@ class _CartSheetState extends State<_CartSheet> {
                     },
                   ),
                 ),
-                Padding(
+                Container(
                   padding: EdgeInsets.fromLTRB(
-                      20, 8, 20, MediaQuery.of(context).padding.bottom + 16),
-                  child: SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: ElevatedButton(
-                      onPressed: widget.onCheckout,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.brandGreen,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14)),
+                      CxSpace.xl, CxSpace.md, CxSpace.xl, MediaQuery.of(context).padding.bottom + CxSpace.lg),
+                  decoration: const BoxDecoration(
+                    border: Border(top: BorderSide(color: CxColors.border)),
+                  ),
+                  child: Column(
+                    children: [
+                      CxPriceRow(
+                        label: 'Total',
+                        value: '₹${_total.toInt()}',
+                        emphasis: true,
+                        valueColor: CxColors.brand,
                       ),
-                      child: Text('Proceed to Book  ·  ₹${_total.toInt()}',
-                          style: const TextStyle(
-                              fontSize: 15, fontWeight: FontWeight.w500)),
-                    ),
+                      const SizedBox(height: CxSpace.sm),
+                      CxButton(
+                        onPressed: widget.onCheckout,
+                        icon: Icons.arrow_forward_rounded,
+                        label: 'Proceed to Book  ·  ₹${_total.toInt()}',
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
+      ),
+      ),
     );
   }
 }
@@ -3528,10 +3370,10 @@ class _AppDrawer extends StatelessWidget {
                   Container(
                     width: 56, height: 56,
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
+                      color: Colors.white.withValues(alpha: 0.2),
                       shape: BoxShape.circle,
                       border: Border.all(
-                          color: Colors.white.withOpacity(0.4), width: 1.5),
+                          color: Colors.white.withValues(alpha: 0.4), width: 1.5),
                     ),
                     child: ClipOval(
                       child: hasPhoto
@@ -3577,10 +3419,12 @@ class _AppDrawer extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 2),
-                  Text('+91 \${member.mobile}',
+                  // Was '+91 \${member.mobile}' (escaped), which showed the
+                  // literal text instead of the number.
+                  Text('+91 ${member.mobile}',
                       style: TextStyle(
                           fontSize: 13,
-                          color: Colors.white.withOpacity(0.8))),
+                          color: Colors.white.withValues(alpha: 0.85))),
                 ],
               ),
             ),
@@ -3621,15 +3465,17 @@ class _DrawerItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = isDestructive ? const Color(0xFFD32F2F) : isActive ? AppColors.brandGreen : AppColors.textSecondary;
-    return ListTile(
-      leading: Icon(icon, size: 20, color: color),
-      title: Text(label, style: TextStyle(fontSize: 14, fontWeight: isActive ? FontWeight.w600 : FontWeight.w400, color: color)),
-      tileColor: isActive ? AppColors.brandGreenSurface : null,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-      visualDensity: VisualDensity.compact,
-      onTap: onTap,
+    final color = isDestructive ? CxColors.error : isActive ? CxColors.brand : CxColors.textPrimary;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: CxSpace.sm, vertical: 2),
+      child: ListTile(
+        leading: Icon(icon, size: 22, color: isDestructive ? CxColors.error : isActive ? CxColors.brand : CxColors.textSecondary),
+        title: Text(label, style: TextStyle(fontSize: 15, fontWeight: isActive ? FontWeight.w600 : FontWeight.w500, color: color)),
+        tileColor: isActive ? CxColors.brandSurface : null,
+        shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
+        contentPadding: const EdgeInsets.symmetric(horizontal: CxSpace.md),
+        onTap: onTap,
+      ),
     );
   }
 }
@@ -3671,22 +3517,14 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
   void _showSourcePicker() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
-      builder: (_) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => CustomerThemeScope(
+        child: CxSheetFrame(
+          title: 'Add prescription images',
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Container(
-                width: 36, height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(
-                    color: AppColors.divider,
-                    borderRadius: BorderRadius.circular(2)),
-              ),
               _SourceTile(
                 icon: Icons.camera_alt_outlined,
                 label: 'Take a photo',
@@ -3696,7 +3534,7 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                   _pickFrom(ImageSource.camera);
                 },
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: CxSpace.md),
               _SourceTile(
                 icon: Icons.photo_library_outlined,
                 label: 'Choose from gallery',
@@ -3837,44 +3675,35 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
   Widget build(BuildContext context) {
     final canAddMore = _uploads.length < _maxFiles;
 
-    return Container(
+    return CustomerThemeScope(
+      child: Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
       decoration: const BoxDecoration(
         color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: CxRadius.sheetTop,
       ),
-      constraints:
-          BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.92),
+      constraints: BoxConstraints(
+          maxWidth: CxSize.sheetMaxWidth,
+          maxHeight: MediaQuery.of(context).size.height * 0.92),
       child: Column(
         children: [
           // ── Handle ──────────────────────────────────────
-          Center(
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                  color: AppColors.divider,
-                  borderRadius: BorderRadius.circular(2)),
-            ),
-          ),
+          const CxDragHandle(),
 
           // ── Header ──────────────────────────────────────
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 16, 12),
+            padding: const EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, CxSpace.md),
             child: Row(
               children: [
+                const CxIconBadge(icon: Icons.description_outlined, size: 40),
+                const SizedBox(width: CxSpace.md),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Upload Prescription',
-                          style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.textPrimary)),
-                      Text('For ${widget.member.name}',
-                          style: const TextStyle(
-                              fontSize: 13, color: AppColors.textSecondary)),
+                      const Text('Upload Prescription', style: CxText.sheetTitle),
+                      Text('For ${widget.member.name}', style: CxText.bodySecondary),
                     ],
                   ),
                 ),
@@ -3885,94 +3714,38 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
 
           Flexible(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+              padding: const EdgeInsets.fromLTRB(CxSpace.xl, CxSpace.lg, CxSpace.xl, CxSpace.sm),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // ── Info note ────────────────────────────
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppColors.brandGreenLight),
-                    ),
-                    child: const Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(Icons.info_outline_rounded,
-                            size: 14, color: AppColors.brandGreen),
-                        SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            "Upload your doctor's prescription. You can add up to 5 images. Our technician will review and assign the right tests.",
-                            style: TextStyle(
-                                fontSize: 12,
-                                color: AppColors.brandGreen,
-                                height: 1.4),
-                          ),
-                        ),
-                      ],
-                    ),
+                  const CxBanner(
+                    tone: CxTone.brand,
+                    icon: Icons.info_outline_rounded,
+                    message: "Upload your doctor's prescription. You can add up to 5 images. Our technician will review and assign the right tests.",
                   ),
 
-                  const SizedBox(height: 16),
+                  const SizedBox(height: CxSpace.lg),
 
                   // ── Patient chip ─────────────────────────
-                  Row(children: [
-                    const Icon(Icons.person_outline,
-                        size: 14, color: AppColors.textHint),
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: AppColors.background,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: AppColors.divider),
-                      ),
-                      child: Text(widget.member.name,
-                          style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              color: AppColors.textPrimary)),
-                    ),
-                    if (widget.member.relation != null) ...[
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: AppColors.brandGreenSurface,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(widget.member.relation!,
-                            style: const TextStyle(
-                                fontSize: 11,
-                                color: AppColors.brandGreen,
-                                fontWeight: FontWeight.w500)),
-                      ),
-                    ],
+                  Wrap(spacing: CxSpace.sm, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
+                    CxChip(label: widget.member.name, icon: Icons.person_outline, tone: CxTone.neutral),
+                    if (widget.member.relation != null)
+                      CxChip(label: widget.member.relation!, tone: CxTone.brand),
                   ]),
 
-                  const SizedBox(height: 20),
+                  const SizedBox(height: CxSpace.xl),
 
                   // ── Upload section header ─────────────────
                   Row(
                     children: [
-                      const Text('Prescription Images',
-                          style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.textPrimary)),
+                      const Text('Prescription Images', style: CxText.label),
                       const Spacer(),
                       if (_uploads.isNotEmpty)
-                        Text('${_uploads.length} / $_maxFiles',
-                            style: const TextStyle(
-                                fontSize: 12, color: AppColors.textSecondary)),
+                        Text('${_uploads.length} / $_maxFiles', style: CxText.caption),
                     ],
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: CxSpace.md),
 
                   // ── Image grid ───────────────────────────
                   if (_uploads.isNotEmpty) ...[
@@ -3995,18 +3768,19 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                     ),
                   ] else ...[
                     // ── Empty upload drop zone ────────────
-                    GestureDetector(
+                    Material(
+                      color: CxColors.brandSurface,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: CxRadius.lgAll,
+                        side: BorderSide(color: CxColors.brand.withValues(alpha: 0.35), width: 1.5),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
                       onTap: _isPicking ? null : _showSourcePicker,
                       child: Container(
                         width: double.infinity,
                         padding:
                             const EdgeInsets.symmetric(vertical: 32),
-                        decoration: BoxDecoration(
-                          color: AppColors.background,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(
-                              color: AppColors.divider, width: 1.5),
-                        ),
                         child: _isPicking
                             ? const Center(
                                 child: SizedBox(
@@ -4023,34 +3797,25 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                                 SizedBox(height: 10),
                                 Text('Tap to add prescription images',
                                     style: TextStyle(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w500,
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w600,
                                         color: AppColors.brandGreen)),
                                 SizedBox(height: 4),
                                 Text('Camera or Gallery · JPG, PNG · max 5MB',
-                                    style: TextStyle(
-                                        fontSize: 11,
-                                        color: AppColors.textHint)),
+                                    style: CxText.caption),
                               ]),
+                      ),
                       ),
                     ),
                   ],
 
                   // ── Previous prescriptions ───────────────
                   if (_loadingHistory)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 16),
-                      child: Center(child: CircularProgressIndicator(
-                          strokeWidth: 2, color: AppColors.brandGreen)),
-                    )
+                    const CxLoading(label: 'Loading previous uploads…')
                   else if (_previous.isNotEmpty) ...[
-                    const SizedBox(height: 24),
-                    const Text('Previous Uploads',
-                        style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.textPrimary)),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: CxSpace.xxl),
+                    const Text('Previous Uploads', style: CxText.label),
+                    const SizedBox(height: CxSpace.md),
                     ..._previous.map((p) {
                       final paths  = (p['file_paths'] as List?)?.cast<String>() ?? [];
                       final status = (p['status'] as String?) ?? 'pending';
@@ -4058,12 +3823,12 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                       final note   = (p['admin_notes'] as String?);
                       final sc     = _statusColor(status);
                       return Container(
-                        margin: const EdgeInsets.only(bottom: 10),
+                        margin: const EdgeInsets.only(bottom: CxSpace.md),
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
-                          color: AppColors.background,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: AppColors.divider),
+                          color: Colors.white,
+                          borderRadius: CxRadius.lgAll,
+                          border: Border.all(color: CxColors.border),
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -4071,22 +3836,18 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                             // Patient name + date
                             Row(children: [
                               const Icon(Icons.person_outline,
-                                  size: 14, color: AppColors.textHint),
+                                  size: 16, color: CxColors.textHint),
                               const SizedBox(width: 6),
                               Expanded(
                                 child: Text(
                                   (p['patient_name'] as String?) ?? 'Patient',
-                                  style: const TextStyle(fontSize: 13,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.textPrimary),
+                                  style: CxText.cardTitle,
                                 ),
                               ),
                               const Icon(Icons.calendar_today_outlined,
-                                  size: 11, color: AppColors.textHint),
+                                  size: 14, color: CxColors.textHint),
                               const SizedBox(width: 4),
-                              Text(date,
-                                  style: const TextStyle(fontSize: 11,
-                                      color: AppColors.textSecondary)),
+                              Text(date, style: CxText.caption),
                             ]),
                             // Image thumbnails
                             if (paths.isNotEmpty) ...[
@@ -4122,28 +3883,25 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
                             const SizedBox(height: 6),
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 3),
+                                  horizontal: 10, vertical: 4),
                               decoration: BoxDecoration(
                                 color: sc.withValues(alpha: 0.1),
-                                borderRadius: BorderRadius.circular(6),
+                                borderRadius: CxRadius.pill,
                               ),
                               child: Text(_statusLabel(status),
-                                  style: TextStyle(fontSize: 11,
+                                  style: TextStyle(fontSize: 12,
                                       fontWeight: FontWeight.w600,
                                       color: sc)),
                             ),
                             if (note != null && note.isNotEmpty) ...[
-                              const SizedBox(height: 6),
+                              const SizedBox(height: CxSpace.sm),
                               Row(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   const Icon(Icons.check_circle_outline,
-                                      size: 13, color: AppColors.brandGreen),
+                                      size: 16, color: CxColors.brand),
                                   const SizedBox(width: 6),
-                                  Expanded(child: Text(note,
-                                      style: const TextStyle(fontSize: 11,
-                                          color: AppColors.textSecondary,
-                                          height: 1.4))),
+                                  Expanded(child: Text(note, style: CxText.bodySecondary)),
                                 ],
                               ),
                             ],
@@ -4160,35 +3918,23 @@ class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
           ),
 
           // ── Submit button ────────────────────────────────
-          Padding(
+          Container(
             padding: EdgeInsets.fromLTRB(
-                16, 8, 16, MediaQuery.of(context).padding.bottom + 16),
-            child: SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: _uploads.isNotEmpty ? _submit : null,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.brandGreen,
-                  disabledBackgroundColor:
-                      AppColors.brandGreen.withValues(alpha: 0.35),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14)),
-                ),
-                child: Text(
-                  _uploads.isEmpty
-                      ? 'Upload at least 1 image'
-                      : 'Submit ${_uploads.length} Image${_uploads.length > 1 ? 's' : ''}',
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w500),
-                ),
-              ),
+                CxSpace.xl, CxSpace.md, CxSpace.xl, MediaQuery.of(context).padding.bottom + CxSpace.lg),
+            decoration: const BoxDecoration(
+              border: Border(top: BorderSide(color: CxColors.border)),
+            ),
+            child: CxButton(
+              onPressed: _uploads.isNotEmpty ? _submit : null,
+              icon: _uploads.isEmpty ? null : Icons.cloud_upload_outlined,
+              label: _uploads.isEmpty
+                  ? 'Upload at least 1 image'
+                  : 'Submit ${_uploads.length} Image${_uploads.length > 1 ? 's' : ''}',
             ),
           ),
         ],
+      ),
+      ),
       ),
     );
   }
@@ -4299,17 +4045,18 @@ class _AddMoreTile extends StatelessWidget {
   const _AddMoreTile({required this.isPicking, required this.onTap});
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
+  Widget build(BuildContext context) => Material(
+        color: CxColors.brandSurface,
+        shape: RoundedRectangleBorder(
+          borderRadius: CxRadius.mdAll,
+          side: BorderSide(color: CxColors.brand.withValues(alpha: 0.6), width: 1.5),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
         onTap: isPicking ? null : onTap,
-        child: Container(
+        child: SizedBox(
           width: 96,
           height: 96,
-          decoration: BoxDecoration(
-            color: AppColors.brandGreenSurface,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-                color: AppColors.brandGreen, width: 1.5),
-          ),
           child: isPicking
               ? const Center(
                   child: SizedBox(
@@ -4326,11 +4073,12 @@ class _AddMoreTile extends StatelessWidget {
                     SizedBox(height: 4),
                     Text('Add more',
                         style: TextStyle(
-                            fontSize: 11,
+                            fontSize: 12,
                             color: AppColors.brandGreen,
-                            fontWeight: FontWeight.w500)),
+                            fontWeight: FontWeight.w600)),
                   ],
                 ),
+        ),
         ),
       );
 }
@@ -4349,44 +4097,12 @@ class _SourceTile extends StatelessWidget {
       required this.onTap});
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
+  // Same look as the shared option card; tap behaviour unchanged.
+  Widget build(BuildContext context) => CxOptionCard(
+        icon: icon,
+        title: label,
+        subtitle: sub,
         onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            color: AppColors.background,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.divider),
-          ),
-          child: Row(children: [
-            Container(
-              width: 44,
-              height: 44,
-              decoration: const BoxDecoration(
-                  color: AppColors.brandGreenSurface,
-                  shape: BoxShape.circle),
-              child: Icon(icon, size: 22, color: AppColors.brandGreen),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(label,
-                      style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary)),
-                  Text(sub,
-                      style: const TextStyle(
-                          fontSize: 12, color: AppColors.textSecondary)),
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right_rounded,
-                color: AppColors.textHint, size: 20),
-          ]),
-        ),
       );
 }
 

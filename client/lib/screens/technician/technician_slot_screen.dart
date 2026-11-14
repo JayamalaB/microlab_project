@@ -6,6 +6,8 @@ import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/tech/tech_widgets.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'technician_booking_detail_screen.dart';
 
@@ -446,29 +448,14 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
             };
           }
         });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text('Availability saved — patients can now book your slots'),
-          backgroundColor: AppColors.brandGreen,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 3),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.success(context, 'Availability saved — patients can now book your slots',
+            duration: const Duration(seconds: 3));
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text('Failed to save. Try again.'),
-          backgroundColor: const Color(0xFFD32F2F),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.error(context, 'Failed to save. Try again.');
       }
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text('Connection failed. Check internet.'),
-          backgroundColor: const Color(0xFFD32F2F),
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.error(context, 'Connection failed. Check internet.');
       }
     } finally {
       if (mounted) setState(() => _isSaving = false);
@@ -522,8 +509,8 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
                     Text(
                       '${d.day} ${_months[d.month]}',
                       style: TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.w800,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
                         color: isSel ? Colors.white : AppColors.textPrimary,
                       ),
                     ),
@@ -578,7 +565,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
           const Icon(Icons.access_time_filled_rounded, size: 15, color: AppColors.textPrimary),
           const SizedBox(width: 7),
           const Text("Today's Appointments",
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
           const Spacer(),
           Row(mainAxisSize: MainAxisSize.min, children: [
             Container(
@@ -641,7 +628,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
           const Text(
             'Other Time Slots',
             style: TextStyle(
-                fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+                fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
           ),
           const Spacer(),
           _QuickButton(
@@ -711,7 +698,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
                           // carries the timing, so none is added here.
                           slotLabel,
                           style: TextStyle(
-                            fontSize: 13.5,
+                            fontSize: 13,
                             fontWeight: FontWeight.w600,
                             color: isPast ? AppColors.textHint : AppColors.textPrimary,
                           ),
@@ -874,26 +861,9 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
 
         if (selected.isEmpty && allCount > 0) ...[
           const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFF8E1),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFFFFE082)),
-            ),
-            child: const Row(children: [
-              Icon(Icons.info_outline_rounded, size: 16, color: Color(0xFFF57F17)),
-              SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'No slots selected — you will be unavailable this day.',
-                  style: TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFFF57F17),
-                      fontWeight: FontWeight.w500),
-                ),
-              ),
-            ]),
+          const TechBanner(
+            tone: TechTone.warning,
+            message: 'No slots selected — you will be unavailable this day.',
           ),
         ],
       ]),
@@ -907,10 +877,10 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
     final total      = _totalSlots;
     final missing    = _missingDurations;
     return Container(
-      padding: EdgeInsets.fromLTRB(16, 12, 16, bottomPadding),
+      padding: EdgeInsets.fromLTRB(TechSpace.lg, TechSpace.md, TechSpace.lg, bottomPadding),
       decoration: BoxDecoration(
         color: Colors.white,
-        border: const Border(top: BorderSide(color: AppColors.divider)),
+        border: const Border(top: BorderSide(color: TechColors.border)),
         boxShadow: [BoxShadow(
             color: Colors.black.withValues(alpha: 0.07),
             blurRadius: 12,
@@ -920,56 +890,28 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
         // Why Save is disabled: the selected slots still without a duration.
         if (hasChanges && missing.isNotEmpty) ...[
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFFE65100)),
+            const Icon(Icons.info_outline_rounded, size: 16, color: TechColors.warning),
             const SizedBox(width: 6),
             Expanded(
               child: Text(
                 'Duration needed: ${missing.join(', ')}',
-                style: const TextStyle(fontSize: 11.5, color: Color(0xFFE65100), height: 1.35),
+                style: const TextStyle(fontSize: 13, color: TechColors.warning, height: 1.35),
               ),
             ),
           ]),
           const SizedBox(height: 8),
         ],
-        SizedBox(
-        width: double.infinity,
-        height: 52,
-        child: ElevatedButton(
+        TechButton(
           onPressed: (!hasChanges || _isSaving || missing.isNotEmpty) ? null : _save,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.brandGreen,
-            disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
-            elevation: 0,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-          ),
-          child: _isSaving
-              ? const SizedBox(
-                  width: 22, height: 22,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
-              : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                  Icon(
-                    hasChanges
-                        ? Icons.check_rounded
-                        : Icons.check_circle_outline_rounded,
-                    size: 18,
-                    color: Colors.white,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    !hasChanges
-                        ? 'All Changes Saved'
-                        : missing.isNotEmpty
-                            ? 'Choose a duration  •  ${missing.length} slot${missing.length != 1 ? 's' : ''}'
-                            : 'Save Availability  •  $total slot${total != 1 ? 's' : ''}',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600),
-                  ),
-                ]),
-        ),
+          loading: _isSaving,
+          icon: hasChanges
+              ? Icons.check_rounded
+              : Icons.check_circle_outline_rounded,
+          label: !hasChanges
+              ? 'All Changes Saved'
+              : missing.isNotEmpty
+                  ? 'Choose a duration  •  ${missing.length} slot${missing.length != 1 ? 's' : ''}'
+                  : 'Save Availability  •  $total slot${total != 1 ? 's' : ''}',
         ),
       ]),
     );
@@ -995,25 +937,12 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
 
     Widget body;
     if (_slotsLoading) {
-      body = const Center(
-        child: CircularProgressIndicator(
-            strokeWidth: 2,
-            valueColor: AlwaysStoppedAnimation<Color>(AppColors.brandGreen)),
-      );
+      body = const TechLoadingState(label: 'Loading your slots…');
     } else if (_masterSlots.isEmpty) {
-      body = const Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.schedule_rounded, size: 48, color: AppColors.brandGreenLight),
-          SizedBox(height: 14),
-          Text('No slots configured yet.',
-              style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textPrimary)),
-          SizedBox(height: 6),
-          Text('Ask your admin to set up time slots.',
-              style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-        ]),
+      body = const TechEmptyState(
+        icon: Icons.schedule_rounded,
+        title: 'No slots configured yet.',
+        message: 'Ask your admin to set up time slots.',
       );
     } else {
       body = Column(children: [
@@ -1058,7 +987,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('Schedule',
-                      style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+                      style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
                   SizedBox(height: 2),
                   Text('Your upcoming appointments',
                       style: TextStyle(color: Colors.white70, fontSize: 11.5)),
@@ -1087,30 +1016,30 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
       ]);
     }
 
-    return Scaffold(
+    return TechThemeScope(
+      child: Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded,
-              color: Colors.white, size: 18),
+              color: Colors.white, size: 20),
+          tooltip: 'Back',
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text('My Availability',
             style: TextStyle(
                 color: Colors.white,
-                fontSize: 17,
+                fontSize: 16,
                 fontWeight: FontWeight.w600)),
         actions: [
           if (!_slotsLoading) ...[
-            GestureDetector(
-              onTap: _loadSlots,
-              child: const Padding(
-                padding: EdgeInsets.only(right: 8),
-                child: Icon(Icons.refresh_rounded,
-                    color: Colors.white70, size: 20),
-              ),
+            IconButton(
+              onPressed: _loadSlots,
+              tooltip: 'Reload slots',
+              icon: const Icon(Icons.refresh_rounded,
+                  color: Colors.white70, size: 22),
             ),
             Padding(
                 padding: const EdgeInsets.only(right: 16),
@@ -1123,6 +1052,7 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
           ? null
           : _buildSaveButton(
               bottomPadding: MediaQuery.of(context).padding.bottom + 12),
+      ),
     );
   }
 }
@@ -1150,15 +1080,17 @@ class _AppointmentCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return Material(
+      color: TechColors.brandSurface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: TechRadius.lgAll,
+        side: BorderSide(color: AppColors.brandGreenLight),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: AppColors.brandGreenSurface,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.brandGreenLight),
-        ),
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -1180,7 +1112,7 @@ class _AppointmentCard extends StatelessWidget {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(booking.customerName,
                   style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                      fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
               const SizedBox(height: 4),
               Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 const Icon(Icons.location_on_outlined, size: 13, color: AppColors.textSecondary),
@@ -1204,8 +1136,9 @@ class _AppointmentCard extends StatelessWidget {
               ),
             ]),
           ),
-          const Icon(Icons.chevron_right_rounded, color: AppColors.brandGreen, size: 20),
+          const Icon(Icons.chevron_right_rounded, color: AppColors.brandGreen, size: 22),
         ]),
+      ),
       ),
     );
   }
@@ -1228,29 +1161,29 @@ class _QuickButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = destructive ? const Color(0xFFD32F2F) : AppColors.brandGreen;
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-        decoration: BoxDecoration(
+    final color = destructive ? TechColors.error : TechColors.brand;
+    return Material(
+      color: destructive ? TechColors.errorSurface : TechColors.brandSurface,
+      shape: StadiumBorder(
+        side: BorderSide(
           color: destructive
-              ? const Color(0xFFFFEBEE)
-              : AppColors.brandGreenSurface,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: destructive
-                ? const Color(0xFFEF9A9A)
-                : AppColors.brandGreenLight,
-          ),
+              ? TechColors.error.withValues(alpha: 0.35)
+              : AppColors.brandGreenLight,
         ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, size: 13, color: color),
-          const SizedBox(width: 4),
-          Text(label,
-              style: TextStyle(
-                  fontSize: 12, fontWeight: FontWeight.w700, color: color)),
-        ]),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 16, color: color),
+            const SizedBox(width: 5),
+            Text(label,
+                style: TextStyle(
+                    fontSize: 13, fontWeight: FontWeight.w700, color: color)),
+          ]),
+        ),
       ),
     );
   }

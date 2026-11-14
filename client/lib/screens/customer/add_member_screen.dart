@@ -5,6 +5,7 @@ import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 
 class AddMemberScreen extends StatefulWidget {
   final MemberModel? existingMember;
@@ -123,49 +124,20 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
   }
 
   void _showImageSourceSheet() {
-    showModalBottomSheet(
+    // Same three options as before (camera, gallery, remove), customer sheet look.
+    showCxSheet(
       context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Container(
-        decoration: const BoxDecoration(
-          color: AppColors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        padding: EdgeInsets.fromLTRB(
-            20, 0, 20, MediaQuery.of(context).padding.bottom + 20),
-        child: Column(
+      title: 'Upload Photo',
+      subtitle: 'Choose a clear face photo',
+      centerTitle: true,
+      builder: (_) => Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Handle
-            Container(
-              margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: AppColors.divider,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-
-            const Text(
-              'Upload Photo',
-              style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textPrimary),
-            ),
-            const SizedBox(height: 4),
-            const Text(
-              'Choose a clear face photo',
-              style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-            ),
-            const SizedBox(height: 20),
-
             // Camera option
             _ImageSourceTile(
               icon: Icons.camera_alt_outlined,
-              iconColor: const Color(0xFF1565C0),
-              iconBg: const Color(0xFFEEF4FB),
+              iconColor: CxColors.brand,
+              iconBg: CxColors.brandSurface,
               title: 'Take a photo',
               subtitle: 'Open camera to capture now',
               onTap: () {
@@ -179,8 +151,8 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
             // Gallery option
             _ImageSourceTile(
               icon: Icons.photo_library_outlined,
-              iconColor: const Color(0xFF6A1B9A),
-              iconBg: const Color(0xFFF3E5F5),
+              iconColor: CxColors.info,
+              iconBg: CxColors.infoSurface,
               title: 'Choose from gallery',
               subtitle: 'Pick an existing photo',
               onTap: () {
@@ -194,8 +166,8 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
               const SizedBox(height: 10),
               _ImageSourceTile(
                 icon: Icons.delete_outline_rounded,
-                iconColor: const Color(0xFFD32F2F),
-                iconBg: const Color(0xFFFFF5F5),
+                iconColor: CxColors.error,
+                iconBg: CxColors.errorSurface,
                 title: 'Remove photo',
                 subtitle: 'Delete the current photo',
                 onTap: () {
@@ -205,7 +177,6 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
               ),
             ],
           ],
-        ),
       ),
     );
   }
@@ -248,25 +219,11 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
       return;
     }
     if (_gender == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Please select a gender'),
-          backgroundColor: Colors.red[700],
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ),
-      );
+      AppMessages.error(context, 'Please select a gender');
       return;
     }
     if (_selectedDob == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Please select a date of birth'),
-          backgroundColor: Colors.red[700],
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ),
-      );
+      AppMessages.error(context, 'Please select a date of birth');
       return;
     }
 
@@ -281,12 +238,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
       );
       if (uploadedPhotoUrl == null && mounted) {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Text('Photo upload failed. Please try again.'),
-          backgroundColor: Colors.red[700],
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.error(context, 'Photo upload failed. Please try again.');
         return;
       }
     }
@@ -379,30 +331,31 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.background,
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       appBar: AppBar(
         backgroundColor: AppColors.white,
         elevation: 0,
         scrolledUnderElevation: 0,
+        shape: const Border(bottom: BorderSide(color: CxColors.border)),
         leading: IconButton(
+          tooltip: 'Back',
           icon: const Icon(Icons.arrow_back_ios_new_rounded,
               size: 18, color: AppColors.textPrimary),
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
           _isEditing ? 'Edit Customer' : 'Add Customer',
-          style: const TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.w600,
-              color: AppColors.textPrimary),
+          style: CxText.pageTitle.copyWith(fontSize: 18),
         ),
       ),
       body: Form(
         key: _formKey,
         child: ListView(
           controller: _scrollController,
-          padding: const EdgeInsets.fromLTRB(16, 20, 16, 100),
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.xl, CxSpace.gutter, 100),
           children: [
             // ── Photo Picker ──────────────────────────────
             _PhotoPickerWidget(
@@ -489,16 +442,22 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
 
               const SizedBox(height: 16),
               _FieldLabel(label: 'Date of Birth', required: true),
-              GestureDetector(
+              Semantics(
+                button: true,
+                label: 'Date of birth',
+                value: _dobController.text,
+                child: Material(
+                color: AppColors.white,
+                shape: const RoundedRectangleBorder(
+                  borderRadius: CxRadius.mdAll,
+                  side: BorderSide(color: CxColors.border),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
                 onTap: _pickDate,
                 child: Container(
-                  height: 50,
+                  height: CxSize.minTouch + 2,
                   padding: const EdgeInsets.symmetric(horizontal: 14),
-                  decoration: BoxDecoration(
-                    color: AppColors.white,
-                    border: Border.all(color: AppColors.divider),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
                   child: Row(
                     children: [
                       const Icon(Icons.cake_outlined,
@@ -517,26 +476,14 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                         ),
                       ),
                       if (_calculatedAge != null)
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: AppColors.brandGreenSurface,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Text(
-                            '${_calculatedAge ?? 0} yrs',
-                            style: const TextStyle(
-                                fontSize: 12,
-                                color: AppColors.brandGreen,
-                                fontWeight: FontWeight.w600),
-                          ),
-                        ),
-                      const SizedBox(width: 6),
+                        CxChip(label: '${_calculatedAge ?? 0} yrs', tone: CxTone.brand),
+                      const SizedBox(width: 8),
                       const Icon(Icons.calendar_month_outlined,
-                          size: 18, color: AppColors.textSecondary),
+                          size: 20, color: CxColors.brand),
                     ],
                   ),
+                ),
+                ),
                 ),
               ),
             ]),
@@ -569,25 +516,25 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                 hint: const Text('Select relation',
                     style: TextStyle(
                         fontSize: 14, color: AppColors.textHint)),
-                decoration: InputDecoration(
-                  prefixIcon: const Icon(Icons.people_outline,
+                decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.people_outline,
                       size: 18, color: AppColors.textHint),
                   filled: true,
                   fillColor: AppColors.white,
                   border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: AppColors.divider),
+                    borderRadius: CxRadius.mdAll,
+                    borderSide: BorderSide(color: CxColors.border),
                   ),
                   enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: AppColors.divider),
+                    borderRadius: CxRadius.mdAll,
+                    borderSide: BorderSide(color: CxColors.border),
                   ),
                   focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(
-                        color: AppColors.brandGreen, width: 1.5),
+                    borderRadius: CxRadius.mdAll,
+                    borderSide: BorderSide(
+                        color: CxColors.brand, width: 1.5),
                   ),
-                  contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                  contentPadding: EdgeInsets.symmetric(vertical: 15),
                 ),
                 style: const TextStyle(
                     fontSize: 14, color: AppColors.textPrimary),
@@ -616,41 +563,17 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
 
       bottomNavigationBar: Container(
         padding: EdgeInsets.fromLTRB(
-            16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
+            CxSpace.gutter, CxSpace.md, CxSpace.gutter, MediaQuery.of(context).padding.bottom + CxSpace.md),
         decoration: const BoxDecoration(
           color: AppColors.white,
-          border: Border(top: BorderSide(color: AppColors.divider)),
+          border: Border(top: BorderSide(color: CxColors.border)),
         ),
-        child: SizedBox(
-          height: 52,
-          child: ElevatedButton(
-            onPressed: _isLoading ? null : _submit,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.brandGreen,
-              disabledBackgroundColor:
-                  AppColors.brandGreen.withOpacity(0.4),
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14)),
-            ),
-            child: _isLoading
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor:
-                            AlwaysStoppedAnimation<Color>(Colors.white)),
-                  )
-                : Text(
-                    _isEditing ? 'Save Changes' : 'Add Customer',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w500),
-                  ),
-          ),
+        child: CxButton(
+          label: _isEditing ? 'Save Changes' : 'Add Customer',
+          loading: _isLoading,
+          onPressed: _isLoading ? null : _submit,
         ),
+      ),
       ),
     );
   }
@@ -720,8 +643,9 @@ class _PhotoPickerWidget extends StatelessWidget {
                   ),
                   child: Icon(
                     hasPhoto ? Icons.edit_outlined : Icons.camera_alt_outlined,
-                    size: 15,
+                    size: 16,
                     color: Colors.white,
+                    semanticLabel: hasPhoto ? 'Change photo' : 'Add photo',
                   ),
                 ),
               ],
@@ -733,10 +657,7 @@ class _PhotoPickerWidget extends StatelessWidget {
           // Label
           Text(
             hasPhoto ? 'Tap to change photo' : 'Add photo (optional)',
-            style: const TextStyle(
-              fontSize: 12,
-              color: AppColors.textSecondary,
-            ),
+            style: CxText.bodySecondary,
           ),
 
           // Uploaded indicator
@@ -811,15 +732,17 @@ class _ImageSourceTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
+    return Material(
+      color: AppColors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: CxRadius.lgAll,
+        side: BorderSide(color: CxColors.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-        decoration: BoxDecoration(
-          border: Border.all(color: AppColors.divider),
-          borderRadius: BorderRadius.circular(14),
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         child: Row(
           children: [
             Container(
@@ -836,22 +759,17 @@ class _ImageSourceTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title,
-                      style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                          color: AppColors.textPrimary)),
+                  Text(title, style: CxText.cardTitle),
                   const SizedBox(height: 2),
-                  Text(subtitle,
-                      style: const TextStyle(
-                          fontSize: 12, color: AppColors.textSecondary)),
+                  Text(subtitle, style: CxText.caption),
                 ],
               ),
             ),
-            const Icon(Icons.arrow_forward_ios_rounded,
-                size: 14, color: AppColors.textHint),
+            const Icon(Icons.chevron_right_rounded,
+                size: 22, color: AppColors.textHint),
           ],
         ),
+      ),
       ),
     );
   }
@@ -865,13 +783,8 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 10),
-        child: Text(label,
-            style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: AppColors.textSecondary,
-                letterSpacing: 0.3)),
+        padding: const EdgeInsets.only(bottom: CxSpace.sm, left: 2),
+        child: Text(label, style: CxText.sectionTitle),
       );
 }
 
@@ -881,11 +794,12 @@ class _FormCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(CxSpace.lg),
         decoration: BoxDecoration(
           color: AppColors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: AppColors.divider),
+          borderRadius: CxRadius.lgAll,
+          border: Border.all(color: CxColors.border),
+          boxShadow: const [BoxShadow(color: Color(0x0A000000), blurRadius: 10, offset: Offset(0, 2))],
         ),
         child: Column(
             crossAxisAlignment: CrossAxisAlignment.start, children: children),
@@ -903,15 +817,12 @@ class _FieldLabel extends StatelessWidget {
         child: RichText(
           text: TextSpan(
             text: label,
-            style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: AppColors.textPrimary),
+            style: CxText.label,
             children: required
                 ? const [
                     TextSpan(
                         text: ' *',
-                        style: TextStyle(color: Color(0xFFD32F2F)))
+                        style: TextStyle(color: CxColors.error))
                   ]
                 : [],
           ),
@@ -965,31 +876,33 @@ class _AppTextField extends StatelessWidget {
           filled: true,
           fillColor: AppColors.white,
           counterText: '',
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: AppColors.divider),
+          errorStyle: const TextStyle(fontSize: 12, color: CxColors.error),
+          errorMaxLines: 2,
+          border: const OutlineInputBorder(
+            borderRadius: CxRadius.mdAll,
+            borderSide: BorderSide(color: CxColors.border),
           ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: AppColors.divider),
+          enabledBorder: const OutlineInputBorder(
+            borderRadius: CxRadius.mdAll,
+            borderSide: BorderSide(color: CxColors.border),
           ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+          focusedBorder: const OutlineInputBorder(
+            borderRadius: CxRadius.mdAll,
             borderSide:
-                const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                BorderSide(color: CxColors.brand, width: 1.5),
           ),
-          errorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+          errorBorder: const OutlineInputBorder(
+            borderRadius: CxRadius.mdAll,
             borderSide:
-                const BorderSide(color: Color(0xFFD32F2F), width: 1.5),
+                BorderSide(color: CxColors.error, width: 1.5),
           ),
-          focusedErrorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
+          focusedErrorBorder: const OutlineInputBorder(
+            borderRadius: CxRadius.mdAll,
             borderSide:
-                const BorderSide(color: Color(0xFFD32F2F), width: 1.5),
+                BorderSide(color: CxColors.error, width: 1.5),
           ),
           contentPadding: EdgeInsets.symmetric(
-              vertical: maxLines > 1 ? 14 : 0, horizontal: 14),
+              vertical: maxLines > 1 ? 14 : 15, horizontal: 14),
         ),
       );
 }
@@ -1002,26 +915,44 @@ class _GenderChip extends StatelessWidget {
       {required this.label, required this.selected, required this.onTap});
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        selected: selected,
+        label: 'Gender $label',
+        excludeSemantics: true,
+        child: GestureDetector(
         onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
-          height: 42,
+          height: CxSize.minTouch,
           decoration: BoxDecoration(
-            color: selected ? AppColors.brandGreen : AppColors.white,
-            borderRadius: BorderRadius.circular(10),
+            color: selected ? CxColors.brand : AppColors.white,
+            borderRadius: CxRadius.mdAll,
             border: Border.all(
-                color: selected ? AppColors.brandGreen : AppColors.divider,
+                color: selected ? CxColors.brand : CxColors.border,
                 width: selected ? 1.5 : 1),
           ),
           alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w500,
-                color: selected ? Colors.white : AppColors.textSecondary),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (selected) ...[
+                const Icon(Icons.check_rounded, size: 16, color: Colors.white),
+                const SizedBox(width: 4),
+              ],
+              Flexible(
+                child: Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                      color: selected ? Colors.white : AppColors.textSecondary),
+                ),
+              ),
+            ],
           ),
+        ),
         ),
       );
 }

@@ -15,6 +15,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/theme/customer_theme.dart';
 import 'yt_web_stub.dart' if (dart.library.html) 'yt_web_impl.dart';
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -422,19 +423,26 @@ class SupportChatbotButton extends StatelessWidget {
         context: context,
         isScrollControlled: true,
         backgroundColor: Colors.transparent,
+        constraints: const BoxConstraints(maxWidth: CxSize.sheetMaxWidth),
         builder: (_) => _ChatbotSheet(patientId: patientId),
       );
 
   @override
   Widget build(BuildContext context) {
-    return Material(
+    return Tooltip(
+      message: 'Chat with MicroLab Assistant',
+      child: Semantics(
+      button: true,
+      label: 'Chat with MicroLab Assistant',
+      excludeSemantics: true,
+      child: Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: () => _open(context),
         borderRadius: BorderRadius.circular(28),
         child: Container(
-          height: 44,
-          width: 44,
+          height: CxSize.minTouch,
+          width: CxSize.minTouch,
           decoration: BoxDecoration(
             color: AppColors.brandGreen,
             borderRadius: BorderRadius.circular(28),
@@ -446,8 +454,10 @@ class SupportChatbotButton extends StatelessWidget {
               ),
             ],
           ),
-          child: const Icon(Icons.support_agent_rounded, color: Colors.white, size: 22),
+          child: const Icon(Icons.support_agent_rounded, color: Colors.white, size: 24),
         ),
+      ),
+      ),
       ),
     );
   }
@@ -1330,16 +1340,22 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   // ── Build ──────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    final keyboardHeight = MediaQuery.of(context).viewInsets.bottom;
+    final mq = MediaQuery.of(context);
+    final keyboardHeight = mq.viewInsets.bottom;
+    // Never taller than the space left above the keyboard (below the status
+    // bar), so the header and input stay on screen on small phones.
+    final maxHeight = mq.size.height - keyboardHeight - mq.padding.top - 8;
+    final sheetHeight = (mq.size.height * 0.88).clamp(0.0, maxHeight < 0 ? 0.0 : maxHeight);
     // Wrap with Padding so the sheet slides UP when the keyboard opens,
     // keeping the input bar visible above the keyboard at all times.
     return Padding(
       padding: EdgeInsets.only(bottom: keyboardHeight),
       child: Container(
-        height: MediaQuery.of(context).size.height * 0.88,
+        height: sheetHeight,
+        clipBehavior: Clip.antiAlias,
         decoration: const BoxDecoration(
-          color: AppColors.background,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          color: CxColors.page,
+          borderRadius: CxRadius.sheetTop,
         ),
         child: Column(
           children: [
@@ -1355,15 +1371,15 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
 
   Widget _buildHeader() {
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
+      padding: const EdgeInsets.fromLTRB(16, 12, 4, 12),
       decoration: const BoxDecoration(
         color: AppColors.brandGreen,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: CxRadius.sheetTop,
       ),
       child: Row(
         children: [
           Container(
-            width: 38, height: 38,
+            width: 40, height: 40,
             decoration: BoxDecoration(
               color: Colors.white.withValues(alpha: 0.18),
               borderRadius: BorderRadius.circular(10),
@@ -1378,21 +1394,24 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text('MicroLab Assistant',
-                    style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700)),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
               ],
             ),
           ),
           const _PulseDot(),
           const SizedBox(width: 5),
           const Text('Online',
-              style: TextStyle(color: Color(0xFF7EFFA0), fontSize: 11, fontWeight: FontWeight.w600)),
-          const SizedBox(width: 4),
+              style: TextStyle(color: Color(0xFF7EFFA0), fontSize: 12, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 2),
           _LayerMenu(onLayerSelected: _pickLayer),
           IconButton(
-            icon: const Icon(Icons.close_rounded, color: Colors.white, size: 20),
+            tooltip: 'Close chat',
+            icon: const Icon(Icons.close_rounded, color: Colors.white, size: 22),
             onPressed: () => Navigator.pop(context),
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            constraints: const BoxConstraints(minWidth: CxSize.minTouch, minHeight: CxSize.minTouch),
           ),
         ],
       ),
@@ -1403,17 +1422,17 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
-        border: Border(bottom: BorderSide(color: AppColors.divider)),
+        border: Border(bottom: BorderSide(color: CxColors.border)),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: Row(
         children: [
           Expanded(child: _LayerChip(layer: _Layer.staticInfo, onTap: () => _pickLayer(_Layer.staticInfo))),
-          const SizedBox(width: 5),
+          const SizedBox(width: 6),
           Expanded(child: _LayerChip(layer: _Layer.db,         onTap: () => _pickLayer(_Layer.db))),
-          const SizedBox(width: 5),
+          const SizedBox(width: 6),
           Expanded(child: _LayerChip(layer: _Layer.web,        onTap: () => _pickLayer(_Layer.web))),
-          const SizedBox(width: 5),
+          const SizedBox(width: 6),
           Expanded(child: _LayerChip(layer: _Layer.book,       onTap: () => _pickLayer(_Layer.book))),
         ],
       ),
@@ -1461,7 +1480,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
             padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Text(text.toUpperCase(),
                 style: const TextStyle(
-                    fontSize: 10, fontWeight: FontWeight.w700,
+                    fontSize: 11, fontWeight: FontWeight.w700,
                     color: AppColors.textSecondary, letterSpacing: 0.7)),
           ),
           Expanded(
@@ -1735,7 +1754,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                 ),
                 child: Text('🎙️ "${msg.voiceTranscript}"',
                     style: const TextStyle(
-                        fontSize: 11,
+                        fontSize: 12,
                         fontStyle: FontStyle.italic,
                         color: AppColors.brandGreen)),
               ),
@@ -1755,11 +1774,11 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                         bottomLeft: Radius.circular(18), bottomRight: Radius.circular(4),
                       ),
                       boxShadow: [BoxShadow(
-                          color: AppColors.brandGreen.withValues(alpha: 0.28),
-                          blurRadius: 14, offset: const Offset(0, 3))],
+                          color: AppColors.brandGreen.withValues(alpha: 0.22),
+                          blurRadius: 10, offset: const Offset(0, 2))],
                     ),
                     child: Text(msg.text,
-                        style: const TextStyle(fontSize: 13, height: 1.65, color: Colors.white)),
+                        style: const TextStyle(fontSize: 14, height: 1.5, color: Colors.white)),
                   ),
                 ),
                 const SizedBox(width: 10),
@@ -1768,7 +1787,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                   decoration: const BoxDecoration(color: Color(0xFF374151), shape: BoxShape.circle),
                   child: const Center(
                     child: Text('You',
-                        style: TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w700)),
+                        style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700)),
                   ),
                 ),
               ],
@@ -1810,36 +1829,43 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    border: Border.all(color: AppColors.divider),
+                    border: Border.all(color: CxColors.border),
                     borderRadius: const BorderRadius.only(
                       topLeft: Radius.circular(4), topRight: Radius.circular(18),
                       bottomLeft: Radius.circular(18), bottomRight: Radius.circular(18),
                     ),
-                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 4)],
+                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 6, offset: const Offset(0, 1))],
                   ),
                   child: _linkifyText(msg.text,
-                      const TextStyle(fontSize: 13, height: 1.65, color: AppColors.textPrimary)),
+                      const TextStyle(fontSize: 14, height: 1.5, color: AppColors.textPrimary)),
                 ),
                 if (msg.chips != null && msg.chips!.isNotEmpty) ...[
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   Wrap(
-                    spacing: 7, runSpacing: 7,
-                    children: msg.chips!.map((c) => GestureDetector(
+                    spacing: 8, runSpacing: 8,
+                    children: msg.chips!.map((c) => Semantics(
+                      button: true,
+                      enabled: !_loading,
+                      label: c,
+                      excludeSemantics: true,
+                      child: GestureDetector(
                       onTap: _loading ? null : () => _send(c),
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 6),
+                        constraints: const BoxConstraints(minHeight: 38),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                         decoration: BoxDecoration(
-                          color: AppColors.brandGreenSurface,
+                          color: _loading ? Colors.white : CxColors.brandSurface,
                           border: Border.all(
-                            color: _loading ? AppColors.divider : AppColors.brandGreenLight,
-                            width: 1.5,
+                            color: _loading ? CxColors.border : CxColors.brandLight,
+                            width: 1.4,
                           ),
-                          borderRadius: BorderRadius.circular(999),
+                          borderRadius: CxRadius.pill,
                         ),
                         child: Text(c,
                             style: TextStyle(
-                                fontSize: 11.5, fontWeight: FontWeight.w500,
+                                fontSize: 13, fontWeight: FontWeight.w600,
                                 color: _loading ? AppColors.textHint : AppColors.brandGreen)),
+                      ),
                       ),
                     )).toList(),
                   ),
@@ -1853,7 +1879,10 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   }
 
   Widget _buildTypingIndicator() {
-    return Padding(
+    return Semantics(
+      liveRegion: true,
+      label: 'Assistant is typing',
+      child: Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1882,6 +1911,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           ),
         ],
       ),
+      ),
     );
   }
 
@@ -1894,7 +1924,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           12, 10, 12, MediaQuery.of(context).padding.bottom + 10),
       decoration: const BoxDecoration(
         color: Colors.white,
-        border: Border(top: BorderSide(color: AppColors.divider)),
+        border: Border(top: BorderSide(color: CxColors.border)),
       ),
       child: Row(
         children: [
@@ -1902,28 +1932,29 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
             child: TextField(
               controller: _ctrl,
               textInputAction: TextInputAction.send,
-              style: const TextStyle(fontSize: 13, color: AppColors.textPrimary),
+              style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
               enabled: !_loading && !isProcessing,
               decoration: InputDecoration(
                 hintText: isRecording  ? 'Listening…'
                         : isProcessing ? 'Transcribing…'
                         : _loading     ? 'Thinking…'
                         : 'Ask something, or tap 🎙️ to speak…',
-                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+                hintStyle: const TextStyle(fontSize: 14, color: AppColors.textHint),
+                hintMaxLines: 1,
                 filled: true,
-                fillColor: AppColors.background,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: const BorderSide(color: AppColors.divider, width: 1.5),
+                fillColor: CxColors.page,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                enabledBorder: const OutlineInputBorder(
+                  borderRadius: CxRadius.pill,
+                  borderSide: BorderSide(color: CxColors.border, width: 1.4),
                 ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                focusedBorder: const OutlineInputBorder(
+                  borderRadius: CxRadius.pill,
+                  borderSide: BorderSide(color: CxColors.brand, width: 1.5),
                 ),
-                disabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: const BorderSide(color: AppColors.divider),
+                disabledBorder: const OutlineInputBorder(
+                  borderRadius: CxRadius.pill,
+                  borderSide: BorderSide(color: CxColors.border),
                 ),
               ),
               onSubmitted: (v) {
@@ -1942,7 +1973,14 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           ),
           const SizedBox(width: 6),
           // Send button
-          GestureDetector(
+          Tooltip(
+            message: 'Send message',
+            child: Semantics(
+            button: true,
+            enabled: !(_loading || isProcessing),
+            label: 'Send message',
+            excludeSemantics: true,
+            child: GestureDetector(
             onTap: (_loading || isProcessing)
                 ? null
                 : () {
@@ -1953,7 +1991,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                   },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
-              width: 42, height: 42,
+              width: 46, height: 46,
               decoration: BoxDecoration(
                 color: (_loading || isProcessing) ? AppColors.divider : AppColors.brandGreen,
                 shape: BoxShape.circle,
@@ -1964,7 +2002,9 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
                         blurRadius: 10, offset: const Offset(0, 3))],
               ),
               child: Icon(Icons.send_rounded,
-                  color: (_loading || isProcessing) ? AppColors.textHint : Colors.white, size: 18),
+                  color: (_loading || isProcessing) ? AppColors.textHint : Colors.white, size: 20),
+            ),
+            ),
             ),
           ),
         ],
@@ -2006,7 +2046,7 @@ class _SourceTag extends StatelessWidget {
       ),
       child: Text(layer.tagLabel.toUpperCase(),
           style: TextStyle(
-              fontSize: 9.5, fontWeight: FontWeight.w700,
+              fontSize: 10.5, fontWeight: FontWeight.w700,
               color: layer.accent, letterSpacing: 0.6)),
     );
   }
@@ -2061,17 +2101,37 @@ class _TtsButton extends StatelessWidget {
       action = onPlay;
     }
 
-    return GestureDetector(
+    final label = isLoading
+        ? 'Loading audio'
+        : isPlaying
+            ? 'Pause reading'
+            : isPaused
+                ? 'Resume reading'
+                : 'Read message aloud';
+    // Same action as before; the transparent padding makes the tap area bigger.
+    return Tooltip(
+      message: label,
+      child: Semantics(
+      button: true,
+      label: label,
+      excludeSemantics: true,
+      child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: action,
+      child: Padding(
+      padding: const EdgeInsets.all(4),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        width: 28, height: 28,
+        width: 32, height: 32,
         decoration: BoxDecoration(
           color: bg,
           shape: BoxShape.circle,
           border: Border.all(color: AppColors.brandGreenLight),
         ),
         child: Center(child: icon),
+      ),
+      ),
+      ),
       ),
     );
   }
@@ -2105,16 +2165,30 @@ class _MicButtonWidget extends StatelessWidget {
       ic = Icons.hourglass_bottom_rounded;
     }
 
-    return GestureDetector(
+    final label = isRecording
+        ? 'Stop recording'
+        : isProcessing
+            ? 'Transcribing voice'
+            : 'Speak your question';
+    return Tooltip(
+      message: label,
+      child: Semantics(
+      button: true,
+      enabled: !isProcessing,
+      label: label,
+      excludeSemantics: true,
+      child: GestureDetector(
       onTap: isProcessing ? null : onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        width: 42, height: 42,
+        width: 46, height: 46,
         decoration: BoxDecoration(
           color: bg, shape: BoxShape.circle,
           border: Border.all(color: bd, width: 1.5),
         ),
-        child: Icon(ic, color: fg, size: 20),
+        child: Icon(ic, color: fg, size: 22),
+      ),
+      ),
       ),
     );
   }
@@ -2202,6 +2276,7 @@ class _LayerMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return PopupMenuButton<_Layer>(
+      tooltip: 'More options',
       icon: Container(
         width: 34, height: 34,
         decoration: BoxDecoration(
@@ -2228,8 +2303,9 @@ class _LayerMenu extends StatelessWidget {
   PopupMenuItem<_Layer> _item(_Layer l, String label) {
     return PopupMenuItem(
       value: l,
+      height: CxSize.minTouch,
       child: Text(label, style: const TextStyle(
-          fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
     );
   }
 }
@@ -2242,22 +2318,29 @@ class _LayerChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return Semantics(
+      button: true,
+      label: layer.label,
+      excludeSemantics: true,
+      child: GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 7),
+        constraints: const BoxConstraints(minHeight: 38),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
         decoration: BoxDecoration(
-          color: AppColors.brandGreenSurface,
-          border: Border.all(color: AppColors.brandGreenLight, width: 1.5),
-          borderRadius: BorderRadius.circular(999),
+          color: CxColors.brandSurface,
+          border: Border.all(color: CxColors.brandLight, width: 1.4),
+          borderRadius: CxRadius.pill,
         ),
         child: Text(
           layer.label,
-          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.brandGreen),
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.brandGreen),
           overflow: TextOverflow.ellipsis,
           maxLines: 1,
           textAlign: TextAlign.center,
         ),
+      ),
       ),
     );
   }

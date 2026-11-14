@@ -9,9 +9,9 @@ class BookingStatusBadge extends StatelessWidget {
   Color get _color {
     switch (status) {
       case 'Completed':   return AppColors.brandGreen;
-      case 'Cancelled':   return const Color(0xFFD32F2F);
-      case 'In Progress': return const Color(0xFF1565C0);
-      default:            return const Color(0xFFE65100); // Technician Allocated
+      case 'Cancelled':   return AppColors.error;
+      case 'In Progress': return AppColors.blue;
+      default:            return AppColors.amber; // Technician Allocated
     }
   }
 
@@ -25,24 +25,26 @@ class BookingStatusBadge extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => Container(
+  Widget build(BuildContext context) => Semantics(
+        label: 'Status: $status',
+        child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
-          color: _color.withOpacity(0.10),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: _color.withOpacity(0.3)),
+          color: _color.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(999),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(_icon, size: 14, color: _color),
+            Icon(_icon, size: 16, color: _color),
             const SizedBox(width: 5),
             Text(status,
                 style: TextStyle(
-                    fontSize: 12,
+                    fontSize: 13,
                     fontWeight: FontWeight.w600,
                     color: _color)),
           ],
+        ),
         ),
       );
 }

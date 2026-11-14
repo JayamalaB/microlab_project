@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 import 'customer_home_screen.dart';
 
 class CompleteProfileScreen extends StatefulWidget {
@@ -109,25 +110,26 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.background,
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       body: SafeArea(
         child: Column(
           children: [
             // ── Header ──────────────────────────────────────────
             Container(
               color: AppColors.brandGreen,
-              padding: const EdgeInsets.fromLTRB(20, 20, 16, 20),
+              padding: const EdgeInsets.fromLTRB(20, 20, 16, 22),
               child: Row(
                 children: [
                   Container(
-                    width: 36, height: 36,
+                    width: 44, height: 44,
                     decoration: BoxDecoration(
                       color: Colors.white.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(10),
+                      borderRadius: CxRadius.mdAll,
                     ),
                     child: const Icon(Icons.person_outline_rounded,
-                        color: Colors.white, size: 20),
+                        color: Colors.white, size: 24),
                   ),
                   const SizedBox(width: 12),
                   const Expanded(
@@ -137,12 +139,12 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                         Text('Complete Your Profile',
                             style: TextStyle(
                                 color: Colors.white,
-                                fontSize: 16,
+                                fontSize: 18,
                                 fontWeight: FontWeight.w700)),
                         SizedBox(height: 2),
                         Text('Required to proceed',
                             style: TextStyle(
-                                color: Colors.white70, fontSize: 11)),
+                                color: Colors.white70, fontSize: 13)),
                       ],
                     ),
                   ),
@@ -153,14 +155,18 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
             // ── Form ────────────────────────────────────────────
             Expanded(
               child: SingleChildScrollView(
+                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
                 padding: const EdgeInsets.fromLTRB(20, 24, 20, 32),
+                child: Center(
+                child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: CxSize.contentMaxWidth),
                 child: Form(
                   key: _formKey,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       // Mobile — read only
-                      _Label('Mobile Number'),
+                      const _Label('Mobile Number'),
                       const SizedBox(height: 6),
                       TextFormField(
                         initialValue: widget.mobile,
@@ -171,18 +177,10 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                           hint: widget.mobile,
                           prefix: const Icon(Icons.phone_outlined,
                               size: 18, color: AppColors.textHint),
-                          suffix: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: AppColors.brandGreenSurface,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: const Text('Verified',
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: AppColors.brandGreen,
-                                    fontWeight: FontWeight.w600)),
+                          suffix: const CxChip(
+                            label: 'Verified',
+                            icon: Icons.verified_rounded,
+                            tone: CxTone.brand,
                           ),
                         ),
                       ),
@@ -190,7 +188,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       const SizedBox(height: 18),
 
                       // Full name
-                      _Label('Full Name', required: true),
+                      const _Label('Full Name', required: true),
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _namCtrl,
@@ -211,40 +209,59 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       const SizedBox(height: 18),
 
                       // Gender
-                      _Label('Gender', required: true),
+                      const _Label('Gender', required: true),
                       const SizedBox(height: 8),
                       Row(
                         children: ['Male', 'Female', 'Other'].map((g) {
                           final selected = _gender == g;
                           return Expanded(
-                            child: GestureDetector(
+                            child: Semantics(
+                              button: true,
+                              selected: selected,
+                              label: 'Gender $g',
+                              excludeSemantics: true,
+                              child: GestureDetector(
                               onTap: () => setState(() => _gender = g),
                               child: AnimatedContainer(
                                 duration: const Duration(milliseconds: 150),
                                 margin: EdgeInsets.only(
                                     right: g != 'Other' ? 10 : 0),
-                                padding: const EdgeInsets.symmetric(
-                                    vertical: 11),
+                                height: CxSize.minTouch,
+                                alignment: Alignment.center,
                                 decoration: BoxDecoration(
                                   color: selected
-                                      ? AppColors.brandGreen
+                                      ? CxColors.brand
                                       : Colors.white,
-                                  borderRadius: BorderRadius.circular(10),
+                                  borderRadius: CxRadius.mdAll,
                                   border: Border.all(
                                     color: selected
-                                        ? AppColors.brandGreen
-                                        : AppColors.divider,
+                                        ? CxColors.brand
+                                        : CxColors.border,
                                     width: selected ? 1.5 : 1,
                                   ),
                                 ),
-                                child: Text(g,
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: selected
-                                            ? Colors.white
-                                            : AppColors.textSecondary)),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (selected) ...[
+                                      const Icon(Icons.check_rounded,
+                                          size: 16, color: Colors.white),
+                                      const SizedBox(width: 4),
+                                    ],
+                                    Flexible(
+                                      child: Text(g,
+                                          textAlign: TextAlign.center,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w600,
+                                              color: selected
+                                                  ? Colors.white
+                                                  : AppColors.textSecondary)),
+                                    ),
+                                  ],
+                                ),
+                              ),
                               ),
                             ),
                           );
@@ -256,19 +273,13 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                           child: Text('Gender is required',
                               style: TextStyle(
                                   fontSize: 12,
-                                  color: Color(0xFFD32F2F))),
+                                  color: CxColors.error)),
                         ),
 
                       const SizedBox(height: 18),
 
                       // Date of birth (mandatory)
-                      RichText(text: const TextSpan(
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
-                        children: [
-                          TextSpan(text: 'Date of Birth'),
-                          TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
-                        ],
-                      )),
+                      const _Label('Date of Birth', required: true),
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _dobCtrl,
@@ -280,6 +291,8 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                           hint: 'DD/MM/YYYY',
                           prefix: const Icon(Icons.cake_outlined,
                               size: 18, color: AppColors.textHint),
+                          suffix: const Icon(Icons.calendar_month_outlined,
+                              size: 20, color: CxColors.brand),
                         ),
                       ),
                       if (_saving && _dob == null)
@@ -288,13 +301,13 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                           child: Text('Date of birth is required',
                               style: TextStyle(
                                   fontSize: 12,
-                                  color: Color(0xFFD32F2F))),
+                                  color: CxColors.error)),
                         ),
 
                       const SizedBox(height: 18),
 
                       // City
-                      _Label('City', required: true),
+                      const _Label('City', required: true),
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _cityCtrl,
@@ -315,7 +328,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       const SizedBox(height: 18),
 
                       // Address
-                      _Label('Address', required: true),
+                      const _Label('Address', required: true),
                       const SizedBox(height: 6),
                       TextFormField(
                         controller: _addrCtrl,
@@ -339,47 +352,29 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                       const SizedBox(height: 32),
 
                       // Save button
-                      SizedBox(
-                        width: double.infinity,
-                        height: 52,
-                        child: ElevatedButton(
-                          onPressed: _saving
-                              ? null
-                              : () {
-                                  if (_gender == null || _dob == null) {
-                                    setState(() {});
-                                    return;
-                                  }
-                                  _save();
-                                },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: AppColors.brandGreen,
-                            disabledBackgroundColor:
-                                AppColors.brandGreen.withValues(alpha: 0.5),
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(14)),
-                          ),
-                          child: _saving
-                              ? const SizedBox(
-                                  width: 20, height: 20,
-                                  child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white))
-                              : const Text('Save & Continue',
-                                  style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w600)),
-                        ),
+                      CxButton(
+                        label: 'Save & Continue',
+                        loading: _saving,
+                        onPressed: _saving
+                            ? null
+                            : () {
+                                if (_gender == null || _dob == null) {
+                                  setState(() {});
+                                  return;
+                                }
+                                _save();
+                              },
                       ),
                     ],
                   ),
+                ),
+                ),
                 ),
               ),
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -395,21 +390,14 @@ class _Label extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!required) {
-      return Text(text,
-          style: const TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: AppColors.textPrimary));
+      return Text(text, style: CxText.label);
     }
     return RichText(
       text: TextSpan(
-        style: const TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w600,
-            color: AppColors.textPrimary),
+        style: CxText.label,
         children: [
           TextSpan(text: text),
-          const TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+          const TextSpan(text: ' *', style: TextStyle(color: CxColors.error)),
         ],
       ),
     );
@@ -424,7 +412,9 @@ InputDecoration _inputDec({
     InputDecoration(
       hintText: hint,
       hintStyle:
-          const TextStyle(fontSize: 13, color: AppColors.textHint),
+          const TextStyle(fontSize: 14, color: AppColors.textHint),
+      errorStyle: const TextStyle(fontSize: 12, color: CxColors.error),
+      errorMaxLines: 2,
       prefixIcon: prefix,
       suffixIcon: suffix != null
           ? Padding(
@@ -437,28 +427,28 @@ InputDecoration _inputDec({
       filled: true,
       fillColor: Colors.white,
       contentPadding:
-          const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.divider),
+          const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
+      border: const OutlineInputBorder(
+        borderRadius: CxRadius.mdAll,
+        borderSide: BorderSide(color: CxColors.border),
       ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(color: AppColors.divider),
+      enabledBorder: const OutlineInputBorder(
+        borderRadius: CxRadius.mdAll,
+        borderSide: BorderSide(color: CxColors.border),
       ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
+      focusedBorder: const OutlineInputBorder(
+        borderRadius: CxRadius.mdAll,
         borderSide:
-            const BorderSide(color: AppColors.brandGreen, width: 1.5),
+            BorderSide(color: CxColors.brand, width: 1.5),
       ),
-      errorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
+      errorBorder: const OutlineInputBorder(
+        borderRadius: CxRadius.mdAll,
         borderSide:
-            const BorderSide(color: Color(0xFFD32F2F), width: 1.5),
+            BorderSide(color: CxColors.error, width: 1.5),
       ),
-      focusedErrorBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
+      focusedErrorBorder: const OutlineInputBorder(
+        borderRadius: CxRadius.mdAll,
         borderSide:
-            const BorderSide(color: Color(0xFFD32F2F), width: 1.5),
+            BorderSide(color: CxColors.error, width: 1.5),
       ),
     );

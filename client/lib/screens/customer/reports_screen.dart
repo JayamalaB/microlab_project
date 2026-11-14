@@ -13,6 +13,7 @@ import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/customer_refresh_notifier.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 
 // ─── Reports screen ───────────────────────────────────────────────────────────
 
@@ -194,77 +195,82 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
 
   Widget _buildFilterRow() {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, CxSpace.sm),
       child: Row(
         children: [
           Expanded(
-            child: GestureDetector(
+            child: Semantics(
+              button: true,
+              label: _dateFilter != null ? 'Clear date filter' : 'Pick a date',
+              child: Material(
+              color: _dateFilter != null ? CxColors.brandSurface : Colors.white,
+              shape: StadiumBorder(
+                side: BorderSide(color: _dateFilter != null ? CxColors.brand : CxColors.border),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
               onTap: _dateFilter != null
                   ? () => setState(() => _dateFilter = null)
                   : _pickDateFilter,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: _dateFilter != null ? AppColors.brandGreenSurface : Colors.transparent,
-                  borderRadius: BorderRadius.circular(20),
-                ),
+                constraints: const BoxConstraints(minHeight: 42),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 child: Row(
                   children: [
                     Icon(Icons.event_outlined,
-                        size: 14,
-                        color: _dateFilter != null ? AppColors.brandGreen : AppColors.textHint),
-                    const SizedBox(width: 6),
+                        size: 18,
+                        color: _dateFilter != null ? CxColors.brand : CxColors.textHint),
+                    const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         _dateFilter != null ? _formatDateShort(_dateFilter!) : 'All dates',
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: _dateFilter != null ? FontWeight.w600 : FontWeight.w400,
-                          color: _dateFilter != null ? AppColors.brandGreen : AppColors.textHint,
+                          fontSize: 14,
+                          fontWeight: _dateFilter != null ? FontWeight.w600 : FontWeight.w500,
+                          color: _dateFilter != null ? CxColors.brand : CxColors.textSecondary,
                         ),
                       ),
                     ),
                     if (_dateFilter != null) ...[
                       const SizedBox(width: 4),
-                      const Icon(Icons.close_rounded, size: 15, color: AppColors.brandGreen),
+                      const Icon(Icons.close_rounded, size: 18, color: CxColors.brand),
                     ],
                   ],
                 ),
               ),
+              ),
+              ),
             ),
           ),
           const SizedBox(width: 10),
-          GestureDetector(
+          Material(
+            color: _dateFilter != null ? CxColors.brand : Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: CxRadius.mdAll,
+              side: BorderSide(color: _dateFilter != null ? CxColors.brand : CxColors.border),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
             onTap: _pickDateFilter,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: _dateFilter != null ? AppColors.brandGreen : Colors.white,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(
-                    color: _dateFilter != null ? AppColors.brandGreen : AppColors.divider),
-                boxShadow: [
-                  BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.06),
-                      blurRadius: 4,
-                      offset: const Offset(0, 2)),
-                ],
-              ),
+              constraints: const BoxConstraints(minHeight: 42),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(Icons.tune_rounded,
-                      size: 16,
-                      color: _dateFilter != null ? Colors.white : AppColors.textSecondary),
+                      size: 18,
+                      color: _dateFilter != null ? Colors.white : CxColors.textSecondary),
                   const SizedBox(width: 6),
                   Text('Filter',
                       style: TextStyle(
-                          fontSize: 12,
+                          fontSize: 14,
                           fontWeight: FontWeight.w600,
-                          color: _dateFilter != null ? Colors.white : AppColors.textSecondary)),
+                          color: _dateFilter != null ? Colors.white : CxColors.textPrimary)),
                 ],
               ),
+            ),
             ),
           ),
         ],
@@ -273,24 +279,11 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
   }
 
   Widget _buildNoMatchState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.event_busy_rounded, size: 40, color: AppColors.textHint),
-            const SizedBox(height: 14),
-            const Text('No reports for this date',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-            const SizedBox(height: 8),
-            TextButton(
-              onPressed: () => setState(() => _dateFilter = null),
-              child: const Text('Clear filter', style: TextStyle(color: AppColors.brandGreen)),
-            ),
-          ],
-        ),
-      ),
+    return CxEmptyState(
+      icon: Icons.event_busy_rounded,
+      title: 'No reports for this date',
+      actionLabel: 'Clear filter',
+      onAction: () => setState(() => _dateFilter = null),
     );
   }
 
@@ -302,27 +295,17 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
 
   Widget _buildBody(BuildContext context, List<BookingModel> reports) {
     if (_isLoading) {
-      return const Center(child: CircularProgressIndicator());
+      return const CxLoading(label: 'Loading your reports…');
     }
     if (_error != null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.error_outline, size: 40, color: Colors.red),
-            const SizedBox(height: 12),
-            Text(_error!, style: const TextStyle(
-                fontSize: 13, color: AppColors.textSecondary)),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () {
-                setState(() { _isLoading = true; _error = null; });
-                _loadReports();
-              },
-              child: const Text('Retry'),
-            ),
-          ],
-        ),
+      return CxErrorState(
+        title: 'Couldn\'t load reports',
+        message: _error!,
+        retryLabel: 'Retry',
+        onRetry: () {
+          setState(() { _isLoading = true; _error = null; });
+          _loadReports();
+        },
       );
     }
     if (reports.isEmpty) {
@@ -339,37 +322,24 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Container(
-                      width: 88,
-                      height: 88,
-                      decoration: const BoxDecoration(
-                          color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-                      child: const Icon(Icons.receipt_long_outlined,
-                          size: 38, color: AppColors.brandGreen),
-                    ),
-                    const SizedBox(height: 18),
-                    const Text('No reports yet',
-                        style: TextStyle(
-                            fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                    const CxIconBadge(icon: Icons.receipt_long_outlined, size: 76),
+                    const SizedBox(height: CxSpace.lg),
+                    const Text('No reports yet', style: CxText.sectionTitle),
                     const SizedBox(height: 8),
                     const Text('Reports for completed tests will appear here.',
                         textAlign: TextAlign.center,
-                        style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.4)),
+                        style: CxText.bodySecondary),
                     const SizedBox(height: 4),
                     const Text('Your test results will be available here once processed.',
                         textAlign: TextAlign.center,
-                        style: TextStyle(fontSize: 12, color: AppColors.textHint, height: 1.4)),
-                    const SizedBox(height: 22),
-                    OutlinedButton.icon(
+                        style: CxText.caption),
+                    const SizedBox(height: CxSpace.xl),
+                    CxButton.secondary(
                       onPressed: widget.onViewBookings,
-                      icon: const Icon(Icons.calendar_month_outlined, size: 17),
-                      label: const Text('View My Bookings'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.brandGreen,
-                        side: const BorderSide(color: AppColors.brandGreen, width: 1.4),
-                        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
+                      icon: Icons.calendar_month_outlined,
+                      label: 'View My Bookings',
+                      expand: false,
+                      compact: true,
                     ),
                   ],
                 ),
@@ -394,7 +364,7 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
             SliverFillRemaining(hasScrollBody: false, child: _buildNoMatchState())
           else
             SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+              padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.sm, CxSpace.gutter, 32),
               sliver: SliverList(
                 delegate: SliverChildBuilderDelegate(
                   (_, i) => _buildReportCard(context, filtered[i]),
@@ -409,91 +379,65 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
 
   Widget _buildReportCard(BuildContext context, BookingModel b) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: CxSpace.md),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.divider),
+        borderRadius: CxRadius.lgAll,
+        border: Border.all(color: CxColors.border),
+        boxShadow: const [BoxShadow(color: Color(0x0D000000), blurRadius: 10, offset: Offset(0, 2))],
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(13),
+        borderRadius: CxRadius.lgAll,
         child: Column(
           children: [
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              color: AppColors.brandGreenSurface,
+              padding: const EdgeInsets.symmetric(horizontal: CxSpace.lg, vertical: 10),
+              color: CxColors.brandSurface,
               child: Row(
                 children: [
-                  const Icon(Icons.check_circle_outline,
-                      size: 14, color: AppColors.brandGreen),
+                  const Icon(Icons.check_circle_rounded,
+                      size: 17, color: CxColors.brand),
                   const SizedBox(width: 6),
                   const Text('Report Ready',
                       style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.brandGreen)),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: CxColors.brand)),
                   const Spacer(),
                   if (b.referenceNo != null)
-                    Text(b.referenceNo!,
-                        style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                    Text(b.referenceNo!, style: CxText.caption),
                 ],
               ),
             ),
             Padding(
-              padding: const EdgeInsets.all(14),
+              padding: const EdgeInsets.all(CxSpace.lg),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
                     children: [
                       Expanded(
-                        child: Text(b.member.name,
-                            style: const TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.textPrimary)),
+                        child: Text(b.member.name, style: CxText.cardTitle),
                       ),
-                      Text(_formatDate(b.date),
-                          style: const TextStyle(
-                              fontSize: 12, color: AppColors.textSecondary)),
+                      const Icon(Icons.event_outlined, size: 15, color: CxColors.textHint),
+                      const SizedBox(width: 4),
+                      Text(_formatDate(b.date), style: CxText.bodySecondary),
                     ],
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   Wrap(
-                    spacing: 6, runSpacing: 4,
-                    children: b.tests.map((t) => Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: t.type == 'package'
-                            ? AppColors.brandGreenSurface
-                            : const Color(0xFFEEF4FB),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(t.name,
-                          style: TextStyle(
-                              fontSize: 11,
-                              color: t.type == 'package'
-                                  ? AppColors.brandGreen
-                                  : const Color(0xFF1565C0))),
+                    spacing: 6, runSpacing: 6,
+                    children: b.tests.map((t) => CxChip(
+                      label: t.name,
+                      tone: t.type == 'package' ? CxTone.brand : CxTone.info,
                     )).toList(),
                   ),
-                  const SizedBox(height: 12),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton.icon(
-                      onPressed: () => _openReport(context, b),
-                      icon: const Icon(Icons.description_outlined, size: 16),
-                      label: const Text('View Reports'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.brandGreen,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 11),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10)),
-                      ),
-                    ),
+                  const SizedBox(height: 14),
+                  CxButton(
+                    onPressed: () => _openReport(context, b),
+                    icon: Icons.description_outlined,
+                    label: 'View Reports',
+                    compact: true,
                   ),
                 ],
               ),
@@ -507,7 +451,8 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
   @override
   Widget build(BuildContext context) {
     if (widget.embedded) {
-      return Column(
+      return CustomerThemeScope(
+        child: Column(
         children: [
           Container(
             color: AppColors.brandGreen,
@@ -521,37 +466,42 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
                 child: Text('Reports & Results',
                     style: TextStyle(
                         color: Colors.white,
-                        fontSize: 18,
+                        fontSize: 20,
                         fontWeight: FontWeight.w700)),
               ),
             ),
           ),
           Expanded(
             child: ColoredBox(
-              color: AppColors.background,
+              color: CxColors.page,
               child: _buildBody(context, _bookings),
             ),
           ),
         ],
+        ),
       );
     }
-    return Scaffold(
-      backgroundColor: AppColors.background,
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
         elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded,
-              color: Colors.white, size: 18),
+              color: Colors.white, size: 20),
+          tooltip: 'Back',
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text('Reports & Results',
             style: TextStyle(
                 color: Colors.white,
-                fontSize: 17,
-                fontWeight: FontWeight.w600)),
+                fontSize: 18,
+                fontWeight: FontWeight.w700)),
       ),
       body: _buildBody(context, _bookings),
+      ),
     );
   }
 }
@@ -677,89 +627,52 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
     final busyAction  = _busy[i];
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
+      margin: const EdgeInsets.only(bottom: CxSpace.md),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.divider),
+        borderRadius: CxRadius.lgAll,
+        border: Border.all(color: CxColors.border),
       ),
       child: Padding(
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(CxSpace.lg),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: AppColors.brandGreenSurface,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Icon(Icons.description_outlined,
-                    size: 18, color: AppColors.brandGreen),
-              ),
+              const CxIconBadge(icon: Icons.description_outlined, size: 42),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(name,
-                        style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: AppColors.textPrimary)),
+                    Text(name, style: CxText.cardTitle),
                     if (releasedDate != null) ...[
                       const SizedBox(height: 2),
-                      Text('Released: ${_fmtShort(releasedDate)}',
-                          style: const TextStyle(
-                              fontSize: 11, color: AppColors.textSecondary)),
+                      Text('Released: ${_fmtShort(releasedDate)}', style: CxText.caption),
                     ],
                   ],
                 ),
               ),
             ]),
-            const SizedBox(height: 12),
+            const SizedBox(height: 14),
             Row(children: [
               Expanded(
-                child: OutlinedButton.icon(
+                child: CxButton.secondary(
                   onPressed: isBusy ? null : () => _shareReport(i, r),
-                  icon: busyAction == 'share'
-                      ? const SizedBox(
-                          width: 14, height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.share_outlined, size: 15),
-                  label: const Text('Share'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.brandGreen,
-                    side: const BorderSide(
-                        color: AppColors.brandGreen, width: 1.5),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10)),
-                  ),
+                  loading: busyAction == 'share',
+                  icon: Icons.share_outlined,
+                  label: 'Share',
+                  compact: true,
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: CxSpace.md),
               Expanded(
-                child: ElevatedButton.icon(
+                child: CxButton(
                   onPressed: isBusy ? null : () => _downloadReport(i, r),
-                  icon: busyAction == 'download'
-                      ? const SizedBox(
-                          width: 14, height: 14,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.download_outlined, size: 15),
-                  label: const Text('Download'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen,
-                    disabledBackgroundColor:
-                        AppColors.brandGreen.withValues(alpha: 0.5),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(10)),
-                  ),
+                  loading: busyAction == 'download',
+                  icon: Icons.download_outlined,
+                  label: 'Download',
+                  compact: true,
                 ),
               ),
             ]),
@@ -773,14 +686,17 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
   Widget build(BuildContext context) {
     final m = booking.member;
 
-    return Scaffold(
-      backgroundColor: AppColors.background,
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
         elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded,
-              color: Colors.white, size: 18),
+              color: Colors.white, size: 20),
+          tooltip: 'Back',
           onPressed: () => Navigator.pop(context),
         ),
         title: Column(
@@ -802,7 +718,7 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
         color: AppColors.brandGreen,
         child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
+        padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, 40),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -810,13 +726,13 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
                   colors: [AppColors.brandGreen, AppColors.brandGreenMid],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
-                borderRadius: BorderRadius.circular(14),
+                borderRadius: CxRadius.lgAll,
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -842,7 +758,7 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
                                 fontWeight: FontWeight.w700)),
                         Text('NABL Accredited · ISO 15189:2022',
                             style: TextStyle(
-                                color: Colors.white70, fontSize: 11)),
+                                color: Colors.white70, fontSize: 12)),
                       ],
                     ),
                   ]),
@@ -911,37 +827,21 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
             const SizedBox(height: 16),
 
             // ── Reports section ─────────────────────────
-            const Text('Reports',
-                style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textPrimary)),
-            const SizedBox(height: 10),
+            const Text('Reports', style: CxText.sectionTitle),
+            const SizedBox(height: CxSpace.md),
 
             if (_resultsLoading)
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(24),
-                  child: CircularProgressIndicator(),
-                ),
-              )
+              const CxLoading(label: 'Loading reports…')
             else if (_results.isEmpty)
               Container(
-                padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
                   color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppColors.divider),
+                  borderRadius: CxRadius.lgAll,
+                  border: Border.all(color: CxColors.border),
                 ),
-                child: const Column(
-                  children: [
-                    Icon(Icons.hourglass_empty_rounded,
-                        size: 32, color: AppColors.textHint),
-                    SizedBox(height: 8),
-                    Text('Reports not available yet',
-                        style: TextStyle(
-                            fontSize: 13, color: AppColors.textSecondary)),
-                  ],
+                child: const CxEmptyState(
+                  icon: Icons.hourglass_empty_rounded,
+                  title: 'Reports not available yet',
                 ),
               )
             else
@@ -953,6 +853,7 @@ class _ReportDetailPageState extends State<_ReportDetailPage> {
           ],
         ),
         ),
+      ),
       ),
     );
   }
@@ -971,12 +872,12 @@ class _ReportMeta extends StatelessWidget {
         children: [
           Text(label,
               style: const TextStyle(
-                  fontSize: 9, color: Colors.white60, letterSpacing: 0.3)),
+                  fontSize: 11, color: Colors.white70, letterSpacing: 0.3)),
           const SizedBox(height: 2),
           Text(value,
               style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
                   color: Colors.white)),
         ],
       );
@@ -993,27 +894,23 @@ class _SectionCard extends StatelessWidget {
   Widget build(BuildContext context) => Container(
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.divider),
+          borderRadius: CxRadius.lgAll,
+          border: Border.all(color: CxColors.border),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(14, 12, 14, 0),
+              padding: const EdgeInsets.fromLTRB(CxSpace.lg, 14, CxSpace.lg, 0),
               child: Row(children: [
-                Icon(icon, size: 14, color: AppColors.brandGreen),
-                const SizedBox(width: 6),
-                Text(title,
-                    style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.brandGreen)),
+                CxIconBadge(icon: icon, size: 32),
+                const SizedBox(width: 10),
+                Text(title, style: CxText.sectionTitle.copyWith(fontSize: 15)),
               ]),
             ),
-            const SizedBox(height: 8),
-            const Divider(height: 1, color: AppColors.divider),
-            Padding(padding: const EdgeInsets.all(14), child: child),
+            const SizedBox(height: 12),
+            const Divider(height: 1, color: CxColors.border),
+            Padding(padding: const EdgeInsets.all(CxSpace.lg), child: child),
           ],
         ),
       );
@@ -1038,17 +935,12 @@ class _ReportRow extends StatelessWidget {
           children: [
             SizedBox(
               width: 110,
-              child: Text(label,
-                  style: const TextStyle(
-                      fontSize: 12, color: AppColors.textSecondary)),
+              child: Text(label, style: CxText.bodySecondary),
             ),
-            const Text(':  ',
-                style: TextStyle(
-                    fontSize: 12, color: AppColors.textSecondary)),
             Expanded(
               child: Text(value,
                   style: TextStyle(
-                      fontSize: 12,
+                      fontSize: 14,
                       fontWeight:
                           bold ? FontWeight.w700 : FontWeight.w500,
                       color: AppColors.textPrimary)),

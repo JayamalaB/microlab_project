@@ -7,6 +7,7 @@ import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/utils/app_messages.dart';
 import 'package:microlab/widgets/skeleton_loader.dart';
+import 'package:microlab/widgets/tech/tech_widgets.dart';
 
 class TechnicianHistoryScreen extends StatefulWidget {
   final String mobile;
@@ -166,19 +167,11 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
     if (_loading) {
       body = const _HistoryListSkeleton();
     } else if (_error != null) {
-      body = Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.wifi_off_rounded, size: 36, color: AppColors.textHint),
-            const SizedBox(height: 12),
-            Text(_error!,
-                style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
-                textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            TextButton(onPressed: _loadHistory, child: const Text('Retry')),
-          ],
-        ),
+      body = TechErrorState(
+        title: "Couldn't load history",
+        message: _error!,
+        retryLabel: 'Retry',
+        onRetry: _loadHistory,
       );
     } else {
       body = Column(
@@ -191,8 +184,8 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
                   padding: const EdgeInsets.all(4),
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: AppColors.divider),
+                    borderRadius: TechRadius.lgAll,
+                    border: Border.all(color: TechColors.border),
                   ),
                   child: Row(children: [
                     Expanded(
@@ -218,23 +211,24 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
                   const SizedBox(height: 10),
                   Align(
                     alignment: Alignment.centerLeft,
-                    child: GestureDetector(
-                      onTap: () => setState(() => _dateFilter = null),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                        decoration: BoxDecoration(
-                          color: AppColors.brandGreenSurface,
-                          borderRadius: BorderRadius.circular(20),
+                    child: Material(
+                      color: TechColors.brandSurface,
+                      shape: const StadiumBorder(),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
+                        onTap: () => setState(() => _dateFilter = null),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            const Icon(Icons.event_outlined, size: 16, color: TechColors.brand),
+                            const SizedBox(width: 6),
+                            Text(_formatDateShort(_dateFilter!),
+                                style: const TextStyle(
+                                    fontSize: 13, fontWeight: FontWeight.w600, color: TechColors.brand)),
+                            const SizedBox(width: 6),
+                            const Icon(Icons.close_rounded, size: 16, color: TechColors.brand),
+                          ]),
                         ),
-                        child: Row(mainAxisSize: MainAxisSize.min, children: [
-                          const Icon(Icons.event_outlined, size: 13, color: AppColors.brandGreen),
-                          const SizedBox(width: 6),
-                          Text(_formatDateShort(_dateFilter!),
-                              style: const TextStyle(
-                                  fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-                          const SizedBox(width: 4),
-                          const Icon(Icons.close_rounded, size: 14, color: AppColors.brandGreen),
-                        ]),
                       ),
                     ),
                   ),
@@ -282,7 +276,7 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
                     children: [
                       Text('History',
                           style: TextStyle(
-                              color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+                              color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
                       SizedBox(height: 2),
                       Text('Completed & Cancelled Appointments',
                           style: TextStyle(color: Colors.white70, fontSize: 11.5)),
@@ -290,18 +284,21 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
                   ),
                 ),
                 if (!_loading)
-                  GestureDetector(
-                    onTap: _pickDateFilter,
-                    child: Container(
-                      width: 36,
-                      height: 36,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.18),
-                        borderRadius: BorderRadius.circular(10),
+                  Material(
+                    color: Colors.white.withValues(alpha: 0.18),
+                    borderRadius: TechRadius.mdAll,
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: _pickDateFilter,
+                      child: Tooltip(
+                        message: 'Filter by date',
+                        child: SizedBox(
+                          width: 44,
+                          height: 44,
+                          child: Icon(Icons.filter_list_rounded,
+                              color: _dateFilter != null ? Colors.white : Colors.white70, size: 22),
+                        ),
                       ),
-                      child: Icon(Icons.filter_list_rounded,
-                          color: _dateFilter != null ? Colors.white : Colors.white70, size: 19),
                     ),
                   ),
               ],
@@ -312,26 +309,30 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
       );
     }
 
-    return Scaffold(
+    return TechThemeScope(
+      child: Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20),
+          tooltip: 'Back',
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text('History',
-            style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
+            style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600)),
         actions: [
           if (!_loading)
             IconButton(
               icon: const Icon(Icons.refresh_rounded, color: Colors.white70),
+              tooltip: 'Reload history',
               onPressed: _loadHistory,
             ),
         ],
       ),
       body: body,
+      ),
     );
   }
 }
@@ -352,26 +353,14 @@ class _BookingList extends StatelessWidget {
       return RefreshIndicator(
         onRefresh: () async => onRefresh(),
         color: AppColors.brandGreen,
-        child: SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
+        child: const SingleChildScrollView(
+          physics: AlwaysScrollableScrollPhysics(),
           child: SizedBox(
             height: 400,
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 64, height: 64,
-                    decoration: const BoxDecoration(
-                        color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-                    child: const Icon(Icons.history_outlined, size: 30, color: AppColors.brandGreen),
-                  ),
-                  const SizedBox(height: 14),
-                  const Text('No records yet',
-                      style: TextStyle(
-                          fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                ],
-              ),
+            child: TechEmptyState(
+              icon: Icons.history_outlined,
+              title: 'No records yet',
+              message: 'Pull down to refresh.',
             ),
           ),
         ),
@@ -382,7 +371,7 @@ class _BookingList extends StatelessWidget {
       onRefresh: () async => onRefresh(),
       color: AppColors.brandGreen,
       child: ListView.builder(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+        padding: const EdgeInsets.fromLTRB(TechSpace.lg, TechSpace.lg, TechSpace.lg, 32),
         itemCount: bookings.length,
         itemBuilder: (_, i) => GestureDetector(
           onTap: () => showModalBottomSheet(
@@ -473,7 +462,7 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         iconTheme: const IconThemeData(color: Colors.white),
-        title: const Text('Collection Photo', style: TextStyle(color: Colors.white, fontSize: 15)),
+        title: const Text('Collection Photo', style: TextStyle(color: Colors.white, fontSize: 14)),
       ),
       body: Center(
         child: InteractiveViewer(
@@ -504,50 +493,40 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
   @override
   Widget build(BuildContext context) {
     final isCompleted = b.status == 'Completed';
-    final statusColor = isCompleted ? AppColors.brandGreen : const Color(0xFFD32F2F);
 
-    return Container(
+    return TechThemeScope(
+      child: Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
       decoration: const BoxDecoration(
         color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: TechRadius.sheetTop,
       ),
-      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.88,
+        maxWidth: TechSize.sheetMaxWidth,
+      ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
           // Handle
-          Center(
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 40, height: 4,
-              decoration: BoxDecoration(
-                  color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-            ),
-          ),
+          const TechDragHandle(),
 
           // Header
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+            padding: const EdgeInsets.fromLTRB(TechSpace.gutter, 0, TechSpace.gutter, TechSpace.md),
             child: Row(children: [
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  const Text('Booking Details',
-                      style: TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                  const Text('Booking Details', style: TechText.sheetTitle),
                   if (b.referenceNo != null)
-                    Text(b.referenceNo!,
-                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                    Text(b.referenceNo!, style: TechText.bodySecondary),
                 ]),
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(
-                  color: statusColor.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: statusColor.withValues(alpha: 0.3)),
-                ),
-                child: Text(b.status,
-                    style: TextStyle(
-                        fontSize: 12, fontWeight: FontWeight.w600, color: statusColor)),
+              TechStatusChip(
+                label: b.status,
+                icon: isCompleted ? Icons.check_rounded : Icons.close_rounded,
+                tone: isCompleted ? TechTone.success : TechTone.error,
               ),
             ]),
           ),
@@ -556,7 +535,8 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
           // Scrollable content
           Flexible(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+              padding: EdgeInsets.fromLTRB(TechSpace.gutter, TechSpace.lg, TechSpace.gutter,
+                  MediaQuery.of(context).padding.bottom + 32),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -579,48 +559,37 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
                   // Tests & Packages
                   Text(
                     'Tests & Packages${_itemsLoading ? '' : ' (${_items.length})'}',
-                    style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600,
-                        color: AppColors.textSecondary, letterSpacing: 0.3),
+                    style: TechText.sectionTitle,
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: TechSpace.sm),
                   Container(
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.divider),
+                      color: Colors.white,
+                      borderRadius: TechRadius.mdAll,
+                      border: Border.all(color: TechColors.border),
                     ),
                     child: _itemsLoading
-                        ? const Center(
-                            child: Padding(
-                              padding: EdgeInsets.symmetric(vertical: 12),
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation(AppColors.brandGreen)),
-                            ),
-                          )
+                        ? const TechLoadingState()
                         : _items.isEmpty
-                            ? const Text('No test details available',
-                                style: TextStyle(fontSize: 12, color: AppColors.textHint))
+                            ? const Text('No test details available', style: TechText.bodySecondary)
                             : Column(
                                 children: _items.map((item) => Padding(
                                   padding: const EdgeInsets.symmetric(vertical: 6),
                                   child: Row(children: [
                                     const Icon(Icons.science_outlined,
-                                        size: 14, color: AppColors.brandGreen),
+                                        size: 18, color: TechColors.brand),
                                     const SizedBox(width: 10),
                                     Expanded(
                                       child: Text(item['name']?.toString() ?? '',
-                                          style: const TextStyle(
-                                              fontSize: 12, color: AppColors.textPrimary)),
+                                          style: TechText.body),
                                     ),
                                     Text(
                                       '₹${(double.tryParse(item['price']?.toString() ?? '0') ?? 0).toInt()}',
                                       style: const TextStyle(
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w600,
-                                          color: AppColors.textPrimary),
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w700,
+                                          color: TechColors.textPrimary),
                                     ),
                                   ]),
                                 )).toList(),
@@ -633,34 +602,22 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
                   // captured (if any) during sample collection for this
                   // booking. Same data source as the live Manage Booking
                   // screen's "Sample Collection Photo" section.
-                  const Text(
-                    'Collection Photo',
-                    style: TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600,
-                        color: AppColors.textSecondary, letterSpacing: 0.3),
-                  ),
-                  const SizedBox(height: 10),
+                  const Text('Collection Photo', style: TechText.sectionTitle),
+                  const SizedBox(height: TechSpace.sm),
                   Container(
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.divider),
+                      color: Colors.white,
+                      borderRadius: TechRadius.mdAll,
+                      border: Border.all(color: TechColors.border),
                     ),
                     child: _collectionProofLoading
-                        ? const Center(
-                            child: Padding(
-                              padding: EdgeInsets.symmetric(vertical: 12),
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation(AppColors.brandGreen)),
-                            ),
-                          )
+                        ? const TechLoadingState()
                         : _collectionProofUrl == null
-                            ? const Text('No collection photo captured',
-                                style: TextStyle(fontSize: 12, color: AppColors.textHint))
-                            : GestureDetector(
+                            ? const Text('No collection photo captured', style: TechText.bodySecondary)
+                            : InkWell(
                                 onTap: _viewCollectionProof,
+                                borderRadius: TechRadius.smAll,
                                 child: Row(children: [
                                   ClipRRect(
                                     borderRadius: BorderRadius.circular(8),
@@ -681,10 +638,9 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
                                   ),
                                   const SizedBox(width: 12),
                                   const Expanded(
-                                    child: Text('Proof photo captured — tap to view',
-                                        style: TextStyle(fontSize: 12, color: AppColors.textPrimary)),
+                                    child: Text('Proof photo captured — tap to view', style: TechText.body),
                                   ),
-                                  const Icon(Icons.chevron_right_rounded, size: 18, color: AppColors.textHint),
+                                  const Icon(Icons.chevron_right_rounded, size: 22, color: TechColors.textHint),
                                 ]),
                               ),
                   ),
@@ -712,6 +668,8 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
           ),
         ],
       ),
+      ),
+      ),
     );
   }
 }
@@ -737,11 +695,11 @@ class _HistoryCardSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: TechSpace.md),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.divider),
+        borderRadius: TechRadius.lgAll,
+        border: Border.all(color: TechColors.border),
       ),
       child: SkeletonShimmer(
         child: Column(
@@ -750,7 +708,7 @@ class _HistoryCardSkeleton extends StatelessWidget {
             // Status strip
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              color: AppColors.divider.withOpacity(0.3),
+              color: AppColors.divider.withValues(alpha: 0.3),
               child: Row(
                 children: [
                   SkeletonBox(width: 70, height: 11, borderRadius: BorderRadius.circular(4)),
@@ -788,18 +746,19 @@ class _HistoryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isCompleted  = booking.status == 'Completed';
-    final statusColor  = isCompleted ? AppColors.brandGreen : const Color(0xFFD32F2F);
+    final statusColor  = isCompleted ? TechColors.success : TechColors.error;
     final totalCollected = booking.serviceChargePaid + booking.testsTotal;
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: TechSpace.md),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.divider),
+        borderRadius: TechRadius.lgAll,
+        border: Border.all(color: TechColors.border),
+        boxShadow: const [BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2))],
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(13),
+        borderRadius: TechRadius.lgAll,
         child: Column(
           children: [
             // Status strip
@@ -809,16 +768,15 @@ class _HistoryCard extends StatelessWidget {
               child: Row(children: [
                 Icon(
                   isCompleted ? Icons.check_circle_outline : Icons.cancel_outlined,
-                  size: 13, color: statusColor,
+                  size: 16, color: statusColor,
                 ),
                 const SizedBox(width: 6),
                 Text(booking.status,
                     style: TextStyle(
-                        fontSize: 12, fontWeight: FontWeight.w600, color: statusColor)),
+                        fontSize: 13, fontWeight: FontWeight.w700, color: statusColor)),
                 const Spacer(),
                 if (booking.referenceNo != null)
-                  Text(booking.referenceNo!,
-                      style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                  Text(booking.referenceNo!, style: TechText.caption),
               ]),
             ),
 
@@ -845,7 +803,7 @@ class _HistoryCard extends StatelessWidget {
                         // Name
                         Text(booking.customerName,
                             style: const TextStyle(
-                                fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                                fontSize: 14, fontWeight: FontWeight.w700, color: TechColors.textPrimary)),
                         const SizedBox(height: 8),
 
                         // Date + time
@@ -937,26 +895,29 @@ class _HistoryTabButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(
-          color: selected ? AppColors.brandGreen : Colors.transparent,
-          borderRadius: BorderRadius.circular(11),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 15, color: selected ? Colors.white : AppColors.textSecondary),
-            const SizedBox(width: 6),
-            Text(label,
-                style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                    color: selected ? Colors.white : AppColors.textSecondary)),
-          ],
+    return Material(
+      color: selected ? TechColors.brand : Colors.transparent,
+      borderRadius: TechRadius.mdAll,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 18, color: selected ? Colors.white : TechColors.textSecondary),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(label,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: selected ? Colors.white : TechColors.textSecondary)),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -975,34 +936,30 @@ class _HDetailSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(title,
-            style: const TextStyle(
-                fontSize: 13, fontWeight: FontWeight.w600,
-                color: AppColors.textSecondary, letterSpacing: 0.3)),
-        const SizedBox(height: 10),
+        Text(title, style: TechText.sectionTitle),
+        const SizedBox(height: TechSpace.sm),
         Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            color: AppColors.background,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.divider),
+            color: Colors.white,
+            borderRadius: TechRadius.mdAll,
+            border: Border.all(color: TechColors.border),
           ),
           child: Column(
             children: rows.map((r) => Padding(
               padding: const EdgeInsets.symmetric(vertical: 6),
               child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Icon(r.icon, size: 14, color: AppColors.brandGreen),
+                Icon(r.icon, size: 18, color: TechColors.textHint),
                 const SizedBox(width: 10),
                 Expanded(
                   flex: 2,
-                  child: Text(r.label,
-                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                  child: Text(r.label, style: TechText.bodySecondary),
                 ),
                 Expanded(
                   flex: 3,
                   child: Text(r.value,
                       style: TextStyle(
-                          fontSize: 12,
+                          fontSize: 13,
                           fontWeight: r.valueBold ? FontWeight.w600 : FontWeight.w500,
                           color: r.valueColor ?? AppColors.textPrimary),
                       textAlign: TextAlign.end),

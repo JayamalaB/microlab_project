@@ -1,78 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/models.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 Future<void> _confirmLogout(BuildContext context, VoidCallback onLogout) async {
-  final confirmed = await showDialog<bool>(
-    context: context,
-    barrierDismissible: true,
-    builder: (ctx) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      contentPadding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 56,
-            height: 56,
-            decoration: const BoxDecoration(
-              color: Color(0xFFFFEBEE),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(Icons.logout_rounded,
-                size: 26, color: Color(0xFFD32F2F)),
-          ),
-          const SizedBox(height: 16),
-          const Text('Logout?',
-              style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.textPrimary)),
-          const SizedBox(height: 8),
-          const Text(
-            'Are you sure you want to logout from MicroLab?',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-          ),
-          const SizedBox(height: 24),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () => Navigator.pop(ctx, false),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.textSecondary,
-                    side: const BorderSide(color: AppColors.divider),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
-                  ),
-                  child: const Text('Cancel',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(ctx, true),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFD32F2F),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12)),
-                  ),
-                  child: const Text('Logout',
-                      style: TextStyle(fontWeight: FontWeight.w600)),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    ),
+  // Same result as before: logs out only when Logout is tapped.
+  final confirmed = await showCxConfirm(
+    context,
+    icon: Icons.logout_rounded,
+    title: 'Logout?',
+    message: 'Are you sure you want to logout from MicroLab?',
+    confirmLabel: 'Logout',
+    destructive: true,
   );
   if (confirmed == true) onLogout();
 }
@@ -136,24 +76,24 @@ class ProfileScreen extends StatelessWidget {
         children: [
           const Text('Profile',
               style: TextStyle(
-                  color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+                  color: Colors.white, fontSize: 20, fontWeight: FontWeight.w700)),
           if (isVip) ...[
             const SizedBox(width: 10),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFB300),
-                borderRadius: BorderRadius.circular(12),
+              decoration: const BoxDecoration(
+                color: Color(0xFFFFB300),
+                borderRadius: CxRadius.pill,
               ),
               child: const Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.star_rounded, size: 10, color: Colors.white),
+                  Icon(Icons.star_rounded, size: 12, color: Colors.white),
                   SizedBox(width: 3),
                   Text('VIP',
                       style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w800,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
                           color: Colors.white,
                           letterSpacing: 0.5)),
                 ],
@@ -163,12 +103,12 @@ class ProfileScreen extends StatelessWidget {
           const Spacer(),
           TextButton.icon(
             onPressed: () => _confirmLogout(context, onLogout),
-            icon: const Icon(Icons.logout_rounded, size: 15, color: Colors.white70),
+            icon: const Icon(Icons.logout_rounded, size: 18, color: Colors.white),
             label: const Text('Logout',
-                style: TextStyle(color: Colors.white70, fontSize: 13)),
+                style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
             style: TextButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              minimumSize: const Size(48, 44),
             ),
           ),
         ],
@@ -177,29 +117,26 @@ class ProfileScreen extends StatelessWidget {
     );
 
     final body = ListView(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 80),
+      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.xl, CxSpace.gutter, 80),
       children: [
         // ── Account Details ──────────────────────────────────
         Row(
           children: [
-            const Text('Account Details',
-                style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textPrimary)),
+            const Text('Account Details', style: CxText.sectionTitle),
             const Spacer(),
             if (self != null && !self.isReadOnly)
               _EditButton(onTap: () => onEditMember(self)),
           ],
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: CxSpace.sm),
 
         Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(CxSpace.lg),
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: AppColors.divider),
+            borderRadius: CxRadius.lgAll,
+            border: Border.all(color: CxColors.border),
+            boxShadow: const [BoxShadow(color: Color(0x0D000000), blurRadius: 10, offset: Offset(0, 2))],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -215,10 +152,7 @@ class ProfileScreen extends StatelessWidget {
                       children: [
                         Text(
                           self?.name ?? accountName ?? mobile,
-                          style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                              color: AppColors.textPrimary),
+                          style: CxText.pageTitle.copyWith(fontSize: 18),
                         ),
                         if (self != null) ...[
                           const SizedBox(height: 3),
@@ -227,8 +161,7 @@ class ProfileScreen extends StatelessWidget {
                               if (self.relation != null) self.relation,
                               if (self.location.isNotEmpty) self.location,
                             ].join(' · '),
-                            style: const TextStyle(
-                                fontSize: 12, color: AppColors.textSecondary),
+                            style: CxText.bodySecondary,
                           ),
                         ],
                       ],
@@ -297,53 +230,38 @@ class ProfileScreen extends StatelessWidget {
         // ── Patients ─────────────────────────────────────────
         Row(
           children: [
-            const Text('Customer',
-                style: TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textPrimary)),
+            const Text('Customer', style: CxText.sectionTitle),
             const Spacer(),
             OutlinedButton.icon(
               onPressed: onAddMember,
-              icon: const Icon(Icons.person_add_alt_1_rounded, size: 15),
+              icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
               label: const Text('Add '),
               style: OutlinedButton.styleFrom(
-                foregroundColor: AppColors.brandGreen,
-                side: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                foregroundColor: CxColors.brand,
+                side: const BorderSide(color: CxColors.brand, width: 1.4),
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                minimumSize: const Size(64, 40),
                 textStyle: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w600),
-                visualDensity: VisualDensity.compact,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(20)),
+                    fontSize: 14, fontWeight: FontWeight.w600),
+                shape: const StadiumBorder(),
               ),
             ),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: CxSpace.md),
 
         if (patients.isEmpty)
           Container(
-            padding: const EdgeInsets.symmetric(vertical: 28),
             decoration: BoxDecoration(
               color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.divider),
+              borderRadius: CxRadius.lgAll,
+              border: Border.all(color: CxColors.border),
             ),
-            child: const Column(
-              children: [
-                Icon(Icons.people_outline_rounded,
-                    size: 32, color: AppColors.textHint),
-                SizedBox(height: 8),
-                Text('No customers added yet',
-                    style: TextStyle(
-                        fontSize: 14, color: AppColors.textSecondary)),
-                SizedBox(height: 2),
-                Text('Tap "Add" to add family members',
-                    style: TextStyle(
-                        fontSize: 12, color: AppColors.textHint)),
-              ],
+            child: const CxEmptyState(
+              icon: Icons.people_outline_rounded,
+              title: 'No customers added yet',
+              message: 'Tap "Add" to add family members',
             ),
           ),
 
@@ -371,35 +289,40 @@ class ProfileScreen extends StatelessWidget {
     );
 
     if (embedded) {
-      return Column(
+      return CustomerThemeScope(
+        child: Column(
         children: [
           header,
           Expanded(
-            child: ColoredBox(color: AppColors.background, child: body),
+            child: ColoredBox(color: CxColors.page, child: body),
           ),
         ],
+        ),
       );
     }
 
-    return Scaffold(
-      backgroundColor: AppColors.background,
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
         elevation: 0,
+        scrolledUnderElevation: 0,
         automaticallyImplyLeading: false,
         title: const Text('Profile',
             style: TextStyle(
-                color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
+                color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
         actions: [
           TextButton.icon(
             onPressed: () => _confirmLogout(context, onLogout),
-            icon: const Icon(Icons.logout_rounded, size: 16, color: Colors.white70),
+            icon: const Icon(Icons.logout_rounded, size: 18, color: Colors.white),
             label: const Text('Logout',
-                style: TextStyle(color: Colors.white70, fontSize: 13)),
+                style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
           ),
         ],
       ),
       body: body,
+      ),
     );
   }
 
@@ -461,15 +384,14 @@ class _EditButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) => TextButton.icon(
         onPressed: onTap,
-        icon: const Icon(Icons.edit_outlined, size: 14),
+        icon: const Icon(Icons.edit_outlined, size: 18),
         label: const Text('Edit'),
         style: TextButton.styleFrom(
-          foregroundColor: AppColors.brandGreen,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          foregroundColor: CxColors.brand,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          minimumSize: const Size(48, 40),
           textStyle:
-              const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          visualDensity: VisualDensity.compact,
+              const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
         ),
       );
 }
@@ -487,22 +409,18 @@ class _InfoRow extends StatelessWidget {
   Widget build(BuildContext context) => Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 15, color: AppColors.textSecondary),
-          const SizedBox(width: 10),
+          Icon(icon, size: 18, color: CxColors.textHint),
+          const SizedBox(width: 12),
           SizedBox(
-            width: 90,
-            child: Text(label,
-                style: const TextStyle(
-                    fontSize: 13, color: AppColors.textSecondary)),
+            width: 100,
+            child: Text(label, style: CxText.bodySecondary),
           ),
-          const Text(':  ',
-              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
           Expanded(
             child: Text(value,
                 style: const TextStyle(
-                    fontSize: 13,
+                    fontSize: 14,
                     fontWeight: FontWeight.w500,
-                    color: AppColors.textPrimary)),
+                    color: CxColors.textPrimary)),
           ),
         ],
       );
@@ -513,7 +431,7 @@ class _HDivider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      const Divider(height: 22, thickness: 1, color: AppColors.divider);
+      const Divider(height: 24, thickness: 1, color: CxColors.border);
 }
 
 // ─── Patient Card ─────────────────────────────────────────────────────────────
@@ -533,21 +451,15 @@ class _PatientCard extends StatelessWidget {
       if (member.age != null) '${member.age} yrs',
     ];
 
-    final card = Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.divider),
-      ),
+    final content = Padding(
+      padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Avatar
           Container(
-            width: 40,
-            height: 40,
+            width: 44,
+            height: 44,
             margin: const EdgeInsets.only(right: 12, top: 2),
             decoration: const BoxDecoration(
                 color: AppColors.brandGreenSurface, shape: BoxShape.circle),
@@ -574,45 +486,27 @@ class _PatientCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(member.name,
-                    style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary)),
+                Text(member.name, style: CxText.cardTitle),
                 if (chips.isNotEmpty) ...[
-                  const SizedBox(height: 5),
+                  const SizedBox(height: 6),
                   Wrap(
                     spacing: 6,
                     runSpacing: 4,
                     children: chips
-                        .map((c) => Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: AppColors.background,
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(color: AppColors.divider),
-                              ),
-                              child: Text(c,
-                                  style: const TextStyle(
-                                      fontSize: 11,
-                                      color: AppColors.textSecondary)),
-                            ))
+                        .map((c) => CxChip(label: c, tone: CxTone.neutral))
                         .toList(),
                   ),
                 ],
                 if (member.healthCondition != null &&
                     member.healthCondition!.isNotEmpty) ...[
-                  const SizedBox(height: 5),
+                  const SizedBox(height: 6),
                   Row(
                     children: [
                       const Icon(Icons.favorite_border_rounded,
-                          size: 12, color: AppColors.textSecondary),
+                          size: 14, color: CxColors.textSecondary),
                       const SizedBox(width: 4),
                       Expanded(
-                        child: Text(member.healthCondition!,
-                            style: const TextStyle(
-                                fontSize: 12, color: AppColors.textSecondary)),
+                        child: Text(member.healthCondition!, style: CxText.caption),
                       ),
                     ],
                   ),
@@ -621,40 +515,34 @@ class _PatientCard extends StatelessWidget {
             ),
           ),
           if (onEdit != null)
-            GestureDetector(
-              onTap: onEdit,
-              child: Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: AppColors.brandGreenSurface,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Icon(Icons.edit_outlined,
-                    size: 16, color: AppColors.brandGreen),
-              ),
+            CxIconButton(
+              icon: Icons.edit_outlined,
+              tooltip: 'Edit ${member.name}',
+              color: CxColors.brand,
+              onPressed: onEdit,
             ),
-          if (onRemove != null) ...[
-            const SizedBox(width: 6),
-            GestureDetector(
-              onTap: onRemove,
-              child: Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFFEBEE),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Icon(Icons.person_remove_outlined,
-                    size: 16, color: Color(0xFFD32F2F)),
-              ),
+          if (onRemove != null)
+            CxIconButton(
+              icon: Icons.person_remove_outlined,
+              tooltip: 'Remove ${member.name}',
+              color: CxColors.error,
+              onPressed: onRemove,
             ),
-          ],
         ],
       ),
     );
-    return onView == null
-        ? card
-        : GestureDetector(behavior: HitTestBehavior.opaque, onTap: onView, child: card);
+    // Tapping the card opens the member's details (same as before).
+    return Padding(
+      padding: const EdgeInsets.only(bottom: CxSpace.md),
+      child: Material(
+        color: Colors.white,
+        shape: const RoundedRectangleBorder(
+          borderRadius: CxRadius.lgAll,
+          side: BorderSide(color: CxColors.border),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: onView == null ? content : InkWell(onTap: onView, child: content),
+      ),
+    );
   }
 }

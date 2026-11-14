@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 
 enum _LabStage { pending, active, done }
 
@@ -128,38 +129,45 @@ class _LabProgressScreenState extends State<LabProgressScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.dark
           .copyWith(statusBarColor: Colors.transparent),
-      child: Scaffold(
-        backgroundColor: AppColors.background,
+      child: CustomerThemeScope(
+        child: Scaffold(
+        backgroundColor: CxColors.page,
         appBar: AppBar(
           backgroundColor: Colors.white,
           elevation: 0,
+          scrolledUnderElevation: 0,
+          shape: const Border(bottom: BorderSide(color: CxColors.border)),
           leading: IconButton(
+            tooltip: 'Back',
             icon: const Icon(Icons.arrow_back_ios_new_rounded,
                 size: 18, color: AppColors.textPrimary),
             onPressed: () => Navigator.pop(context),
           ),
-          title: const Text('Lab Progress',
-              style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.textPrimary)),
+          title: Text('Lab Progress',
+              style: CxText.pageTitle.copyWith(fontSize: 18)),
           centerTitle: true,
         ),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
+        body: SafeArea(
+          top: false,
+          child: SingleChildScrollView(
+          padding: const EdgeInsets.all(CxSpace.gutter),
+          child: Center(
+          child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: CxSize.contentMaxWidth),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // Booking header
               Container(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(CxSpace.lg),
                 decoration: BoxDecoration(
                   color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
+                  borderRadius: CxRadius.lgAll,
+                  border: Border.all(color: CxColors.border),
                   boxShadow: const [
                     BoxShadow(
-                        color: Colors.black12,
-                        blurRadius: 8,
+                        color: Color(0x0D000000),
+                        blurRadius: 10,
                         offset: Offset(0, 2))
                   ],
                 ),
@@ -181,49 +189,37 @@ class _LabProgressScreenState extends State<LabProgressScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(widget.patientName,
-                              style: const TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
-                                  color: AppColors.textPrimary)),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: CxText.cardTitle.copyWith(fontSize: 16)),
+                          const SizedBox(height: 2),
                           Text('Booking #${widget.bookingId}',
-                              style: const TextStyle(
-                                  fontSize: 12,
-                                  color: AppColors.textSecondary)),
+                              style: CxText.bodySecondary),
                         ],
                       ),
                     ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: _stage == 3
-                            ? AppColors.brandGreenSurface
-                            : const Color(0xFFFFF3E0),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        _stage == 3 ? 'Complete' : 'In Progress',
-                        style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: _stage == 3
-                                ? AppColors.brandGreen
-                                : const Color(0xFFE65100)),
-                      ),
+                    CxChip(
+                      label: _stage == 3 ? 'Complete' : 'In Progress',
+                      tone: _stage == 3 ? CxTone.success : CxTone.warning,
                     ),
                   ],
                 ),
               ),
 
-              const SizedBox(height: 24),
-              const Text('Sample Journey',
-                  style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.textPrimary)),
-              const SizedBox(height: 16),
+              const SizedBox(height: CxSpace.xl),
+              const Text('Sample Journey', style: CxText.sectionTitle),
+              const SizedBox(height: CxSpace.md),
 
               // Pipeline steps
+              Container(
+                padding: const EdgeInsets.fromLTRB(CxSpace.lg, CxSpace.sm, CxSpace.lg, CxSpace.sm),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: CxRadius.lgAll,
+                  border: Border.all(color: CxColors.border),
+                ),
+                child: Column(
+                  children: [
               const _PipelineStep(
                 icon: Icons.check_circle_outline_rounded,
                 title: 'Sample Collected',
@@ -250,58 +246,34 @@ class _LabProgressScreenState extends State<LabProgressScreen> {
                 stage: _stageFor(3),
                 isLast: true,
               ),
+                  ],
+                ),
+              ),
 
-              const SizedBox(height: 28),
+              const SizedBox(height: CxSpace.xl),
 
               // Download button — only when report is ready
               if (_stage == 3)
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: _reportUrl != null ? _downloadReport : null,
-                    icon: const Icon(Icons.download_rounded, size: 20),
-                    label: const Text('Download Report',
-                        style: TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w600)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.brandGreen,
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                    ),
-                  ),
+                CxButton(
+                  label: 'Download Report',
+                  icon: Icons.download_rounded,
+                  onPressed: _reportUrl != null ? _downloadReport : null,
                 ),
 
               if (_stage < 3)
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFF8E1),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: const Color(0xFFFFE082)),
-                  ),
-                  child: const Row(
-                    children: [
-                      Icon(Icons.info_outline_rounded,
-                          size: 18, color: Color(0xFFE65100)),
-                      SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          'You\'ll receive a notification when your report is ready. This page updates automatically.',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: Color(0xFFE65100),
-                              height: 1.4),
-                        ),
-                      ),
-                    ],
-                  ),
+                const CxBanner(
+                  tone: CxTone.warning,
+                  icon: Icons.info_outline_rounded,
+                  message:
+                      'You\'ll receive a notification when your report is ready. This page updates automatically.',
                 ),
             ],
           ),
+          ),
+          ),
+          ),
         ),
+      ),
       ),
     );
   }
@@ -331,25 +303,35 @@ class _PipelineStep extends StatelessWidget {
       case _LabStage.done:
         return AppColors.brandGreen;
       case _LabStage.active:
-        return const Color(0xFF1565C0);
+        return CxColors.info;
       case _LabStage.pending:
-        return AppColors.divider;
+        return CxColors.border;
     }
   }
 
   Color get _lineColor => stage == _LabStage.done
       ? AppColors.brandGreen
-      : AppColors.divider;
+      : CxColors.border;
+
+  String get _statusLabel => switch (stage) {
+        _LabStage.done => 'completed',
+        _LabStage.active => 'in progress',
+        _LabStage.pending => 'pending',
+      };
 
   @override
   Widget build(BuildContext context) {
-    return IntrinsicHeight(
+    return Semantics(
+      container: true,
+      label: '$title, $_statusLabel. $subtitle',
+      excludeSemantics: true,
+      child: IntrinsicHeight(
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           // Timeline column
           SizedBox(
-            width: 32,
+            width: 36,
             child: Column(
               children: [
                 if (!isFirst)
@@ -361,13 +343,13 @@ class _PipelineStep extends StatelessWidget {
                     ),
                   ),
                 Container(
-                  width: 32,
-                  height: 32,
+                  width: 36,
+                  height: 36,
                   decoration: BoxDecoration(
                       color: _iconBg, shape: BoxShape.circle),
                   child: stage == _LabStage.active
                       ? const Padding(
-                          padding: EdgeInsets.all(8),
+                          padding: EdgeInsets.all(9),
                           child: CircularProgressIndicator(
                               strokeWidth: 2,
                               valueColor: AlwaysStoppedAnimation<Color>(
@@ -377,7 +359,7 @@ class _PipelineStep extends StatelessWidget {
                           stage == _LabStage.done
                               ? Icons.check_rounded
                               : icon,
-                          size: 16,
+                          size: 18,
                           color: stage == _LabStage.pending
                               ? AppColors.textHint
                               : Colors.white),
@@ -387,7 +369,7 @@ class _PipelineStep extends StatelessWidget {
                     child: Center(
                       child: Container(
                           width: 2,
-                          color: AppColors.divider),
+                          color: CxColors.border),
                     ),
                   ),
               ],
@@ -397,22 +379,22 @@ class _PipelineStep extends StatelessWidget {
           // Content
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
+              padding: const EdgeInsets.symmetric(vertical: 10),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(title,
                       style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                          fontWeight: stage == _LabStage.active ? FontWeight.w700 : FontWeight.w600,
                           color: stage == _LabStage.pending
                               ? AppColors.textHint
                               : AppColors.textPrimary)),
                   const SizedBox(height: 2),
                   Text(subtitle,
                       style: TextStyle(
-                          fontSize: 11,
+                          fontSize: 12.5,
                           color: stage == _LabStage.pending
                               ? AppColors.textHint
                               : AppColors.textSecondary)),
@@ -421,6 +403,7 @@ class _PipelineStep extends StatelessWidget {
             ),
           ),
         ],
+      ),
       ),
     );
   }

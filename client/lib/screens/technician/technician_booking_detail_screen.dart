@@ -12,6 +12,7 @@ import 'package:microlab/services/api_service.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/models.dart' show BranchModel;
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/tech/tech_widgets.dart';
 import 'technician_active_job_screen.dart';
 // ₹ amount for display — whole rupees as "1229", and paise kept as
 // "1229.50" (never cut off, so a due like ₹0.50 doesn't show as ₹0).
@@ -522,8 +523,8 @@ class _TechnicianBookingDetailScreenState
     final choice = await showModalBottomSheet<({List<int> productIds, String reason})>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      // The sheet draws its own rounded white surface (max 560px wide).
+      backgroundColor: Colors.transparent,
       builder: (_) => _ChargePackageSheet(packages: _chargeCatalogue, patientName: widget.booking.customerName),
     );
     if (choice == null || !mounted) return;
@@ -550,23 +551,16 @@ class _TechnicianBookingDetailScreenState
         : '${choice.productIds.length} charge packages added');
   }
 
-  Future<bool> _confirmRemoveCharge(String name, double amount) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Remove charge?'),
-        content: Text('$name · ₹${_inr(amount)} will be taken off the bill.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: TextButton.styleFrom(foregroundColor: AppColors.error),
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
+  Future<bool> _confirmRemoveCharge(String name, double amount) {
+    // Same result as before: true only when Remove is tapped.
+    return showTechConfirm(
+      context,
+      icon: Icons.receipt_long_outlined,
+      title: 'Remove charge?',
+      message: '$name · ₹${_inr(amount)} will be taken off the bill.',
+      confirmLabel: 'Remove',
+      destructive: true,
     );
-    return ok == true;
   }
 
   Future<void> _removeChargePackage(Map<String, dynamic> charge) async {
@@ -733,14 +727,22 @@ class _TechnicianBookingDetailScreenState
           const SizedBox(height: 4),
           _BillRow('+ Additional charge${showMember ? ' · ${t.name}' : ''}', '₹${_inr(t.amount)}', sub: true),
         ],
-        const Divider(height: 20),
+        const Divider(height: 24),
         _BillRow('Grand Total', '₹${_inr(grandTotal)}', bold: true),
         if (paid > 0) ...[
-          const SizedBox(height: 4),
+          const SizedBox(height: 6),
           _BillRow('Paid', '₹${_inr(paid)}', sub: true),
         ],
-        const SizedBox(height: 6),
-        _BillRow(totalDue > 0 ? 'Amount Due' : 'Fully Paid', '₹${_inr(totalDue)}', bold: true, green: true),
+        const SizedBox(height: TechSpace.md),
+        // The figure the technician acts on, set apart.
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: const BoxDecoration(
+            color: TechColors.brandSurface,
+            borderRadius: TechRadius.mdAll,
+          ),
+          child: _BillRow(totalDue > 0 ? 'Amount Due' : 'Fully Paid', '₹${_inr(totalDue)}', bold: true, green: true),
+        ),
       ]),
     );
   }
@@ -788,13 +790,7 @@ class _TechnicianBookingDetailScreenState
       if (mounted) setState(() => _isReloading = false);
     }
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: const Text('Booking details refreshed'),
-      backgroundColor: AppColors.brandGreen,
-      behavior: SnackBarBehavior.floating,
-      duration: const Duration(seconds: 2),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ));
+    AppMessages.success(context, 'Booking details refreshed', duration: const Duration(seconds: 2));
   }
 
   Future<void> _loadDocs() async {
@@ -996,13 +992,7 @@ class _TechnicianBookingDetailScreenState
         final msg = count > 1
             ? '$count members added — collect payment below'
             : '$firstName added — collect payment below';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(msg),
-          backgroundColor: AppColors.brandGreen,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 4),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
+        AppMessages.success(context, msg, duration: const Duration(seconds: 4));
       }
     }
   }
@@ -1082,44 +1072,33 @@ void _advanceStatus() {
     }).toList();
     if (missing.isNotEmpty) {
       final names = missing.map((p) => p['name'] as String).join(', ');
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Upload prescription for: $names'),
-        backgroundColor: Colors.red,
-      ));
+      AppMessages.error(context, 'Upload prescription for: $names');
       return;
     }
     if (!_docVerified) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Verify the prescription before collecting the sample.'),
-        backgroundColor: Colors.orange,
-      ));
+      AppMessages.warning(context, 'Verify the prescription before collecting the sample.');
       return;
     }
   }
 
+  final step = _journeySteps.firstWhere((s) => s.status == next);
   showDialog(
     context: context,
-    builder: (_) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: Text('$next?',
-          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-      content: Text(
-        _journeySteps.firstWhere((s) => s.status == next).description,
-        style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
-      ),
+    builder: (_) => TechDialog(
+      icon: step.icon,
+      title: '$next?',
+      message: step.description,
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary))),
-        ElevatedButton(
+        TechButton.secondary(
+          label: 'Cancel', compact: true,
+          onPressed: () => Navigator.pop(context),
+        ),
+        TechButton(
+          label: 'Confirm', compact: true,
           onPressed: () {
             Navigator.pop(context);
             _handleStatusTransition(next);
           },
-          style: ElevatedButton.styleFrom(
-            backgroundColor: AppColors.brandGreen, elevation: 0,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ),
-          child: const Text('Confirm', style: TextStyle(color: Colors.white)),
         ),
       ],
     ),
@@ -1229,145 +1208,127 @@ Future<void> _showHandOverToLabDialog() async {
             receivedByCtrl.text.trim().isNotEmpty &&
             !isSubmitting;
 
-        return AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: const Text('Hand Over to Lab?',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'This will complete the visit and cannot be undone.',
-                  style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-                ),
-                const SizedBox(height: 14),
+        Widget fieldLabel(String text) => Padding(
+              padding: const EdgeInsets.only(bottom: TechSpace.sm - 2),
+              child: Text(text,
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                      color: TechColors.textPrimary)),
+            );
 
-                // ── Received Branch/Lab ──────────────────────────
-                const Text('Received Branch/Lab *',
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
-                const SizedBox(height: 6),
-                GestureDetector(
+        return TechDialog(
+          icon: Icons.biotech_outlined,
+          title: 'Hand Over to Lab?',
+          message: 'This will complete the visit and cannot be undone.',
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // ── Received Branch/Lab ──────────────────────────
+              fieldLabel('Received Branch/Lab *'),
+              Material(
+                color: selectedBranch != null ? TechColors.brandSurface : Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: TechRadius.mdAll,
+                  side: BorderSide(
+                    color: selectedBranch != null || showBranchSearch
+                        ? TechColors.brand : TechColors.border,
+                    width: selectedBranch != null || showBranchSearch ? 1.4 : 1,
+                  ),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
                   onTap: () => setDialogState(() => showBranchSearch = !showBranchSearch),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: selectedBranch != null ? AppColors.brandGreen : AppColors.divider,
-                      ),
-                    ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
                     child: Row(children: [
-                      Icon(Icons.local_hospital_outlined, size: 16,
-                          color: selectedBranch != null ? AppColors.brandGreen : AppColors.textHint),
-                      const SizedBox(width: 8),
+                      Icon(Icons.local_hospital_outlined, size: 20,
+                          color: selectedBranch != null ? TechColors.brand : TechColors.textHint),
+                      const SizedBox(width: 10),
                       Expanded(
                         child: Text(
                           selectedBranch?.name ?? 'Select branch/lab',
                           style: TextStyle(
                             fontSize: 13,
-                            color: selectedBranch != null ? AppColors.textPrimary : AppColors.textHint,
+                            fontWeight: selectedBranch != null ? FontWeight.w600 : FontWeight.w400,
+                            color: selectedBranch != null ? TechColors.textPrimary : TechColors.textHint,
                           ),
                         ),
                       ),
                       Icon(showBranchSearch ? Icons.expand_less_rounded : Icons.expand_more_rounded,
-                          size: 18, color: AppColors.textHint),
+                          size: 22, color: TechColors.textSecondary),
                     ]),
                   ),
                 ),
+              ),
 
-                if (showBranchSearch) ...[
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: branchSearchCtrl,
-                    autofocus: true,
-                    onChanged: (_) => setDialogState(() {}),
-                    style: const TextStyle(fontSize: 13),
-                    decoration: InputDecoration(
-                      hintText: 'Search branch name…',
-                      hintStyle: const TextStyle(fontSize: 12, color: AppColors.textHint),
-                      prefixIcon: const Icon(Icons.search_rounded, size: 16, color: AppColors.textHint),
-                      contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                          borderSide: const BorderSide(color: AppColors.divider)),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                          borderSide: const BorderSide(color: AppColors.divider)),
-                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                          borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  // Plain mapped Column, not ListView — a ListView (sliver-
-                  // based) inside AlertDialog content crashes on web/desktop
-                  // because AlertDialog sizes itself via IntrinsicWidth, and
-                  // slivers don't support intrinsic-width computation. Same
-                  // pattern already used safely elsewhere in this file for
-                  // the "Add Test / Package" search list.
-                  if (filteredBranches.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                      child: Text('No branches found', style: TextStyle(fontSize: 12, color: AppColors.textHint)),
-                    )
-                  else
-                    ...filteredBranches.take(6).map((b) => GestureDetector(
-                          onTap: () => setDialogState(() {
-                            selectedBranch     = b;
-                            showBranchSearch   = false;
-                            branchSearchCtrl.clear();
-                          }),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            child: Text(b.name, style: const TextStyle(fontSize: 13)),
-                          ),
-                        )),
-                ],
-
-                const SizedBox(height: 14),
-
-                // ── Received By ───────────────────────────────────
-                const Text('Received By *',
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
-                const SizedBox(height: 6),
+              if (showBranchSearch) ...[
+                const SizedBox(height: TechSpace.sm),
                 TextField(
-                  controller: receivedByCtrl,
+                  controller: branchSearchCtrl,
+                  autofocus: true,
                   onChanged: (_) => setDialogState(() {}),
-                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
-                  style: const TextStyle(fontSize: 14),
-                  decoration: InputDecoration(
-                    hintText: 'Name of person receiving the samples',
-                    hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: AppColors.divider)),
-                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: AppColors.divider)),
-                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
+                  decoration: const InputDecoration(
+                    hintText: 'Search branch name…',
+                    prefixIcon: Icon(Icons.search_rounded, size: 20, color: TechColors.textHint),
                   ),
                 ),
-
-                if (submitError != null) ...[
-                  const SizedBox(height: 12),
-                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    const Icon(Icons.error_outline_rounded, size: 15, color: Color(0xFFD32F2F)),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(submitError!,
-                          style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F))),
-                    ),
-                  ]),
-                ],
+                const SizedBox(height: TechSpace.xs),
+                // Plain mapped Column, not ListView — keeps the dialog's
+                // sizing simple on web/desktop (same pattern as the
+                // "Add Test / Package" search list).
+                if (filteredBranches.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: TechSpace.md),
+                    child: Text('No branches found', textAlign: TextAlign.center,
+                        style: TechText.bodySecondary),
+                  )
+                else
+                  ...filteredBranches.take(6).map((b) => InkWell(
+                        borderRadius: TechRadius.smAll,
+                        onTap: () => setDialogState(() {
+                          selectedBranch     = b;
+                          showBranchSearch   = false;
+                          branchSearchCtrl.clear();
+                        }),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 12),
+                          child: Row(children: [
+                            const Icon(Icons.location_city_outlined, size: 18, color: TechColors.textHint),
+                            const SizedBox(width: 10),
+                            Expanded(child: Text(b.name, style: TechText.body)),
+                          ]),
+                        ),
+                      )),
               ],
-            ),
+
+              const SizedBox(height: TechSpace.lg),
+
+              // ── Received By ───────────────────────────────────
+              fieldLabel('Received By *'),
+              TextField(
+                controller: receivedByCtrl,
+                onChanged: (_) => setDialogState(() {}),
+                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
+                decoration: const InputDecoration(
+                  hintText: 'Name of person receiving the samples',
+                  prefixIcon: Icon(Icons.person_outline_rounded, size: 20, color: TechColors.textHint),
+                ),
+              ),
+
+              if (submitError != null) ...[
+                const SizedBox(height: TechSpace.md),
+                TechBanner(message: submitError!, tone: TechTone.error),
+              ],
+            ],
           ),
           actions: [
-            TextButton(
+            TechButton.secondary(
+              label: 'Cancel', compact: true,
               onPressed: isSubmitting ? null : () => Navigator.pop(dialogCtx),
-              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
             ),
-            ElevatedButton(
+            TechButton(
+              label: 'Confirm', compact: true,
+              loading: isSubmitting,
               onPressed: !canConfirm ? null : () async {
                 setDialogState(() {
                   isSubmitting = true;
@@ -1400,17 +1361,6 @@ Future<void> _showHandOverToLabDialog() async {
                   });
                 }
               },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.brandGreen, elevation: 0,
-                disabledBackgroundColor: AppColors.divider,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ),
-              child: isSubmitting
-                  ? const SizedBox(
-                      width: 18, height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Text('Confirm', style: TextStyle(color: Colors.white)),
             ),
           ],
         );
@@ -1457,32 +1407,34 @@ void _resumeJourney() {
     final reason = await showDialog<String>(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDlg) => AlertDialog(
-          title: const Text('No payment collected'),
-          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Enter the reason for not collecting any payment, then verify the OTP.',
-                style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-            const SizedBox(height: 12),
-            TextField(
-              controller: ctrl,
-              autofocus: true,
-              maxLength: 255,
-              maxLines: 3,
-              minLines: 1,
-              textCapitalization: TextCapitalization.sentences,
-              onChanged: (_) { if (error != null) setDlg(() => error = null); },
-              decoration: InputDecoration(
-                labelText: 'Reason for no payment *',
-                hintText: 'e.g. Customer will pay at report delivery',
-                errorText: error,
-                border: const OutlineInputBorder(),
-                isDense: true,
-              ),
+        builder: (ctx, setDlg) => TechDialog(
+          icon: Icons.money_off_rounded,
+          tone: TechTone.warning,
+          title: 'No payment collected',
+          message: 'Enter the reason for not collecting any payment, then verify the OTP.',
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            maxLength: 255,
+            maxLines: 3,
+            minLines: 2,
+            textCapitalization: TextCapitalization.sentences,
+            onChanged: (_) { if (error != null) setDlg(() => error = null); },
+            // Border, focus and error colours come from the technician theme.
+            decoration: InputDecoration(
+              labelText: 'Reason for no payment *',
+              hintText: 'e.g. Customer will pay at report delivery',
+              alignLabelWithHint: true,
+              errorText: error,
             ),
-          ]),
+          ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-            ElevatedButton(
+            TechButton.secondary(
+              label: 'Cancel', compact: true,
+              onPressed: () => Navigator.pop(ctx),
+            ),
+            TechButton(
+              label: 'Continue to OTP', compact: true,
               onPressed: () {
                 final text = ctrl.text.trim();
                 if (text.isEmpty) {
@@ -1491,8 +1443,6 @@ void _resumeJourney() {
                 }
                 Navigator.pop(ctx, text);
               },
-              style: ElevatedButton.styleFrom(backgroundColor: AppColors.brandGreen, foregroundColor: Colors.white),
-              child: const Text('Continue to OTP'),
             ),
           ],
         ),
@@ -1527,58 +1477,40 @@ void _resumeJourney() {
       context: context,
       barrierDismissible: false,
       builder: (_) => StatefulBuilder(
-        builder: (ctx, setDialogState) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          // Fixed-height Column overflows once the on-screen keyboard opens
-          // and shrinks the available space (the OTP boxes autofocus the
-          // keyboard open immediately). Wrapping in a scroll view lets the
-          // content scroll instead of overflowing, matching the fix already
-          // applied to the payment sheet for the same underlying issue.
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 56, height: 56,
-                  decoration: const BoxDecoration(
-                    color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-                  child: const Icon(Icons.lock_open_rounded,
-                      size: 28, color: AppColors.brandGreen),
-                ),
-                const SizedBox(height: 14),
-                const Text('Enter Customer OTP',
-                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700)),
-                const SizedBox(height: 6),
-                Text(
-                  'OTP sent to $maskedMobile. Ask the customer to share it.',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
-                ),
-                const SizedBox(height: 20),
-
-                // 4 OTP boxes
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(4, (i) => Expanded(
+        // TechDialog scrolls, so the OTP boxes (which open the keyboard
+        // straight away) never overflow.
+        builder: (ctx, setDialogState) => TechDialog(
+          icon: Icons.lock_open_rounded,
+          centered: true,
+          title: 'Enter Customer OTP',
+          message: 'OTP sent to $maskedMobile. Ask the customer to share it.',
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 4 OTP boxes
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(4, (i) {
+                  final filled = _otpControllers[i].text.isNotEmpty;
+                  return Expanded(
                     child: Padding(
-                      padding: EdgeInsets.only(right: i < 3 ? 10 : 0),
-                      child: Container(
-                        height: 56,
+                      padding: EdgeInsets.only(right: i < 3 ? TechSpace.md : 0),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 150),
+                        height: 60,
                         decoration: BoxDecoration(
                           color: _otpError
-                              ? const Color(0xFFFFF5F5)
-                              : AppColors.background,
-                          borderRadius: BorderRadius.circular(12),
+                              ? TechColors.errorSurface
+                              : filled ? TechColors.brandSurface : TechColors.surfaceMuted,
+                          borderRadius: TechRadius.mdAll,
                           border: Border.all(
                             color: _otpError
-                                ? const Color(0xFFD32F2F)
-                                : _otpControllers[i].text.isNotEmpty
-                                    ? AppColors.brandGreen
-                                    : AppColors.divider,
+                                ? TechColors.error
+                                : filled ? TechColors.brand : TechColors.border,
                             width: 1.5,
                           ),
                         ),
+                        alignment: Alignment.center,
                         child: TextField(
                           controller: _otpControllers[i],
                           focusNode: _otpFocusNodes[i],
@@ -1586,15 +1518,18 @@ void _resumeJourney() {
                           keyboardType: TextInputType.number,
                           maxLength: 1,
                           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                          cursorColor: TechColors.brand,
                           style: TextStyle(
                             fontSize: 20,
                             fontWeight: FontWeight.w700,
-                            color: _otpError
-                                ? const Color(0xFFD32F2F)
-                                : AppColors.textPrimary,
+                            color: _otpError ? TechColors.error : TechColors.textPrimary,
                           ),
                           decoration: const InputDecoration(
                             border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            filled: false,
+                            isCollapsed: true,
                             counterText: '',
                           ),
                           onChanged: (v) {
@@ -1606,75 +1541,52 @@ void _resumeJourney() {
                         ),
                       ),
                     ),
-                  )),
-                ),
+                  );
+                }),
+              ),
 
-                if (_otpError) ...[
-                  const SizedBox(height: 8),
-                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    const Icon(Icons.error_outline, size: 13, color: Color(0xFFD32F2F)),
-                    const SizedBox(width: 4),
-                    Flexible(child: Text(_otpErrorText,
-                        style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)))),
-                  ]),
-                ],
-
-                const SizedBox(height: 8),
-
-                // Resend OTP
-                Center(
-                  child: _isResendingOtp
-                      ? const SizedBox(width: 14, height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 1.5, color: AppColors.textSecondary))
-                      : TextButton(
-                          onPressed: () => _resendOtp(setDialogState),
-                          style: TextButton.styleFrom(
-                            foregroundColor: AppColors.textSecondary,
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          ),
-                          child: const Text('Resend OTP', style: TextStyle(fontSize: 12)),
-                        ),
-                ),
-
-                const SizedBox(height: 12),
-
-                Row(children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: _isVerifyingOtp ? null : () => Navigator.pop(ctx),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.textSecondary,
-                        side: const BorderSide(color: AppColors.divider),
-                        padding: const EdgeInsets.symmetric(vertical: 13),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text('Cancel'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: _isVerifyingOtp
-                          ? null
-                          : () => _verifyOtp(ctx, setDialogState),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.brandGreen,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 13),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: _isVerifyingOtp
-                          ? const SizedBox(width: 18, height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                          : const Text('Verify',
-                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                    ),
-                  ),
+              if (_otpError) ...[
+                const SizedBox(height: TechSpace.md),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  const Icon(Icons.error_outline_rounded, size: 16, color: TechColors.error),
+                  const SizedBox(width: 6),
+                  Flexible(child: Text(_otpErrorText,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 13, color: TechColors.error))),
                 ]),
               ],
-            ),
+
+              const SizedBox(height: TechSpace.sm),
+
+              // Resend OTP
+              SizedBox(
+                height: TechSize.minTouch,
+                child: Center(
+                  child: _isResendingOtp
+                      ? const SizedBox(width: 18, height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: TechColors.brand))
+                      : Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Text("Didn't get it?", style: TechText.bodySecondary),
+                          TextButton(
+                            onPressed: () => _resendOtp(setDialogState),
+                            child: const Text('Resend OTP'),
+                          ),
+                        ]),
+                ),
+              ),
+            ],
           ),
+          actions: [
+            TechButton.secondary(
+              label: 'Cancel', compact: true,
+              onPressed: _isVerifyingOtp ? null : () => Navigator.pop(ctx),
+            ),
+            TechButton(
+              label: 'Verify', compact: true,
+              loading: _isVerifyingOtp,
+              onPressed: _isVerifyingOtp ? null : () => _verifyOtp(ctx, setDialogState),
+            ),
+          ],
         ),
       ),
     );
@@ -1711,13 +1623,8 @@ void _resumeJourney() {
       // await above and silently skip the pop while still being "mounted"
       // enough for the earlier check to pass.
       if (mounted) Navigator.of(context, rootNavigator: true).pop();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: const Text('OTP verified — tap "Hand Over to Lab" to complete'),
-        backgroundColor: AppColors.brandGreen,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        duration: const Duration(seconds: 3),
-      ));
+      AppMessages.success(context, 'OTP verified — tap "Hand Over to Lab" to complete',
+          duration: const Duration(seconds: 3));
     } else {
       setState(() {
         _isVerifyingOtp = false;
@@ -1744,12 +1651,7 @@ void _resumeJourney() {
       for (final c in _otpControllers) { c.clear(); }
       setState(() { _otpError = false; _otpErrorText = 'Invalid OTP. Please try again.'; });
       setDialogState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: const Text('OTP resent successfully'),
-        backgroundColor: AppColors.brandGreen,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.success(context, 'OTP resent successfully');
     } else {
       AppMessages.error(context, AppMessages.serverMessage(result?['message'],
           fallback: 'We couldn\'t resend the OTP. Please try again.'));
@@ -1761,11 +1663,7 @@ void _resumeJourney() {
   Future<void> _removeTest(String id) async {
     // Block all removals once OTP has been verified — visit is finalized at that point.
     if (_isFinalized) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Tests cannot be changed after OTP verification.'),
-        backgroundColor: Colors.red,
-        behavior: SnackBarBehavior.floating,
-      ));
+      AppMessages.error(context, 'Tests cannot be changed after OTP verification.');
       return;
     }
     final test          = _selectedTests.firstWhere((t) => t['id'] == id, orElse: () => {});
@@ -1837,31 +1735,21 @@ void _resumeJourney() {
     final name = (member['patient_name'] as String?)?.trim().isNotEmpty == true
         ? member['patient_name'] as String
         : 'this member';
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Remove $name?'),
-        content: Text('$name and their tests will be removed from this visit.',
-            style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Remove', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
+    final confirmed = await showTechConfirm(
+      context,
+      icon: Icons.person_remove_outlined,
+      title: 'Remove $name?',
+      message: '$name and their tests will be removed from this visit.',
+      confirmLabel: 'Remove',
+      destructive: true,
     );
     if (confirmed != true || !mounted) return;
 
     final result = await ApiService.removeVisitMember(bookingId: memberBookingId);
     if (!mounted) return;
     final ok = result['success'] == true;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text((result['message'] as String?) ?? (ok ? '$name removed' : 'Could not remove $name')),
-      backgroundColor: ok ? null : Colors.red,
-      behavior: SnackBarBehavior.floating,
-    ));
+    final removeMsg = (result['message'] as String?) ?? (ok ? '$name removed' : 'Could not remove $name');
+    ok ? AppMessages.success(context, removeMsg) : AppMessages.error(context, removeMsg);
     if (!ok) return;
     setState(() {
       _linkedPatients = _linkedPatients
@@ -1904,11 +1792,7 @@ void _resumeJourney() {
       });
       _updateFamilyAmountDue(familyBookingId, -price);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to add test — please retry'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-        ));
+        AppMessages.error(context, 'Failed to add test — please retry');
       }
     }
   }
@@ -1933,135 +1817,98 @@ void _resumeJourney() {
           final selectedTotal = _catalogueItems
               .where((t) => pendingIds.contains(t['id']))
               .fold<double>(0, (s, t) => s + (double.tryParse(t['price'] ?? '0') ?? 0));
-          return Container(
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-            ),
-            padding: EdgeInsets.fromLTRB(
-              16, 0, 16,
-              MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 16,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  margin: const EdgeInsets.symmetric(vertical: 12),
-                  width: 40, height: 4,
-                  decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-                ),
-                const Text('Add Test / Package',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 12),
-                TextField(
-                  autofocus: true,
-                  onChanged: (v) => setSheet(() => searchQuery = v),
-                  style: const TextStyle(fontSize: 13),
-                  decoration: InputDecoration(
-                    hintText: 'Search tests…',
-                    hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
-                    prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: AppColors.divider)),
-                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: AppColors.divider)),
-                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                        borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Container(
-                  height: filtered.isEmpty ? null : (filtered.length * 58.0).clamp(58.0, 300.0),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: AppColors.divider),
-                  ),
-                  child: filtered.isEmpty
-                      ? const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 20),
-                          child: Center(child: Text('No tests found',
-                              style: TextStyle(fontSize: 13, color: AppColors.textHint))),
-                        )
-                      : ListView.separated(
-                          padding: EdgeInsets.zero,
-                          itemCount: filtered.length,
-                          separatorBuilder: (_, __) => const Divider(height: 1),
-                          itemBuilder: (_, i) {
-                            final t = filtered[i];
-                            final id = t['id'] ?? '';
-                            return CheckboxListTile(
-                              value: pendingIds.contains(id),
-                              onChanged: adding
-                                  ? null
-                                  : (v) => setSheet(() {
-                                        if (v == true) pendingIds.add(id);
-                                        else pendingIds.remove(id);
-                                      }),
-                              activeColor: AppColors.brandGreen,
-                              dense: true,
-                              controlAffinity: ListTileControlAffinity.leading,
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 6),
-                              title: Text(t['name'] ?? '',
-                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                              subtitle: (t['category'] ?? '').isEmpty ? null
-                                  : Text(t['category']!,
-                                      style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                              secondary: Text('₹${t['price'] ?? '0'}',
-                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                      color: AppColors.brandGreen)),
-                            );
-                          },
-                        ),
-                ),
-                const SizedBox(height: 10),
-                Row(children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: adding ? null : () => Navigator.pop(ctx),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.textSecondary,
-                        side: const BorderSide(color: AppColors.divider),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                      child: const Text('Cancel'),
+          // TechSheetFrame keeps the sheet above the keyboard and safe area.
+          return TechThemeScope(
+            child: TechSheetFrame(
+              title: 'Add Test / Package',
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextField(
+                    autofocus: true,
+                    onChanged: (v) => setSheet(() => searchQuery = v),
+                    decoration: const InputDecoration(
+                      hintText: 'Search tests…',
+                      prefixIcon: Icon(Icons.search_rounded, size: 20, color: TechColors.textHint),
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    flex: 2,
-                    child: ElevatedButton(
-                      onPressed: (pendingIds.isEmpty || adding) ? null : () async {
-                        setSheet(() => adding = true);
-                        final picked = _catalogueItems
-                            .where((t) => pendingIds.contains(t['id'])).toList();
-                        for (final t in picked) {
-                          await _addFamilyTest(t, familyBookingId);
-                        }
-                        if (ctx.mounted) Navigator.pop(ctx);
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.brandGreen,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                      child: adding
-                          ? const SizedBox(width: 18, height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                          : Text(
-                              pendingIds.isEmpty
-                                  ? 'Select tests to add'
-                                  : 'Add ${pendingIds.length} selected · ₹${selectedTotal.toStringAsFixed(0)}',
-                              style: const TextStyle(fontWeight: FontWeight.w600),
-                            ),
+                  const SizedBox(height: TechSpace.md),
+                  Container(
+                    height: filtered.isEmpty ? null : (filtered.length * 64.0).clamp(64.0, 320.0),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: TechRadius.mdAll,
+                      border: Border.all(color: TechColors.border),
                     ),
+                    clipBehavior: Clip.antiAlias,
+                    child: filtered.isEmpty
+                        ? const TechEmptyState(
+                            icon: Icons.search_off_rounded,
+                            title: 'No tests found',
+                          )
+                        : ListView.separated(
+                            padding: EdgeInsets.zero,
+                            itemCount: filtered.length,
+                            separatorBuilder: (_, __) => const Divider(height: 1),
+                            itemBuilder: (_, i) {
+                              final t = filtered[i];
+                              final id = t['id'] ?? '';
+                              final checked = pendingIds.contains(id);
+                              return CheckboxListTile(
+                                value: checked,
+                                onChanged: adding
+                                    ? null
+                                    : (v) => setSheet(() {
+                                          if (v == true) pendingIds.add(id);
+                                          else pendingIds.remove(id);
+                                        }),
+                                activeColor: TechColors.brand,
+                                tileColor: checked ? TechColors.brandSurface : null,
+                                controlAffinity: ListTileControlAffinity.leading,
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                                title: Text(t['name'] ?? '',
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                        color: TechColors.textPrimary)),
+                                subtitle: (t['category'] ?? '').isEmpty ? null
+                                    : Text(t['category']!, style: TechText.caption),
+                                secondary: Text('₹${t['price'] ?? '0'}',
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                                        color: TechColors.textPrimary)),
+                              );
+                            },
+                          ),
                   ),
-                ]),
-              ],
+                  const SizedBox(height: TechSpace.lg),
+                  Row(children: [
+                    Expanded(
+                      child: TechButton.secondary(
+                        label: 'Cancel',
+                        onPressed: adding ? null : () => Navigator.pop(ctx),
+                      ),
+                    ),
+                    const SizedBox(width: TechSpace.md),
+                    Expanded(
+                      flex: 2,
+                      child: TechButton(
+                        loading: adding,
+                        label: pendingIds.isEmpty
+                            ? 'Select tests to add'
+                            : 'Add ${pendingIds.length} · ₹${selectedTotal.toStringAsFixed(0)}',
+                        onPressed: (pendingIds.isEmpty || adding) ? null : () async {
+                          setSheet(() => adding = true);
+                          final picked = _catalogueItems
+                              .where((t) => pendingIds.contains(t['id'])).toList();
+                          for (final t in picked) {
+                            await _addFamilyTest(t, familyBookingId);
+                          }
+                          if (ctx.mounted) Navigator.pop(ctx);
+                        },
+                      ),
+                    ),
+                  ]),
+                ],
+              ),
             ),
           );
         },
@@ -2108,11 +1955,7 @@ void _resumeJourney() {
       setState(() => _selectedTests.removeWhere(
           (x) => x['id'] == t['id'] && x['bookingItemId'] == ''));
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to add test — please retry'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-        ));
+        AppMessages.error(context, 'Failed to add test — please retry');
       }
     }
   }
@@ -2176,11 +2019,7 @@ void _resumeJourney() {
         final idx = list.indexWhere((t) => t['id'] == testId);
         if (idx != -1) list[idx]['collected'] = newValue ? 'pending' : 'completed';
       });
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Failed to update checklist — please retry'),
-        backgroundColor: Colors.red,
-        behavior: SnackBarBehavior.floating,
-      ));
+      AppMessages.error(context, 'Failed to update checklist — please retry');
     }
   }
 
@@ -2319,20 +2158,13 @@ void _resumeJourney() {
   // ✕ on a collection photo: confirm, then remove it on the server and show
   // the empty "Take Collection Photo" box again.
   Future<void> _confirmRemoveCollectionProof({required int bookingId, required String patientName}) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Remove photo?', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-        content: Text('The collection photo for $patientName will be removed. You can take a new one afterwards.',
-            style: const TextStyle(fontSize: 14, height: 1.5)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary))),
-          TextButton(onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Remove', style: TextStyle(color: Color(0xFFD32F2F), fontWeight: FontWeight.w700))),
-        ],
-      ),
+    final ok = await showTechConfirm(
+      context,
+      icon: Icons.hide_image_outlined,
+      title: 'Remove photo?',
+      message: 'The collection photo for $patientName will be removed. You can take a new one afterwards.',
+      confirmLabel: 'Remove',
+      destructive: true,
     );
     if (ok != true || !mounted) return;
 
@@ -2451,33 +2283,31 @@ void _resumeJourney() {
   // ── Document ──────────────────────────────────────────────
 
   void _showDocSourcePicker({required int targetBookingId, required int targetPatientId}) {
-    showModalBottomSheet(
+    showTechSheet<void>(
       context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).padding.bottom + 20),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            width: 40, height: 4,
-            margin: const EdgeInsets.only(bottom: 16),
-            decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-          ),
-          _DocSourceTile(Icons.camera_alt_outlined, 'Camera', 'Take a photo now', () {
+      title: 'Upload document',
+      subtitle: 'Add a photo of the prescription',
+      builder: (_) => Column(mainAxisSize: MainAxisSize.min, children: [
+        TechOptionCard(
+          icon: Icons.camera_alt_outlined,
+          title: 'Camera',
+          subtitle: 'Take a photo now',
+          onTap: () {
             Navigator.pop(context);
             _pickDoc(ImageSource.camera, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
-          }),
-          const SizedBox(height: 8),
-          _DocSourceTile(Icons.photo_library_outlined, 'Gallery', 'Choose from your photos', () {
+          },
+        ),
+        const SizedBox(height: TechSpace.md),
+        TechOptionCard(
+          icon: Icons.photo_library_outlined,
+          title: 'Gallery',
+          subtitle: 'Choose from your photos',
+          onTap: () {
             Navigator.pop(context);
             _pickDoc(ImageSource.gallery, targetBookingId: targetBookingId, targetPatientId: targetPatientId);
-          }),
-          const SizedBox(height: 4),
-        ]),
-      ),
+          },
+        ),
+      ]),
     );
   }
 
@@ -2562,11 +2392,7 @@ void _resumeJourney() {
           );
         } else {
           _docUploads.removeAt(idx);
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Upload failed — please retry'),
-            backgroundColor: Colors.red,
-            behavior: SnackBarBehavior.floating,
-          ));
+          AppMessages.error(context, 'Upload failed — please retry');
         }
       });
     } catch (e) {
@@ -2628,11 +2454,7 @@ void _resumeJourney() {
     // Collected" gate for a document still pending_review server-side.
     setState(() => _docVerified = _docUploads.every((d) => d.isVerified));
     if (anyFailed) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Some documents could not be verified — please retry.'),
-        backgroundColor: Colors.red,
-        behavior: SnackBarBehavior.floating,
-      ));
+      AppMessages.error(context, 'Some documents could not be verified — please retry.');
     }
   }
 
@@ -2644,117 +2466,154 @@ void _resumeJourney() {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => StatefulBuilder(
-        builder: (ctx, setSheet) => Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          padding: EdgeInsets.fromLTRB(
-              20, 0, 20, MediaQuery.of(ctx).padding.bottom + 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Center(
-                child: Container(
-                  margin: const EdgeInsets.symmetric(vertical: 12),
-                  width: 40, height: 4,
-                  decoration: BoxDecoration(
-                      color: AppColors.divider,
-                      borderRadius: BorderRadius.circular(2)),
+        builder: (ctx, setSheet) {
+          // The same state and handlers as before; only the layout changed.
+          final allPaid    = _unpaidMembers.isEmpty;
+          final otpDone    = _currentStatus == 'OTP Verified' || _isCompleted;
+          // Nothing paid yet → OTP is the alternative to paying, and needs a
+          // reason first (_askNoPaymentReason). After any payment it is the
+          // next step, with no reason.
+          final otpIsAlternative = !_visitPaymentStarted && !allPaid;
+          final mq = MediaQuery.of(ctx);
+
+          // Same entry point as the Collect Payment card: a family with
+          // 2+ members owing is asked single vs individual payment.
+          void onCollectPayment() {
+            Navigator.pop(ctx);
+            _startPayment(onDone: () {
+              Future.delayed(
+                  const Duration(milliseconds: 300), _showCompleteSheet);
+            });
+          }
+
+          Future<void> onVerifyOtp() async {
+            Navigator.pop(ctx);
+            if (!_visitPaymentStarted) {
+              final reason = await _askNoPaymentReason();
+              if (reason == null || !mounted) return;
+              _noPaymentReason = reason;
+            }
+            _showOtpDialog();
+          }
+
+          return Align(
+            alignment: Alignment.bottomCenter,
+            // Tablets: keep the sheet a readable width.
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: 560,
+                maxHeight: mq.size.height * 0.9,
+              ),
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
                 ),
-              ),
-              const Text('Complete Booking',
-                  style: TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-              const SizedBox(height: 4),
-              Text('${widget.booking.customerName}${widget.booking.referenceNo != null ? ' · ${widget.booking.referenceNo}' : ''}',
-                  style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-              const SizedBox(height: 20),
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, mq.padding.bottom + 20),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Drag handle
+                      Center(
+                        child: Container(
+                          margin: const EdgeInsets.only(top: 10, bottom: 18),
+                          width: 36, height: 4,
+                          decoration: BoxDecoration(
+                              color: AppColors.divider,
+                              borderRadius: BorderRadius.circular(2)),
+                        ),
+                      ),
 
-              // Step 1: Payment
-              _CompleteStep(
-                number: '1',
-                title: 'Collect Payment',
-                // Same figures as the button below: everyone on the visit
-                // who still owes (main patient + family members).
-                subtitle: _unpaidMembers.isEmpty
-                    ? 'All payments collected'
-                    : _unpaidMembers.length > 1
-                        ? 'Collect ₹${_inr(_unpaidTotal)} for ${_unpaidMembers.length} members. Part payment is fine to continue.'
-                        : _livePaymentStatus == 'paid'
-                            ? 'Original ₹${_inr(_liveAmountPaid)} paid. Collect additional: ₹${_inr(_unpaidTotal)}'
-                            : 'Collect ₹${_inr(_unpaidTotal)} from customer (tests amount)',
-                done: _unpaidMembers.isEmpty,
-                locked: false,
-                buttonLabel: _unpaidMembers.isEmpty
-                    ? 'Paid ✓'
-                    : 'Make Payment  ₹${_inr(_unpaidTotal)}',
-                buttonColor: _unpaidMembers.isEmpty ? AppColors.brandGreen : const Color(0xFF1565C0),
-                // Same entry point as the Collect Payment card: a family with
-                // 2+ members owing is asked single vs individual payment.
-                onTap: _unpaidMembers.isEmpty
-                    ? null
-                    : () {
-                        Navigator.pop(ctx);
-                        _startPayment(onDone: () {
-                          Future.delayed(
-                              const Duration(milliseconds: 300), _showCompleteSheet);
-                        });
-                      },
-              ),
+                      // Header
+                      const Text('Complete Booking',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w700,
+                              color: AppColors.textPrimary, letterSpacing: -0.2)),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${widget.booking.customerName}${widget.booking.referenceNo != null ? '  ·  #${widget.booking.referenceNo}' : ''}',
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                      ),
+                      const SizedBox(height: 22),
 
-              const SizedBox(height: 12),
+                      // Payment: the primary section
+                      _CompletePaymentCard(
+                        allPaid: allPaid,
+                        amountDue: '₹${_inr(_unpaidTotal)}',
+                        // Same figures as the Collect Payment card: everyone
+                        // on the visit who still owes (main + family members).
+                        memberCount: _unpaidMembers.length,
+                        note: allPaid
+                            ? 'All payments collected'
+                            : (_unpaidMembers.length == 1 && _livePaymentStatus == 'paid')
+                                ? '₹${_inr(_liveAmountPaid)} already paid · additional amount due'
+                                : 'Partial payment accepted',
+                        onCollect: allPaid ? null : onCollectPayment,
+                      ),
 
-              // Step 2: OTP — open even with nothing paid, but then the
-              // technician must give the reason first (_askNoPaymentReason).
-              _CompleteStep(
-                number: '2',
-                title: 'Verify OTP',
-                subtitle: _visitPaymentStarted
-                    ? 'Ask customer for the OTP sent to their phone'
-                    : 'No payment yet — you\'ll be asked for the reason, then the OTP',
-                done: _currentStatus == 'OTP Verified' || _isCompleted,
-                locked: false,
-                buttonLabel: (_currentStatus == 'OTP Verified' || _isCompleted)
-                    ? 'Verified ✓'
-                    : _visitPaymentStarted ? 'Verify OTP' : 'Verify OTP without payment',
-                buttonColor: AppColors.brandGreen,
-                onTap: (_currentStatus == 'OTP Verified' || _isCompleted)
-                    ? null
-                    : () async {
-                        Navigator.pop(ctx);
-                        if (!_visitPaymentStarted) {
-                          final reason = await _askNoPaymentReason();
-                          if (reason == null || !mounted) return;
-                          _noPaymentReason = reason;
-                        }
-                        _showOtpDialog();
-                      },
-              ),
-
-              const SizedBox(height: 20),
-
-              // Only while nothing has been paid toward the visit.
-              if (!_visitPaymentStarted)
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFFF3E0),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: const Color(0xFFFFCC02).withOpacity(0.4)),
+                      if (otpIsAlternative && !otpDone) ...[
+                        const SizedBox(height: 18),
+                        const _OrSeparator(),
+                        const SizedBox(height: 18),
+                        // Secondary: OTP without payment
+                        SizedBox(
+                          height: 50,
+                          child: OutlinedButton.icon(
+                            onPressed: onVerifyOtp,
+                            icon: const Icon(Icons.lock_open_rounded, size: 18),
+                            label: const Text('Verify OTP without payment'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: _kCompleteBrand,
+                              side: const BorderSide(color: _kCompleteBrand, width: 1.2),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14)),
+                              textStyle: const TextStyle(
+                                  fontSize: 14, fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        const Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Padding(
+                              padding: EdgeInsets.only(top: 1),
+                              child: Icon(Icons.info_outline_rounded,
+                                  size: 15, color: AppColors.textSecondary),
+                            ),
+                            SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                "A reason is required when payment isn't collected. You'll enter it before the OTP.",
+                                style: TextStyle(
+                                    fontSize: 12, height: 1.4,
+                                    color: AppColors.textSecondary),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ] else ...[
+                        // Payment started (or nothing owed): OTP is the next step.
+                        const SizedBox(height: 14),
+                        _CompleteOtpRow(
+                          done: otpDone,
+                          primary: allPaid,
+                          onVerify: otpDone ? null : onVerifyOtp,
+                        ),
+                      ],
+                    ],
                   ),
-                  child: const Row(children: [
-                    Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFE65100)),
-                    SizedBox(width: 8),
-                    Expanded(child: Text(
-                      'Collect a payment (part payment is fine) — or verify the OTP without payment by entering the reason.',
-                      style: TextStyle(fontSize: 12, color: Color(0xFF795548), height: 1.4),
-                    )),
-                  ]),
                 ),
-            ],
-          ),
-        ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -2784,123 +2643,109 @@ void _resumeJourney() {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          // viewInsets.bottom is the on-screen keyboard's height — without it,
-          // the sheet's bottom padding only ever accounts for the safe-area
-          // inset, so opening the keyboard pushes the TextField/buttons off
-          // the bottom of the screen instead of the sheet shifting up to
-          // stay above it.
-          padding: EdgeInsets.fromLTRB(
-            20, 20, 20,
-            MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 20,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Collect Payment',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-              const SizedBox(height: 4),
-              Text(subtitle, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-              const SizedBox(height: 18),
-
-              if (allowPartial) ...[
-                const Text('Amount to collect',
-                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
-                const SizedBox(height: 6),
-                TextField(
-                  controller: amountCtrl,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
-                  // Always rebuilds: the reason field follows the amount.
-                  onChanged: (_) => setSheet(() { errorText = null; reasonError = null; }),
-                  decoration: InputDecoration(
-                    prefixText: '₹ ',
-                    errorText: errorText,
-                    helperText: 'Full amount due: ₹${_inr(maxAmount)} — enter less to pay partially',
-                    helperMaxLines: 2,
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                ),
-                // Only for a partial payment — not needed when paying in full.
-                if (isPartial()) ...[
-                  const SizedBox(height: 12),
-                  const Text('Reason for partial payment *',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
-                  const SizedBox(height: 6),
+        // TechSheetFrame keeps the sheet above the keyboard (viewInsets) and
+        // the bottom safe area, and scrolls when space is short.
+        builder: (ctx, setSheet) => TechThemeScope(
+          child: TechSheetFrame(
+            title: 'Collect Payment',
+            subtitle: subtitle,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (allowPartial) ...[
+                  const _SheetFieldLabel('Amount to collect'),
                   TextField(
-                    controller: reasonCtrl,
-                    maxLength: 255,
-                    maxLines: 2,
-                    minLines: 1,
-                    textCapitalization: TextCapitalization.sentences,
-                    onChanged: (_) { if (reasonError != null) setSheet(() => reasonError = null); },
+                    controller: amountCtrl,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
+                    // Always rebuilds: the reason field follows the amount.
+                    onChanged: (_) => setSheet(() { errorText = null; reasonError = null; }),
+                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700,
+                        color: TechColors.textPrimary),
                     decoration: InputDecoration(
-                      hintText: 'Why is only part of the amount being paid?',
-                      errorText: reasonError,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                      prefixText: '₹ ',
+                      prefixStyle: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700,
+                          color: TechColors.textSecondary),
+                      errorText: errorText,
+                      helperText: 'Full amount due: ₹${_inr(maxAmount)} — enter less to pay partially',
+                      helperMaxLines: 2,
                     ),
                   ),
-                ],
-              ] else
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: AppColors.background,
-                    borderRadius: BorderRadius.circular(10),
+                  // Only for a partial payment — not needed when paying in full.
+                  if (isPartial()) ...[
+                    const SizedBox(height: TechSpace.lg),
+                    const _SheetFieldLabel('Reason for partial payment *'),
+                    TextField(
+                      controller: reasonCtrl,
+                      maxLength: 255,
+                      maxLines: 2,
+                      minLines: 1,
+                      textCapitalization: TextCapitalization.sentences,
+                      onChanged: (_) { if (reasonError != null) setSheet(() => reasonError = null); },
+                      decoration: InputDecoration(
+                        hintText: 'Why is only part of the amount being paid?',
+                        errorText: reasonError,
+                      ),
+                    ),
+                  ],
+                ] else
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: TechSpace.lg, vertical: 14),
+                    decoration: const BoxDecoration(
+                      color: TechColors.brandSurface,
+                      borderRadius: TechRadius.mdAll,
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('Amount', style: TechText.bodySecondary),
+                        Text('₹${_inr(maxAmount)}',
+                            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700,
+                                color: TechColors.textPrimary)),
+                      ],
+                    ),
                   ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('Amount', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                      Text('₹${_inr(maxAmount)}',
-                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-                    ],
-                  ),
-                ),
-              const SizedBox(height: 18),
+                const SizedBox(height: TechSpace.xl),
 
-              const Text('Payment method',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
-              const SizedBox(height: 8),
-              Row(children: [
-                Expanded(
-                  child: _PaymentMethodChip(
-                    label: 'Razorpay',
-                    icon: Icons.credit_card_rounded,
-                    selected: method == 'RAZORPAY',
-                    onTap: () => setSheet(() => method = 'RAZORPAY'),
+                const _SheetFieldLabel('Payment method'),
+                Row(children: [
+                  Expanded(
+                    child: _PaymentMethodChip(
+                      label: 'Razorpay',
+                      icon: Icons.credit_card_rounded,
+                      selected: method == 'RAZORPAY',
+                      onTap: () => setSheet(() => method = 'RAZORPAY'),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _PaymentMethodChip(
-                    label: 'UPI QR',
-                    icon: Icons.qr_code_rounded,
-                    selected: method == 'QR',
-                    onTap: () => setSheet(() => method = 'QR'),
+                  const SizedBox(width: TechSpace.sm),
+                  Expanded(
+                    child: _PaymentMethodChip(
+                      label: 'UPI QR',
+                      icon: Icons.qr_code_rounded,
+                      selected: method == 'QR',
+                      onTap: () => setSheet(() => method = 'QR'),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _PaymentMethodChip(
-                    label: 'Cash',
-                    icon: Icons.payments_outlined,
-                    selected: method == 'CASH',
-                    onTap: () => setSheet(() => method = 'CASH'),
+                  const SizedBox(width: TechSpace.sm),
+                  Expanded(
+                    child: _PaymentMethodChip(
+                      label: 'Cash',
+                      icon: Icons.payments_outlined,
+                      selected: method == 'CASH',
+                      onTap: () => setSheet(() => method = 'CASH'),
+                    ),
                   ),
-                ),
-              ]),
-              const SizedBox(height: 22),
+                ]),
+                const SizedBox(height: TechSpace.xxl),
 
-              SizedBox(
-                width: double.infinity,
-                height: 48,
-                child: ElevatedButton(
+                TechButton(
+                  icon: method == 'CASH' ? Icons.check_rounded
+                      : method == 'QR' ? Icons.qr_code_2_rounded
+                      : Icons.arrow_forward_rounded,
+                  label: method == 'CASH' ? 'Confirm Cash Received'
+                      : method == 'QR' ? 'Generate QR Code'
+                      : 'Continue to Razorpay',
                   onPressed: () {
                     final amt = enteredAmount();
                     if (amt <= 0) { setSheet(() => errorText = 'Enter an amount greater than 0'); return; }
@@ -2916,21 +2761,9 @@ void _resumeJourney() {
                       'partialReason': isPartial() ? reason : null,
                     });
                   },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                  child: Text(
-                    method == 'CASH' ? 'Confirm Cash Received'
-                        : method == 'QR' ? 'Generate QR Code'
-                        : 'Continue to Razorpay',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -2953,68 +2786,60 @@ void _resumeJourney() {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          padding: EdgeInsets.fromLTRB(
-            20, 20, 20,
-            MediaQuery.of(ctx).viewInsets.bottom + MediaQuery.of(ctx).padding.bottom + 20,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text("Can't make it?",
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-              const SizedBox(height: 4),
-              const Text(
-                'This job will be released and re-dispatched to another technician. The patient keeps their booking.',
-                style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
-              ),
-              const SizedBox(height: 16),
-              ..._cancelReasons.entries.map((e) => RadioListTile<String>(
-                    value: e.key,
-                    groupValue: reason,
-                    onChanged: (v) => setSheet(() { reason = v; errorText = null; }),
-                    title: Text(e.value, style: const TextStyle(fontSize: 13)),
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    activeColor: AppColors.brandGreen,
-                  )),
-              if (errorText != null) ...[
-                const SizedBox(height: 4),
-                Text(errorText!, style: const TextStyle(fontSize: 12, color: Colors.red)),
-              ],
-              const SizedBox(height: 8),
-              TextField(
-                controller: noteCtrl,
-                maxLines: 2,
-                decoration: InputDecoration(
-                  hintText: 'Add a note (optional)',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+        // TechSheetFrame keeps the sheet above the keyboard and safe area.
+        builder: (ctx, setSheet) => TechThemeScope(
+          child: TechSheetFrame(
+            title: "Can't make it?",
+            subtitle: 'This job will be released and re-dispatched to another technician. The patient keeps their booking.',
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // One choice, same values as before (single-select).
+                ..._cancelReasons.entries.map((e) => Padding(
+                      padding: const EdgeInsets.only(bottom: TechSpace.sm),
+                      child: TechOptionCard(
+                        icon: switch (e.key) {
+                          'vehicle_issue'       => Icons.two_wheeler_rounded,
+                          'personal_emergency'  => Icons.medical_services_outlined,
+                          'unreachable_patient' => Icons.phone_disabled_outlined,
+                          _                     => Icons.more_horiz_rounded,
+                        },
+                        title: e.value,
+                        selected: reason == e.key,
+                        onTap: () => setSheet(() { reason = e.key; errorText = null; }),
+                        trailing: Icon(
+                          reason == e.key
+                              ? Icons.radio_button_checked_rounded
+                              : Icons.radio_button_unchecked_rounded,
+                          color: reason == e.key ? TechColors.brand : TechColors.textHint,
+                        ),
+                      ),
+                    )),
+                if (errorText != null) ...[
+                  const SizedBox(height: TechSpace.xs),
+                  TechBanner(message: errorText!, tone: TechTone.error),
+                ],
+                const SizedBox(height: TechSpace.md),
+                TextField(
+                  controller: noteCtrl,
+                  maxLines: 2,
+                  textCapitalization: TextCapitalization.sentences,
+                  decoration: const InputDecoration(
+                    hintText: 'Add a note (optional)',
+                  ),
                 ),
-              ),
-              const SizedBox(height: 18),
-              SizedBox(
-                width: double.infinity,
-                height: 48,
-                child: ElevatedButton(
+                const SizedBox(height: TechSpace.xl),
+                TechButton.destructive(
+                  icon: Icons.logout_rounded,
+                  label: 'Confirm — Release Job',
                   onPressed: () {
                     if (reason == null) { setSheet(() => errorText = 'Select a reason'); return; }
                     Navigator.pop(ctx, {'reason': reason, 'note': noteCtrl.text.trim()});
                   },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red.shade600,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                  child: const Text('Confirm — Release Job', style: TextStyle(fontWeight: FontWeight.w600)),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -3028,7 +2853,13 @@ void _resumeJourney() {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
+      builder: (_) => const Center(
+        child: Material(
+          color: Colors.white,
+          borderRadius: TechRadius.lgAll,
+          child: SizedBox(width: 200, child: TechLoadingState(label: 'Releasing job…')),
+        ),
+      ),
     );
     final result = await ApiService.cancelAssignedBooking(
       bookingId: int.tryParse(widget.booking.id) ?? 0,
@@ -3039,10 +2870,7 @@ void _resumeJourney() {
     Navigator.of(context, rootNavigator: true).pop(); // close loading dialog
 
     if (result['success'] == true) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Job released — it has been re-dispatched.'),
-        backgroundColor: AppColors.brandGreen,
-      ));
+      AppMessages.success(context, 'Job released — it has been re-dispatched.');
       Navigator.pop(context, true);
     } else {
       AppMessages.error(context, AppMessages.serverMessage(result['message'],
@@ -3162,20 +2990,11 @@ void _resumeJourney() {
       }
     });
     if (ok) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('₹${_inr(amount)} cash received'),
-        backgroundColor: AppColors.brandGreen,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.success(context, '₹${_inr(amount)} cash received');
       onDone?.call();
       _refreshPaymentInfo();
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Failed to record cash payment — please retry'),
-        backgroundColor: Colors.red,
-        behavior: SnackBarBehavior.floating,
-      ));
+      AppMessages.error(context, 'Failed to record cash payment — please retry');
     }
   }
 
@@ -3219,11 +3038,7 @@ void _resumeJourney() {
       if (ok) {
         applyLocalUpdate('cash');
       } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to record cash payment — please retry'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-        ));
+        AppMessages.error(context, 'Failed to record cash payment — please retry');
       }
       if (mounted) _loadLinkedPatients();
       return;
@@ -3388,12 +3203,7 @@ void _resumeJourney() {
           }
         }
       });
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content:         Text('₹${_inr(enteredAmount)} received · $paymentRef'),
-        backgroundColor: AppColors.brandGreen,
-        behavior:        SnackBarBehavior.floating,
-        shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      ));
+      AppMessages.success(context, '₹${_inr(enteredAmount)} received · $paymentRef');
     }
 
     if (method == 'CASH') {
@@ -3558,20 +3368,18 @@ void _resumeJourney() {
 
     final mode = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('How would the family like to pay?',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-        contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+      builder: (ctx) => TechDialog(
+        title: 'How would the family like to pay?',
+        message: '₹${_inr(_unpaidTotal)} due for ${members.length} members',
         content: Column(mainAxisSize: MainAxisSize.min, children: [
-          _PayModeOption(
+          TechOptionCard(
             icon: Icons.payments_outlined,
             title: 'Single payment',
             subtitle: 'One payment of ₹${_inr(_unpaidTotal)} for all ${members.length} members',
             onTap: () => Navigator.pop(ctx, 'combined'),
           ),
-          const SizedBox(height: 10),
-          _PayModeOption(
+          const SizedBox(height: TechSpace.md),
+          TechOptionCard(
             icon: Icons.people_alt_outlined,
             title: 'Individual payments',
             subtitle: 'Each member pays their own amount, in any order',
@@ -3579,8 +3387,10 @@ void _resumeJourney() {
           ),
         ]),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary))),
+          TechButton.text(
+            label: 'Cancel', expand: true,
+            onPressed: () => Navigator.pop(ctx),
+          ),
         ],
       ),
     );
@@ -3598,49 +3408,35 @@ void _resumeJourney() {
   // "Collect" button — the technician picks whoever is paying now.
   void _showIndividualPaySheet({VoidCallback? onDone}) {
     final members = _unpaidMembers;
-    showModalBottomSheet(
+    showTechSheet<void>(
       context: context,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Center(child: Container(width: 40, height: 4,
-              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)))),
-          const SizedBox(height: 14),
-          const Text('Individual payments',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-          const SizedBox(height: 4),
-          const Text('Choose who is paying now. Partial amounts are allowed.',
-              style: TextStyle(fontSize: 12.5, color: AppColors.textSecondary)),
-          const SizedBox(height: 14),
+      title: 'Individual payments',
+      subtitle: 'Choose who is paying now. Partial amounts are allowed.',
+      builder: (ctx) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
           for (final m in members)
             Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    _collectForMember(m, onDone: onDone);
-                  },
-                  icon: const Icon(Icons.payment_outlined, size: 18),
-                  label: Text('Collect ₹${_inr(m.amount)} · ${m.name}',
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF1565C0),
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
+              padding: const EdgeInsets.only(bottom: TechSpace.md),
+              child: TechOptionCard(
+                icon: m.isParent ? Icons.person_rounded : Icons.person_outline_rounded,
+                title: m.name,
+                subtitle: m.isParent ? 'Main member' : 'Family member',
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _collectForMember(m, onDone: onDone);
+                },
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Text('₹${_inr(m.amount)}',
+                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700,
+                          color: TechColors.textPrimary)),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.chevron_right_rounded, color: TechColors.textHint),
+                ]),
               ),
             ),
-        ]),
+        ],
       ),
     );
   }
@@ -3657,13 +3453,18 @@ void _resumeJourney() {
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _exitScreen();
       },
+      // Technician look for this screen only (inputs, buttons, cards).
+      child: TechThemeScope(
       child: Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8),
+      backgroundColor: const Color(0xFFF3F5F4),
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
+        foregroundColor: Colors.white,
         elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20),
+          tooltip: 'Back',
           onPressed: _exitScreen,
         ),
         title: Column(
@@ -3671,10 +3472,10 @@ void _resumeJourney() {
           mainAxisSize: MainAxisSize.min,
           children: [
             const Text('Manage Booking',
-                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600)),
+                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
             if (widget.booking.referenceNo != null)
               Text(widget.booking.referenceNo!,
-                  style: TextStyle(color: Colors.white.withOpacity(0.75), fontSize: 11)),
+                  style: TextStyle(color: Colors.white.withValues(alpha: 0.8), fontSize: 12)),
           ],
         ),
         actions: [
@@ -3690,13 +3491,9 @@ void _resumeJourney() {
           ),
           IconButton(
             icon: const Icon(Icons.phone_outlined, color: Colors.white),
+            tooltip: 'Call customer',
             onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text('Calling ${widget.booking.customerPhone}…'),
-                backgroundColor: AppColors.brandGreen,
-                behavior: SnackBarBehavior.floating,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ));
+              AppMessages.info(context, 'Calling ${widget.booking.customerPhone}…');
             },
           ),
           // Only before travel starts — matches the server-side gate exactly
@@ -3709,9 +3506,17 @@ void _resumeJourney() {
             ),
         ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+      body: Center(
+        // Tablets: keep the cards a readable width.
+        child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720),
+        child: ListView(
+        padding: const EdgeInsets.fromLTRB(TechSpace.lg, TechSpace.lg, TechSpace.lg, 120),
         children: [
+
+          // ── Booking & customer header ─────────────────────
+          _bookingHeaderCard(currentStep),
+          const SizedBox(height: 14),
 
           // ── Journey Status Stepper ────────────────────────
           _SectionCard(
@@ -3732,18 +3537,22 @@ void _resumeJourney() {
                       Column(children: [
                         AnimatedContainer(
                           duration: const Duration(milliseconds: 300),
-                          width: 32, height: 32,
+                          width: 34, height: 34,
                           decoration: BoxDecoration(
                             color: isDone || isCurrent
                                 ? step.color
-                                : AppColors.background,
+                                : TechColors.surfaceMuted,
                             shape: BoxShape.circle,
                             border: Border.all(
                               color: isDone || isCurrent
                                   ? step.color
-                                  : AppColors.divider,
+                                  : TechColors.border,
                               width: 1.5,
                             ),
+                            // Current step gets a soft halo.
+                            boxShadow: isCurrent
+                                ? [BoxShadow(color: step.color.withValues(alpha: 0.25), blurRadius: 0, spreadRadius: 4)]
+                                : null,
                           ),
                           child: Icon(
                             isDone ? Icons.check_rounded : step.icon,
@@ -3772,18 +3581,21 @@ void _resumeJourney() {
                             children: [
                               Text(step.label,
                                   style: TextStyle(
-                                    fontSize: 13,
+                                    fontSize: isCurrent ? 14 : 13,
                                     fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w500,
                                     color: isCurrent
                                         ? step.color
                                         : isDone
-                                            ? AppColors.textSecondary
-                                            : AppColors.textHint,
+                                            ? TechColors.textPrimary
+                                            : TechColors.textHint,
                                   )),
                               if (isCurrent)
-                                Text(step.description,
-                                    style: TextStyle(
-                                        fontSize: 11, color: step.color.withOpacity(0.8))),
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Text(step.description,
+                                      style: TextStyle(
+                                          fontSize: 12, color: step.color.withValues(alpha: 0.85))),
+                                ),
                             ],
                           ),
                         ),
@@ -3791,20 +3603,28 @@ void _resumeJourney() {
           // Same action as the bottom bar button (see _currentAction).
           if (isCurrent && _currentAction != null) ...[
   const SizedBox(width: 8),
-  GestureDetector(
-    onTap: _currentAction!.onTap,
-    child: Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: _currentStatus == 'Journey Started' ? const Color(0xFF1565C0) : step.color,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        '${_currentAction!.label} ▸',
-        style: const TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
-          color: Colors.white
+  Material(
+    color: _currentStatus == 'Journey Started' ? const Color(0xFF1565C0) : step.color,
+    shape: const StadiumBorder(),
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      onTap: _currentAction!.onTap,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 36),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(
+              _currentAction!.label,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(width: 2),
+            const Icon(Icons.chevron_right_rounded, size: 18, color: Colors.white),
+          ]),
         ),
       ),
     ),
@@ -3821,42 +3641,20 @@ void _resumeJourney() {
           const SizedBox(height: 14),
 
           // ── Customer Info ─────────────────────────────────
+          // Name, phone, mode, date, slot and VIP are in the header card at
+          // the top; the remaining details stay here.
           _SectionCard(
             title: 'Customer Details',
             icon: Icons.person_outline,
             child: Column(children: [
               _InfoRow(Icons.person_outline, 'Name', widget.booking.customerName),
               _InfoRow(Icons.phone_outlined, 'Phone', '+91 ${widget.booking.customerPhone}'),
-              _InfoRow(
-                widget.booking.mode == 'Home Collection'
-                    ? Icons.home_outlined : Icons.local_hospital_outlined,
-                'Mode', widget.booking.mode,
-              ),
               _InfoRow(Icons.location_on_outlined, 'Address',
                   [widget.booking.address, widget.booking.city, widget.booking.pincode]
                       .where((s) => s.isNotEmpty)
                       .join(', ')),
-              _InfoRow(Icons.event_outlined, 'Date', _formatDate(widget.booking.date)),
-              _InfoRow(Icons.schedule_outlined, 'Slot', widget.booking.timeSlot),
               if (widget.booking.collectionNotes != null && widget.booking.collectionNotes!.isNotEmpty)
                 _InfoRow(Icons.notes_outlined, 'Notes', widget.booking.collectionNotes!),
-              if (widget.booking.isVip)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFFB300).withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.star_rounded, size: 12, color: Color(0xFFFFB300)),
-                      SizedBox(width: 5),
-                      Text('VIP Customer',
-                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
-                    ]),
-                  ),
-                ),
             ]),
           ),
 
@@ -3867,135 +3665,122 @@ void _resumeJourney() {
             title: 'Tests & Packages',
             icon: Icons.science_outlined,
             child: _itemsLoading
-                ? const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
-                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
-                  )
+                ? const TechLoadingState(label: 'Loading tests…')
                 : Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                ..._selectedTests.map((t) => Container(
-                  margin: const EdgeInsets.only(bottom: 8),
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                if (_selectedTests.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: TechSpace.md),
+                    child: Text('No tests on this booking yet.',
+                        textAlign: TextAlign.center, style: TechText.bodySecondary),
+                  ),
+                ..._selectedTests.map((t) {
+                  final collected = t['collected'] == 'completed';
+                  return Container(
+                  margin: const EdgeInsets.only(bottom: TechSpace.sm),
+                  padding: const EdgeInsets.fromLTRB(TechSpace.md, 10, 4, 10),
                   decoration: BoxDecoration(
-                    color: AppColors.background,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: AppColors.divider),
+                    color: Colors.white,
+                    borderRadius: TechRadius.mdAll,
+                    border: Border.all(
+                      color: _showCollectionChecklist && collected
+                          ? TechColors.brand.withValues(alpha: 0.5)
+                          : TechColors.border,
+                    ),
                   ),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
-                      Container(
-                        width: 8, height: 8,
-                        decoration: BoxDecoration(
-                          color: t['category'] == 'Package'
-                              ? AppColors.brandGreen : const Color(0xFF1565C0),
-                          shape: BoxShape.circle,
-                        ),
+                      TechIconBadge(
+                        icon: t['category'] == 'Package'
+                            ? Icons.inventory_2_outlined : Icons.science_outlined,
+                        tone: t['category'] == 'Package' ? TechTone.brand : TechTone.info,
+                        size: 36,
                       ),
-                      const SizedBox(width: 10),
+                      const SizedBox(width: TechSpace.md),
                       Expanded(
                         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           Text(t['name'] ?? '',
-                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                          Text(t['category'] ?? '',
-                              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                  color: TechColors.textPrimary)),
+                          if ((t['category'] ?? '').isNotEmpty)
+                            Text(t['category'] ?? '', style: TechText.caption),
                         ]),
                       ),
+                      const SizedBox(width: TechSpace.sm),
                       Text('₹${t['price'] ?? '0'}',
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                              color: TechColors.textPrimary)),
                       // Hide the remove control entirely once the visit is finalized (OTP Verified or Handed to Lab).
-                      if (!_isFinalized) ...[
-                        const SizedBox(width: 8),
-                        GestureDetector(
-                          onTap: () { _removeTest(t['id'] ?? ''); },
-                          child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
-                        ),
-                      ],
+                      if (!_isFinalized)
+                        IconButton(
+                          onPressed: () { _removeTest(t['id'] ?? ''); },
+                          tooltip: 'Remove test',
+                          icon: const Icon(Icons.close_rounded, size: 20, color: TechColors.textHint),
+                        )
+                      else
+                        const SizedBox(width: TechSpace.sm),
                     ]),
                     // Collection checklist — visible from "Collection Started"
                     // onward. Purely a per-item tracking toggle: does not gate
                     // or affect the "Sample Collected" step in any way.
                     if (_showCollectionChecklist) ...[
-                      const SizedBox(height: 8),
-                      GestureDetector(
+                      const SizedBox(height: TechSpace.xs),
+                      InkWell(
+                        borderRadius: TechRadius.smAll,
                         onTap: () => _toggleItemCollected(t['id'] ?? '', t['collected'] != 'completed'),
-                        child: Row(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(
-                            t['collected'] == 'completed'
-                                ? Icons.check_circle_rounded
-                                : Icons.radio_button_unchecked_rounded,
-                            size: 16,
-                            color: t['collected'] == 'completed' ? AppColors.brandGreen : AppColors.textHint,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            t['collected'] == 'completed' ? 'Collected' : 'Pending',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: t['collected'] == 'completed' ? AppColors.brandGreen : AppColors.textHint,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(
+                              collected
+                                  ? Icons.check_circle_rounded
+                                  : Icons.radio_button_unchecked_rounded,
+                              size: 22,
+                              color: collected ? TechColors.brand : TechColors.textHint,
                             ),
-                          ),
-                        ]),
+                            const SizedBox(width: TechSpace.sm),
+                            Text(
+                              collected ? 'Collected' : 'Pending',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: collected ? TechColors.brand : TechColors.textSecondary,
+                              ),
+                            ),
+                          ]),
+                        ),
                       ),
                     ],
                   ]),
-                )),
+                );
+                }),
 
                 // Always visible; shows a lock icon and disabled style once the visit is finalized.
                 if (!_isCompleted && !_showAddTest)
-                  GestureDetector(
-                    onTap: _isFinalized ? null : () => setState(() => _showAddTest = true),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      decoration: BoxDecoration(
-                        color: _isFinalized ? AppColors.background : AppColors.brandGreenSurface,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: _isFinalized ? AppColors.divider : AppColors.brandGreenLight,
-                        ),
-                      ),
-                      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                        Icon(
-                          _isFinalized ? Icons.lock_outline_rounded : Icons.add_circle_outline,
-                          size: 15,
-                          color: _isFinalized ? AppColors.textHint : AppColors.brandGreen,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          _isFinalized ? 'Tests Locked' : 'Add Test / Package',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                            color: _isFinalized ? AppColors.textHint : AppColors.brandGreen,
-                          ),
-                        ),
-                      ]),
-                    ),
+                  TechButton.secondary(
+                    onPressed: _isFinalized ? null : () => setState(() => _showAddTest = true),
+                    icon: _isFinalized ? Icons.lock_outline_rounded : Icons.add_rounded,
+                    label: _isFinalized ? 'Tests Locked' : 'Add Test / Package',
+                    compact: true,
                   ),
 
                 if (_showAddTest) ...[
-                  const SizedBox(height: 8),
+                  const SizedBox(height: TechSpace.sm),
                   TextField(
                     autofocus: true,
                     onChanged: (v) => setState(() => _searchQuery = v),
-                    style: const TextStyle(fontSize: 14),
                     decoration: InputDecoration(
                       hintText: 'Search test…',
-                      hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
-                      prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
-                      suffixIcon: GestureDetector(
-                        onTap: _addingTests ? null : _closeAddTest,
-                        child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+                      prefixIcon: const Icon(Icons.search_rounded, size: 20, color: TechColors.textHint),
+                      suffixIcon: IconButton(
+                        onPressed: _addingTests ? null : _closeAddTest,
+                        tooltip: 'Close search',
+                        icon: const Icon(Icons.close_rounded, size: 20, color: TechColors.textHint),
                       ),
-                      filled: true, fillColor: AppColors.background,
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                      contentPadding: const EdgeInsets.symmetric(vertical: 10),
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: TechSpace.sm),
                   // Multi-select: tick any number of tests/packages, then
                   // "Add N selected" adds them all. Ticks survive changing
                   // the search text.
@@ -4008,19 +3793,17 @@ void _resumeJourney() {
                       Container(
                         // Fixed height (not shrinkWrap) so a large catalogue
                         // only builds the rows on screen.
-                        height: results.isEmpty ? null : (results.length * 58.0).clamp(58.0, 300.0),
+                        height: results.isEmpty ? null : (results.length * 64.0).clamp(64.0, 320.0),
                         decoration: BoxDecoration(
                           color: Colors.white,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: AppColors.divider),
+                          borderRadius: TechRadius.mdAll,
+                          border: Border.all(color: TechColors.border),
                         ),
+                        clipBehavior: Clip.antiAlias,
                         child: results.isEmpty
-                            ? const Padding(
-                                padding: EdgeInsets.symmetric(vertical: 18),
-                                child: Center(
-                                  child: Text('No tests found',
-                                      style: TextStyle(fontSize: 13, color: AppColors.textHint)),
-                                ),
+                            ? const TechEmptyState(
+                                icon: Icons.search_off_rounded,
+                                title: 'No tests found',
                               )
                             : ListView.separated(
                                 padding: EdgeInsets.zero,
@@ -4040,59 +3823,42 @@ void _resumeJourney() {
                                                 _pendingTestIds.remove(id);
                                               }
                                             }),
-                                    activeColor: AppColors.brandGreen,
-                                    dense: true,
+                                    activeColor: TechColors.brand,
+                                    tileColor: _pendingTestIds.contains(id) ? TechColors.brandSurface : null,
                                     controlAffinity: ListTileControlAffinity.leading,
-                                    contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 8),
                                     title: Text(t['name'] ?? '',
-                                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                            color: TechColors.textPrimary)),
                                     subtitle: (t['category'] ?? '').isEmpty
                                         ? null
-                                        : Text(t['category']!,
-                                            style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                                        : Text(t['category']!, style: TechText.caption),
                                     secondary: Text('₹${t['price']}',
                                         style: const TextStyle(
-                                            fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+                                            fontSize: 13, fontWeight: FontWeight.w700, color: TechColors.textPrimary)),
                                   );
                                 },
                               ),
                       ),
-                      const SizedBox(height: 10),
+                      const SizedBox(height: TechSpace.md),
                       Row(children: [
                         Expanded(
-                          child: OutlinedButton(
+                          child: TechButton.secondary(
                             onPressed: _addingTests ? null : _closeAddTest,
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: AppColors.textSecondary,
-                              side: const BorderSide(color: AppColors.divider),
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                            ),
-                            child: const Text('Cancel'),
+                            label: 'Cancel',
+                            compact: true,
                           ),
                         ),
-                        const SizedBox(width: 10),
+                        const SizedBox(width: TechSpace.md),
                         Expanded(
                           flex: 2,
-                          child: ElevatedButton(
+                          child: TechButton(
                             onPressed: (_pendingTestIds.isEmpty || _addingTests) ? null : _addSelectedTests,
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: AppColors.brandGreen,
-                              foregroundColor: Colors.white,
-                              elevation: 0,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                            ),
-                            child: _addingTests
-                                ? const SizedBox(
-                                    width: 18, height: 18,
-                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                                : Text(
-                                    _pendingTestIds.isEmpty
-                                        ? 'Select tests to add'
-                                        : 'Add ${_pendingTestIds.length} selected · ₹${_inr(selectedTotal)}',
-                                    style: const TextStyle(fontWeight: FontWeight.w600),
-                                  ),
+                            loading: _addingTests,
+                            compact: true,
+                            label: _pendingTestIds.isEmpty
+                                ? 'Select tests to add'
+                                : 'Add ${_pendingTestIds.length} · ₹${_inr(selectedTotal)}',
                           ),
                         ),
                       ]),
@@ -4117,10 +3883,7 @@ void _resumeJourney() {
             title: 'Sample Collection Photo',
             icon: Icons.camera_alt_outlined,
             child: _collectionProofLoading
-                ? const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 20),
-                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
-                  )
+                ? const TechLoadingState(label: 'Loading photos…')
                 // One block per patient in this visit (primary + any family
                 // members) — each keyed to their own booking_id via
                 // _proofUrlByBookingId, so one patient's photo never
@@ -4141,34 +3904,24 @@ void _resumeJourney() {
                         final canCapture    = patientBookingId != null;
                         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           Row(children: [
-                            Text(pname,
-                                style: const TextStyle(
-                                    fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-                            const SizedBox(width: 6),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: proofUrl != null
-                                    ? AppColors.brandGreenSurface
-                                    : const Color(0xFFFFF3E0),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                proofUrl != null ? 'ADDED' : 'NOT ADDED',
-                                style: TextStyle(
-                                  fontSize: 9,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 0.5,
-                                  color: proofUrl != null
-                                      ? AppColors.brandGreen
-                                      : const Color(0xFFE65100),
-                                ),
-                              ),
+                            Flexible(
+                              child: Text(pname, style: TechText.cardTitle, overflow: TextOverflow.ellipsis),
                             ),
+                            const SizedBox(width: TechSpace.sm),
+                            proofUrl != null
+                                ? const TechStatusChip(label: 'ADDED', icon: Icons.check_rounded, tone: TechTone.success)
+                                : const TechStatusChip(label: 'NOT ADDED', tone: TechTone.warning),
                           ]),
-                          const SizedBox(height: 10),
+                          const SizedBox(height: TechSpace.sm),
                           if (proofUrl == null)
-                            GestureDetector(
+                            Material(
+                              color: TechColors.surfaceMuted,
+                              shape: const RoundedRectangleBorder(
+                                borderRadius: TechRadius.mdAll,
+                                side: BorderSide(color: TechColors.border, width: 1.2),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child: InkWell(
                               // While busy, a tap cancels (camera or upload
                               // step) — see _cancelProofCapture.
                               onTap: !canCapture
@@ -4182,19 +3935,14 @@ void _resumeJourney() {
                               child: Container(
                                 width: double.infinity,
                                 padding: const EdgeInsets.symmetric(vertical: 22),
-                                decoration: BoxDecoration(
-                                  color: AppColors.background,
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(color: AppColors.divider, width: 1.5),
-                                ),
                                 child: Column(mainAxisSize: MainAxisSize.min, children: [
                                   isCapturing
                                       ? const SizedBox(
-                                          width: 22, height: 22,
-                                          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+                                          width: 24, height: 24,
+                                          child: CircularProgressIndicator(strokeWidth: 2.2, color: TechColors.brand),
                                         )
-                                      : const Icon(Icons.camera_alt_outlined, size: 22, color: AppColors.textHint),
-                                  const SizedBox(height: 6),
+                                      : const Icon(Icons.camera_alt_outlined, size: 28, color: TechColors.brand),
+                                  const SizedBox(height: 8),
                                   Text(
                                     !isCapturing
                                         ? 'Take Collection Photo'
@@ -4203,14 +3951,15 @@ void _resumeJourney() {
                                             _ProofStep.uploading => 'Uploading photo…',
                                             _ProofStep.saving    => 'Saving photo…',
                                           },
-                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textSecondary),
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                        color: TechColors.textPrimary),
                                   ),
                                   if (isCapturing && _proofStep != _ProofStep.saving) ...[
                                     const SizedBox(height: 2),
-                                    const Text('Tap to cancel',
-                                        style: TextStyle(fontSize: 10.5, color: AppColors.textHint)),
+                                    const Text('Tap to cancel', style: TechText.caption),
                                   ],
                                 ]),
+                              ),
                               ),
                             )
                           else
@@ -4227,11 +3976,11 @@ void _resumeJourney() {
                                     width: 88,
                                     height: 88,
                                     decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(10),
-                                      border: Border.all(color: AppColors.divider),
+                                      borderRadius: TechRadius.mdAll,
+                                      border: Border.all(color: TechColors.border),
                                     ),
                                     child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(10),
+                                      borderRadius: TechRadius.mdAll,
                                       child: _removingProofBookingId == patientBookingId
                                           ? const Center(child: SizedBox(width: 22, height: 22,
                                               child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
@@ -4257,9 +4006,13 @@ void _resumeJourney() {
                                         onTap: () => _confirmRemoveCollectionProof(
                                             bookingId: patientBookingId, patientName: pname),
                                         child: Container(
-                                          width: 24, height: 24,
-                                          decoration: const BoxDecoration(color: Color(0xFFD32F2F), shape: BoxShape.circle),
-                                          child: const Icon(Icons.close_rounded, size: 15, color: Colors.white),
+                                          width: 26, height: 26,
+                                          decoration: BoxDecoration(
+                                            color: TechColors.error,
+                                            shape: BoxShape.circle,
+                                            border: Border.all(color: Colors.white, width: 2),
+                                          ),
+                                          child: const Icon(Icons.close_rounded, size: 14, color: Colors.white),
                                         ),
                                       ),
                                     ),
@@ -4268,9 +4021,8 @@ void _resumeJourney() {
                               const SizedBox(width: 12),
                               Expanded(
                                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                  const Text('Proof photo captured',
-                                      style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                                  const SizedBox(height: 8),
+                                  const Text('Proof photo captured', style: TechText.bodySecondary),
+                                  const SizedBox(height: TechSpace.sm),
                                   TextButton.icon(
                                     onPressed: (!canCapture || isCapturing) ? null : () =>
                                         _captureAndUploadCollectionProof(bookingId: patientBookingId),
@@ -4282,10 +4034,10 @@ void _resumeJourney() {
                                         : const Icon(Icons.refresh_rounded, size: 16),
                                     label: Text(isCapturing ? 'Retaking…' : 'Retake Photo'),
                                     style: TextButton.styleFrom(
-                                      foregroundColor: AppColors.brandGreen,
-                                      padding: EdgeInsets.zero,
-                                      minimumSize: const Size(0, 0),
-                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                      foregroundColor: TechColors.brand,
+                                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                                      minimumSize: const Size(48, 40),
+                                      textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                                     ),
                                   ),
                                 ]),
@@ -4308,50 +4060,15 @@ void _resumeJourney() {
             icon: Icons.description_outlined,
             badge: _anyDocRequired ? 'REQUIRED' : null,
             child: _docsLoading
-                ? const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
-                    child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
-                  )
+                ? const TechLoadingState(label: 'Loading documents…')
                 : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: _anyDocRequired
-                      ? const Color(0xFFFFF3E0)
-                      : AppColors.brandGreenSurface,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: _anyDocRequired
-                        ? const Color(0xFFFFCC02).withOpacity(0.4)
-                        : AppColors.brandGreenLight,
-                  ),
-                ),
-                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Icon(
-                    _anyDocRequired
-                        ? Icons.warning_amber_rounded
-                        : Icons.info_outline_rounded,
-                    size: 13,
-                    color: _anyDocRequired
-                        ? const Color(0xFFE65100)
-                        : AppColors.brandGreen,
-                  ),
-                  const SizedBox(width: 7),
-                  Expanded(child: Text(
-                    _anyDocRequired
-                        ? 'A doctor\'s prescription is required — mandatory for every patient whose test needs one. Upload and verify each before collecting samples.'
-                        : 'Upload prescription if provided by the customer.',
-                    style: TextStyle(
-                      fontSize: 12,
-                      height: 1.4,
-                      color: _anyDocRequired
-                          ? const Color(0xFF795548)
-                          : AppColors.brandGreen,
-                    ),
-                  )),
-                ]),
+              TechBanner(
+                tone: _anyDocRequired ? TechTone.warning : TechTone.info,
+                message: _anyDocRequired
+                    ? 'A doctor\'s prescription is required — mandatory for every patient whose test needs one. Upload and verify each before collecting samples.'
+                    : 'Upload prescription if provided by the customer.',
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: TechSpace.lg),
 
               // One section per patient in this visit (primary + any family
               // members). Each prescription is fetched already tagged with
@@ -4376,26 +4093,25 @@ void _resumeJourney() {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(children: [
-                        Text(pname,
-                            style: const TextStyle(
-                                fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                        Flexible(
+                          child: Text(pname, style: TechText.cardTitle, overflow: TextOverflow.ellipsis),
+                        ),
                         if (needsDoc && patientDocs.isEmpty) ...[
-                          const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFFF3E0),
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: const Text('REQUIRED',
-                                style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
-                          ),
+                          const SizedBox(width: TechSpace.sm),
+                          const TechStatusChip(label: 'REQUIRED', tone: TechTone.warning),
                         ],
                       ]),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: TechSpace.sm),
                       if (patientDocs.isEmpty)
                         canUpload
-                            ? GestureDetector(
+                            ? Material(
+                                color: TechColors.brandSurface,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: TechRadius.mdAll,
+                                  side: BorderSide(color: TechColors.brand.withValues(alpha: 0.35), width: 1.2),
+                                ),
+                                clipBehavior: Clip.antiAlias,
+                                child: InkWell(
                                 onTap: _docIsPicking
                                     ? null
                                     : () => _showDocSourcePicker(
@@ -4403,11 +4119,6 @@ void _resumeJourney() {
                                 child: Container(
                                   width: double.infinity,
                                   padding: const EdgeInsets.symmetric(vertical: 22),
-                                  decoration: BoxDecoration(
-                                    color: AppColors.background,
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(color: AppColors.divider, width: 1.5),
-                                  ),
                                   child: Column(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
@@ -4422,23 +4133,24 @@ void _resumeJourney() {
                                       Text(
                                         _docIsPicking ? 'Picking…' : 'Tap to upload prescription',
                                         style: const TextStyle(
-                                            fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen),
+                                            fontSize: 13, fontWeight: FontWeight.w600, color: TechColors.brand),
                                       ),
                                       const SizedBox(height: 3),
                                       Text(
                                         'Up to $_docMaxFiles images · JPG or PNG',
-                                        style: const TextStyle(fontSize: 11, color: AppColors.textHint),
+                                        style: TechText.caption,
                                       ),
                                     ],
                                   ),
+                                ),
                                 ),
                               )
                             : Container(
                                 width: double.infinity,
                                 padding: const EdgeInsets.symmetric(vertical: 16),
                                 decoration: BoxDecoration(
-                                  color: AppColors.background,
-                                  borderRadius: BorderRadius.circular(10),
+                                  color: TechColors.surfaceMuted,
+                                  borderRadius: TechRadius.mdAll,
                                   border: Border.all(color: AppColors.divider),
                                 ),
                                 child: const Center(
@@ -4479,32 +4191,16 @@ void _resumeJourney() {
               }),
 
               if (_docUploads.isNotEmpty && !_docVerified) ...[
-                const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: _markDocsVerified,
-                    icon: const Icon(Icons.verified_outlined, size: 16),
-                    label: const Text('Mark as Verified',
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.brandGreen,
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    ),
-                  ),
+                const SizedBox(height: TechSpace.sm),
+                TechButton(
+                  onPressed: _markDocsVerified,
+                  icon: Icons.verified_outlined,
+                  label: 'Mark as Verified',
                 ),
               ],
               if (_docVerified) ...[
-                const SizedBox(height: 8),
-                const Row(children: [
-                  Icon(Icons.check_circle_rounded, size: 14, color: AppColors.brandGreen),
-                  SizedBox(width: 6),
-                  Text('All documents verified',
-                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.brandGreen)),
-                ]),
+                const SizedBox(height: TechSpace.xs),
+                const TechBanner(tone: TechTone.success, message: 'All documents verified'),
               ],
             ]),
           ),
@@ -4523,29 +4219,17 @@ void _resumeJourney() {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                 // Info banner
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: AppColors.brandGreenSurface,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: AppColors.brandGreenLight),
-                  ),
-                  child: Row(children: [
-                    const Icon(Icons.info_outline_rounded, size: 14, color: AppColors.brandGreen),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(
-                      _paymentDone
-                          ? (_livePaymentStatus == 'paid'
-                              ? 'Service charge ₹${_inr(_serviceCharge)} paid at booking. All tests also paid.'
-                              : 'All dues collected — service charge ₹${_inr(_serviceCharge)} + tests.')
-                          : _livePaymentStatus == 'paid'
-                              ? 'Original booking (₹${_inr(_liveAmountPaid)}) paid. Collect ${_additionalCharge > 0 ? 'balance due' : 'additional tests'}: ₹${_inr(_amountDue)}'
-                              : 'Service charge ₹${_inr(_serviceCharge)} not yet paid. Collect total due: ₹${_inr(_amountDue)}',
-                      style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
-                    )),
-                  ]),
+                TechBanner(
+                  tone: _paymentDone ? TechTone.success : TechTone.info,
+                  message: _paymentDone
+                      ? (_livePaymentStatus == 'paid'
+                          ? 'Service charge ₹${_inr(_serviceCharge)} paid at booking. All tests also paid.'
+                          : 'All dues collected — service charge ₹${_inr(_serviceCharge)} + tests.')
+                      : _livePaymentStatus == 'paid'
+                          ? 'Original booking (₹${_inr(_liveAmountPaid)}) paid. Collect ${_additionalCharge > 0 ? 'balance due' : 'additional tests'}: ₹${_inr(_amountDue)}'
+                          : 'Service charge ₹${_inr(_serviceCharge)} not yet paid. Collect total due: ₹${_inr(_amountDue)}',
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: TechSpace.md),
 
                 // Charges added on site — charge packages, plus any charge typed
                 // in with an older app version — already inside each booking's
@@ -4585,7 +4269,10 @@ void _resumeJourney() {
                               : const Icon(Icons.add_rounded, size: 18),
                           label: const Text('Add charge package',
                               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                          style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
+                          style: TextButton.styleFrom(
+                            foregroundColor: TechColors.brand,
+                            minimumSize: const Size(48, TechSize.minTouch),
+                          ),
                         ),
                       ),
                     const SizedBox(height: 8),
@@ -4613,34 +4300,21 @@ void _resumeJourney() {
                           icon: const Icon(Icons.payments_outlined, size: 16),
                           label: Text('Pay together instead · ₹${_inr(totalAmount)}',
                               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                          style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
+                          style: TextButton.styleFrom(
+                            foregroundColor: TechColors.brand,
+                            minimumSize: const Size(48, TechSize.minTouch),
+                          ),
                         ),
                       ),
                       const SizedBox(height: 4),
                     ];
                   }
                   return [
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _isProcessingPayment ? null : () => _startPayment(),
-                        icon: _isProcessingPayment
-                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                            : const Icon(Icons.payments_outlined, size: 18),
-                        label: Text(
-                          _isProcessingPayment
-                              ? 'Processing…'
-                              : 'Collect Payment · ₹${_inr(totalAmount)} · $totalUnpaid members',
-                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.brandGreen,
-                          foregroundColor: Colors.white,
-                          elevation:       0,
-                          padding:         const EdgeInsets.symmetric(vertical: 14),
-                          shape:           RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                      ),
+                    TechButton(
+                      onPressed: _isProcessingPayment ? null : () => _startPayment(),
+                      loading: _isProcessingPayment,
+                      icon: Icons.payments_outlined,
+                      label: 'Collect Payment · ₹${_inr(totalAmount)} · $totalUnpaid members',
                     ),
                   ];
                 }(),
@@ -4662,27 +4336,11 @@ void _resumeJourney() {
                   final widgets = <Widget>[];
 
                   if (parentUnpaid) {
-                    widgets.add(SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _isProcessingPayment ? null : () => _collectPayment(onDone: null),
-                        icon: _isProcessingPayment
-                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                            : const Icon(Icons.payment_outlined, size: 18),
-                        label: Text(
-                          _isProcessingPayment
-                              ? 'Processing…'
-                              : 'Collect ₹${_inr(_amountDue)} · ${widget.booking.customerName}',
-                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF1565C0),
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                      ),
+                    widgets.add(TechButton(
+                      onPressed: _isProcessingPayment ? null : () => _collectPayment(onDone: null),
+                      loading: _isProcessingPayment,
+                      icon: Icons.payment_outlined,
+                      label: 'Collect ₹${_inr(_amountDue)} · ${widget.booking.customerName}',
                     ));
                   }
 
@@ -4691,46 +4349,33 @@ void _resumeJourney() {
                     final due   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
                     final mName = c['patient_name'] as String? ?? 'Visit Member';
                     widgets.add(Padding(
-                      padding: EdgeInsets.only(top: widgets.isEmpty ? 0 : 8),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: () => _collectVisitMemberPayment(
-                            siblingBookingId: sibId,
-                            amountDue: due,
-                            patientName: mName,
-                          ),
-                          icon: const Icon(Icons.payment_outlined, size: 18),
-                          label: Text('Collect ₹${_inr(due)} · $mName',
-                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF1565C0),
-                            foregroundColor: Colors.white,
-                            elevation: 0,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
+                      padding: EdgeInsets.only(top: widgets.isEmpty ? 0 : TechSpace.sm),
+                      child: TechButton(
+                        onPressed: () => _collectVisitMemberPayment(
+                          siblingBookingId: sibId,
+                          amountDue: due,
+                          patientName: mName,
                         ),
+                        icon: Icons.payment_outlined,
+                        label: 'Collect ₹${_inr(due)} · $mName',
                       ),
                     ));
                   }
 
                   if (widgets.isEmpty && _paymentDone) {
-                    widgets.add(SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: null,
-                        icon: const Icon(Icons.check_circle_outline, size: 18),
-                        label: const Text('Booking Paid ✓',
-                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.brandGreen,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
+                    // Was a disabled button; same message as a status row.
+                    widgets.add(Container(
+                      height: TechSize.buttonHeight,
+                      decoration: const BoxDecoration(
+                        color: TechColors.brandSurface,
+                        borderRadius: TechRadius.mdAll,
                       ),
+                      child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                        Icon(Icons.check_circle_rounded, size: 20, color: TechColors.brand),
+                        SizedBox(width: 8),
+                        Text('Booking Paid ✓',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: TechColors.brand)),
+                      ]),
                     ));
                   }
 
@@ -4738,18 +4383,19 @@ void _resumeJourney() {
                 }(),
 
                 // Refresh row
-                const SizedBox(height: 4),
+                const SizedBox(height: TechSpace.xs),
                 Center(
                   child: TextButton.icon(
                     onPressed: () {
                       _refreshPaymentInfo();
                       _loadLinkedPatients();
                     },
-                    icon: const Icon(Icons.refresh_rounded, size: 15),
-                    label: const Text('Refresh payment status', style: TextStyle(fontSize: 12)),
+                    icon: const Icon(Icons.refresh_rounded, size: 18),
+                    label: const Text('Refresh payment status'),
                     style: TextButton.styleFrom(
-                      foregroundColor: AppColors.textSecondary,
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      foregroundColor: TechColors.textSecondary,
+                      minimumSize: const Size(48, TechSize.minTouch),
+                      textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                     ),
                   ),
                 ),
@@ -4767,9 +4413,9 @@ void _resumeJourney() {
               children: [
                 const Text(
                   'Add family members at this address who also need a blood test during this visit.',
-                  style: TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
+                  style: TechText.bodySecondary,
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: TechSpace.md),
 
                 if (_linkedPatients.isNotEmpty) ...[
                   ..._linkedPatients.map((c) {
@@ -4787,210 +4433,276 @@ void _resumeJourney() {
                     final paidSome     = totalAmount - amountDue > 0.009;
                     final canRemove    = !_isFinalized && memberBookingId != null && addedByTech
                         && !anyCollected && !paidSome;
+                    final pname = (c['patient_name'] ?? '').toString();
                     return Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      margin: const EdgeInsets.only(bottom: TechSpace.md),
+                      padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
                       decoration: BoxDecoration(
-                        color: AppColors.brandGreenSurface,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: AppColors.brandGreenLight),
+                        color: Colors.white,
+                        borderRadius: TechRadius.mdAll,
+                        border: Border.all(color: TechColors.border),
                       ),
                       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Row(children: [
-                          const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.brandGreen),
-                          const SizedBox(width: 8),
+                        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          CircleAvatar(
+                            radius: 18,
+                            backgroundColor: TechColors.brandSurface,
+                            child: Text(pname.isNotEmpty ? pname[0].toUpperCase() : '?',
+                                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
+                                    color: TechColors.brand)),
+                          ),
+                          const SizedBox(width: TechSpace.md),
                           Expanded(child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
                                 '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
-                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                    color: TechColors.textPrimary),
                               ),
                               if ((c['reference_no'] as String?) != null)
-                                Text(c['reference_no'] as String,
-                                    style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                                Text(c['reference_no'] as String, style: TechText.caption),
                               if ((c['doctor_name']?.toString().trim() ?? '').isNotEmpty)
                                 Padding(
                                   padding: const EdgeInsets.only(top: 2),
                                   child: Row(children: [
-                                    const Icon(Icons.local_hospital_outlined, size: 12, color: AppColors.textSecondary),
+                                    const Icon(Icons.local_hospital_outlined, size: 14, color: TechColors.textHint),
                                     const SizedBox(width: 4),
                                     Expanded(
                                       child: Text('Doctor: ${c['doctor_name'].toString().trim()}',
-                                          style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                                          style: TechText.caption),
                                     ),
                                   ]),
                                 ),
                             ],
                           )),
                           if (hasPayment)
-                            isPaid
-                              ? Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: AppColors.brandGreen.withValues(alpha: 0.12),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: const Text('Paid ✓',
-                                      style: TextStyle(fontSize: 11, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-                                )
-                              : Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFE3F2FD),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: Text('₹${_inr(amountDue)} due',
-                                      style: const TextStyle(fontSize: 11, color: Color(0xFF1565C0), fontWeight: FontWeight.w600)),
-                                ),
-                          if (canRemove) ...[
-                            const SizedBox(width: 6),
-                            InkWell(
-                              borderRadius: BorderRadius.circular(12),
-                              onTap: () => _confirmRemoveMember(c, memberBookingId),
-                              child: const Padding(
-                                padding: EdgeInsets.all(4),
-                                child: Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
-                              ),
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2, left: TechSpace.sm),
+                              child: isPaid
+                                  ? const TechStatusChip(label: 'Paid', icon: Icons.check_rounded, tone: TechTone.success)
+                                  : TechStatusChip(label: '₹${_inr(amountDue)} due', tone: TechTone.info),
                             ),
-                          ],
+                          if (canRemove)
+                            IconButton(
+                              onPressed: () => _confirmRemoveMember(c, memberBookingId),
+                              tooltip: 'Remove member',
+                              icon: const Icon(Icons.close_rounded, size: 20, color: TechColors.textSecondary),
+                            )
+                          else
+                            const SizedBox(width: TechSpace.sm),
                         ]),
                         // Family member's tests — always shown (edit + checklist).
                         if (memberBookingId != null && memberItems != null && memberItems.isNotEmpty) ...[
-                          const Divider(height: 16),
-                          ...memberItems.map((t) => Padding(
-                            padding: const EdgeInsets.only(bottom: 6),
-                            child: Row(children: [
+                          const Padding(
+                            padding: EdgeInsets.only(right: TechSpace.sm),
+                            child: Divider(height: 20),
+                          ),
+                          ...memberItems.map((t) => Row(children: [
                               if (_showCollectionChecklist)
-                                GestureDetector(
-                                  onTap: () => _toggleItemCollected(
+                                IconButton(
+                                  onPressed: () => _toggleItemCollected(
                                     t['id'] ?? '', t['collected'] != 'completed',
                                     targetBookingId: memberBookingId,
                                   ),
-                                  child: Icon(
+                                  tooltip: t['collected'] == 'completed' ? 'Mark pending' : 'Mark collected',
+                                  visualDensity: VisualDensity.compact,
+                                  icon: Icon(
                                     t['collected'] == 'completed'
                                         ? Icons.check_circle_rounded
                                         : Icons.radio_button_unchecked_rounded,
-                                    size: 15,
-                                    color: t['collected'] == 'completed' ? AppColors.brandGreen : AppColors.textHint,
+                                    size: 22,
+                                    color: t['collected'] == 'completed' ? TechColors.brand : TechColors.textHint,
                                   ),
                                 )
                               else
-                                const Icon(Icons.circle_outlined, size: 8, color: AppColors.brandGreen),
-                              const SizedBox(width: 6),
+                                const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                                  child: Icon(Icons.science_outlined, size: 16, color: TechColors.textHint),
+                                ),
+                              const SizedBox(width: 4),
                               Expanded(
-                                child: Text(t['name'] ?? '',
-                                    style: const TextStyle(fontSize: 12)),
+                                child: Text(t['name'] ?? '', style: TechText.body),
                               ),
                               Text('₹${t['price'] ?? '0'}',
-                                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                              if (!_isFinalized) ...[
-                                const SizedBox(width: 8),
-                                GestureDetector(
-                                  onTap: () => _removeFamilyTest(t['id'] ?? '', memberBookingId),
-                                  child: const Icon(Icons.close_rounded, size: 16, color: AppColors.textHint),
-                                ),
-                              ],
-                            ]),
-                          )),
+                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                      color: TechColors.textSecondary)),
+                              if (!_isFinalized)
+                                IconButton(
+                                  onPressed: () => _removeFamilyTest(t['id'] ?? '', memberBookingId),
+                                  tooltip: 'Remove test',
+                                  visualDensity: VisualDensity.compact,
+                                  icon: const Icon(Icons.close_rounded, size: 18, color: TechColors.textHint),
+                                )
+                              else
+                                const SizedBox(width: TechSpace.sm),
+                            ])),
                         ],
                         if (!_isFinalized && memberBookingId != null) ...[
-                          const SizedBox(height: 6),
-                          GestureDetector(
-                            onTap: () => _showAddFamilyTestSheet(memberBookingId),
-                            child: Container(
-                              width: double.infinity,
-                              padding: const EdgeInsets.symmetric(vertical: 8),
-                              decoration: BoxDecoration(
-                                color: AppColors.brandGreenSurface,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: AppColors.brandGreenLight),
-                              ),
-                              child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                                Icon(Icons.add_circle_outline, size: 14, color: AppColors.brandGreen),
-                                SizedBox(width: 6),
-                                Text('Add Test / Package',
-                                    style: TextStyle(fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w500)),
-                              ]),
+                          const SizedBox(height: TechSpace.sm),
+                          Padding(
+                            padding: const EdgeInsets.only(right: TechSpace.sm),
+                            child: TechButton.secondary(
+                              icon: Icons.add_rounded,
+                              label: 'Add Test / Package',
+                              compact: true,
+                              onPressed: () => _showAddFamilyTestSheet(memberBookingId),
                             ),
                           ),
                         ],
                         if (memberBookingId != null &&
                             (_familyPendingRefund[memberBookingId] ?? 0) > 0.5) ...[
-                          const SizedBox(height: 8),
-                          Row(children: [
-                            const Icon(Icons.info_outline_rounded, size: 13, color: Color(0xFFE65100)),
-                            const SizedBox(width: 4),
-                            Text(
-                              'Refund ₹${_inr((_familyPendingRefund[memberBookingId]!))} pending',
-                              style: const TextStyle(fontSize: 12, color: Color(0xFFE65100), fontWeight: FontWeight.w500),
+                          const SizedBox(height: TechSpace.sm),
+                          Padding(
+                            padding: const EdgeInsets.only(right: TechSpace.sm),
+                            child: TechBanner(
+                              tone: TechTone.warning,
+                              message: 'Refund ₹${_inr((_familyPendingRefund[memberBookingId]!))} pending',
                             ),
-                          ]),
+                          ),
                         ],
                       ]),
                     );
                   }),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: TechSpace.xs),
                 ],
 
                 // Disabled with lock icon once visit is finalized — no new family members after OTP.
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: _isFinalized ? null : _openAddVisitMemberSheet,
-                    icon: Icon(
-                      _isFinalized ? Icons.lock_outline_rounded : Icons.person_add_outlined,
-                      size: 16,
-                    ),
-                    label: Text(_isFinalized ? 'Visit Member Locked' : 'Add Visit Member'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: _isFinalized ? AppColors.textHint : AppColors.brandGreen,
-                      side: BorderSide(
-                        color: _isFinalized ? AppColors.divider : AppColors.brandGreen,
-                      ),
-                      padding: const EdgeInsets.symmetric(vertical: 11),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    ),
-                  ),
+                TechButton.secondary(
+                  onPressed: _isFinalized ? null : _openAddVisitMemberSheet,
+                  icon: _isFinalized ? Icons.lock_outline_rounded : Icons.person_add_outlined,
+                  label: _isFinalized ? 'Visit Member Locked' : 'Add Visit Member',
                 ),
               ],
             ),
           ),
         ],
       ),
+        ),
+      ),
 
       bottomNavigationBar: Container(
-              padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
+              padding: EdgeInsets.fromLTRB(TechSpace.lg, TechSpace.md, TechSpace.lg,
+                  MediaQuery.of(context).padding.bottom + TechSpace.md),
               decoration: const BoxDecoration(
                 color: Colors.white,
-                border: Border(top: BorderSide(color: AppColors.divider)),
+                border: Border(top: BorderSide(color: TechColors.border)),
+                boxShadow: [BoxShadow(color: Color(0x0F000000), blurRadius: 12, offset: Offset(0, -2))],
               ),
               // Main action of the screen: the same next step as the Journey
               // Status card's button (_currentAction), with the same checks
               // and dialogs. Everything on this screen already saves as it
               // happens, so there is no separate "save". After Handed to Lab
               // it reads "Done" and returns to the Dashboard.
-              child: SizedBox(
-                height: 50,
-                child: ElevatedButton(
-                  onPressed: _isCompleted ? _exitScreen : (_currentAction?.onTap ?? _exitScreen),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen,
-                    foregroundColor: Colors.white,
-                    disabledBackgroundColor: AppColors.divider,
-                    disabledForegroundColor: AppColors.textSecondary,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                  ),
-                  child: Text(
-                    _isCompleted ? 'Done' : (_currentAction?.label ?? 'Done'),
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+              child: Center(
+                heightFactor: 1,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 640),
+                  child: TechButton(
+                    icon: _isCompleted || _currentAction == null
+                        ? Icons.check_rounded
+                        : Icons.arrow_forward_rounded,
+                    onPressed: _isCompleted ? _exitScreen : (_currentAction?.onTap ?? _exitScreen),
+                    label: _isCompleted ? 'Done' : (_currentAction?.label ?? 'Done'),
                   ),
                 ),
               ),
             ),
       ),   // Scaffold
+      ),   // TechThemeScope
     );     // PopScope
+  }
+
+  // Top of the screen: who, when, where and the current status at a glance.
+  // Display only — the same booking fields the Customer Details card shows.
+  Widget _bookingHeaderCard(_JourneyStep currentStep) {
+    final b = widget.booking;
+    final name = b.customerName;
+    final isHome = b.mode == 'Home Collection';
+
+    Widget fact(IconData icon, String label, String value) => Expanded(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            decoration: const BoxDecoration(
+              color: TechColors.surfaceMuted,
+              borderRadius: TechRadius.mdAll,
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Icon(icon, size: 14, color: TechColors.textHint),
+                const SizedBox(width: 4),
+                Text(label, style: TechText.caption),
+              ]),
+              const SizedBox(height: 4),
+              Text(value,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                      color: TechColors.textPrimary)),
+            ]),
+          ),
+        );
+
+    return Container(
+      padding: const EdgeInsets.all(TechSpace.lg),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: TechRadius.lgAll,
+        border: Border.all(color: TechColors.border),
+        boxShadow: const [BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2))],
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          CircleAvatar(
+            radius: 24,
+            backgroundColor: TechColors.brandSurface,
+            child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: TechColors.brand)),
+          ),
+          const SizedBox(width: TechSpace.md),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                      color: TechColors.textPrimary, letterSpacing: -0.2)),
+              const SizedBox(height: 2),
+              Text('+91 ${b.customerPhone}', style: TechText.bodySecondary),
+              const SizedBox(height: TechSpace.sm),
+              Wrap(spacing: 6, runSpacing: 6, children: [
+                // Current journey step, in that step's own colour.
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: currentStep.color.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(currentStep.icon, size: 14, color: currentStep.color),
+                    const SizedBox(width: 4),
+                    Text(currentStep.label,
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: currentStep.color)),
+                  ]),
+                ),
+                if (b.isVip)
+                  const TechStatusChip(label: 'VIP Customer', icon: Icons.star_rounded, tone: TechTone.warning),
+              ]),
+            ]),
+          ),
+        ]),
+        const SizedBox(height: TechSpace.lg),
+        Row(children: [
+          fact(Icons.event_outlined, 'Date', _formatDate(b.date)),
+          const SizedBox(width: TechSpace.sm),
+          fact(Icons.schedule_outlined, 'Slot', b.timeSlot),
+        ]),
+        const SizedBox(height: TechSpace.sm),
+        Row(children: [
+          fact(isHome ? Icons.home_outlined : Icons.local_hospital_outlined, 'Mode', b.mode),
+        ]),
+      ]),
+    );
   }
 
   String _formatDate(DateTime d) {
@@ -5011,27 +4723,26 @@ class _SectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(TechSpace.lg),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.divider),
+          borderRadius: TechRadius.lgAll,
+          border: Border.all(color: TechColors.border),
+          boxShadow: const [
+            BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2)),
+          ],
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
-            Icon(icon, size: 15, color: AppColors.brandGreen),
-            const SizedBox(width: 8),
-            Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+            TechIconBadge(icon: icon, size: 32),
+            const SizedBox(width: 10),
+            Expanded(child: Text(title, style: TechText.sectionTitle)),
             if (badge != null) ...[
               const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                decoration: BoxDecoration(color: const Color(0xFFFFF3E0), borderRadius: BorderRadius.circular(6)),
-                child: Text(badge!, style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: Color(0xFFE65100), letterSpacing: 0.5)),
-              ),
+              TechStatusChip(label: badge!, tone: TechTone.warning),
             ],
           ]),
-          const SizedBox(height: 12),
+          const SizedBox(height: TechSpace.lg),
           child,
         ]),
       );
@@ -5045,14 +4756,17 @@ class _InfoRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 5),
+        padding: const EdgeInsets.symmetric(vertical: 6),
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Icon(icon, size: 14, color: AppColors.brandGreen),
-          const SizedBox(width: 10),
-          SizedBox(width: 80, child: Text(label,
-              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary))),
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Icon(icon, size: 18, color: TechColors.textHint),
+          ),
+          const SizedBox(width: TechSpace.md),
+          SizedBox(width: 72, child: Text(label, style: TechText.bodySecondary)),
           Expanded(child: Text(value,
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textPrimary))),
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                  color: TechColors.textPrimary, height: 1.35))),
         ]),
       );
 }
@@ -5072,32 +4786,54 @@ class _PaymentMethodChip extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            color: selected ? AppColors.brandGreenSurface : Colors.white,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: selected ? AppColors.brandGreen : AppColors.divider,
-              width: selected ? 1.5 : 1,
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        selected: selected,
+        child: Material(
+          color: selected ? TechColors.brandSurface : Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: TechRadius.mdAll,
+            side: BorderSide(
+              color: selected ? TechColors.brand : TechColors.border,
+              width: selected ? 1.6 : 1,
             ),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 20, color: selected ? AppColors.brandGreen : AppColors.textSecondary),
-              const SizedBox(height: 4),
-              Text(label,
-                  style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: selected ? AppColors.brandGreen : AppColors.textSecondary)),
-            ],
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 4),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 24, color: selected ? TechColors.brand : TechColors.textSecondary),
+                  const SizedBox(height: 6),
+                  Text(label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: selected ? TechColors.brand : TechColors.textSecondary)),
+                ],
+              ),
+            ),
           ),
         ),
+      );
+}
+
+/// A small bold label above a field in technician sheets and dialogs.
+class _SheetFieldLabel extends StatelessWidget {
+  final String text;
+  const _SheetFieldLabel(this.text);
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: TechSpace.sm - 2),
+        child: Text(text,
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                color: TechColors.textPrimary)),
       );
 }
 
@@ -5114,31 +4850,31 @@ class _ChargeCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: EdgeInsets.fromLTRB(12, 8, onRemove != null ? 4 : 12, 8),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFF8E1),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: const Color(0xFFFFE082)),
+        margin: const EdgeInsets.only(bottom: TechSpace.sm),
+        padding: EdgeInsets.fromLTRB(TechSpace.md, 10, onRemove != null ? 4 : TechSpace.md, 10),
+        decoration: const BoxDecoration(
+          color: TechColors.warningSurface,
+          borderRadius: TechRadius.mdAll,
         ),
         child: Row(children: [
-          const Icon(Icons.add_circle_outline, size: 16, color: Color(0xFFE65100)),
-          const SizedBox(width: 8),
+          const TechIconBadge(icon: Icons.receipt_long_outlined, tone: TechTone.warning, size: 32),
+          const SizedBox(width: TechSpace.md),
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(member != null ? '$title · $member' : title,
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                    color: TechColors.textPrimary)),
             if ((reason ?? '').isNotEmpty)
-              Text(reason!, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+              Text(reason!, style: TechText.caption),
           ])),
+          const SizedBox(width: TechSpace.sm),
           Text('₹${_inr(amount)}',
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: TechColors.textPrimary)),
           if (onRemove != null)
             IconButton(
               onPressed: onRemove,
-              icon: const Icon(Icons.close_rounded, size: 18),
-              color: AppColors.textSecondary,
+              icon: const Icon(Icons.close_rounded, size: 20),
+              color: TechColors.textSecondary,
               tooltip: 'Remove charge',
-              visualDensity: VisualDensity.compact,
             ),
         ]),
       );
@@ -5183,102 +4919,112 @@ class _ChargePackageSheetState extends State<_ChargePackageSheet> {
     final selectedTotal = widget.packages
         .where((p) => _selected.contains(_idOf(p)))
         .fold(0.0, (s, p) => s + _priceOf(p));
+    final mq = MediaQuery.of(context);
 
-    return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.8,
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Center(child: Container(
-                width: 40, height: 4,
-                margin: const EdgeInsets.only(bottom: 14),
-                decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-              )),
-              const Text('Add charge package', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 2),
-              Text(widget.patientName, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _searchCtrl,
-                onChanged: (v) => setState(() => _query = v.trim()),
-                decoration: const InputDecoration(
-                  hintText: 'Search packages',
-                  prefixIcon: Icon(Icons.search, size: 20),
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
+    return TechThemeScope(
+      child: Padding(
+        padding: EdgeInsets.only(bottom: mq.viewInsets.bottom),
+        child: Align(
+          alignment: Alignment.bottomCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: TechSize.sheetMaxWidth),
+            child: Container(
+              height: mq.size.height * 0.8,
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: TechRadius.sheetTop,
               ),
-            ]),
-          ),
-          const SizedBox(height: 8),
-          Expanded(
-            child: shown.isEmpty
-                ? const Center(child: Text('No packages match your search',
-                    style: TextStyle(fontSize: 13, color: AppColors.textSecondary)))
-                : ListView.builder(
-                    itemCount: shown.length,
-                    itemBuilder: (_, i) {
-                      final p  = shown[i];
-                      final id = _idOf(p);
-                      return CheckboxListTile(
-                        value: _selected.contains(id),
-                        onChanged: (v) => setState(() => v == true ? _selected.add(id) : _selected.remove(id)),
-                        dense: true,
-                        controlAffinity: ListTileControlAffinity.leading,
-                        activeColor: AppColors.brandGreen,
-                        title: Text(p['name'] as String? ?? 'Package', style: const TextStyle(fontSize: 13)),
-                        subtitle: (p['category'] as String?) != null
-                            ? Text(p['category'] as String, style: const TextStyle(fontSize: 11))
-                            : null,
-                        secondary: Text('₹${_inr(_priceOf(p))}',
-                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                      );
-                    },
-                  ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-            child: Column(children: [
-              TextField(
-                controller: _reasonCtrl,
-                maxLength: 255,
-                maxLines: 2,
-                minLines: 1,
-                textCapitalization: TextCapitalization.sentences,
-                decoration: const InputDecoration(
-                  labelText: 'Reason (optional)',
-                  border: OutlineInputBorder(),
-                  isDense: true,
+              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: TechSpace.gutter),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    const TechDragHandle(),
+                    const Text('Add charge package', textAlign: TextAlign.center, style: TechText.sheetTitle),
+                    const SizedBox(height: 4),
+                    Text(widget.patientName, textAlign: TextAlign.center, style: TechText.bodySecondary),
+                    const SizedBox(height: TechSpace.lg),
+                    TextField(
+                      controller: _searchCtrl,
+                      onChanged: (v) => setState(() => _query = v.trim()),
+                      decoration: const InputDecoration(
+                        hintText: 'Search packages',
+                        prefixIcon: Icon(Icons.search_rounded, size: 20, color: TechColors.textHint),
+                      ),
+                    ),
+                  ]),
                 ),
-              ),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _selected.isEmpty
-                      ? null
-                      : () => Navigator.pop(context,
-                          (productIds: _selected.toList(), reason: _reasonCtrl.text.trim())),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    padding: const EdgeInsets.symmetric(vertical: 13),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                  child: Text(
-                    _selected.isEmpty
-                        ? 'Select packages'
-                        : 'Add ${_selected.length} · ₹${_inr(selectedTotal)}',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
+                const SizedBox(height: TechSpace.sm),
+                Expanded(
+                  child: shown.isEmpty
+                      ? const TechEmptyState(
+                          icon: Icons.search_off_rounded,
+                          title: 'No packages match your search',
+                        )
+                      : ListView.separated(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: TechSpace.gutter - 4, vertical: TechSpace.xs),
+                          itemCount: shown.length,
+                          separatorBuilder: (_, __) => const SizedBox(height: TechSpace.xs),
+                          itemBuilder: (_, i) {
+                            final p  = shown[i];
+                            final id = _idOf(p);
+                            final checked = _selected.contains(id);
+                            return Material(
+                              color: checked ? TechColors.brandSurface : Colors.transparent,
+                              borderRadius: TechRadius.mdAll,
+                              child: CheckboxListTile(
+                                value: checked,
+                                onChanged: (v) => setState(() => v == true ? _selected.add(id) : _selected.remove(id)),
+                                controlAffinity: ListTileControlAffinity.leading,
+                                activeColor: TechColors.brand,
+                                shape: const RoundedRectangleBorder(borderRadius: TechRadius.mdAll),
+                                contentPadding: const EdgeInsets.symmetric(horizontal: TechSpace.xs),
+                                title: Text(p['name'] as String? ?? 'Package',
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                        color: TechColors.textPrimary)),
+                                subtitle: (p['category'] as String?) != null
+                                    ? Text(p['category'] as String, style: TechText.caption)
+                                    : null,
+                                secondary: Text('₹${_inr(_priceOf(p))}',
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                                        color: TechColors.textPrimary)),
+                              ),
+                            );
+                          },
+                        ),
                 ),
-              ),
-            ]),
+                const Divider(),
+                Padding(
+                  padding: EdgeInsets.fromLTRB(TechSpace.gutter, TechSpace.md, TechSpace.gutter,
+                      TechSpace.lg + (mq.viewInsets.bottom > 0 ? 0 : mq.padding.bottom)),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    TextField(
+                      controller: _reasonCtrl,
+                      maxLength: 255,
+                      maxLines: 2,
+                      minLines: 1,
+                      textCapitalization: TextCapitalization.sentences,
+                      decoration: const InputDecoration(
+                        labelText: 'Reason (optional)',
+                      ),
+                    ),
+                    const SizedBox(height: TechSpace.xs),
+                    TechButton(
+                      icon: _selected.isEmpty ? null : Icons.add_rounded,
+                      label: _selected.isEmpty
+                          ? 'Select packages'
+                          : 'Add ${_selected.length} · ₹${_inr(selectedTotal)}',
+                      onPressed: _selected.isEmpty
+                          ? null
+                          : () => Navigator.pop(context,
+                              (productIds: _selected.toList(), reason: _reasonCtrl.text.trim())),
+                    ),
+                  ]),
+                ),
+              ]),
+            ),
           ),
-        ]),
+        ),
       ),
     );
   }
@@ -5296,121 +5042,206 @@ class _BillRow extends StatelessWidget {
   Widget build(BuildContext context) => Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Expanded(child: Text(label, style: TextStyle(fontSize: sub ? 12 : 13, color: sub ? AppColors.textSecondary : AppColors.textPrimary))),
-          const SizedBox(width: 8),
-          Text(value, style: TextStyle(fontSize: sub ? 12 : 13, fontWeight: bold ? FontWeight.w700 : FontWeight.w500, color: green ? AppColors.brandGreen : AppColors.textPrimary)),
+          Expanded(child: Text(label, style: TextStyle(
+              fontSize: sub ? 12.5 : 13,
+              fontWeight: bold ? FontWeight.w600 : FontWeight.w400,
+              color: sub ? TechColors.textSecondary : TechColors.textPrimary))),
+          const SizedBox(width: TechSpace.sm),
+          Text(value, style: TextStyle(
+              fontSize: bold ? 14 : (sub ? 12.5 : 13),
+              fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
+              color: green ? TechColors.brand : TechColors.textPrimary)),
         ],
       );
 }
 
-// ─── Complete Step Widget ─────────────────────────────────────────────────────
+// ─── Complete Booking sheet widgets ───────────────────────────────────────────
 
-class _CompleteStep extends StatelessWidget {
-  final String number;
-  final String title;
-  final String subtitle;
-  final bool done;
-  final bool locked;
-  final String buttonLabel;
-  final Color buttonColor;
-  final VoidCallback? onTap;
+// The app's brand green, shared with the customer app.
+const Color _kCompleteBrand = AppColors.brandGreen;
+const Color _kCompleteBrandSurface = AppColors.brandGreenSurface;
 
-  const _CompleteStep({
-    required this.number,
-    required this.title,
-    required this.subtitle,
-    required this.done,
-    required this.locked,
-    required this.buttonLabel,
-    required this.buttonColor,
-    required this.onTap,
+/// Primary section: amount due, member count, and the Collect Payment button.
+class _CompletePaymentCard extends StatelessWidget {
+  final bool allPaid;
+  final String amountDue;
+  final int memberCount;
+  final String note;
+  final VoidCallback? onCollect;
+
+  const _CompletePaymentCard({
+    required this.allPaid,
+    required this.amountDue,
+    required this.memberCount,
+    required this.note,
+    required this.onCollect,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: done
-            ? AppColors.brandGreenSurface
-            : locked
-                ? AppColors.background
-                : Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: done
-              ? AppColors.brandGreen
-              : locked
-                  ? AppColors.divider
-                  : AppColors.divider,
-          width: done ? 1.5 : 1,
-        ),
+        color: _kCompleteBrandSurface,
+        borderRadius: BorderRadius.circular(18),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
-            width: 32, height: 32,
-            decoration: BoxDecoration(
-              color: done
-                  ? AppColors.brandGreen
-                  : locked
-                      ? AppColors.divider
-                      : buttonColor.withOpacity(0.1),
-              shape: BoxShape.circle,
-            ),
-            child: Center(
-              child: done
-                  ? const Icon(Icons.check_rounded, size: 16, color: Colors.white)
-                  : locked
-                      ? const Icon(Icons.lock_outline_rounded, size: 14, color: AppColors.textHint)
-                      : Text(number,
-                            style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w700,
-                                color: buttonColor)),
-            ),
+          Row(
+            children: [
+              Text(allPaid ? 'PAYMENT' : 'AMOUNT DUE',
+                  style: const TextStyle(
+                      fontSize: 11, fontWeight: FontWeight.w700,
+                      letterSpacing: 0.8, color: _kCompleteBrand)),
+              const Spacer(),
+              if (!allPaid && memberCount > 0)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.people_alt_outlined, size: 14, color: _kCompleteBrand),
+                    const SizedBox(width: 4),
+                    Text('$memberCount ${memberCount == 1 ? 'member' : 'members'}',
+                        style: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600,
+                            color: _kCompleteBrand)),
+                  ]),
+                ),
+            ],
           ),
-          const SizedBox(width: 12),
-
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title,
+          const SizedBox(height: 8),
+          if (allPaid)
+            const Row(children: [
+              Icon(Icons.check_circle_rounded, size: 26, color: _kCompleteBrand),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text('Paid in full',
                     style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: locked ? AppColors.textHint : AppColors.textPrimary)),
-                Text(subtitle,
-                    style: const TextStyle(fontSize: 11, color: AppColors.textSecondary, height: 1.3)),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-
-          GestureDetector(
-            onTap: onTap,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: onTap == null
-                    ? (done ? AppColors.brandGreen : AppColors.divider)
-                    : buttonColor,
-                borderRadius: BorderRadius.circular(20),
+                        fontSize: 20, fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary)),
               ),
-              child: Text(
-                buttonLabel,
-                style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: onTap == null && !done
-                        ? AppColors.textHint
-                        : Colors.white),
+            ])
+          else
+            FittedBox(
+              alignment: Alignment.centerLeft,
+              fit: BoxFit.scaleDown,
+              child: Text(amountDue,
+                  style: const TextStyle(
+                      fontSize: 28, fontWeight: FontWeight.w700,
+                      color: AppColors.textPrimary, letterSpacing: -0.5)),
+            ),
+          const SizedBox(height: 4),
+          Text(note,
+              style: const TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.35)),
+          if (!allPaid) ...[
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 52,
+              child: FilledButton.icon(
+                onPressed: onCollect,
+                icon: const Icon(Icons.payments_outlined, size: 20),
+                label: const Text('Collect Payment'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: _kCompleteBrand,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
               ),
             ),
-          ),
+          ],
         ],
       ),
+    );
+  }
+}
+
+/// A thin "OR" divider between the payment and no-payment paths.
+class _OrSeparator extends StatelessWidget {
+  const _OrSeparator();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Row(children: [
+      Expanded(child: Divider(color: AppColors.divider, height: 1)),
+      Padding(
+        padding: EdgeInsets.symmetric(horizontal: 12),
+        child: Text('OR',
+            style: TextStyle(
+                fontSize: 12, fontWeight: FontWeight.w600,
+                letterSpacing: 1, color: AppColors.textHint)),
+      ),
+      Expanded(child: Divider(color: AppColors.divider, height: 1)),
+    ]);
+  }
+}
+
+/// OTP step once a payment has been made (no reason needed), or its done state.
+class _CompleteOtpRow extends StatelessWidget {
+  final bool done;
+  final bool primary;
+  final VoidCallback? onVerify;
+
+  const _CompleteOtpRow({required this.done, required this.primary, required this.onVerify});
+
+  @override
+  Widget build(BuildContext context) {
+    if (done) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          border: Border.all(color: AppColors.divider),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: const Row(children: [
+          Icon(Icons.verified_rounded, size: 20, color: _kCompleteBrand),
+          SizedBox(width: 10),
+          Text('OTP verified',
+              style: TextStyle(
+                  fontSize: 14, fontWeight: FontWeight.w600,
+                  color: AppColors.textPrimary)),
+        ]),
+      );
+    }
+    final shape = RoundedRectangleBorder(borderRadius: BorderRadius.circular(14));
+    const label = Text('Verify OTP');
+    const icon = Icon(Icons.lock_open_rounded, size: 20);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(
+          height: 52,
+          // Filled when it is the only action left; outlined while a balance
+          // is still due, so Collect Payment stays the primary action.
+          child: primary
+              ? FilledButton.icon(
+                  onPressed: onVerify, icon: icon, label: label,
+                  style: FilledButton.styleFrom(
+                    backgroundColor: _kCompleteBrand,
+                    foregroundColor: Colors.white,
+                    shape: shape,
+                    textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                  ),
+                )
+              : OutlinedButton.icon(
+                  onPressed: onVerify, icon: icon, label: label,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _kCompleteBrand,
+                    side: const BorderSide(color: _kCompleteBrand, width: 1.2),
+                    shape: shape,
+                    textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                  ),
+                ),
+        ),
+        const SizedBox(height: 8),
+        const Text('Ask the customer for the OTP sent to their phone.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+      ],
     );
   }
 }
@@ -5446,7 +5277,7 @@ class _FormField extends StatelessWidget {
             keyboardType: keyboardType,
 
             maxLines: maxLines,
-            style: const TextStyle(fontSize: 14),
+            style: const TextStyle(fontSize: 13),
             decoration: InputDecoration(
               hintText: hint,
               hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
@@ -5568,46 +5399,6 @@ class _DocAddMoreTile extends StatelessWidget {
       );
 }
 
-class _DocSourceTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-  const _DocSourceTile(this.icon, this.title, this.subtitle, this.onTap);
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            color: AppColors.background,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.divider),
-          ),
-          child: Row(children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: const BoxDecoration(
-                  color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-              child: Icon(icon, size: 20, color: AppColors.brandGreen),
-            ),
-            const SizedBox(width: 14),
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title,
-                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-              Text(subtitle,
-                  style: const TextStyle(
-                      fontSize: 12, color: AppColors.textSecondary)),
-            ]),
-            const Spacer(),
-            const Icon(Icons.chevron_right_rounded, color: AppColors.textHint),
-          ]),
-        ),
-      );
-}
-
 // ─── Full-screen document image viewer ───────────────────────────────────────
 
 class _DocImageViewerPage extends StatefulWidget {
@@ -5646,7 +5437,7 @@ class _DocImageViewerPageState extends State<_DocImageViewerPage> {
             widget.images.length > 1
                 ? 'Photo ${_current + 1} of ${widget.images.length}'
                 : 'Photo',
-            style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+            style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
           ),
         ),
         body: Column(children: [
@@ -5906,11 +5697,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   void _addToQueue() {
     if (_selectedTestIds.isEmpty) return;
     if (_mode == 'newPatient' && _dob == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Please select a date of birth'),
-        backgroundColor: Colors.red,
-        behavior: SnackBarBehavior.floating,
-      ));
+      AppMessages.error(context, 'Please select a date of birth');
       return;
     }
 
@@ -6026,21 +5813,13 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         });
       } else {
         setState(() => _isSaving = false);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to add members — please retry'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-        ));
+        AppMessages.error(context, 'Failed to add members — please retry');
       }
     } catch (e) {
       debugPrint('[_AddVisitMemberSheet._submitAll] ERROR: $e');
       if (mounted) {
         setState(() => _isSaving = false);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Failed to add members — please retry'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-        ));
+        AppMessages.error(context, 'Failed to add members — please retry');
       }
     }
   }
@@ -6098,89 +5877,108 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final bottom = MediaQuery.of(context).padding.bottom;
-    return DraggableScrollableSheet(
-      initialChildSize: 0.85,
-      minChildSize: 0.5,
-      maxChildSize: 0.95,
-      expand: false,
-      builder: (_, scroll) => Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        child: Column(children: [
-          Container(
-            width: 40, height: 4,
-            margin: const EdgeInsets.only(top: 12, bottom: 4),
-            decoration: BoxDecoration(
-                color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: Row(children: [
-              if (_showBackArrow) ...[
-                GestureDetector(
-                  onTap: _onBack,
-                  child: const Icon(Icons.arrow_back_rounded, size: 20,
-                      color: AppColors.textPrimary),
+    final mq = MediaQuery.of(context);
+    final bottom = mq.padding.bottom;
+    const stepLabels = ['Member', 'Tests', 'Review'];
+    final stepIndex = _step.clamp(0, 2);
+    return TechThemeScope(
+      // Keeps the sheet (and its button) above the on-screen keyboard.
+      child: Padding(
+        padding: EdgeInsets.only(bottom: mq.viewInsets.bottom),
+        child: DraggableScrollableSheet(
+          initialChildSize: 0.85,
+          minChildSize: 0.5,
+          maxChildSize: 0.95,
+          expand: false,
+          builder: (_, scroll) => Align(
+            alignment: Alignment.bottomCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: TechSize.sheetMaxWidth),
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: TechRadius.sheetTop,
                 ),
-                const SizedBox(width: 10),
-              ],
-              Expanded(
-                child: Text(
-                  _headerTitle,
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ]),
-          ),
-          const SizedBox(height: 12),
-          const Divider(height: 1),
-          Expanded(child: switch (_step) {
-            0 => _buildStep0(scroll),
-            1 => _buildTestStep(scroll),
-            _ => _buildReviewStep(scroll),
-          }),
-          Padding(
-            padding: EdgeInsets.fromLTRB(16, 8, 16, bottom + 12),
-            child: SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: _isSaving ? null : switch (_step) {
-                  0 => _canProceed ? _onNextStep : null,
-                  1 => _canProceed ? _addToQueue : null,
-                  _ => _canProceed ? _submitAll  : null,
-                },
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _canProceed
-                      ? AppColors.brandGreen
-                      : AppColors.brandGreen.withValues(alpha: 0.35),
-                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                child: _isSaving
-                    ? const SizedBox(width: 20, height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                    : Text(
-                        switch (_step) {
-                          0 => 'Next: Select Tests',
-                          1 => _selectedTestIds.isEmpty
-                              ? 'Select at least one test'
-                              : 'Add to Queue · ₹${_inr(_selectedTotal)}',
-                          _ => 'Submit ${_queuedMembers.length} Member${_queuedMembers.length == 1 ? '' : 's'}'
-                              ' · ₹${_inr(_queuedTotal)}',
-                        },
-                        style: const TextStyle(
-                            color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                child: Column(children: [
+                  const TechDragHandle(),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(TechSpace.sm, 0, TechSpace.gutter, 0),
+                    child: Row(children: [
+                      if (_showBackArrow)
+                        IconButton(
+                          onPressed: _onBack,
+                          tooltip: 'Back',
+                          icon: const Icon(Icons.arrow_back_rounded, size: 22,
+                              color: TechColors.textPrimary),
+                        )
+                      else
+                        const SizedBox(width: TechSpace.md),
+                      Expanded(
+                        child: Text(
+                          _headerTitle,
+                          style: TechText.sheetTitle,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
+                      TechStatusChip(
+                        label: 'Step ${stepIndex + 1} of 3 · ${stepLabels[stepIndex]}',
+                        tone: TechTone.brand,
+                      ),
+                    ]),
+                  ),
+                  const SizedBox(height: TechSpace.sm),
+                  // Step progress
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: TechSpace.gutter),
+                    child: Row(children: [
+                      for (var i = 0; i < 3; i++) ...[
+                        if (i > 0) const SizedBox(width: 6),
+                        Expanded(
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: i <= stepIndex ? TechColors.brand : TechColors.border,
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ]),
+                  ),
+                  const SizedBox(height: TechSpace.md),
+                  const Divider(height: 1),
+                  Expanded(child: switch (_step) {
+                    0 => _buildStep0(scroll),
+                    1 => _buildTestStep(scroll),
+                    _ => _buildReviewStep(scroll),
+                  }),
+                  const Divider(height: 1),
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(TechSpace.gutter, TechSpace.md, TechSpace.gutter,
+                        (mq.viewInsets.bottom > 0 ? 0 : bottom) + TechSpace.md),
+                    child: TechButton(
+                      loading: _isSaving,
+                      onPressed: _isSaving ? null : switch (_step) {
+                        0 => _canProceed ? _onNextStep : null,
+                        1 => _canProceed ? _addToQueue : null,
+                        _ => _canProceed ? _submitAll  : null,
+                      },
+                      label: switch (_step) {
+                        0 => 'Next: Select Tests',
+                        1 => _selectedTestIds.isEmpty
+                            ? 'Select at least one test'
+                            : 'Add to Queue · ₹${_inr(_selectedTotal)}',
+                        _ => 'Submit ${_queuedMembers.length} Member${_queuedMembers.length == 1 ? '' : 's'}'
+                            ' · ₹${_inr(_queuedTotal)}',
+                      },
+                    ),
+                  ),
+                ]),
               ),
             ),
           ),
-        ]),
+        ),
       ),
     );
   }
@@ -6192,59 +5990,28 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
 
   Widget _buildSelectMode(ScrollController scroll) {
     if (_loadingFamily) {
-      return const Center(
-        child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
-      );
+      return const TechLoadingState(label: 'Loading family members…');
     }
     return SingleChildScrollView(
       controller: scroll,
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('Select a family member',
-            style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-        const SizedBox(height: 12),
+      padding: const EdgeInsets.fromLTRB(TechSpace.gutter, TechSpace.lg, TechSpace.gutter, TechSpace.sm),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        const Text('Select a family member', style: TechText.bodySecondary),
+        const SizedBox(height: TechSpace.md),
 
         ..._availableMembers.map(_buildFamilyCard),
 
-        const SizedBox(height: 4),
-        const Divider(height: 24),
+        const SizedBox(height: TechSpace.xs),
+        const Divider(height: TechSpace.xxl),
 
         // Add new customer option
-        GestureDetector(
+        TechOptionCard(
+          icon: Icons.person_add_rounded,
+          title: 'Add New Customer',
+          subtitle: 'Search or create a new patient',
           onTap: () => setState(() => _mode = 'newPatient'),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: AppColors.divider),
-            ),
-            child: Row(children: [
-              Container(
-                width: 44, height: 44,
-                decoration: BoxDecoration(
-                  color: AppColors.brandGreenSurface,
-                  borderRadius: BorderRadius.circular(22),
-                ),
-                child: const Icon(Icons.person_add_rounded,
-                    size: 20, color: AppColors.brandGreen),
-              ),
-              const SizedBox(width: 12),
-              const Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('Add New Customer',
-                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary)),
-                  SizedBox(height: 2),
-                  Text('Search or create a new patient',
-                      style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                ]),
-              ),
-              const Icon(Icons.chevron_right_rounded, color: AppColors.textHint),
-            ]),
-          ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: TechSpace.sm),
       ]),
     );
   }
@@ -6257,72 +6024,56 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     final initial  = name.isNotEmpty ? name[0].toUpperCase() : '?';
     final color    = _avatarColor(name);
 
-    return GestureDetector(
-      onTap: () => _selectFamilyMember(m),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        decoration: BoxDecoration(
-          color: isSelected ? AppColors.brandGreenSurface : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isSelected ? AppColors.brandGreen : AppColors.divider,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: TechSpace.md),
+      child: Material(
+        color: isSelected ? TechColors.brandSurface : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: TechRadius.lgAll,
+          side: BorderSide(
+            color: isSelected ? TechColors.brand : TechColors.border,
             width: isSelected ? 1.5 : 1,
           ),
         ),
-        child: Row(children: [
-          CircleAvatar(
-            radius: 22,
-            backgroundColor: color.withValues(alpha: 0.15),
-            child: Text(initial,
-                style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 17)),
-          ),
-          const SizedBox(width: 12),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(name, style: const TextStyle(
-                fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-            const SizedBox(height: 3),
-            Row(children: [
-              if (relation.isNotEmpty) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(relation, style: TextStyle(
-                      fontSize: 11, color: color, fontWeight: FontWeight.w500)),
-                ),
-                const SizedBox(width: 6),
-              ],
-              if (mobile.isNotEmpty)
-                Text(mobile, style: const TextStyle(
-                    fontSize: 12, color: AppColors.textSecondary)),
-            ]),
-          ])),
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            width: 20, height: 20,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: isSelected ? AppColors.brandGreen : AppColors.divider,
-                width: isSelected ? 2 : 1.5,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: () => _selectFamilyMember(m),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            child: Row(children: [
+              CircleAvatar(
+                radius: 22,
+                backgroundColor: color.withValues(alpha: 0.15),
+                child: Text(initial,
+                    style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 16)),
               ),
-              color: Colors.white,
-            ),
-            child: isSelected
-                ? Center(child: Container(
-                    width: 10, height: 10,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: AppColors.brandGreen,
+              const SizedBox(width: TechSpace.md),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(name, style: TechText.cardTitle),
+                const SizedBox(height: 3),
+                Wrap(spacing: 6, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+                  if (relation.isNotEmpty)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(relation, style: TextStyle(
+                          fontSize: 11, color: color, fontWeight: FontWeight.w600)),
                     ),
-                  ))
-                : null,
+                  if (mobile.isNotEmpty)
+                    Text(mobile, style: TechText.caption),
+                ]),
+              ])),
+              Icon(
+                isSelected ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
+                size: 22,
+                color: isSelected ? TechColors.brand : TechColors.textHint,
+              ),
+            ]),
           ),
-        ]),
+        ),
       ),
     );
   }
@@ -6350,10 +6101,10 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
               maxLength: 10,
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               autofocus: true,
-              style: const TextStyle(fontSize: 15),
+              style: const TextStyle(fontSize: 14),
               decoration: InputDecoration(
                 hintText: '10-digit mobile number',
-                hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 14),
+                hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
                 prefixIcon: const Icon(Icons.phone_outlined, size: 18, color: AppColors.textHint),
                 counterText: '',
                 filled: true, fillColor: AppColors.background,
@@ -6432,7 +6183,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
           controller: _nameCtrl,
           keyboardType: TextInputType.name,
           inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
-          style: const TextStyle(fontSize: 14),
+          style: const TextStyle(fontSize: 13),
           decoration: InputDecoration(
             hintText: 'Enter full name',
             hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
@@ -6475,7 +6226,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                 const SizedBox(width: 10),
                 Expanded(child: Text(
                   _dobCtrl.text.isEmpty ? 'DD / MM / YYYY' : _dobCtrl.text,
-                  style: TextStyle(fontSize: 14,
+                  style: TextStyle(fontSize: 13,
                       color: _dobCtrl.text.isEmpty
                           ? AppColors.textHint : AppColors.textPrimary),
                 )),
@@ -6574,7 +6325,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
         child: TextField(
           onChanged: (v) => setState(() => _testSearch = v),
-          style: const TextStyle(fontSize: 14),
+          style: const TextStyle(fontSize: 13),
           decoration: InputDecoration(
             hintText: 'Search test or package…',
             hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
@@ -6692,16 +6443,16 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                     radius: 20,
                     backgroundColor: color.withValues(alpha: 0.15),
                     child: Text(initial,
-                        style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 15)),
+                        style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 14)),
                   ),
                   const SizedBox(width: 12),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
                       Expanded(child: Text(name,
-                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
                               color: AppColors.textPrimary))),
                       Text('₹${_inr(total)}',
-                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
                               color: AppColors.textPrimary)),
                     ]),
                     if (mobile.isNotEmpty) ...[
@@ -6795,7 +6546,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                 ),
                 SizedBox(width: 12),
                 Expanded(child: Text('Add Another Member',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500,
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
                         color: AppColors.brandGreen))),
                 Icon(Icons.chevron_right_rounded, color: AppColors.brandGreen, size: 18),
               ]),
@@ -6812,55 +6563,12 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                 style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
             const Spacer(),
             Text('₹${_inr(_queuedTotal)}',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700,
                     color: AppColors.textPrimary)),
           ]),
           const SizedBox(height: 8),
         ],
       ]),
-    );
-  }
-}
-// One choice in the family payment popup ("Single payment" / "Individual payments").
-class _PayModeOption extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-  const _PayModeOption({required this.icon, required this.title, required this.subtitle, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: AppColors.background,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.divider),
-          ),
-          child: Row(children: [
-            Container(
-              width: 40, height: 40,
-              decoration: BoxDecoration(color: AppColors.brandGreenSurface, borderRadius: BorderRadius.circular(10)),
-              child: Icon(icon, color: AppColors.brandGreen, size: 22),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-                const SizedBox(height: 2),
-                Text(subtitle, style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.3)),
-              ]),
-            ),
-            const Icon(Icons.chevron_right_rounded, color: AppColors.textHint),
-          ]),
-        ),
-      ),
     );
   }
 }
@@ -6959,43 +6667,40 @@ class _QrPaymentSheetState extends State<_QrPaymentSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final screenH = MediaQuery.of(context).size.height;
-    return Container(
-      height: screenH * 0.82,
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      child: Column(
-        children: [
-          // Drag handle
-          const SizedBox(height: 12),
-          Container(width: 36, height: 4,
-              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2))),
-          const SizedBox(height: 4),
-
-          Expanded(child: _buildBody()),
-
-          // Cancel / close button at bottom
-          if (_state != _QrState.paid)
-            Padding(
-              padding: EdgeInsets.fromLTRB(24, 0, 24,
-                  MediaQuery.of(context).padding.bottom + 20),
-              child: SizedBox(
-                width: double.infinity,
-                height: 48,
-                child: OutlinedButton(
-                  onPressed: () => Navigator.of(context).pop(null),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: AppColors.textSecondary,
-                    side: const BorderSide(color: AppColors.divider),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                  child: const Text('Cancel', style: TextStyle(fontWeight: FontWeight.w600)),
-                ),
-              ),
+    final mq = MediaQuery.of(context);
+    return TechThemeScope(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: TechSize.sheetMaxWidth),
+          child: Container(
+            height: mq.size.height * 0.82,
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: TechRadius.sheetTop,
             ),
-        ],
+            child: Column(
+              children: [
+                const TechDragHandle(),
+                const Text('UPI Payment', style: TechText.sheetTitle),
+                const SizedBox(height: TechSpace.sm),
+
+                Expanded(child: _buildBody()),
+
+                // Cancel / close button at bottom
+                if (_state != _QrState.paid)
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(TechSpace.xxl, 0, TechSpace.xxl,
+                        mq.padding.bottom + TechSpace.xl),
+                    child: TechButton.secondary(
+                      label: 'Cancel',
+                      onPressed: () => Navigator.of(context).pop(null),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -7003,165 +6708,104 @@ class _QrPaymentSheetState extends State<_QrPaymentSheet> {
   Widget _buildBody() {
     switch (_state) {
       case _QrState.loading:
-        return const Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            CircularProgressIndicator(color: AppColors.brandGreen, strokeWidth: 3),
-            SizedBox(height: 20),
-            Text('Generating QR code…',
-                style: TextStyle(fontSize: 15, color: AppColors.textSecondary, fontWeight: FontWeight.w500)),
-          ]),
-        );
+        return const TechLoadingState(label: 'Generating QR code…');
 
       case _QrState.error:
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.wifi_off_rounded, size: 52, color: AppColors.textHint),
-              const SizedBox(height: 16),
-              Text(_errorMsg ?? 'Something went wrong',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 14, color: AppColors.textSecondary, height: 1.5)),
-              const SizedBox(height: 24),
-              ElevatedButton.icon(
-                onPressed: _generateQr,
-                icon: const Icon(Icons.refresh_rounded, size: 18),
-                label: const Text('Try Again', style: TextStyle(fontWeight: FontWeight.w600)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.brandGreen,
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
-                ),
-              ),
-            ]),
-          ),
+        return TechErrorState(
+          title: "Couldn't generate the QR",
+          message: _errorMsg ?? 'Something went wrong',
+          retryLabel: 'Try Again',
+          onRetry: _generateQr,
         );
 
       case _QrState.expired:
-        return Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.timer_off_rounded, size: 52, color: AppColors.textHint),
-              const SizedBox(height: 16),
-              const Text('QR Code Expired',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-              const SizedBox(height: 8),
-              const Text('The 5-minute window passed.\nGenerate a new code to try again.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5)),
-              const SizedBox(height: 24),
-              ElevatedButton.icon(
-                onPressed: _generateQr,
-                icon: const Icon(Icons.qr_code_rounded, size: 18),
-                label: const Text('Generate New QR', style: TextStyle(fontWeight: FontWeight.w600)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.brandGreen,
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
-                ),
-              ),
-            ]),
-          ),
+        return TechEmptyState(
+          icon: Icons.timer_off_rounded,
+          title: 'QR Code Expired',
+          message: 'The 5-minute window passed.\nGenerate a new code to try again.',
+          actionLabel: 'Generate New QR',
+          onAction: _generateQr,
         );
 
       case _QrState.paid:
         return Center(
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Container(
-              width: 80, height: 80,
-              decoration: BoxDecoration(
-                color: AppColors.brandGreen.withValues(alpha: 0.1),
+              width: 84, height: 84,
+              decoration: const BoxDecoration(
+                color: TechColors.brandSurface,
                 shape: BoxShape.circle,
               ),
-              child: const Icon(Icons.check_rounded, color: AppColors.brandGreen, size: 44),
+              child: const Icon(Icons.check_rounded, color: TechColors.brand, size: 46),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: TechSpace.xl),
             const Text('Payment Received!',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.textPrimary)),
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: TechColors.textPrimary)),
             const SizedBox(height: 6),
-            Text('₹${_inr(widget.amount)} collected via UPI',
-                style: const TextStyle(fontSize: 14, color: AppColors.textSecondary)),
+            Text('₹${_inr(widget.amount)} collected via UPI', style: TechText.bodySecondary),
           ]),
         );
 
       case _QrState.ready:
+        final urgent = _remaining <= 60;
         return Padding(
-          padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
+          padding: const EdgeInsets.fromLTRB(TechSpace.xxl, 0, TechSpace.xxl, 0),
           child: Column(
             children: [
-              // Amount
-              Text('₹${_inr(widget.amount)}',
-                  style: const TextStyle(
-                      fontSize: 36, fontWeight: FontWeight.w800,
-                      color: AppColors.brandGreen, letterSpacing: -0.5)),
+              const Text('AMOUNT TO PAY', style: TechText.overline),
+              const SizedBox(height: 2),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text('₹${_inr(widget.amount)}',
+                    style: const TextStyle(
+                        fontSize: 30, fontWeight: FontWeight.w700,
+                        color: TechColors.textPrimary, letterSpacing: -0.5)),
+              ),
+              const SizedBox(height: TechSpace.lg),
 
-              const SizedBox(height: 16),
-
-              // QR image — no card border, no padding, just the image
+              // QR image inside a light frame
               Expanded(
-                child: _imageUrl != null
-                    ? Image.network(
-                        _imageUrl!,
-                        fit: BoxFit.contain,
-                        loadingBuilder: (_, child, progress) => progress == null
-                            ? child
-                            : const Center(child: CircularProgressIndicator(
-                                color: AppColors.brandGreen, strokeWidth: 2)),
-                        errorBuilder: (_, __, ___) => const Center(
-                          child: Column(mainAxisSize: MainAxisSize.min, children: [
-                            Icon(Icons.broken_image_outlined, size: 52, color: AppColors.textHint),
-                            SizedBox(height: 12),
-                            Text('Could not load QR image.\nCheck your internet connection.',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                          ]),
-                        ),
-                      )
-                    : const Center(
-                        child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(Icons.qr_code_2_rounded, size: 64, color: AppColors.textHint),
-                          SizedBox(height: 12),
-                          Text('QR code not available',
-                              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                        ]),
-                      ),
-              ),
-
-              const SizedBox(height: 14),
-
-              // Timer pill only
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                decoration: BoxDecoration(
-                  color: _remaining <= 60
-                      ? Colors.red.withValues(alpha: 0.08)
-                      : AppColors.background,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: _remaining <= 60
-                        ? Colors.red.withValues(alpha: 0.3)
-                        : AppColors.divider,
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(TechSpace.md),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: TechRadius.lgAll,
+                    border: Border.all(color: TechColors.border),
                   ),
+                  child: _imageUrl != null
+                      ? Image.network(
+                          _imageUrl!,
+                          fit: BoxFit.contain,
+                          loadingBuilder: (_, child, progress) => progress == null
+                              ? child
+                              : const TechLoadingState(),
+                          errorBuilder: (_, __, ___) => const TechEmptyState(
+                            icon: Icons.broken_image_outlined,
+                            title: 'Could not load QR image',
+                            message: 'Check your internet connection.',
+                          ),
+                        )
+                      : const TechEmptyState(
+                          icon: Icons.qr_code_2_rounded,
+                          title: 'QR code not available',
+                        ),
                 ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.timer_outlined,
-                      size: 14,
-                      color: _remaining <= 60 ? Colors.red : AppColors.textSecondary),
-                  const SizedBox(width: 5),
-                  Text(_timerLabel,
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: _remaining <= 60 ? Colors.red : AppColors.textPrimary)),
-                ]),
               ),
 
-              const SizedBox(height: 16),
+              const SizedBox(height: TechSpace.md),
+              const Text('Ask the customer to scan with any UPI app',
+                  textAlign: TextAlign.center, style: TechText.bodySecondary),
+              const SizedBox(height: TechSpace.sm),
+
+              // Time left
+              TechStatusChip(
+                icon: Icons.timer_outlined,
+                label: 'Expires in $_timerLabel',
+                tone: urgent ? TechTone.error : TechTone.neutral,
+              ),
+
+              const SizedBox(height: TechSpace.lg),
             ],
           ),
         );

@@ -11,6 +11,7 @@ import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/screens/customer/lab_progress_screen.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 
 class TrackingMapScreen extends StatefulWidget {
   final int bookingId;
@@ -646,17 +647,21 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                   children: [
                     _CircleButton(
                       icon: Icons.arrow_back_ios_new_rounded,
+                      tooltip: 'Back',
                       onTap: () => Navigator.pop(context),
                     ),
                     const SizedBox(width: 10),
                     // Status pill
-                    Container(
+                    Expanded(
+                      child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 7),
-                      decoration: BoxDecoration(
+                          horizontal: 14, vertical: 10),
+                      decoration: const BoxDecoration(
                         color: Colors.white,
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: const [
+                        borderRadius: CxRadius.pill,
+                        boxShadow: [
                           BoxShadow(
                               color: Colors.black12,
                               blurRadius: 8,
@@ -671,8 +676,8 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                             height: 8,
                             decoration: BoxDecoration(
                               color: _liveActive
-                                  ? AppColors.brandGreen
-                                  : Colors.orange,
+                                  ? CxColors.brand
+                                  : CxColors.warning,
                               shape: BoxShape.circle,
                             ),
                           ),
@@ -680,27 +685,34 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                           Text(
                             _liveActive ? 'Live' : 'Connecting…',
                             style: const TextStyle(
-                                fontSize: 12,
+                                fontSize: 13,
                                 fontWeight: FontWeight.w600,
                                 color: AppColors.textPrimary),
                           ),
                           const SizedBox(width: 8),
                           Container(
-                              width: 1, height: 14, color: AppColors.divider),
+                              width: 1, height: 14, color: CxColors.border),
                           const SizedBox(width: 8),
-                          Text(
-                            widget.technicianName,
-                            style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                                color: AppColors.textSecondary),
+                          Flexible(
+                            child: Text(
+                              widget.technicianName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                  color: AppColors.textSecondary),
+                            ),
                           ),
                         ],
                       ),
+                      ),
+                      ),
                     ),
-                    const Spacer(),
+                    const SizedBox(width: 10),
                     _CircleButton(
                       icon: Icons.my_location_rounded,
+                      tooltip: 'Follow technician',
                       highlighted: !_followTech && _techLocation != null,
                       onTap: () {
                         if (_techLocation == null) return;
@@ -724,10 +736,10 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 16, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF1565C0),
-                    borderRadius: BorderRadius.circular(14),
-                    boxShadow: const [
+                  decoration: const BoxDecoration(
+                    color: CxColors.info,
+                    borderRadius: CxRadius.lgAll,
+                    boxShadow: [
                       BoxShadow(
                           color: Colors.black26,
                           blurRadius: 10,
@@ -752,13 +764,13 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                               horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
                             color: Colors.white.withValues(alpha: 0.2),
-                            borderRadius: BorderRadius.circular(10),
+                            borderRadius: CxRadius.pill,
                           ),
                           child: Text(
                             '~$_etaMinutes min',
                             style: const TextStyle(
                                 color: Colors.white,
-                                fontSize: 12,
+                                fontSize: 13,
                                 fontWeight: FontWeight.w700),
                           ),
                         ),
@@ -776,10 +788,10 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 16, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: AppColors.brandGreen,
-                    borderRadius: BorderRadius.circular(14),
-                    boxShadow: const [
+                  decoration: const BoxDecoration(
+                    color: CxColors.brand,
+                    borderRadius: CxRadius.lgAll,
+                    boxShadow: [
                       BoxShadow(
                           color: Colors.black26,
                           blurRadius: 10,
@@ -818,10 +830,10 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                 right: 16,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: AppColors.brandGreen,
-                    borderRadius: BorderRadius.circular(20),
-                    boxShadow: const [
+                  decoration: const BoxDecoration(
+                    color: CxColors.brand,
+                    borderRadius: CxRadius.pill,
+                    boxShadow: [
                       BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 2))
                     ],
                   ),
@@ -829,7 +841,7 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                     'Arriving in $_etaMinutes min',
                     style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 12,
+                        fontSize: 13,
                         fontWeight: FontWeight.w700),
                   ),
                 ),
@@ -862,13 +874,13 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                       child: Container(
                         width: 40,
                         height: 4,
-                        decoration: BoxDecoration(
-                          color: AppColors.divider,
-                          borderRadius: BorderRadius.circular(2),
+                        decoration: const BoxDecoration(
+                          color: CxColors.border,
+                          borderRadius: CxRadius.pill,
                         ),
                       ),
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 16),
 
                     Row(
                       children: [
@@ -877,7 +889,7 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                           width: 48,
                           height: 48,
                           decoration: const BoxDecoration(
-                            color: Color(0xFF1A2340),
+                            color: CxColors.brand,
                             shape: BoxShape.circle,
                           ),
                           alignment: Alignment.center,
@@ -898,11 +910,11 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                             children: [
                               Text(
                                 widget.technicianName,
-                                style: const TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.textPrimary),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: CxText.cardTitle.copyWith(fontSize: 16),
                               ),
+                              const SizedBox(height: 2),
                               Text(
                                 _arrived
                                     ? 'Arrived at your location'
@@ -912,11 +924,11 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                                             ? 'On the way to you'
                                             : 'Locating technician…',
                                 style: TextStyle(
-                                  fontSize: 12,
+                                  fontSize: 13,
                                   color: _arrived
-                                      ? AppColors.brandGreen
+                                      ? CxColors.brand
                                       : _enRoute
-                                          ? const Color(0xFF1565C0)
+                                          ? CxColors.info
                                           : AppColors.textSecondary,
                                   fontWeight: (_arrived || _enRoute)
                                       ? FontWeight.w600
@@ -931,10 +943,10 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                         if (_enRoute && !_arrived && _etaMinutes != null)
                           Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 5),
-                            decoration: BoxDecoration(
-                              color: AppColors.blueSurface,
-                              borderRadius: BorderRadius.circular(10),
+                                horizontal: 10, vertical: 6),
+                            decoration: const BoxDecoration(
+                              color: CxColors.infoSurface,
+                              borderRadius: CxRadius.mdAll,
                             ),
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
@@ -948,19 +960,19 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                                 ),
                                 const Text('min',
                                     style: TextStyle(
-                                        fontSize: 9, color: AppColors.blue)),
+                                        fontSize: 11, color: CxColors.info)),
                               ],
                             ),
                           )
                         else
                           Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 4),
+                                horizontal: 10, vertical: 5),
                             decoration: BoxDecoration(
                               color: _liveActive
-                                  ? AppColors.brandGreenSurface
-                                  : const Color(0xFFFFF3E0),
-                              borderRadius: BorderRadius.circular(20),
+                                  ? CxColors.brandSurface
+                                  : CxColors.warningSurface,
+                              borderRadius: CxRadius.pill,
                             ),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
@@ -979,10 +991,10 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                                 Text(
                                   _liveActive ? 'Live' : 'Connecting',
                                   style: TextStyle(
-                                      fontSize: 11,
+                                      fontSize: 12,
                                       color: _liveActive
-                                          ? AppColors.brandGreen
-                                          : Colors.orange,
+                                          ? CxColors.brand
+                                          : CxColors.warning,
                                       fontWeight: FontWeight.w600),
                                 ),
                               ],
@@ -998,14 +1010,14 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                         children: [
                           Text('Technician',
                               style: TextStyle(
-                                  fontSize: 10,
-                                  color: AppColors.textHint,
+                                  fontSize: 12,
+                                  color: AppColors.textSecondary,
                                   fontWeight: FontWeight.w500)),
                           Spacer(),
                           Text('You',
                               style: TextStyle(
-                                  fontSize: 10,
-                                  color: AppColors.textHint,
+                                  fontSize: 12,
+                                  color: AppColors.textSecondary,
                                   fontWeight: FontWeight.w500)),
                         ],
                       ),
@@ -1014,13 +1026,14 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                         children: [
                           Expanded(
                             child: ClipRRect(
-                              borderRadius: BorderRadius.circular(4),
+                              borderRadius: CxRadius.pill,
                               child: LinearProgressIndicator(
                                 value: _journeyProgress,
-                                minHeight: 6,
-                                backgroundColor: AppColors.divider,
+                                minHeight: 8,
+                                backgroundColor: CxColors.border,
                                 valueColor: const AlwaysStoppedAnimation<Color>(
-                                    AppColors.blue),
+                                    CxColors.info),
+                                semanticsLabel: 'Technician journey progress',
                               ),
                             ),
                           ),
@@ -1032,9 +1045,9 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                                     : '${_distKm!.toStringAsFixed(1)} km'
                                 : '',
                             style: const TextStyle(
-                                fontSize: 11,
+                                fontSize: 13,
                                 color: AppColors.textSecondary,
-                                fontWeight: FontWeight.w500),
+                                fontWeight: FontWeight.w600),
                           ),
                         ],
                       ),
@@ -1050,14 +1063,14 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 12, vertical: 10),
                         decoration: BoxDecoration(
-                          color: AppColors.background,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(color: AppColors.divider),
+                          color: CxColors.page,
+                          borderRadius: CxRadius.mdAll,
+                          border: Border.all(color: CxColors.border),
                         ),
                         child: Row(
                           children: [
                             const Icon(Icons.home_outlined,
-                                size: 16, color: AppColors.brandGreen),
+                                size: 20, color: CxColors.brand),
                             const SizedBox(width: 10),
                             Expanded(
                               child: Column(
@@ -1066,16 +1079,16 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                                   const Text(
                                     'COLLECTION ADDRESS',
                                     style: TextStyle(
-                                        fontSize: 9,
+                                        fontSize: 11,
                                         fontWeight: FontWeight.w600,
-                                        color: AppColors.textHint,
+                                        color: AppColors.textSecondary,
                                         letterSpacing: 0.5),
                                   ),
                                   const SizedBox(height: 2),
                                   Text(
                                     widget.patientAddress,
                                     style: const TextStyle(
-                                        fontSize: 12,
+                                        fontSize: 13,
                                         color: AppColors.textPrimary,
                                         fontWeight: FontWeight.w500),
                                     maxLines: 2,
@@ -1104,13 +1117,17 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value:
           SystemUiOverlayStyle.dark.copyWith(statusBarColor: Colors.transparent),
-      child: Scaffold(
+      child: CustomerThemeScope(
+        child: Scaffold(
         backgroundColor: Colors.white,
         body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Center(
+          child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: CxSize.dialogMaxWidth),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Container(
                   width: 96,
@@ -1139,10 +1156,10 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                       color: AppColors.textSecondary,
                       height: 1.55),
                 ),
-                const SizedBox(height: 44),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
+                const SizedBox(height: 40),
+                CxButton(
+                    label: 'Track Lab Progress',
+                    icon: Icons.biotech_rounded,
                     onPressed: () {
                       Navigator.of(context).pushAndRemoveUntil(
                         MaterialPageRoute(
@@ -1157,33 +1174,25 @@ class _TrackingMapScreenState extends State<TrackingMapScreen> {
                         (route) => route.isFirst,
                       );
                     },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.brandGreen,
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      padding: const EdgeInsets.symmetric(vertical: 15),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
-                    ),
-                    child: const Text('Track Lab Progress',
-                        style: TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w600)),
-                  ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 8),
                 TextButton(
                   onPressed: () =>
                       Navigator.of(context).popUntil((r) => r.isFirst),
+                  style: TextButton.styleFrom(minimumSize: const Size(120, CxSize.minTouch)),
                   child: const Text(
                     'Back to Home',
                     style: TextStyle(
-                        color: AppColors.textSecondary, fontSize: 13),
+                        color: AppColors.textSecondary, fontSize: 14, fontWeight: FontWeight.w600),
                   ),
                 ),
               ],
             ),
           ),
+          ),
+          ),
         ),
+      ),
       ),
     );
   }
@@ -1193,30 +1202,39 @@ class _CircleButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
   final bool highlighted;
+  final String? tooltip;
 
   const _CircleButton({
     required this.icon,
     required this.onTap,
     this.highlighted = false,
+    this.tooltip,
   });
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
+  Widget build(BuildContext context) {
+    final button = Semantics(
+      button: true,
+      label: tooltip,
+      child: GestureDetector(
         onTap: onTap,
         child: Container(
-          width: 40,
-          height: 40,
+          width: 44,
+          height: 44,
           decoration: BoxDecoration(
-            color: highlighted ? AppColors.blue : Colors.white,
+            color: highlighted ? CxColors.info : Colors.white,
             shape: BoxShape.circle,
             boxShadow: [
               BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.12), blurRadius: 8)
+                  color: Colors.black.withValues(alpha: 0.14), blurRadius: 10, offset: const Offset(0, 2))
             ],
           ),
           child: Icon(icon,
-              size: 16,
+              size: 18,
               color: highlighted ? Colors.white : AppColors.textPrimary),
         ),
-      );
+      ),
+    );
+    return tooltip == null ? button : Tooltip(message: tooltip!, child: button);
+  }
 }

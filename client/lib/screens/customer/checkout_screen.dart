@@ -11,6 +11,7 @@ import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 import 'my_bookings_screen.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
@@ -407,54 +408,37 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Slot section body ─────────────────────────────────────
   Widget _buildSlotBody() {
     if (_selectedDate == null) {
-      return const Text(
-        'Please select a date first',
-        style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+      return const CxBanner(
+        tone: CxTone.neutral,
+        icon: Icons.event_outlined,
+        message: 'Please select a date first',
       );
     }
     if (_loadingSlots) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.symmetric(vertical: 12),
-          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
-        ),
-      );
+      return const CxLoading(label: 'Finding available slots…');
     }
     if (_slotsError.isNotEmpty) {
-      return Text(
-        _slotsError,
-        style: const TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+      return CxBanner(
+        tone: CxTone.error,
+        message: _slotsError,
       );
     }
     if (_availableSlots.isEmpty) {
-      return const Text(
-        'No slots available. Try another date.',
-        style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+      return const CxBanner(
+        tone: CxTone.warning,
+        icon: Icons.event_busy_outlined,
+        message: 'No slots available. Try another date.',
       );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (_fallbackDateChanged) ...[
-          Container(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: AppColors.amberSurface,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: AppColors.amber.withValues(alpha: 0.3)),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.info_outline_rounded, size: 14, color: AppColors.amber),
-                const SizedBox(width: 8),
-                const Expanded(
-                  child: Text(
-                    'No slots on your selected date. Appointment date updated to the next available day.',
-                    style: TextStyle(fontSize: 12, color: AppColors.amber, height: 1.4),
-                  ),
-                ),
-              ],
+          const Padding(
+            padding: EdgeInsets.only(bottom: 10),
+            child: CxBanner(
+              tone: CxTone.warning,
+              message: 'No slots on your selected date. Appointment date updated to the next available day.',
             ),
           ),
         ],
@@ -465,30 +449,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         final isSelected  = _selectedSlot?.id == slot.id;
         final isFallback  = slot.id.isEmpty;
         final activeColor = isFallback ? AppColors.amber : AppColors.brandGreen;
-        return GestureDetector(
+        return _ChoicePill(
+          label: slot.label,
+          selected: isSelected,
+          activeColor: activeColor,
+          highlight: isFallback,
           onTap: () => setState(() {
             _selectedSlot            = slot;
             _selectedAppointmentTime = null;
           }),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-            decoration: BoxDecoration(
-              color: isSelected ? activeColor : Colors.white,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: isSelected ? activeColor : (isFallback ? AppColors.amber : AppColors.divider),
-                width: isSelected ? 1.5 : 1,
-              ),
-            ),
-            child: Text(slot.label,
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: isSelected
-                        ? Colors.white
-                        : (isFallback ? AppColors.amber : AppColors.textPrimary))),
-          ),
         );
       }).toList(),
         ),
@@ -497,33 +466,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   }
 
   // ── Prescription upload — multi-image ────────────────────
-  void _showPresSourcePicker() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        padding: EdgeInsets.fromLTRB(
-            20, 12, 20, MediaQuery.of(context).padding.bottom + 20),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            width: 40, height: 4,
-            margin: const EdgeInsets.only(bottom: 16),
-            decoration: BoxDecoration(
-                color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-          ),
-          _PresSourceTile(Icons.camera_alt_outlined, 'Camera', 'Take a photo now',
-              () { Navigator.pop(context); _pickPres(ImageSource.camera); }),
-          const SizedBox(height: 8),
-          _PresSourceTile(Icons.photo_library_outlined, 'Gallery', 'Choose from your photos',
-              () { Navigator.pop(context); _pickPres(ImageSource.gallery); }),
-          const SizedBox(height: 4),
-        ]),
-      ),
-    );
+  // Shared Camera / Gallery chooser (same labels as before). It only returns
+  // the choice; picking still goes through _pickPres exactly as before.
+  Future<void> _showPresSourcePicker() async {
+    final source = await showCxImageSourcePicker(context, title: 'Upload prescription');
+    if (source == null || !mounted) return;
+    _pickPres(source == CxImageSource.camera ? ImageSource.camera : ImageSource.gallery);
   }
 
   Future<void> _pickPres(ImageSource source) async {
@@ -570,20 +518,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-        child: Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+      // CxSheetFrame keeps the sheet above the keyboard and the safe area.
+      builder: (ctx) => CustomerThemeScope(
+        child: CxSheetFrame(
+          title: 'Edit Address',
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Center(child: Container(width: 40, height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)))),
-            const Text('Edit Address', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-            const SizedBox(height: 16),
             const Text('Address', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
             const SizedBox(height: 6),
             TextField(controller: addrCtrl, maxLines: 2,
@@ -609,7 +548,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ])),
             ]),
             const SizedBox(height: 20),
-            SizedBox(width: double.infinity, child: ElevatedButton(
+            CxButton(
               onPressed: () {
                 final a = addrCtrl.text.trim();
                 final p = pincodeCtrl.text.trim();
@@ -621,13 +560,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 });
                 Navigator.pop(ctx);
               },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.brandGreen, foregroundColor: Colors.white,
-                elevation: 0, padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-              child: const Text('Save Address', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-            )),
+              icon: Icons.check_rounded,
+              label: 'Save Address',
+            ),
           ]),
         ),
       ),
@@ -635,13 +570,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     addrCtrl.dispose(); pincodeCtrl.dispose(); cityCtrl.dispose();
   }
 
+  // Borders, focus colour and padding come from the customer theme.
   InputDecoration _addrInputDecor(String hint) => InputDecoration(
     hintText: hint,
-    hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
-    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
   );
 
   // ── Family: open add-member sheet (it loads tests page by page itself) ──
@@ -1119,20 +1050,27 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8),
+    // Customer look for checkout and the sheets it opens.
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
         elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20),
+          tooltip: 'Back',
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text('Checkout',
-            style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
+            style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
       ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+      body: Center(
+        child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: CxSize.contentMaxWidth),
+        child: ListView(
+        padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, 140),
         children: [
 
           // ── Order Summary ─────────────────────────────────
@@ -1142,33 +1080,29 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             child: Column(
               children: [
                 ...widget.cart.map((t) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  padding: const EdgeInsets.symmetric(vertical: 6),
                   child: Row(
                     children: [
-                      Container(
-                        width: 6, height: 6,
-                        decoration: BoxDecoration(
-                          color: t.type == 'package'
-                              ? AppColors.brandGreen
-                              : const Color(0xFF1565C0),
-                          shape: BoxShape.circle,
-                        ),
+                      CxIconBadge(
+                        icon: t.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
+                        tone: t.type == 'package' ? CxTone.brand : CxTone.info,
+                        size: 34,
                       ),
-                      const SizedBox(width: 10),
+                      const SizedBox(width: CxSpace.md),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(t.name,
-                                style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+                            Text(t.name, style: CxText.body.copyWith(fontWeight: FontWeight.w600)),
                             if (t.docRequired)
                               const Text('Prescription required',
-                                  style: TextStyle(fontSize: 11, color: Color(0xFFE65100))),
+                                  style: TextStyle(fontSize: 12, color: CxColors.warning, fontWeight: FontWeight.w500)),
                           ],
                         ),
                       ),
+                      const SizedBox(width: CxSpace.sm),
                       Text('₹${t.finalPrice.toInt()}',
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                          style: CxText.body.copyWith(fontWeight: FontWeight.w700)),
                     ],
                   ),
                 )),
@@ -1176,20 +1110,22 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
           ),
 
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.md),
 
           // ── Collection Info ───────────────────────────────
           _SectionCard(
             title: widget.mode == 'Lab Test' ? 'Lab Appointment' : widget.mode,
             icon: widget.mode == 'Home Collection' ? Icons.home_outlined : Icons.local_hospital_outlined,
             trailing: widget.mode == 'Home Collection'
-                ? GestureDetector(
-                    onTap: _editAddress,
-                    child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.edit_outlined, size: 14, color: AppColors.brandGreen),
-                      SizedBox(width: 3),
-                      Text('Edit', style: TextStyle(fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-                    ]),
+                ? TextButton.icon(
+                    onPressed: _editAddress,
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    label: const Text('Edit'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: CxColors.brand,
+                      minimumSize: const Size(48, 40),
+                      textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                    ),
                   )
                 : null,
             child: Column(
@@ -1207,26 +1143,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       Expanded(child: _InfoLine(Icons.location_city_outlined, _city!)),
                   ]),
                   if (_lat == null) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFFF3CD),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                            color: const Color(0xFFFFCC02).withValues(alpha: 0.6)),
-                      ),
-                      child: const Row(children: [
-                        Icon(Icons.location_off_outlined,
-                            size: 13, color: Color(0xFF856404)),
-                        SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            'Location not pinned on map — technician tracking will use address only.',
-                            style: TextStyle(fontSize: 11, color: Color(0xFF856404), height: 1.4),
-                          ),
-                        ),
-                      ]),
+                    const SizedBox(height: CxSpace.sm),
+                    const CxBanner(
+                      tone: CxTone.warning,
+                      icon: Icons.location_off_outlined,
+                      message: 'Location not pinned on map — technician tracking will use address only.',
                     ),
                   ],
                 ],
@@ -1238,50 +1159,52 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
           ),
 
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.md),
 
           // ── Date Selection ────────────────────────────────
           _SectionCard(
             title: 'Booking Date',
             icon: Icons.calendar_today_outlined,
             required: true,
-            child: GestureDetector(
-              onTap: _pickDate,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-                decoration: BoxDecoration(
-                  color: _selectedDate != null ? AppColors.brandGreenSurface : AppColors.background,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: _selectedDate != null ? AppColors.brandGreen : AppColors.divider,
-                    width: _selectedDate != null ? 1.5 : 1,
-                  ),
+            child: Material(
+              color: _selectedDate != null ? CxColors.brandSurface : Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: CxRadius.mdAll,
+                side: BorderSide(
+                  color: _selectedDate != null ? CxColors.brand : CxColors.border,
+                  width: _selectedDate != null ? 1.5 : 1,
                 ),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+              onTap: _pickDate,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
                 child: Row(
                   children: [
                     Icon(Icons.event_outlined,
-                        size: 20,
-                        color: _selectedDate != null ? AppColors.brandGreen : AppColors.textHint),
+                        size: 22,
+                        color: _selectedDate != null ? CxColors.brand : CxColors.textHint),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(
                         _selectedDate != null ? _formatDate(_selectedDate!) : 'Select booking date',
                         style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: _selectedDate != null ? FontWeight.w500 : FontWeight.w400,
-                            color: _selectedDate != null ? AppColors.textPrimary : AppColors.textHint),
+                            fontSize: 15,
+                            fontWeight: _selectedDate != null ? FontWeight.w600 : FontWeight.w400,
+                            color: _selectedDate != null ? CxColors.textPrimary : CxColors.textHint),
                       ),
                     ),
                     Icon(Icons.keyboard_arrow_down_rounded,
-                        color: _selectedDate != null ? AppColors.brandGreen : AppColors.textHint),
+                        color: _selectedDate != null ? CxColors.brand : CxColors.textHint),
                   ],
                 ),
+              ),
               ),
             ),
           ),
 
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.md),
 
           // ── Time Slot ─────────────────────────────────────
           _SectionCard(
@@ -1293,7 +1216,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
           // ── Appointment Time (shown when slot has intervals) ─
           if (_selectedSlot != null && _currentSlotIntervals.isNotEmpty) ...[
-            const SizedBox(height: 14),
+            const SizedBox(height: CxSpace.md),
             _SectionCard(
               title: 'Appointment Time',
               icon: Icons.access_time_outlined,
@@ -1303,32 +1226,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 runSpacing: 10,
                 children: _currentSlotIntervals.map((interval) {
                   final isSel = _selectedAppointmentTime?.time == interval.time;
-                  return GestureDetector(
+                  return _ChoicePill(
+                    label: interval.label,
+                    selected: isSel,
                     onTap: () => setState(() => _selectedAppointmentTime = interval),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 180),
-                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: isSel ? AppColors.brandGreen : Colors.white,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: isSel ? AppColors.brandGreen : AppColors.divider,
-                          width: isSel ? 1.5 : 1,
-                        ),
-                      ),
-                      child: Text(interval.label,
-                          style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: isSel ? Colors.white : AppColors.textPrimary)),
-                    ),
                   );
                 }).toList(),
               ),
             ),
           ],
 
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.md),
 
           // ── Prescription / Document (multi-image) ─────────
           if (_primaryNeedsPrescription || widget.isVip)
@@ -1340,34 +1248,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // Info banner
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFFF3E0),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: const Color(0xFFFFCC02)),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFFE65100)),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            widget.mode == 'Lab Test'
-                                ? 'A valid prescription is required for ${widget.member.name}. Upload it below — payment will be collected at the branch after verification.'
-                                : 'A valid prescription is required for ${widget.member.name}. Upload it below — you cannot proceed without uploading.',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              height: 1.4,
-                              color: Color(0xFF795548),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+                  CxBanner(
+                    tone: CxTone.warning,
+                    message: widget.mode == 'Lab Test'
+                        ? 'A valid prescription is required for ${widget.member.name}. Upload it below — payment will be collected at the branch after verification.'
+                        : 'A valid prescription is required for ${widget.member.name}. Upload it below — you cannot proceed without uploading.',
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: CxSpace.md),
 
                   // Thumbnail grid
                   if (_prescriptions.isNotEmpty) ...[
@@ -1396,26 +1283,25 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     const SizedBox(height: 4),
                     Text(
                       '${_prescriptions.length} of $_maxPrescrips image${_prescriptions.length == 1 ? '' : 's'} uploaded',
-                      style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                      style: CxText.caption,
                     ),
                     const SizedBox(height: 10),
                   ],
 
                   // Empty upload tile
                   if (_prescriptions.isEmpty)
-                    GestureDetector(
+                    Material(
+                      color: CxColors.brandSurface,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: CxRadius.mdAll,
+                        side: BorderSide(color: CxColors.brand.withValues(alpha: 0.4), width: 1.5),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
                       onTap: _isPicking ? null : _showPresSourcePicker,
                       child: Container(
                         width: double.infinity,
-                        padding: const EdgeInsets.symmetric(vertical: 20),
-                        decoration: BoxDecoration(
-                          color: AppColors.background,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: const Color(0xFFE65100),
-                            width: 1.5,
-                          ),
-                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 22),
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -1426,86 +1312,51 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                                         strokeWidth: 2,
                                         color: AppColors.brandGreen))
                                 : const Icon(Icons.upload_file_outlined,
-                                    size: 28, color: AppColors.brandGreen),
+                                    size: 30, color: AppColors.brandGreen),
                             const SizedBox(height: 8),
                             Text(
                               _isPicking ? 'Picking…' : 'Tap to upload prescription',
                               style: const TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w500,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
                                   color: AppColors.brandGreen),
                             ),
                             const SizedBox(height: 3),
                             Text(
                               'Up to $_maxPrescrips images · JPG or PNG',
-                              style: const TextStyle(
-                                  fontSize: 11, color: AppColors.textHint),
+                              style: CxText.caption,
                             ),
                           ],
                         ),
+                      ),
                       ),
                     ),
 
                   // Verification status
                   if (_prescriptions.isNotEmpty && !_docVerified) ...[
                     const SizedBox(height: 10),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: AppColors.brandGreenSurface,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: AppColors.brandGreenLight),
-                      ),
-                      child: Row(children: [
-                        const Icon(Icons.hourglass_top_rounded, size: 14, color: AppColors.brandGreen),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text('Prescription uploaded',
-                                  style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.brandGreen)),
-                              Text(
-                                  widget.mode == 'Lab Test'
-                                      ? 'Bring original to the branch on appointment day'
-                                      : 'Awaiting technician verification',
-                                  style: const TextStyle(
-                                      fontSize: 11,
-                                      color: AppColors.textSecondary)),
-                            ],
-                          ),
-                        ),
-                      ]),
+                    CxBanner(
+                      tone: CxTone.brand,
+                      icon: Icons.hourglass_top_rounded,
+                      title: 'Prescription uploaded',
+                      message: widget.mode == 'Lab Test'
+                          ? 'Bring original to the branch on appointment day'
+                          : 'Awaiting technician verification',
                     ),
                   ],
                   if (_docVerified) ...[
                     const SizedBox(height: 10),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: AppColors.brandGreenSurface,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: AppColors.brandGreen),
-                      ),
-                      child: const Row(children: [
-                        Icon(Icons.verified_outlined, size: 16, color: AppColors.brandGreen),
-                        SizedBox(width: 8),
-                        Expanded(child: Text('Document verified by technician',
-                            style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.brandGreen))),
-                      ]),
+                    const CxBanner(
+                      tone: CxTone.success,
+                      icon: Icons.verified_outlined,
+                      message: 'Document verified by technician',
                     ),
                   ],
                 ],
               ),
             ),
 
-          if (_anyDocRequired) const SizedBox(height: 14),
+          if (_anyDocRequired) const SizedBox(height: CxSpace.md),
 
           // ── Payment Options ───────────────────────────────
           _SectionCard(
@@ -1516,29 +1367,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 // Service charge info banner
-                if (widget.mode != 'Lab Test')
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    margin: const EdgeInsets.only(bottom: 14),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppColors.brandGreenLight),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.directions_car_outlined, size: 14, color: AppColors.brandGreen),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Home collection service charge is calculated based on distance and collected at the time of sample collection.',
-                            style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4),
-                          ),
-                        ),
-                      ],
-                    ),
+                if (widget.mode != 'Lab Test') ...[
+                  const CxBanner(
+                    tone: CxTone.info,
+                    icon: Icons.directions_car_outlined,
+                    message: 'Home collection service charge is calculated based on distance and collected at the time of sample collection.',
                   ),
+                  const SizedBox(height: 14),
+                ],
 
                 // Option 1: Pay Full Amount Now
                 _PaymentOptionTile(
@@ -1574,7 +1410,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
           ),
 
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.md),
 
           // ── VIP: Technician Selection ─────────────────────
           if (widget.isVip) ...[
@@ -1586,14 +1422,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (_selectedDate == null || _selectedSlot == null)
-                    const Text(
-                      'Please select a date and time slot first to see available technicians.',
-                      style: TextStyle(fontSize: 12, color: AppColors.textHint, fontStyle: FontStyle.italic),
+                    const CxBanner(
+                      tone: CxTone.neutral,
+                      message: 'Please select a date and time slot first to see available technicians.',
                     )
                   else ...[
                     Text(
                       'Available for ${_selectedSlot!.label} on ${_formatDate(_selectedDate!)}',
-                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary, height: 1.4),
+                      style: CxText.bodySecondary,
                     ),
                     const SizedBox(height: 12),
                     // TODO: replace with GET /api/technicians?date=_selectedDate&slot=_selectedSlot.time
@@ -1610,11 +1446,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 ],
               ),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: CxSpace.md),
           ],
 
           // ── Notes (optional) ──────────────────────────────
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.md),
           _SectionCard(
             title: 'Notes',
             icon: Icons.notes_outlined,
@@ -1623,30 +1459,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               maxLines: 3,
               maxLength: 300,
               textInputAction: TextInputAction.done,
-              style: const TextStyle(fontSize: 14),
-              decoration: InputDecoration(
+              textCapitalization: TextCapitalization.sentences,
+              style: CxText.body,
+              decoration: const InputDecoration(
                 hintText: 'Any special instructions',
-                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.divider),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.divider),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
-                ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                counterStyle: const TextStyle(fontSize: 11, color: AppColors.textHint),
+                counterStyle: CxText.caption,
               ),
             ),
           ),
 
           // ── Doctor Name ─────────────────────────────────────
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.md),
           _SectionCard(
             title: 'Doctor Name',
             required: true,
@@ -1656,31 +1479,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               maxLines: 1,
               maxLength: 150,
               textInputAction: TextInputAction.done,
-              style: const TextStyle(fontSize: 14),
-              decoration: InputDecoration(
+              textCapitalization: TextCapitalization.words,
+              style: CxText.body,
+              decoration: const InputDecoration(
                 hintText: 'Enter doctor name or Self',
-                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.divider),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.divider),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
-                ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                counterStyle: const TextStyle(fontSize: 11, color: AppColors.textHint),
+                prefixIcon: Icon(Icons.person_outline_rounded, size: 20, color: CxColors.textHint),
+                counterStyle: CxText.caption,
               ),
             ),
           ),
 
           // ── Family Members (Home Collection only) ─────────
           if (widget.mode == 'Home Collection') ...[
-            const SizedBox(height: 14),
+            const SizedBox(height: CxSpace.md),
             _SectionCard(
               title: 'Family Members (Same Visit)',
               icon: Icons.group_outlined,
@@ -1689,10 +1500,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 children: [
                   if (_familyMembers.isEmpty)
                     const Padding(
-                      padding: EdgeInsets.only(bottom: 10),
+                      padding: EdgeInsets.only(bottom: 12),
                       child: Text(
                         'Add family members to share this home collection visit — single service charge applies.',
-                        style: TextStyle(fontSize: 12, color: AppColors.textHint, height: 1.4),
+                        style: CxText.bodySecondary,
                       ),
                     ),
                   ..._familyMembers.map((m) => Column(
@@ -1708,48 +1519,30 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                           controller: m.doctorCtrl,
                           maxLength: 150,
                           textInputAction: TextInputAction.done,
-                          style: const TextStyle(fontSize: 13),
+                          textCapitalization: TextCapitalization.words,
+                          style: CxText.body,
                           decoration: InputDecoration(
                             hintText: 'Doctor name for ${m.patient.name}',
-                            hintStyle: const TextStyle(fontSize: 12, color: AppColors.textHint),
-                            prefixIcon: const Icon(Icons.local_hospital_outlined, size: 16, color: AppColors.textHint),
-                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(8),
-                              borderSide: const BorderSide(color: AppColors.divider),
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(8),
-                              borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                            counterStyle: const TextStyle(fontSize: 10, color: AppColors.textHint),
+                            prefixIcon: const Icon(Icons.local_hospital_outlined, size: 20, color: CxColors.textHint),
+                            counterStyle: CxText.caption,
                           ),
                         ),
                       ),
                     ],
                   )),
                   const SizedBox(height: 4),
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: _showAddMemberSheet,
-                      icon: const Icon(Icons.person_add_outlined, size: 16),
-                      label: const Text('Add Family Member'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.brandGreen,
-                        side: const BorderSide(color: AppColors.brandGreen),
-                        padding: const EdgeInsets.symmetric(vertical: 10),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                      ),
-                    ),
+                  CxButton.secondary(
+                    onPressed: _showAddMemberSheet,
+                    icon: Icons.person_add_outlined,
+                    label: 'Add Family Member',
+                    compact: true,
                   ),
                 ],
               ),
             ),
           ],
 
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.md),
 
           // ── Billing Summary ───────────────────────────────
           _SectionCard(
@@ -1767,32 +1560,55 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       : _fareAmount != null
                         ? _BillRow('Service Charge', '₹${_fareAmount!.toInt()}')
                         : const _BillRow('Service Charge', 'N/A', sub: true),
-                const Divider(height: 20),
+                const Divider(height: 24),
                 _BillRow('Grand Total', '₹${_grandTotal.toInt()}', bold: true),
-                const SizedBox(height: 8),
-                _BillRow('Pay Now', '₹${_payableNow.toInt()}', bold: true, green: true),
-                if (_paymentType == 'pay_later')
-                  _BillRow('Due at Collection', '₹${_payableLater.toInt()}', sub: true),
+                const SizedBox(height: CxSpace.sm),
+                // The amount the customer acts on, set apart.
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: const BoxDecoration(
+                    color: CxColors.brandSurface,
+                    borderRadius: CxRadius.mdAll,
+                  ),
+                  child: Column(children: [
+                    _BillRow('Pay Now', '₹${_payableNow.toInt()}', bold: true, green: true),
+                    if (_paymentType == 'pay_later')
+                      _BillRow('Due at Collection', '₹${_payableLater.toInt()}', sub: true),
+                  ]),
+                ),
               ],
             ),
           ),
         ],
       ),
+        ),
+      ),
 
       // ── Bottom Pay Button ─────────────────────────────────
       bottomNavigationBar: Container(
-        padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
+        padding: EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, MediaQuery.of(context).padding.bottom + CxSpace.md),
         decoration: const BoxDecoration(
           color: Colors.white,
-          border: Border(top: BorderSide(color: AppColors.divider)),
+          border: Border(top: BorderSide(color: CxColors.border)),
+          boxShadow: [BoxShadow(color: Color(0x12000000), blurRadius: 14, offset: Offset(0, -3))],
         ),
-        child: Column(
+        child: Center(
+          heightFactor: 1,
+          child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: CxSize.contentMaxWidth),
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (!_canProceed)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.info_outline_rounded, size: 16, color: CxColors.error),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
                   _selectedDate == null
                       ? 'Please select a date'
                       : _selectedSlot == null
@@ -1804,40 +1620,60 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                                   : (_primaryNeedsPrescription && _prescriptions.isEmpty)
                                       ? 'Upload prescription for ${widget.member.name} to continue'
                                       : '',
-                  style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)),
+                  style: const TextStyle(fontSize: 13, color: CxColors.error, fontWeight: FontWeight.w500),
                   textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: ElevatedButton(
-                onPressed: _canProceed && !_isProcessing ? _proceedToPayment : null,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: (_paymentType == 'pay_later' || _paymentType == 'cash')
-                      ? AppColors.brandGreen
-                      : const Color(0xFF1565C0),
-                  disabledBackgroundColor: ((_paymentType == 'pay_later' || _paymentType == 'cash')
-                      ? AppColors.brandGreen
-                      : const Color(0xFF1565C0)).withValues(alpha: 0.35),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-                child: _isProcessing
-                    ? const SizedBox(width: 20, height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
-                    : Text(
-                        _paymentType == 'pay_later'
-                            ? 'Confirm Booking · Pay Later'
-                            : _paymentType == 'cash'
-                                ? 'Confirm Booking · Pay Cash'
-                                : 'Pay ₹${_payableNow.toInt()} via Razorpay',
-                        style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500)),
+            Row(children: [
+              // Amount at a glance next to the button.
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_paymentType == 'pay_later' ? 'Pay later' : 'Pay now', style: CxText.caption),
+                  Text('₹${_payableNow.toInt()}',
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: CxColors.textPrimary)),
+                ],
               ),
-            ),
+              const SizedBox(width: CxSpace.lg),
+              Expanded(
+                child: SizedBox(
+                  height: 52,
+                  child: FilledButton(
+                    onPressed: _canProceed && !_isProcessing ? _proceedToPayment : null,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: CxColors.brand,
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: _isProcessing ? CxColors.brand : CxColors.border,
+                      disabledForegroundColor: _isProcessing ? Colors.white : CxColors.textHint,
+                      shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
+                      textStyle: CxText.button,
+                    ),
+                    child: _isProcessing
+                        ? const SizedBox(width: 20, height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
+                        : Text(
+                            _paymentType == 'pay_later'
+                                ? 'Confirm Booking · Pay Later'
+                                : _paymentType == 'cash'
+                                    ? 'Confirm Booking · Pay Cash'
+                                    : 'Pay ₹${_payableNow.toInt()} via Razorpay',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                  ),
+                ),
+              ),
+            ]),
           ],
+          ),
+          ),
         ),
+      ),
       ),
     );
   }
@@ -1860,29 +1696,34 @@ class _TechnicianTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        margin: const EdgeInsets.only(bottom: 10),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: selected ? AppColors.brandGreenSurface : AppColors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: selected ? AppColors.brandGreen : AppColors.divider,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Semantics(
+        button: true,
+        selected: selected,
+        child: Material(
+        color: selected ? CxColors.brandSurface : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: CxRadius.lgAll,
+          side: BorderSide(
+            color: selected ? CxColors.brand : CxColors.border,
             width: selected ? 1.5 : 1,
           ),
         ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+        onTap: onTap,
+        child: Padding(
+        padding: const EdgeInsets.all(CxSpace.md),
         child: Row(
           children: [
             // Avatar
             Container(
-              width: 42, height: 42,
+              width: 44, height: 44,
               decoration: BoxDecoration(
                 color: selected
-                    ? AppColors.brandGreen
-                    : AppColors.brandGreenSurface,
+                    ? CxColors.brand
+                    : CxColors.brandSurface,
                 shape: BoxShape.circle,
               ),
               child: Center(
@@ -1891,9 +1732,9 @@ class _TechnicianTile extends StatelessWidget {
                       ? technician.name.split(' ').map((w) => w[0]).take(2).join()
                       : '?',
                   style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: selected ? Colors.white : AppColors.brandGreen),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: selected ? Colors.white : CxColors.brand),
                 ),
               ),
             ),
@@ -1904,45 +1745,32 @@ class _TechnicianTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(technician.name,
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: selected
-                              ? AppColors.brandGreen
-                              : AppColors.textPrimary)),
+                  Text(technician.name, style: CxText.cardTitle),
                   const SizedBox(height: 3),
                   Row(children: [
                     const Icon(Icons.star_rounded,
-                        size: 12, color: Color(0xFFFFB300)),
+                        size: 15, color: Color(0xFFFFB300)),
                     const SizedBox(width: 3),
                     Text('${technician.rating}  ·  ${technician.experience}',
-                        style: const TextStyle(
-                            fontSize: 11, color: AppColors.textSecondary)),
+                        style: CxText.caption),
                   ]),
                   const SizedBox(height: 3),
                   Text(technician.specializations.join(', '),
-                      style: const TextStyle(
-                          fontSize: 11, color: AppColors.textHint),
+                      style: CxText.caption,
                       overflow: TextOverflow.ellipsis),
                 ],
               ),
             ),
 
-            // Radio circle
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              width: 20, height: 20,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: selected ? AppColors.brandGreen : AppColors.divider,
-                  width: selected ? 5 : 1.5,
-                ),
-                color: Colors.white,
-              ),
+            // Radio
+            Icon(
+              selected ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
+              color: selected ? CxColors.brand : CxColors.textHint,
             ),
           ],
+        ),
+        ),
+        ),
         ),
       ),
     );
@@ -1974,41 +1802,41 @@ class _PaymentOptionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
+    return Semantics(
+      button: true,
+      selected: selected,
+      enabled: enabled,
+      child: Material(
+      color: !enabled
+          ? CxColors.surfaceMuted
+          : selected
+              ? badgeColor.withValues(alpha: 0.06)
+              : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: CxRadius.lgAll,
+        side: BorderSide(
           color: !enabled
-              ? const Color(0xFFF5F5F5)
+              ? CxColors.border
               : selected
-                  ? badgeColor.withOpacity(0.05)
-                  : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: !enabled
-                ? AppColors.divider
-                : selected
-                    ? badgeColor
-                    : AppColors.divider,
-            width: selected ? 1.5 : 1,
-          ),
+                  ? badgeColor
+                  : CxColors.border,
+          width: selected ? 1.6 : 1,
         ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.all(CxSpace.lg),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              width: 20, height: 20,
-              margin: const EdgeInsets.only(top: 2),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: !enabled ? AppColors.divider : selected ? badgeColor : AppColors.divider,
-                  width: selected ? 5 : 1.5,
-                ),
-                color: Colors.white,
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(
+                selected ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
+                color: !enabled ? CxColors.border : selected ? badgeColor : CxColors.textHint,
+                size: 22,
               ),
             ),
             const SizedBox(width: 12),
@@ -2023,48 +1851,138 @@ class _PaymentOptionTile extends StatelessWidget {
                     children: [
                       Text(title,
                           style: TextStyle(
-                              fontSize: 13,
+                              fontSize: 15,
                               fontWeight: FontWeight.w600,
                               color: !enabled
-                                  ? AppColors.textHint
-                                  : selected
-                                      ? badgeColor
-                                      : AppColors.textPrimary)),
+                                  ? CxColors.textHint
+                                  : CxColors.textPrimary)),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                         decoration: BoxDecoration(
-                          color: badgeColor.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(6),
+                          color: badgeColor.withValues(alpha: 0.1),
+                          borderRadius: CxRadius.pill,
                         ),
                         child: Text(badge,
-                            style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700,
-                                color: badgeColor, letterSpacing: 0.5)),
+                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                                color: badgeColor, letterSpacing: 0.4)),
                       ),
                     ],
                   ),
                   const SizedBox(height: 4),
                   Text(subtitle,
-                      style: TextStyle(fontSize: 12,
-                          color: !enabled ? AppColors.textHint : AppColors.textSecondary,
+                      style: TextStyle(fontSize: 13,
+                          color: !enabled ? CxColors.textHint : CxColors.textSecondary,
                           height: 1.4)),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 8),
                   Text(amount,
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
-                          color: !enabled ? AppColors.textHint : badgeColor)),
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700,
+                          color: !enabled ? CxColors.textHint : badgeColor)),
                 ],
               ),
             ),
             if (!enabled)
               const Padding(
                 padding: EdgeInsets.only(top: 2),
-                child: Icon(Icons.lock_outline_rounded, size: 16, color: AppColors.textHint),
+                child: Icon(Icons.lock_outline_rounded, size: 18, color: CxColors.textHint),
               ),
           ],
         ),
       ),
+      ),
+      ),
     );
   }
 }
+
+// ─── Booking result screens: shared hero card ─────────────────────────────────
+
+class _ResultHero extends StatelessWidget {
+  final IconData icon;
+  final CxTone tone;
+  final String title;
+  final String? reference;
+  final String? message;
+  final Widget? footer;
+  const _ResultHero({required this.icon, required this.tone, required this.title,
+      this.reference, this.message, this.footer});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.fromLTRB(CxSpace.xxl, 28, CxSpace.xxl, CxSpace.xxl),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: CxRadius.lgAll,
+          border: Border.all(color: CxColors.border),
+          boxShadow: const [BoxShadow(color: Color(0x0D000000), blurRadius: 10, offset: Offset(0, 2))],
+        ),
+        child: Column(
+          children: [
+            Container(
+              width: 84, height: 84,
+              decoration: BoxDecoration(color: tone.surface, shape: BoxShape.circle),
+              child: Icon(icon, size: 46, color: tone.color),
+            ),
+            const SizedBox(height: CxSpace.lg),
+            Text(title, textAlign: TextAlign.center, style: CxText.pageTitle.copyWith(fontSize: 22)),
+            if (reference != null) ...[
+              const SizedBox(height: 6),
+              CxChip(label: reference!, icon: Icons.tag_rounded, tone: CxTone.neutral),
+            ],
+            if (message != null) ...[
+              const SizedBox(height: CxSpace.sm),
+              Text(message!, textAlign: TextAlign.center, style: CxText.bodySecondary),
+            ],
+            if (footer != null) ...[const SizedBox(height: CxSpace.lg), footer!],
+          ],
+        ),
+      );
+}
+
+// Bottom actions on the result screens.
+class _ResultActions extends StatelessWidget {
+  final VoidCallback onHome;
+  final VoidCallback onBookings;
+  const _ResultActions({required this.onHome, required this.onBookings});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, MediaQuery.of(context).padding.bottom + CxSpace.md),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: CxColors.border)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: CxButton.secondary(onPressed: onHome, icon: Icons.home_outlined, label: 'Back to Home'),
+            ),
+            const SizedBox(width: CxSpace.md),
+            Expanded(
+              child: CxButton(onPressed: onBookings, icon: Icons.calendar_month_outlined, label: 'My Bookings'),
+            ),
+          ],
+        ),
+      );
+}
+
+Widget _testsBookedList(List<TestModel> tests) => Column(
+      children: tests.map((t) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(
+          children: [
+            CxIconBadge(
+              icon: t.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
+              tone: t.type == 'package' ? CxTone.brand : CxTone.info,
+              size: 32,
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Text(t.name, style: CxText.body)),
+            Text('₹${t.finalPrice.toInt()}',
+                style: CxText.body.copyWith(fontWeight: FontWeight.w700)),
+          ],
+        ),
+      )).toList(),
+    );
 
 // ─── Booking Success (Lab Test / static) ─────────────────────────────────────
 
@@ -2082,67 +2000,38 @@ class _BookingSuccessScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8),
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       body: SafeArea(
         child: Column(
           children: [
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
+              child: Center(
+                child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: CxSize.contentMaxWidth),
+                child: ListView(
+                padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.xxl, CxSpace.gutter, CxSpace.xxl),
                 children: [
                   // Success banner
-                  Container(
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: AppColors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: AppColors.divider),
-                    ),
-                    child: Column(
-                      children: [
-                        Container(
-                          width: 72, height: 72,
-                          decoration: const BoxDecoration(
-                            color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-                          child: const Icon(Icons.check_circle_outline_rounded,
-                              size: 40, color: AppColors.brandGreen),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text('Booking Successful!',
-                            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-                        if (booking.referenceNo != null) ...[
-                          const SizedBox(height: 6),
-                          Text(booking.referenceNo!,
-                              style: const TextStyle(fontSize: 13, color: AppColors.textSecondary, letterSpacing: 0.5)),
-                        ],
-                        const SizedBox(height: 16),
-                        BookingStatusBadge(status: booking.status),
-                      ],
-                    ),
+                  _ResultHero(
+                    icon: Icons.check_circle_rounded,
+                    tone: CxTone.success,
+                    title: 'Booking Successful!',
+                    reference: booking.referenceNo,
+                    footer: BookingStatusBadge(status: booking.status),
                   ),
 
                   if (familyCount > 0) ...[
-                    const SizedBox(height: 14),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                      decoration: BoxDecoration(
-                        color: AppColors.brandGreenSurface,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: AppColors.brandGreenLight),
-                      ),
-                      child: Row(children: [
-                        const Icon(Icons.group_outlined, size: 18, color: AppColors.brandGreen),
-                        const SizedBox(width: 10),
-                        Expanded(child: Text(
-                          '$familyCount more family member${familyCount == 1 ? '' : 's'} added to this visit',
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.brandGreen),
-                        )),
-                      ]),
+                    const SizedBox(height: CxSpace.md),
+                    CxBanner(
+                      tone: CxTone.brand,
+                      icon: Icons.group_outlined,
+                      message: '$familyCount more family member${familyCount == 1 ? '' : 's'} added to this visit',
                     ),
                   ],
 
-                  const SizedBox(height: 14),
+                  const SizedBox(height: CxSpace.md),
 
                   _SectionCard(
                     title: 'Booking Details',
@@ -2177,32 +2066,15 @@ class _BookingSuccessScreen extends StatelessWidget {
                     ),
                   ),
 
-                  const SizedBox(height: 14),
+                  const SizedBox(height: CxSpace.md),
 
                   _SectionCard(
                     title: 'Tests Booked',
                     icon: Icons.science_outlined,
-                    child: Column(
-                      children: booking.tests.map((t) => Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 5),
-                        child: Row(
-                          children: [
-                            Container(width: 6, height: 6,
-                              decoration: BoxDecoration(
-                                color: t.type == 'package' ? AppColors.brandGreen : const Color(0xFF1565C0),
-                                shape: BoxShape.circle)),
-                            const SizedBox(width: 10),
-                            Expanded(child: Text(t.name,
-                                style: const TextStyle(fontSize: 13, color: AppColors.textPrimary))),
-                            Text('₹${t.finalPrice.toInt()}',
-                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                          ],
-                        ),
-                      )).toList(),
-                    ),
+                    child: _testsBookedList(booking.tests),
                   ),
 
-                  const SizedBox(height: 14),
+                  const SizedBox(height: CxSpace.md),
 
                   _SectionCard(
                     title: 'Payment',
@@ -2220,86 +2092,49 @@ class _BookingSuccessScreen extends StatelessWidget {
                         if (booking.paymentType == 'pay_later')
                           _ConfirmRow(Icons.schedule_outlined, 'Due at Collection',
                               '₹${booking.grandTotal.toInt()}${booking.mode == 'Lab Test' ? '' : ' (tests + service charge)'}',
-                              valueColor: const Color(0xFFE65100)),
+                              valueColor: CxColors.warning),
                       ],
                     ),
                   ),
 
-                  const SizedBox(height: 14),
+                  const SizedBox(height: CxSpace.md),
 
-                  Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.brandGreenLight),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text("What's next?",
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-                        const SizedBox(height: 10),
-                        if (booking.mode == 'Lab Test') ...[
-                          const _NextStep('1', 'Visit the branch at your selected date and time slot'),
-                          const _NextStep('2', 'Carry any required prescriptions or documents'),
-                          const _NextStep('3', 'Follow the pre-test instructions for your tests'),
-                          const _NextStep('4', 'Reports will be shared within the promised time'),
-                        ] else ...[
-                          const _NextStep('1', 'A technician has been allocated to your booking'),
-                          const _NextStep('2', 'You will receive a call 1 hour before the appointment'),
-                          const _NextStep('3', 'Keep your samples ready as per test requirements'),
-                          const _NextStep('4', 'Reports will be shared within the promised time'),
-                        ],
-                      ],
-                    ),
+                  _NextStepsCard(
+                    title: "What's next?",
+                    tone: CxTone.brand,
+                    steps: booking.mode == 'Lab Test'
+                        ? const [
+                            _NextStep('1', 'Visit the branch at your selected date and time slot'),
+                            _NextStep('2', 'Carry any required prescriptions or documents'),
+                            _NextStep('3', 'Follow the pre-test instructions for your tests'),
+                            _NextStep('4', 'Reports will be shared within the promised time'),
+                          ]
+                        : const [
+                            _NextStep('1', 'A technician has been allocated to your booking'),
+                            _NextStep('2', 'You will receive a call 1 hour before the appointment'),
+                            _NextStep('3', 'Keep your samples ready as per test requirements'),
+                            _NextStep('4', 'Reports will be shared within the promised time'),
+                          ],
                   ),
                 ],
+              ),
+                ),
               ),
             ),
 
-            Container(
-              padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
-              color: Colors.white,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () {
-                        onBookingComplete?.call();
-                        Navigator.popUntil(context, (route) => route.isFirst);
-                      },
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.brandGreen,
-                        side: const BorderSide(color: AppColors.brandGreen, width: 1.5),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text('Back to Home', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => MyBookingsScreen(initialBooking: booking)));
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.brandGreen,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text('My Bookings', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                    ),
-                  ),
-                ],
-              ),
+            _ResultActions(
+              onHome: () {
+                onBookingComplete?.call();
+                Navigator.popUntil(context, (route) => route.isFirst);
+              },
+              onBookings: () {
+                Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => MyBookingsScreen(initialBooking: booking)));
+              },
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -2320,51 +2155,29 @@ class _BookingScheduledScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8),
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       body: SafeArea(
         child: Column(
           children: [
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
+              child: Center(
+                child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: CxSize.contentMaxWidth),
+                child: ListView(
+                padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.xxl, CxSpace.gutter, CxSpace.xxl),
                 children: [
                   // Scheduled banner
-                  Container(
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: AppColors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: AppColors.divider),
-                    ),
-                    child: Column(
-                      children: [
-                        Container(
-                          width: 72, height: 72,
-                          decoration: const BoxDecoration(
-                            color: Color(0xFFE3F2FD), shape: BoxShape.circle),
-                          child: const Icon(Icons.event_available_rounded,
-                              size: 40, color: Color(0xFF1565C0)),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text('Booking Scheduled!',
-                            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-                        if (booking.referenceNo != null) ...[
-                          const SizedBox(height: 6),
-                          Text(booking.referenceNo!,
-                              style: const TextStyle(fontSize: 13, color: AppColors.textSecondary, letterSpacing: 0.5)),
-                        ],
-                        const SizedBox(height: 8),
-                        const Text(
-                          'A technician will be assigned closer to your appointment time.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
-                        ),
-                      ],
-                    ),
+                  _ResultHero(
+                    icon: Icons.event_available_rounded,
+                    tone: CxTone.info,
+                    title: 'Booking Scheduled!',
+                    reference: booking.referenceNo,
+                    message: 'A technician will be assigned closer to your appointment time.',
                   ),
 
-                  const SizedBox(height: 14),
+                  const SizedBox(height: CxSpace.md),
 
                   _SectionCard(
                     title: 'Booking Details',
@@ -2382,97 +2195,43 @@ class _BookingScheduledScreen extends StatelessWidget {
                     ),
                   ),
 
-                  const SizedBox(height: 14),
+                  const SizedBox(height: CxSpace.md),
 
                   _SectionCard(
                     title: 'Tests Booked',
                     icon: Icons.science_outlined,
-                    child: Column(
-                      children: booking.tests.map((t) => Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 5),
-                        child: Row(
-                          children: [
-                            Container(width: 6, height: 6,
-                              decoration: BoxDecoration(
-                                color: t.type == 'package' ? AppColors.brandGreen : const Color(0xFF1565C0),
-                                shape: BoxShape.circle)),
-                            const SizedBox(width: 10),
-                            Expanded(child: Text(t.name,
-                                style: const TextStyle(fontSize: 13, color: AppColors.textPrimary))),
-                            Text('₹${t.finalPrice.toInt()}',
-                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
-                          ],
-                        ),
-                      )).toList(),
-                    ),
+                    child: _testsBookedList(booking.tests),
                   ),
 
-                  const SizedBox(height: 14),
+                  const SizedBox(height: CxSpace.md),
 
                   // What happens next
-                  Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFE3F2FD),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: const Color(0xFF90CAF9)),
-                    ),
-                    child: const Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text("What happens next?",
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1565C0))),
-                        SizedBox(height: 10),
-                        _NextStep('1', 'Your booking is confirmed and saved'),
-                        _NextStep('2', 'A technician will be assigned ~1 hour before your slot'),
-                        _NextStep('3', 'You will receive a call before the technician arrives'),
-                        _NextStep('4', 'Keep your samples ready as per test requirements'),
-                      ],
-                    ),
+                  const _NextStepsCard(
+                    title: 'What happens next?',
+                    tone: CxTone.info,
+                    steps: [
+                      _NextStep('1', 'Your booking is confirmed and saved'),
+                      _NextStep('2', 'A technician will be assigned ~1 hour before your slot'),
+                      _NextStep('3', 'You will receive a call before the technician arrives'),
+                      _NextStep('4', 'Keep your samples ready as per test requirements'),
+                    ],
                   ),
                 ],
+              ),
+                ),
               ),
             ),
 
-            Container(
-              padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
-              color: Colors.white,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppColors.brandGreen,
-                        side: const BorderSide(color: AppColors.brandGreen, width: 1.5),
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text('Back to Home', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => MyBookingsScreen(initialBooking: booking)));
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF1565C0),
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: const Text('My Bookings', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-                    ),
-                  ),
-                ],
-              ),
+            _ResultActions(
+              onHome: () => Navigator.pop(context),
+              onBookings: () {
+                Navigator.push(context, MaterialPageRoute(
+                  builder: (_) => MyBookingsScreen(initialBooking: booking)));
+              },
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -2490,26 +2249,77 @@ class _SectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(CxSpace.lg),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.divider),
+          borderRadius: CxRadius.lgAll,
+          border: Border.all(color: CxColors.border),
+          boxShadow: const [BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2))],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(children: [
-              Icon(icon, size: 16, color: AppColors.brandGreen),
-              const SizedBox(width: 8),
-              Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+              CxIconBadge(icon: icon, size: 34),
+              const SizedBox(width: CxSpace.md),
+              Flexible(child: Text(title, style: CxText.sectionTitle, overflow: TextOverflow.ellipsis)),
               if (required)
-                const Text(' *', style: TextStyle(color: Color(0xFFD32F2F), fontSize: 14)),
+                const Text(' *', style: TextStyle(color: CxColors.error, fontSize: 16, fontWeight: FontWeight.w700)),
               if (trailing != null) ...[const Spacer(), trailing!],
             ]),
-            const SizedBox(height: 12),
+            const SizedBox(height: CxSpace.md),
             child,
           ],
+        ),
+      );
+}
+
+// A selectable time pill (slots and appointment times).
+class _ChoicePill extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final Color activeColor;
+  final bool highlight;
+  const _ChoicePill({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.activeColor = AppColors.brandGreen,
+    this.highlight = false,
+  });
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        selected: selected,
+        child: Material(
+          color: selected ? activeColor : Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: CxRadius.mdAll,
+            side: BorderSide(
+              color: selected ? activeColor : (highlight ? activeColor : CxColors.border),
+              width: selected ? 1.5 : 1,
+            ),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 44, minWidth: 64),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+                child: Text(label,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: selected
+                            ? Colors.white
+                            : (highlight ? activeColor : CxColors.textPrimary))),
+              ),
+            ),
+          ),
         ),
       );
 }
@@ -2521,14 +2331,18 @@ class _InfoLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 4),
+        padding: const EdgeInsets.only(bottom: 6),
         child: Row(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, size: 13, color: AppColors.textHint),
-            const SizedBox(width: 6),
-            Flexible(child: Text(text, overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 13, color: AppColors.textSecondary))),
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(icon, size: 17, color: CxColors.textHint),
+            ),
+            const SizedBox(width: CxSpace.sm),
+            Flexible(child: Text(text, overflow: TextOverflow.ellipsis, maxLines: 2,
+                style: CxText.body)),
           ],
         ),
       );
@@ -2544,18 +2358,19 @@ class _BillRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
+        padding: const EdgeInsets.symmetric(vertical: 5),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             Flexible(child: Text(label, overflow: TextOverflow.ellipsis, style: TextStyle(
-                fontSize: sub ? 12 : 13,
-                color: sub ? AppColors.textSecondary : AppColors.textPrimary))),
+                fontSize: sub ? 13 : 14,
+                fontWeight: bold ? FontWeight.w600 : FontWeight.w400,
+                color: sub ? CxColors.textSecondary : CxColors.textPrimary))),
             const SizedBox(width: 8),
             Text(value, style: TextStyle(
-                fontSize: sub ? 12 : 14,
+                fontSize: sub ? 13 : (bold ? 16 : 14),
                 fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
-                color: green ? AppColors.brandGreen : AppColors.textPrimary)),
+                color: green ? CxColors.brand : CxColors.textPrimary)),
           ],
         ),
       );
@@ -2570,19 +2385,43 @@ class _ConfirmRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
+        padding: const EdgeInsets.symmetric(vertical: 7),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, size: 15, color: AppColors.brandGreen),
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(icon, size: 18, color: CxColors.textHint),
+            ),
             const SizedBox(width: 10),
             SizedBox(width: 110,
-              child: Text(label, style: const TextStyle(fontSize: 13, color: AppColors.textSecondary))),
+              child: Text(label, style: CxText.bodySecondary)),
             Expanded(
               child: Text(value, style: TextStyle(
-                  fontSize: 13, fontWeight: FontWeight.w500,
-                  color: valueColor ?? AppColors.textPrimary)),
+                  fontSize: 14, fontWeight: FontWeight.w600,
+                  color: valueColor ?? CxColors.textPrimary)),
             ),
+          ],
+        ),
+      );
+}
+
+class _NextStepsCard extends StatelessWidget {
+  final String title;
+  final CxTone tone;
+  final List<_NextStep> steps;
+  const _NextStepsCard({required this.title, required this.tone, required this.steps});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(CxSpace.lg),
+        decoration: BoxDecoration(color: tone.surface, borderRadius: CxRadius.lgAll),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: CxText.sectionTitle.copyWith(color: tone.color)),
+            const SizedBox(height: CxSpace.md),
+            for (final s in steps) _NextStep(s.number, s.text, color: tone.color),
           ],
         ),
       );
@@ -2591,23 +2430,26 @@ class _ConfirmRow extends StatelessWidget {
 class _NextStep extends StatelessWidget {
   final String number;
   final String text;
-  const _NextStep(this.number, this.text);
+  final Color color;
+  const _NextStep(this.number, this.text, {this.color = AppColors.brandGreen});
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.only(bottom: 10),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Container(
-              width: 20, height: 20,
-              decoration: const BoxDecoration(color: AppColors.brandGreen, shape: BoxShape.circle),
+              width: 24, height: 24,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
               child: Center(child: Text(number,
-                  style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700))),
+                  style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700))),
             ),
-            const SizedBox(width: 10),
-            Expanded(child: Text(text,
-                style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, height: 1.4))),
+            const SizedBox(width: CxSpace.md),
+            Expanded(child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(text, style: CxText.body),
+            )),
           ],
         ),
       );
@@ -2626,46 +2468,59 @@ class _PresThumbnailCard extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
-        onTap: onView,
-        child: Stack(clipBehavior: Clip.none, children: [
-          Container(
-            width: 96,
-            height: 96,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: AppColors.divider),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.memory(doc.bytes, fit: BoxFit.cover),
+  Widget build(BuildContext context) => Stack(clipBehavior: Clip.none, children: [
+          Semantics(
+            button: true,
+            label: 'View prescription image',
+            child: GestureDetector(
+              onTap: onView,
+              child: Container(
+                width: 96,
+                height: 96,
+                decoration: BoxDecoration(
+                  borderRadius: CxRadius.mdAll,
+                  border: Border.all(color: CxColors.border),
+                ),
+                child: ClipRRect(
+                  borderRadius: CxRadius.mdAll,
+                  child: Image.memory(doc.bytes, fit: BoxFit.cover),
+                ),
+              ),
             ),
           ),
           Positioned(
-            top: -6, right: -6,
-            child: GestureDetector(
-              onTap: onDelete,
-              child: Container(
-                width: 22, height: 22,
-                decoration: const BoxDecoration(
-                    color: Color(0xFFD32F2F), shape: BoxShape.circle),
-                child: const Icon(Icons.close_rounded, size: 13, color: Colors.white),
+            top: -8, right: -8,
+            child: Semantics(
+              button: true,
+              label: 'Remove image',
+              child: GestureDetector(
+                onTap: onDelete,
+                child: Container(
+                  width: 28, height: 28,
+                  decoration: BoxDecoration(
+                    color: CxColors.error,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 2),
+                  ),
+                  child: const Icon(Icons.close_rounded, size: 14, color: Colors.white),
+                ),
               ),
             ),
           ),
           Positioned(
             bottom: 6, right: 6,
-            child: Container(
-              width: 24, height: 24,
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.45),
-                borderRadius: BorderRadius.circular(6),
+            child: IgnorePointer(
+              child: Container(
+                width: 24, height: 24,
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Icon(Icons.fullscreen_rounded, size: 14, color: Colors.white),
               ),
-              child: const Icon(Icons.fullscreen_rounded, size: 14, color: Colors.white),
             ),
           ),
-        ]),
-      );
+        ]);
 }
 
 class _PresAddMoreTile extends StatelessWidget {
@@ -2673,24 +2528,27 @@ class _PresAddMoreTile extends StatelessWidget {
   const _PresAddMoreTile({this.onTap});
 
   @override
-  Widget build(BuildContext context) => GestureDetector(
+  Widget build(BuildContext context) => Material(
+        color: CxColors.brandSurface,
+        shape: RoundedRectangleBorder(
+          borderRadius: CxRadius.mdAll,
+          side: BorderSide(color: CxColors.brand.withValues(alpha: 0.5), width: 1.5),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
         onTap: onTap,
-        child: Container(
+        child: const SizedBox(
           width: 96, height: 96,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: AppColors.brandGreenLight, width: 1.5),
-            color: AppColors.brandGreenSurface,
-          ),
-          child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Icon(Icons.add_photo_alternate_outlined, size: 26, color: AppColors.brandGreen),
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(Icons.add_photo_alternate_outlined, size: 28, color: AppColors.brandGreen),
             SizedBox(height: 4),
             Text('Add more',
                 style: TextStyle(
-                    fontSize: 10,
+                    fontSize: 12,
                     color: AppColors.brandGreen,
-                    fontWeight: FontWeight.w500)),
+                    fontWeight: FontWeight.w600)),
           ]),
+        ),
         ),
       );
 }
@@ -2702,34 +2560,13 @@ class _PresSourceTile extends StatelessWidget {
   final VoidCallback onTap;
   const _PresSourceTile(this.icon, this.title, this.subtitle, this.onTap);
 
+  // Same look as the shared option card; tap behaviour unchanged.
   @override
-  Widget build(BuildContext context) => GestureDetector(
+  Widget build(BuildContext context) => CxOptionCard(
+        icon: icon,
+        title: title,
+        subtitle: subtitle,
         onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            color: AppColors.background,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.divider),
-          ),
-          child: Row(children: [
-            Container(
-              width: 40, height: 40,
-              decoration: const BoxDecoration(
-                  color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-              child: Icon(icon, size: 20, color: AppColors.brandGreen),
-            ),
-            const SizedBox(width: 14),
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title,
-                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-              Text(subtitle,
-                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-            ]),
-            const Spacer(),
-            const Icon(Icons.chevron_right_rounded, color: AppColors.textHint),
-          ]),
-        ),
       );
 }
 
@@ -2743,22 +2580,26 @@ class _FamilyMemberTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Container(
         margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        padding: const EdgeInsets.fromLTRB(CxSpace.md, 10, 4, 10),
         decoration: BoxDecoration(
-          color: AppColors.brandGreenSurface,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppColors.brandGreenLight),
+          color: Colors.white,
+          borderRadius: CxRadius.mdAll,
+          border: Border.all(color: CxColors.border),
         ),
         child: Row(children: [
-          const Icon(Icons.person_outline, size: 16, color: AppColors.brandGreen),
-          const SizedBox(width: 10),
+          CircleAvatar(
+            radius: 18,
+            backgroundColor: CxColors.brandSurface,
+            child: Text(member.patient.name.isNotEmpty ? member.patient.name[0].toUpperCase() : '?',
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: CxColors.brand)),
+          ),
+          const SizedBox(width: CxSpace.md),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(member.patient.name,
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+              Text(member.patient.name, style: CxText.cardTitle),
               Text(
                 '${member.tests.length} test${member.tests.length == 1 ? '' : 's'} · ₹${member.testsTotal.toInt()}',
-                style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                style: CxText.bodySecondary,
               ),
               if (member.anyDocRequired) ...[
                 const SizedBox(height: 3),
@@ -2767,10 +2608,10 @@ class _FamilyMemberTile extends StatelessWidget {
                     member.prescriptionBytes.isNotEmpty
                         ? Icons.check_circle_rounded
                         : Icons.error_outline_rounded,
-                    size: 12,
+                    size: 14,
                     color: member.prescriptionBytes.isNotEmpty
-                        ? AppColors.brandGreen
-                        : const Color(0xFFE65100),
+                        ? CxColors.brand
+                        : CxColors.warning,
                   ),
                   const SizedBox(width: 4),
                   Text(
@@ -2778,19 +2619,22 @@ class _FamilyMemberTile extends StatelessWidget {
                         ? 'Prescription uploaded'
                         : 'Prescription required',
                     style: TextStyle(
-                      fontSize: 10,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
                       color: member.prescriptionBytes.isNotEmpty
-                          ? AppColors.brandGreen
-                          : const Color(0xFFE65100),
+                          ? CxColors.brand
+                          : CxColors.warning,
                     ),
                   ),
                 ]),
               ],
             ]),
           ),
-          GestureDetector(
-            onTap: onRemove,
-            child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
+          CxIconButton(
+            icon: Icons.close_rounded,
+            tooltip: 'Remove ${member.patient.name}',
+            color: CxColors.textSecondary,
+            onPressed: onRemove,
           ),
         ]),
       );
@@ -2892,31 +2736,19 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
   void _showPresSourcePicker() {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        padding: const EdgeInsets.fromLTRB(0, 16, 0, 0),
-        child: SafeArea(
+      builder: (_) => CustomerThemeScope(
+        child: CxSheetFrame(
+          title: 'Upload Prescription',
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Container(width: 40, height: 4,
-              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2))),
-            const SizedBox(height: 12),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 20),
-              child: Align(alignment: Alignment.centerLeft,
-                child: Text('Upload Prescription', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary))),
-            ),
-            const SizedBox(height: 8),
             _PresSourceTile(Icons.camera_alt_rounded, 'Take Photo',
                 'Open camera to capture prescription',
                 () { Navigator.pop(context); _pickPres(ImageSource.camera); }),
+            const SizedBox(height: CxSpace.md),
             _PresSourceTile(Icons.photo_library_outlined, 'Choose from Gallery',
                 'Select one or more images',
                 () { Navigator.pop(context); _pickPres(ImageSource.gallery); }),
-            const SizedBox(height: 8),
           ]),
         ),
       ),
@@ -3017,31 +2849,37 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final bottom = MediaQuery.of(context).padding.bottom;
-    return DraggableScrollableSheet(
+    final mq = MediaQuery.of(context);
+    final bottom = mq.padding.bottom;
+    return CustomerThemeScope(
+      // Keeps the sheet (and its button) above the on-screen keyboard.
+      child: Padding(
+      padding: EdgeInsets.only(bottom: mq.viewInsets.bottom),
+      child: DraggableScrollableSheet(
       initialChildSize: 0.75,
       minChildSize: 0.4,
       maxChildSize: 0.92,
       expand: false,
-      builder: (_, scroll) => Container(
+      builder: (_, scroll) => Align(
+        alignment: Alignment.bottomCenter,
+        child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: CxSize.sheetMaxWidth),
+        child: Container(
         decoration: const BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          borderRadius: CxRadius.sheetTop,
         ),
         child: Column(children: [
           // Handle
-          Container(
-            width: 40, height: 4,
-            margin: const EdgeInsets.only(top: 12, bottom: 4),
-            decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-          ),
+          const CxDragHandle(),
           // Header
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            padding: const EdgeInsets.fromLTRB(CxSpace.sm, 0, CxSpace.lg, 0),
             child: Row(children: [
-              if (_step >= 1) ...[
-                GestureDetector(
-                  onTap: () => setState(() {
+              if (_step >= 1)
+                IconButton(
+                  tooltip: 'Back',
+                  onPressed: () => setState(() {
                     if (_step == 2) {
                       _step = 1;
                       _prescriptionBytes.clear();
@@ -3050,10 +2888,10 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                       _selectedTests.clear();
                     }
                   }),
-                  child: const Icon(Icons.arrow_back_rounded, size: 20, color: AppColors.textPrimary),
-                ),
-                const SizedBox(width: 10),
-              ],
+                  icon: const Icon(Icons.arrow_back_rounded, size: 22, color: AppColors.textPrimary),
+                )
+              else
+                const SizedBox(width: CxSpace.md),
               Expanded(
                 child: Text(
                   _step == 0
@@ -3061,13 +2899,13 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                       : _step == 1
                           ? 'Select Tests for ${_selected!.name}'
                           : 'Upload Prescription',
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  style: CxText.sheetTitle,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
             ]),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: CxSpace.md),
           const Divider(height: 1),
           // Body
           Expanded(child: _step == 0
@@ -3076,12 +2914,13 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                   ? _buildTestStep(scroll)
                   : _buildPrescriptionStep(scroll)),
           // Button
-          Padding(
-            padding: EdgeInsets.fromLTRB(16, 8, 16, bottom + 12),
-            child: SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
+          Container(
+            padding: EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter,
+                (mq.viewInsets.bottom > 0 ? 0 : bottom) + CxSpace.md),
+            decoration: const BoxDecoration(
+              border: Border(top: BorderSide(color: CxColors.border)),
+            ),
+            child: CxButton(
                 onPressed: _step == 0
                     ? (_selected == null ? null : () => setState(() => _step = 1))
                     : _step == 1
@@ -3089,14 +2928,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                             ? null
                             : () { _needsPrescriptionStep ? setState(() => _step = 2) : _confirm(); })
                         : (_prescriptionBytes.isEmpty ? null : _confirm),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.brandGreen,
-                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.3),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                child: Text(
-                  _step == 0
+                label: _step == 0
                       ? 'Next: Select Tests'
                       : _step == 1
                           ? (_selectedTestIds.isEmpty
@@ -3105,12 +2937,13 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                           : (_prescriptionBytes.isEmpty
                               ? 'Upload prescription to continue'
                               : 'Add to Booking · ₹${_selectedTotal.toInt()}'),
-                  style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
-                ),
-              ),
             ),
           ),
         ]),
+      ),
+        ),
+      ),
+      ),
       ),
     );
   }
@@ -3171,7 +3004,14 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
             TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
           ])),
           const SizedBox(height: 6),
-          GestureDetector(
+          Material(
+            color: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: CxRadius.mdAll,
+              side: BorderSide(color: _dobError != null ? CxColors.error : CxColors.border),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
             onTap: () async {
               final picked = await showDatePicker(
                 context: context,
@@ -3181,16 +3021,11 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
               );
               if (picked != null) setState(() { _newDob = picked; _dobError = null; });
             },
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: _dobError != null ? Colors.red : AppColors.divider),
-              ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 15),
               child: Row(children: [
-                Icon(Icons.calendar_today_outlined, size: 16,
-                    color: _dobError != null ? Colors.red : AppColors.textHint),
+                Icon(Icons.calendar_today_outlined, size: 18,
+                    color: _dobError != null ? CxColors.error : CxColors.textHint),
                 const SizedBox(width: 10),
                 Text(
                   _newDob != null
@@ -3203,11 +3038,12 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                 ),
               ]),
             ),
+            ),
           ),
           if (_dobError != null)
             Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(_dobError!, style: const TextStyle(fontSize: 11, color: Colors.red)),
+              padding: const EdgeInsets.only(top: 6, left: 4),
+              child: Text(_dobError!, style: const TextStyle(fontSize: 12, color: CxColors.error)),
             ),
           const SizedBox(height: 14),
           // Gender
@@ -3220,27 +3056,17 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
             final sel = _newGender == g;
             return Expanded(child: Padding(
               padding: EdgeInsets.only(right: g != _genders.last ? 8 : 0),
-              child: GestureDetector(
+              child: _ChoicePill(
+                label: g,
+                selected: sel,
                 onTap: () => setState(() { _newGender = g; _genderError = null; }),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  decoration: BoxDecoration(
-                    color: sel ? AppColors.brandGreen : Colors.white,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: sel ? AppColors.brandGreen : AppColors.divider),
-                  ),
-                  child: Text(g, textAlign: TextAlign.center,
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
-                          color: sel ? Colors.white : AppColors.textPrimary)),
-                ),
               ),
             ));
           }).toList()),
           if (_genderError != null)
             Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(_genderError!, style: const TextStyle(fontSize: 11, color: Colors.red)),
+              padding: const EdgeInsets.only(top: 6, left: 4),
+              child: Text(_genderError!, style: const TextStyle(fontSize: 12, color: CxColors.error)),
             ),
           const SizedBox(height: 14),
           // Relation
@@ -3255,29 +3081,15 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
           ),
           const SizedBox(height: 20),
           Row(children: [
-            Expanded(child: OutlinedButton(
+            Expanded(child: CxButton.secondary(
               onPressed: () => setState(() { _showNewMemberForm = false; _newNameCtrl.clear(); _newMobileCtrl.clear(); _newDob = null; _newGender = null; _newRelation = null; _nameError = null; _mobileError = null; _dobError = null; _genderError = null; }),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: AppColors.textSecondary,
-                side: const BorderSide(color: AppColors.divider),
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ),
-              child: const Text('Cancel'),
+              label: 'Cancel',
             )),
-            const SizedBox(width: 10),
-            Expanded(child: ElevatedButton(
+            const SizedBox(width: CxSpace.md),
+            Expanded(child: CxButton(
               onPressed: _savingNewMember ? null : _saveNewMember,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.brandGreen,
-                disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.4),
-                elevation: 0,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              ),
-              child: _savingNewMember
-                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Text('Save Member', style: TextStyle(color: Colors.white)),
+              loading: _savingNewMember,
+              label: 'Save Member',
             )),
           ]),
         ]),
@@ -3287,45 +3099,37 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
     // ── Patient list ─────────────────────────────────────────
     return ListView.separated(
       controller: scroll,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter, vertical: CxSpace.md),
       itemCount: _patients.length + 1, // +1 for "Add New Member" tile
-      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      separatorBuilder: (_, __) => const SizedBox(height: 10),
       itemBuilder: (_, i) {
         // Last item: Add New Member
         if (i == _patients.length) {
-          return GestureDetector(
-            onTap: () => setState(() => _showNewMemberForm = true),
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: AppColors.brandGreen, width: 1),
-              ),
-              child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                const Icon(Icons.person_add_outlined, size: 18, color: AppColors.brandGreen),
-                const SizedBox(width: 8),
-                const Text('Add New Member',
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
-              ]),
-            ),
+          return CxButton.secondary(
+            onPressed: () => setState(() => _showNewMemberForm = true),
+            icon: Icons.person_add_outlined,
+            label: 'Add New Member',
           );
         }
         final p = _patients[i];
         final isSel = _selected?.patientId == p.patientId;
-        return GestureDetector(
-          onTap: () => setState(() => _selected = p),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: isSel ? AppColors.brandGreenSurface : Colors.white,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: isSel ? AppColors.brandGreen : AppColors.divider,
-                width: isSel ? 1.5 : 1,
-              ),
+        return Semantics(
+          button: true,
+          selected: isSel,
+          child: Material(
+          color: isSel ? CxColors.brandSurface : Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: CxRadius.lgAll,
+            side: BorderSide(
+              color: isSel ? CxColors.brand : CxColors.border,
+              width: isSel ? 1.5 : 1,
             ),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+          onTap: () => setState(() => _selected = p),
+          child: Padding(
+            padding: const EdgeInsets.all(CxSpace.md),
             child: Row(children: [
               Container(
                 width: 40, height: 40,
@@ -3347,50 +3151,40 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                   Text(p.relation!,
                       style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
               ])),
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
-                width: 20, height: 20,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: isSel ? AppColors.brandGreen : AppColors.divider,
-                    width: isSel ? 6 : 1.5,
-                  ),
-                  color: Colors.white,
-                ),
+              Icon(
+                isSel ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
+                color: isSel ? CxColors.brand : CxColors.textHint,
               ),
             ]),
+          ),
+          ),
           ),
         );
       },
     );
   }
 
+  // Borders, focus colour and padding come from the customer theme.
   InputDecoration _inputDecor(String? hint) => InputDecoration(
     hintText: hint,
-    hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
-    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.divider)),
-    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
   );
 
   Widget _buildTestStep(ScrollController scroll) {
     final tests = _pager.items;
     Widget list;
     if (_pager.loading) {
-      list = const Center(child: CircularProgressIndicator(color: AppColors.brandGreen, strokeWidth: 2));
+      list = const CxLoading(label: 'Loading tests…');
     } else if (tests.isEmpty) {
-      list = Center(
-        child: _pager.failed
-            ? TextButton(
-                onPressed: _pager.refresh,
-                style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
-                child: const Text('Couldn\'t load tests. Try again'),
-              )
-            : Text(_pager.search.trim().isEmpty ? 'No tests available.' : 'No tests found',
-                style: const TextStyle(color: AppColors.textHint)),
-      );
+      list = _pager.failed
+          ? CxErrorState(
+              title: 'Couldn\'t load tests',
+              retryLabel: 'Try again',
+              onRetry: _pager.refresh,
+            )
+          : CxEmptyState(
+              icon: Icons.search_off_rounded,
+              title: _pager.search.trim().isEmpty ? 'No tests available.' : 'No tests found',
+            );
     } else {
       // One extra row at the end: the next page's spinner, or "Show more"
       // when a page failed or the list is too short to scroll.
@@ -3410,10 +3204,11 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                   child: _pager.loadingMore
                       ? const SizedBox(width: 22, height: 22,
                           child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
-                      : TextButton(
+                      : CxButton.secondary(
                           onPressed: _pager.loadMore,
-                          style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
-                          child: Text('Show more (${_pager.total - tests.length} more)'),
+                          icon: Icons.expand_more_rounded,
+                          compact: true,
+                          label: 'Show more (${_pager.total - tests.length} more)',
                         ),
                 ),
               );
@@ -3426,28 +3221,27 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
 
     return Column(children: [
       Padding(
-        padding: const EdgeInsets.fromLTRB(16, 10, 16, 2),
+        padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, 2),
         child: TextField(
           controller: _testSearchCtrl,
-          style: const TextStyle(fontSize: 14),
-          decoration: InputDecoration(
+          textInputAction: TextInputAction.search,
+          style: CxText.body,
+          decoration: const InputDecoration(
             hintText: 'Search tests & packages…',
-            hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
-            prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
-            contentPadding: const EdgeInsets.symmetric(vertical: 10),
-            filled: true,
-            fillColor: AppColors.background,
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+            prefixIcon: Icon(Icons.search_rounded, size: 20, color: CxColors.textHint),
           ),
         ),
       ),
       if (_selectedTests.isNotEmpty)
         Padding(
-          padding: const EdgeInsets.fromLTRB(20, 6, 20, 0),
+          padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.sm, CxSpace.gutter, 0),
           child: Align(
             alignment: Alignment.centerLeft,
-            child: Text('${_selectedTests.length} selected · ₹${_selectedTotal.toInt()}',
-                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+            child: CxChip(
+              label: '${_selectedTests.length} selected · ₹${_selectedTotal.toInt()}',
+              icon: Icons.check_circle_outline_rounded,
+              tone: CxTone.brand,
+            ),
           ),
         ),
       Expanded(child: list),
@@ -3466,14 +3260,15 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
         }
       }),
       activeColor: AppColors.brandGreen,
+      tileColor: checked ? CxColors.brandSurface : null,
       contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
       title: Text(t.name,
-          style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
+          style: CxText.body.copyWith(fontWeight: FontWeight.w600)),
       subtitle: t.type == 'package'
-          ? const Text('Package', style: TextStyle(fontSize: 11, color: AppColors.brandGreen))
+          ? const Text('Package', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.brandGreen))
           : null,
       secondary: Text('₹${t.finalPrice.toInt()}',
-          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+          style: CxText.body.copyWith(fontWeight: FontWeight.w700)),
       controlAffinity: ListTileControlAffinity.leading,
     );
   }
@@ -3485,22 +3280,21 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         // Mandatory banner
         Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: const Color(0xFFFFF3E0),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0xFFFFCC02)),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: const BoxDecoration(
+            color: CxColors.warningSurface,
+            borderRadius: CxRadius.mdAll,
           ),
           child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Icon(Icons.description_outlined, size: 14, color: Color(0xFFE65100)),
-            const SizedBox(width: 8),
+            const Icon(Icons.description_outlined, size: 18, color: CxColors.warning),
+            const SizedBox(width: 10),
             const Expanded(child: Text(
               'A valid prescription is required for the selected test(s). Please upload before proceeding.',
-              style: TextStyle(fontSize: 12, color: Color(0xFF795548), height: 1.4),
+              style: TextStyle(fontSize: 13, color: CxColors.textPrimary, height: 1.4),
             )),
             if (_prescriptionBytes.isNotEmpty)
               Text('${_prescriptionBytes.length}/5',
-                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: CxColors.warning)),
           ]),
         ),
         const SizedBox(height: 14),
@@ -3540,48 +3334,55 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
                       ),
                     ),
                   ),
-                  Positioned(top: -6, right: -6, child: GestureDetector(
+                  Positioned(top: -8, right: -8, child: Semantics(
+                    button: true,
+                    label: 'Remove image',
+                    child: GestureDetector(
                     onTap: () => setState(() => _prescriptionBytes.removeAt(e.key)),
                     child: Container(
-                      width: 22, height: 22,
-                      decoration: const BoxDecoration(color: Color(0xFFD32F2F), shape: BoxShape.circle),
-                      child: const Icon(Icons.close_rounded, size: 13, color: Colors.white),
+                      width: 28, height: 28,
+                      decoration: BoxDecoration(
+                        color: CxColors.error,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
+                      child: const Icon(Icons.close_rounded, size: 14, color: Colors.white),
                     ),
-                  )),
+                  ))),
                 ]),
               )),
               if (_prescriptionBytes.length < 5)
-                GestureDetector(
+                Material(
+                  color: CxColors.brandSurface,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: CxRadius.mdAll,
+                    side: BorderSide(color: CxColors.brand.withValues(alpha: 0.5), width: 1.5),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
                   onTap: _isPicking ? null : _showPresSourcePicker,
-                  child: Container(
+                  child: SizedBox(
                     width: 88, height: 88,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: _prescriptionBytes.isEmpty ? const Color(0xFFE65100) : const Color(0xFFFFCC02),
-                        width: 1.5,
-                      ),
-                    ),
                     child: _isPicking
                         ? const Center(child: SizedBox(width: 20, height: 20,
                             child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
                         : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                             Icon(
                               _prescriptionBytes.isEmpty ? Icons.upload_file_outlined : Icons.add_photo_alternate_outlined,
-                              size: 26,
-                              color: _prescriptionBytes.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                              size: 28,
+                              color: CxColors.brand,
                             ),
                             const SizedBox(height: 4),
                             Text(
                               _prescriptionBytes.isEmpty ? 'Upload' : 'Add more',
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w500,
-                                color: _prescriptionBytes.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: CxColors.brand,
                               ),
                             ),
                           ]),
+                  ),
                   ),
                 ),
             ],
@@ -3592,7 +3393,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
           _prescriptionBytes.isEmpty
               ? 'Tap the tile above to upload via camera or gallery'
               : '${_prescriptionBytes.length} image${_prescriptionBytes.length == 1 ? '' : 's'} uploaded · tap to view',
-          style: const TextStyle(fontSize: 11, color: AppColors.textHint),
+          style: CxText.caption,
         ),
       ]),
     );

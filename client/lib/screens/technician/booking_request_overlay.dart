@@ -9,6 +9,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/widgets/tech/tech_widgets.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/constants/app_constants.dart';
 
@@ -355,9 +356,14 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
     final safeTop    = MediaQuery.of(context).padding.top;
     final hasMap     = widget.booking.patientLat != null;
 
-    return Scaffold(
+    return TechThemeScope(
+      child: Scaffold(
       backgroundColor: Colors.transparent,
-      body: Column(
+      body: Center(
+        child: ConstrainedBox(
+        // Tablets: keep the request card a readable width.
+        constraints: const BoxConstraints(maxWidth: TechSize.sheetMaxWidth),
+        child: Column(
         children: [
           SizedBox(height: safeTop + 20),
 
@@ -389,7 +395,7 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                       const Text('New Booking Request',
                           style: TextStyle(
                               color: Colors.white,
-                              fontSize: 17,
+                              fontSize: 16,
                               fontWeight: FontWeight.w700)),
                       const SizedBox(height: 2),
                       Text('Request #${widget.requestNumber}  ·  Home Collection',
@@ -420,8 +426,8 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                           Text(
                             '$_secondsLeft',
                             style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w800,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
                                 color: _ringColor),
                           ),
                           Text('sec',
@@ -551,53 +557,27 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                       Row(
                         children: [
                           Expanded(
-                            child: OutlinedButton.icon(
+                            child: TechButton.secondary(
                               onPressed: _openInMaps,
-                              icon: const Icon(Icons.map_outlined, size: 15),
-                              label: const Text('Open in Maps',
-                                  style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600)),
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: const Color(0xFF1565C0),
-                                side: const BorderSide(
-                                    color: Color(0xFF1565C0), width: 1),
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 9),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(10)),
-                              ),
+                              icon: Icons.map_outlined,
+                              label: 'Open in Maps',
+                              compact: true,
                             ),
                           ),
                           if (widget.booking.patientMobile.isNotEmpty) ...[
-                            const SizedBox(width: 10),
+                            const SizedBox(width: TechSpace.md),
                             Expanded(
-                              child: OutlinedButton.icon(
+                              child: TechButton.secondary(
                                 onPressed: _call,
-                                icon: const Icon(Icons.phone_rounded,
-                                    size: 15),
-                                label: const Text('Call Patient',
-                                    style: TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w600)),
-                                style: OutlinedButton.styleFrom(
-                                  foregroundColor: AppColors.brandGreen,
-                                  side: BorderSide(
-                                      color: AppColors.brandGreen
-                                          .withValues(alpha: 0.5),
-                                      width: 1),
-                                  padding: const EdgeInsets.symmetric(
-                                      vertical: 9),
-                                  shape: RoundedRectangleBorder(
-                                      borderRadius:
-                                          BorderRadius.circular(10)),
-                                ),
+                                icon: Icons.phone_rounded,
+                                label: 'Call Patient',
+                                compact: true,
                               ),
                             ),
                           ],
                         ],
                       ),
-                      const SizedBox(height: 14),
+                      const SizedBox(height: TechSpace.lg),
                     ],
 
                     // ── ETA + Distance card (horizontal) ─────────────────────
@@ -605,9 +585,9 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                       Container(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 16, vertical: 12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFEEF4FB),
-                          borderRadius: BorderRadius.circular(14),
+                        decoration: const BoxDecoration(
+                          color: TechColors.infoSurface,
+                          borderRadius: TechRadius.lgAll,
                         ),
                         child: Row(
                           children: [
@@ -616,8 +596,8 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                               children: [
                                 Text(_etaText,
                                     style: const TextStyle(
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.w800,
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w700,
                                         color: _primary,
                                         height: 1.1)),
                                 const Text('ETA',
@@ -638,7 +618,7 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                               children: [
                                 Text(_distText,
                                     style: const TextStyle(
-                                        fontSize: 16,
+                                        fontSize: 15,
                                         fontWeight: FontWeight.w700,
                                         color: AppColors.brandGreen,
                                         height: 1.1)),
@@ -674,26 +654,26 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                         width: double.infinity,
                         padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
                         decoration: BoxDecoration(
-                          color: const Color(0xFFFFF8E1),
-                          borderRadius: BorderRadius.circular(12),
+                          color: TechColors.warningSurface,
+                          borderRadius: TechRadius.mdAll,
                           border: Border.all(color: _orange, width: 1.5),
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Row(children: [
-                              Icon(Icons.sticky_note_2_rounded, size: 16, color: Color(0xFFE65100)),
+                              Icon(Icons.sticky_note_2_rounded, size: 18, color: TechColors.warning),
                               SizedBox(width: 6),
                               Text('Customer Note',
                                   style: TextStyle(
-                                      fontSize: 12,
+                                      fontSize: 13,
                                       fontWeight: FontWeight.w700,
-                                      color: Color(0xFFE65100))),
+                                      color: TechColors.warning)),
                             ]),
                             const SizedBox(height: 6),
                             Text(widget.booking.notes!,
                                 style: const TextStyle(
-                                    fontSize: 14,
+                                    fontSize: 13,
                                     fontWeight: FontWeight.w600,
                                     color: AppColors.textPrimary,
                                     height: 1.35)),
@@ -704,6 +684,16 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                     ],
 
                     // ── Patient info rows ─────────────────────────────────────
+                    Container(
+                      padding: const EdgeInsets.all(TechSpace.lg),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: TechRadius.lgAll,
+                        border: Border.all(color: TechColors.border),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
                     _DetailRow(
                       icon: Icons.person_rounded,
                       label: 'Patient',
@@ -750,57 +740,59 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                       label: 'Booking ID',
                       value: '#${widget.booking.referenceNo ?? widget.booking.bookingId}',
                     ),
+                        ],
+                      ),
+                    ),
 
-                    const SizedBox(height: 20),
+                    const SizedBox(height: TechSpace.xl),
 
                     // ── Accept / Decline buttons ──────────────────────────────
                     Row(
                       children: [
                         // Decline
                         Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: _responding ? null : _reject,
-                            icon: const Icon(Icons.close_rounded, size: 18),
-                            label: const Text('Decline'),
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: const Color(0xFFD32F2F),
-                              side: const BorderSide(
-                                  color: Color(0xFFD32F2F), width: 1.5),
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 14),
-                              shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14)),
-                              textStyle: const TextStyle(
-                                  fontSize: 15, fontWeight: FontWeight.w600),
+                          child: SizedBox(
+                            height: TechSize.buttonHeight,
+                            child: OutlinedButton.icon(
+                              onPressed: _responding ? null : _reject,
+                              icon: const Icon(Icons.close_rounded, size: 20),
+                              label: const Text('Decline'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: TechColors.error,
+                                side: const BorderSide(color: TechColors.error, width: 1.5),
+                                shape: const RoundedRectangleBorder(borderRadius: TechRadius.mdAll),
+                                textStyle: TechText.button,
+                              ),
                             ),
                           ),
                         ),
-                        const SizedBox(width: 12),
+                        const SizedBox(width: TechSpace.md),
                         // Accept (2× wider)
                         Expanded(
                           flex: 2,
-                          child: ElevatedButton.icon(
-                            onPressed: _responding ? null : _accept,
-                            icon: _responding
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: Colors.white))
-                                : const Icon(Icons.check_rounded, size: 18),
-                            label: Text(
-                                _responding ? 'Accepting…' : 'Accept Booking'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: AppColors.brandGreen,
-                              foregroundColor: Colors.white,
-                              elevation: 0,
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 14),
-                              shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14)),
-                              textStyle: const TextStyle(
-                                  fontSize: 15, fontWeight: FontWeight.w600),
+                          child: SizedBox(
+                            height: TechSize.buttonHeight,
+                            child: FilledButton.icon(
+                              onPressed: _responding ? null : _accept,
+                              icon: _responding
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white))
+                                  : const Icon(Icons.check_rounded, size: 20),
+                              label: Text(
+                                  _responding ? 'Accepting…' : 'Accept Booking'),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: TechColors.brand,
+                                foregroundColor: Colors.white,
+                                // Keep it green (not grey) while accepting.
+                                disabledBackgroundColor: TechColors.brand,
+                                disabledForegroundColor: Colors.white,
+                                shape: const RoundedRectangleBorder(borderRadius: TechRadius.mdAll),
+                                textStyle: TechText.button,
+                              ),
                             ),
                           ),
                         ),
@@ -812,6 +804,9 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
             ),
           ),
         ],
+      ),
+        ),
+      ),
       ),
     );
   }
@@ -849,12 +844,10 @@ class _DetailRow extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           SizedBox(
-            width: 74,
+            width: 78,
             child: Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(label,
-                  style: const TextStyle(
-                      fontSize: 12, color: AppColors.textSecondary)),
+              padding: const EdgeInsets.only(top: 7),
+              child: Text(label, style: TechText.bodySecondary),
             ),
           ),
           Expanded(

@@ -18,6 +18,7 @@ import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/package_pager.dart';
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 import 'package:microlab/services/customer_refresh_notifier.dart';
 import 'package:microlab/services/razorpay_service.dart';
 import 'package:microlab/services/socket_service.dart';
@@ -378,7 +379,8 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
   @override
   Widget build(BuildContext context) {
     if (widget.embedded) {
-      return Column(
+      return CustomerThemeScope(
+        child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
@@ -389,63 +391,59 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
             child: const Align(
               alignment: Alignment.centerLeft,
               child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16),
+                padding: EdgeInsets.symmetric(horizontal: CxSpace.gutter),
                 child: Text(
                   'My Bookings',
                   style: TextStyle(
                       color: Colors.white,
-                      fontSize: 18,
+                      fontSize: 20,
                       fontWeight: FontWeight.w700,
-                      letterSpacing: 0.2),
+                      letterSpacing: -0.2),
                 ),
               ),
             ),
           ),
           Expanded(child: _buildBody()),
         ],
+        ),
       );
     }
 
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8),
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
         elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20),
+          tooltip: 'Back',
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text('My Bookings',
-            style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
+            style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
       ),
       body: _buildBody(),
+      ),
     );
   }
 
   Widget _buildBody() {
     if (_isLoading) {
       return const ColoredBox(
-        color: Color(0xFFF4F6F8),
-        child: Center(child: CircularProgressIndicator(color: AppColors.brandGreen)),
+        color: CxColors.page,
+        child: CxLoading(label: 'Loading your bookings…'),
       );
     }
     if (_error != null) {
       return ColoredBox(
-        color: const Color(0xFFF4F6F8),
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.wifi_off_rounded, size: 40, color: AppColors.textHint),
-              const SizedBox(height: 12),
-              Text(_error!, style: const TextStyle(color: AppColors.textSecondary)),
-              const SizedBox(height: 16),
-              TextButton(
-                onPressed: _loadBookings,
-                child: const Text('Retry', style: TextStyle(color: AppColors.brandGreen)),
-              ),
-            ],
-          ),
+        color: CxColors.page,
+        child: CxErrorState(
+          title: 'Couldn\'t load bookings',
+          message: _error!,
+          retryLabel: 'Retry',
+          onRetry: _loadBookings,
         ),
       );
     }
@@ -459,32 +457,10 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
           physics: const AlwaysScrollableScrollPhysics(),
           child: SizedBox(
             height: MediaQuery.of(context).size.height * 0.7,
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(40),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 72, height: 72,
-                      decoration: const BoxDecoration(
-                          color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-                      child: const Icon(Icons.calendar_today_outlined,
-                          size: 32, color: AppColors.brandGreen),
-                    ),
-                    const SizedBox(height: 16),
-                    const Text('No bookings yet',
-                        style: TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Your booked tests will appear here.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
-                    ),
-                  ],
-                ),
-              ),
+            child: const CxEmptyState(
+              icon: Icons.calendar_today_outlined,
+              title: 'No bookings yet',
+              message: 'Your booked tests will appear here.',
             ),
           ),
         ),
@@ -497,7 +473,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       onRefresh: () async => _loadBookings(),
       color: AppColors.brandGreen,
       child: ColoredBox(
-        color: const Color(0xFFF4F6F8),
+        color: CxColors.page,
         child: CustomScrollView(
           slivers: [
             SliverToBoxAdapter(child: _buildSummaryHeader()),
@@ -505,7 +481,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
               SliverFillRemaining(hasScrollBody: false, child: _buildFilterEmptyState())
             else
               SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+                padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.xs, CxSpace.gutter, 32),
                 sliver: SliverList(
                   delegate: SliverChildBuilderDelegate(
                     (_, i) {
@@ -539,7 +515,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
     final total = _bookings.length;
     final upcoming = _bookings.where((b) => _upcomingStatuses.contains(b.status)).length;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, CxSpace.md),
       child: Row(
         children: [
           Expanded(
@@ -567,30 +543,10 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
   }
 
   Widget _buildFilterEmptyState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 64,
-              height: 64,
-              decoration: const BoxDecoration(color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-              child: const Icon(Icons.filter_list_off_rounded, size: 28, color: AppColors.brandGreen),
-            ),
-            const SizedBox(height: 14),
-            Text('No $_bookingsFilter bookings',
-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-            const SizedBox(height: 6),
-            const Text(
-              'Try a different filter to see more bookings.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
-            ),
-          ],
-        ),
-      ),
+    return CxEmptyState(
+      icon: Icons.filter_list_off_rounded,
+      title: 'No $_bookingsFilter bookings',
+      message: 'Try a different filter to see more bookings.',
     );
   }
 }
@@ -629,27 +585,50 @@ class _StatCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    // Also the filter: tapping selects All / Upcoming (same as before).
+    return Semantics(
+      button: true,
+      selected: selected,
+      child: Material(
+      color: selected ? CxColors.brand : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: CxRadius.lgAll,
+        side: BorderSide(color: selected ? CxColors.brand : CxColors.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(vertical: 14),
-        decoration: BoxDecoration(
-          color: selected ? AppColors.brandGreen : AppColors.brandGreenSurface,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        child: Row(
           children: [
-            Icon(icon, size: 16, color: selected ? Colors.white : AppColors.brandGreen),
-            const SizedBox(height: 6),
-            Text('$count',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: selected ? Colors.white : AppColors.brandGreen)),
-            const SizedBox(height: 2),
-            Text(label,
-                style: TextStyle(fontSize: 11, color: selected ? Colors.white70 : AppColors.textSecondary)),
+            Container(
+              width: 38, height: 38,
+              decoration: BoxDecoration(
+                color: selected ? Colors.white.withValues(alpha: 0.2) : CxColors.brandSurface,
+                borderRadius: CxRadius.mdAll,
+              ),
+              child: Icon(icon, size: 20, color: selected ? Colors.white : CxColors.brand),
+            ),
+            const SizedBox(width: CxSpace.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('$count',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, height: 1.1,
+                          color: selected ? Colors.white : CxColors.textPrimary)),
+                  Text(label,
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                          color: selected ? Colors.white.withValues(alpha: 0.85) : CxColors.textSecondary)),
+                ],
+              ),
+            ),
           ],
         ),
+      ),
+      ),
       ),
     );
   }
@@ -676,22 +655,10 @@ class _PatientCard extends StatelessWidget {
         ? '${view.upcomingCount} upcoming · ${view.allBookings.length} booking${view.allBookings.length == 1 ? '' : 's'}'
         : '${view.displayCount} booking${view.displayCount == 1 ? '' : 's'}';
 
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.06),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: CxSpace.md),
+      child: CxCard(
+        onTap: onTap,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -721,36 +688,36 @@ class _PatientCard extends StatelessWidget {
                   children: [
                     Text(
                       member.name,
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary,
-                      ),
+                      style: CxText.cardTitle,
                     ),
                     const SizedBox(height: 3),
-                    Text(countLabel,
-                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                    Text(countLabel, style: CxText.bodySecondary),
                   ],
                 ),
               ),
+              const SizedBox(width: CxSpace.sm),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   color: view.badgeColor.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: CxRadius.pill,
                 ),
                 child: Text(view.badge,
-                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: view.badgeColor)),
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: view.badgeColor)),
               ),
             ]),
-            const SizedBox(height: 10),
+            const SizedBox(height: CxSpace.md),
+            const Divider(height: 1),
+            const SizedBox(height: CxSpace.md),
             Row(children: [
-              const Icon(Icons.event_outlined, size: 13, color: AppColors.textHint),
-              const SizedBox(width: 5),
-              Text('${view.dateLabel} · ${_fmtDate(view.dateValue)}',
-                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-              const Spacer(),
-              const Icon(Icons.chevron_right_rounded, color: AppColors.textHint, size: 20),
+              const Icon(Icons.event_outlined, size: 16, color: CxColors.textHint),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('${view.dateLabel} · ${_fmtDate(view.dateValue)}',
+                    style: CxText.bodySecondary),
+              ),
+              const Text('View', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: CxColors.brand)),
+              const Icon(Icons.chevron_right_rounded, color: CxColors.brand, size: 20),
             ]),
           ],
         ),
@@ -885,76 +852,56 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
   }
 
   Widget _emptyState(String tab) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(40),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 72,
-              height: 72,
-              decoration: const BoxDecoration(
-                  color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-              child: const Icon(Icons.calendar_today_outlined,
-                  size: 32, color: AppColors.brandGreen),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              tab == 'All' ? 'No bookings yet' : 'No $tab bookings',
-              style: const TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Tests booked for this patient will appear here.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: AppColors.textSecondary, height: 1.5),
-            ),
-          ],
-        ),
-      ),
+    return CxEmptyState(
+      icon: Icons.calendar_today_outlined,
+      title: tab == 'All' ? 'No bookings yet' : 'No $tab bookings',
+      message: 'Tests booked for this patient will appear here.',
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8),
+    return CustomerThemeScope(
+      child: Scaffold(
+      backgroundColor: CxColors.page,
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
         elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 20),
+          tooltip: 'Back',
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
           widget.member.name,
           style: const TextStyle(
-              color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600),
+              color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700),
         ),
         bottom: TabBar(
           controller: _tabCtrl,
           indicatorColor: Colors.white,
           indicatorWeight: 3,
+          indicatorSize: TabBarIndicatorSize.label,
+          dividerColor: Colors.transparent,
           labelColor: Colors.white,
-          unselectedLabelColor: Colors.white60,
-          labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          unselectedLabelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w400),
+          unselectedLabelColor: Colors.white70,
+          labelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+          unselectedLabelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
           isScrollable: true,
           tabAlignment: TabAlignment.start,
           tabs: _tabs.map((t) => Tab(text: t)).toList(),
         ),
       ),
       body: _initialLoading
-          ? const Center(child: CircularProgressIndicator(color: AppColors.brandGreen))
+          ? const CxLoading(label: 'Loading bookings…')
           : TabBarView(
               controller: _tabCtrl,
               children: _tabs.map((tab) {
                 final list = _filtered(tab);
                 if (list.isEmpty) return _emptyState(tab);
                 return ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+                  padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, 32),
                   itemCount: list.length,
                   itemBuilder: (_, i) {
                     final b = list[i];
@@ -973,6 +920,7 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
                 );
               }).toList(),
             ),
+      ),
     );
   }
 }
@@ -1061,12 +1009,7 @@ void _showRescheduleSheet(BuildContext context, BookingModel booking, VoidCallba
         if (!context.mounted) return;
         if (result['success'] == true) {
           Navigator.pop(context);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Booking rescheduled to $collectionDate at $slotLabel'),
-            backgroundColor: AppColors.brandGreen,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          ));
+          AppMessages.success(context, 'Booking rescheduled to $collectionDate at $slotLabel');
           onRescheduled?.call();
         } else {
           AppMessages.error(context, AppMessages.serverMessage(result['message'],
@@ -1167,105 +1110,96 @@ class _RescheduleSheetState extends State<_RescheduleSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      padding: EdgeInsets.fromLTRB(20, 16, 20, MediaQuery.of(context).padding.bottom + 20),
+    return CustomerThemeScope(
+      child: CxSheetFrame(
+      title: 'Reschedule Booking',
+      subtitle: 'Current: ${widget.booking.timeSlot} · ${_fmtDate(widget.booking.date)}',
       child: Column(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Center(child: Container(width: 36, height: 4, decoration: BoxDecoration(
-            color: AppColors.divider, borderRadius: BorderRadius.circular(2)))),
-          const SizedBox(height: 16),
-          const Text('Reschedule Booking',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-          const SizedBox(height: 4),
-          Text('Current: ${widget.booking.timeSlot} · ${_fmtDate(widget.booking.date)}',
-              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-          const SizedBox(height: 20),
-
           // Date picker
-          GestureDetector(
+          Material(
+            color: _date != null ? CxColors.brandSurface : Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: CxRadius.mdAll,
+              side: BorderSide(color: _date != null ? CxColors.brand : CxColors.border,
+                  width: _date != null ? 1.5 : 1),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
             onTap: _pickDate,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-              decoration: BoxDecoration(
-                color: _date != null ? const Color(0xFFF0F7FF) : AppColors.background,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: _date != null ? const Color(0xFF1565C0) : AppColors.divider,
-                    width: _date != null ? 1.5 : 1),
-              ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
               child: Row(children: [
-                Icon(Icons.event_outlined, size: 18,
-                    color: _date != null ? const Color(0xFF1565C0) : AppColors.textHint),
+                Icon(Icons.event_outlined, size: 20,
+                    color: _date != null ? CxColors.brand : CxColors.textHint),
                 const SizedBox(width: 10),
-                Text(_date != null ? _fmtDate(_date!) : 'Select new date',
-                    style: TextStyle(fontSize: 14,
-                        color: _date != null ? AppColors.textPrimary : AppColors.textHint)),
-                const Spacer(),
-                const Icon(Icons.keyboard_arrow_down_rounded, color: AppColors.textHint),
+                Expanded(
+                  child: Text(_date != null ? _fmtDate(_date!) : 'Select new date',
+                      style: TextStyle(fontSize: 15,
+                          fontWeight: _date != null ? FontWeight.w600 : FontWeight.w400,
+                          color: _date != null ? CxColors.textPrimary : CxColors.textHint)),
+                ),
+                const Icon(Icons.keyboard_arrow_down_rounded, color: CxColors.textHint),
               ]),
+            ),
             ),
           ),
 
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.lg),
 
           // Slots
           if (_loadingSlots)
-            const Center(child: Padding(
-              padding: EdgeInsets.symmetric(vertical: 16),
-              child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF1565C0)),
-            ))
+            const CxLoading(label: 'Finding available slots…')
           else if (_slotError.isNotEmpty)
-            Text(_slotError, style: const TextStyle(fontSize: 12, color: Color(0xFFD32F2F)))
-          else if (_slots.isNotEmpty)
+            CxBanner(tone: CxTone.error, message: _slotError)
+          else if (_slots.isNotEmpty) ...[
+            const Text('Choose a time', style: CxText.label),
+            const SizedBox(height: CxSpace.sm),
             Wrap(
               spacing: 8, runSpacing: 8,
               children: _slots.map((s) {
                 final selected = _slot?['time_slot_id'] == s['time_slot_id'];
-                return GestureDetector(
+                return Semantics(
+                  button: true,
+                  selected: selected,
+                  child: Material(
+                  color: selected ? CxColors.brand : Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: CxRadius.mdAll,
+                    side: BorderSide(
+                        color: selected ? CxColors.brand : CxColors.border,
+                        width: selected ? 1.5 : 1),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
                   onTap: () => setState(() => _slot = s),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-                    decoration: BoxDecoration(
-                      color: selected ? const Color(0xFF1565C0) : Colors.white,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                          color: selected ? const Color(0xFF1565C0) : AppColors.divider,
-                          width: selected ? 1.5 : 1),
-                    ),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(minHeight: 44),
+                    child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
                     child: Text(s['label'] as String,
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                            color: selected ? Colors.white : AppColors.textPrimary)),
+                        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                            color: selected ? Colors.white : CxColors.textPrimary)),
+                    ),
+                  ),
+                  ),
                   ),
                 );
               }).toList(),
             ),
+          ],
 
-          const SizedBox(height: 20),
-          SizedBox(
-            width: double.infinity,
-            height: 50,
-            child: ElevatedButton(
-              onPressed: (_date != null && _slot != null && !_submitting) ? _submit : null,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF1565C0),
-                foregroundColor: Colors.white,
-                disabledBackgroundColor: const Color(0xFF1565C0).withValues(alpha: 0.35),
-                elevation: 0,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-              child: _submitting
-                  ? const SizedBox(width: 20, height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Text('Confirm Reschedule',
-                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
-            ),
+          const SizedBox(height: CxSpace.xl),
+          CxButton(
+            onPressed: (_date != null && _slot != null && !_submitting) ? _submit : null,
+            loading: _submitting,
+            icon: Icons.edit_calendar_outlined,
+            label: 'Confirm Reschedule',
           ),
         ],
+      ),
       ),
     );
   }
@@ -1343,40 +1277,47 @@ class _BookingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final sc = _statusColor(booking.status);
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.divider),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: CxSpace.md),
+      child: DecoratedBox(
+        decoration: const BoxDecoration(
+          borderRadius: CxRadius.lgAll,
+          boxShadow: [BoxShadow(color: Color(0x0D000000), blurRadius: 10, offset: Offset(0, 2))],
         ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(13),
+        child: Material(
+        color: Colors.white,
+        shape: const RoundedRectangleBorder(
+          borderRadius: CxRadius.lgAll,
+          side: BorderSide(color: CxColors.border),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+        onTap: onTap,
           child: Column(
             children: [
               // Status strip at top
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                color: sc.withOpacity(0.08),
+                padding: const EdgeInsets.symmetric(horizontal: CxSpace.lg, vertical: 10),
+                color: sc.withValues(alpha: 0.08),
                 child: Row(
                   children: [
-                    Icon(_statusIcon(booking.status), size: 14, color: sc),
+                    Icon(_statusIcon(booking.status), size: 17, color: sc),
                     const SizedBox(width: 6),
-                    Text(booking.status,
-                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: sc)),
+                    Flexible(
+                      child: Text(booking.status,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: sc)),
+                    ),
                     const Spacer(),
                     if (booking.referenceNo != null)
-                      Text(booking.referenceNo!,
-                          style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+                      Text(booking.referenceNo!, style: CxText.caption),
                   ],
                 ),
               ),
 
               Padding(
-                padding: const EdgeInsets.all(14),
+                padding: const EdgeInsets.all(CxSpace.lg),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -1384,76 +1325,56 @@ class _BookingCard extends StatelessWidget {
                     Row(
                       children: [
                         Expanded(
-                          child: Text(booking.member.name,
-                              style: const TextStyle(
-                                  fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                          child: Text(booking.member.name, style: CxText.cardTitle),
                         ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: AppColors.brandGreenSurface,
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Text(booking.mode,
-                              style: const TextStyle(
-                                  fontSize: 10, color: AppColors.brandGreen, fontWeight: FontWeight.w500)),
+                        const SizedBox(width: CxSpace.sm),
+                        CxChip(
+                          label: booking.mode,
+                          icon: booking.mode == 'Home Collection' ? Icons.home_outlined : Icons.local_hospital_outlined,
+                          tone: CxTone.brand,
                         ),
+                      ],
+                    ),
+
+                    const SizedBox(height: CxSpace.md),
+
+                    // Date + time
+                    Wrap(
+                      spacing: 14,
+                      runSpacing: 4,
+                      children: [
+                        Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.event_outlined, size: 16, color: CxColors.textHint),
+                          const SizedBox(width: 5),
+                          Text(_formatDate(booking.date), style: CxText.bodySecondary),
+                        ]),
+                        Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.schedule_outlined, size: 16, color: CxColors.textHint),
+                          const SizedBox(width: 5),
+                          Text(booking.timeSlot, style: CxText.bodySecondary),
+                        ]),
                       ],
                     ),
 
                     const SizedBox(height: 10),
-
-                    // Date + time
-                    Row(
-                      children: [
-                        const Icon(Icons.event_outlined, size: 13, color: AppColors.textHint),
-                        const SizedBox(width: 5),
-                        Text(_formatDate(booking.date),
-                            style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                        const SizedBox(width: 12),
-                        const Icon(Icons.schedule_outlined, size: 13, color: AppColors.textHint),
-                        const SizedBox(width: 5),
-                        Text(booking.timeSlot,
-                            style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                      ],
-                    ),
-
-                    const SizedBox(height: 8),
 
                     // Tests list (max 2 shown + count)
                     Wrap(
                       spacing: 6,
-                      runSpacing: 4,
+                      runSpacing: 6,
                       children: [
-                        ...booking.tests.take(2).map((t) => Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: t.type == 'package'
-                                ? AppColors.brandGreenSurface
-                                : const Color(0xFFEEF4FB),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(t.name,
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  color: t.type == 'package'
-                                      ? AppColors.brandGreen
-                                      : const Color(0xFF1565C0))),
+                        ...booking.tests.take(2).map((t) => CxChip(
+                          label: t.name,
+                          tone: t.type == 'package' ? CxTone.brand : CxTone.info,
                         )),
                         if (booking.tests.length > 2)
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: AppColors.background,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text('+${booking.tests.length - 2} more',
-                                style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                          ),
+                          CxChip(label: '+${booking.tests.length - 2} more', tone: CxTone.neutral),
                       ],
                     ),
 
-                    const SizedBox(height: 10),
+                    const SizedBox(height: CxSpace.md),
+                    const Divider(height: 1),
+                    const SizedBox(height: CxSpace.md),
 
                     // Amount row
                     Row(
@@ -1464,10 +1385,10 @@ class _BookingCard extends StatelessWidget {
                           children: [
                             Text('Paid: ₹${booking.paidAmount.toInt()}',
                                 style: const TextStyle(
-                                    fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+                                    fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.brandGreen)),
                             if (booking.paymentType == 'service_charge')
                               Text('Due at collection: ₹${(booking.grandTotal - booking.paidAmount).toInt()}',
-                                  style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: CxColors.warning)),
                             if ((booking.refundAmount ?? 0) > 0 || (booking.actualRefundAmount ?? 0) > 0)
                               Builder(builder: (context) {
                                 final displayRefund = (booking.actualRefundAmount != null && booking.actualRefundAmount! > 0)
@@ -1480,25 +1401,25 @@ class _BookingCard extends StatelessWidget {
                                         ? 'Refund of ₹${displayRefund.toInt()} initiated · 5–7 days'
                                         : 'Refund of ₹${displayRefund.toInt()} pending',
                                 style: TextStyle(
-                                  fontSize: 11,
+                                  fontSize: 12,
                                   color: booking.refundStatus == 'processed'
                                       ? AppColors.brandGreen
                                       : booking.refundStatus == 'initiated'
                                           ? AppColors.brandGreen
-                                          : const Color(0xFFE65100),
+                                          : CxColors.warning,
                                 ),
                               );
                               }),
                           ],
                         ),
-                        Row(
+                        const Row(
                           children: [
-                            const Text('View details',
+                            Text('View details',
                                 style: TextStyle(
-                                    fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w500)),
-                            const SizedBox(width: 4),
-                            const Icon(Icons.arrow_forward_ios_rounded,
-                                size: 11, color: AppColors.brandGreen),
+                                    fontSize: 13, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
+                            SizedBox(width: 2),
+                            Icon(Icons.chevron_right_rounded,
+                                size: 20, color: AppColors.brandGreen),
                           ],
                         ),
                       ],
@@ -1507,25 +1428,11 @@ class _BookingCard extends StatelessWidget {
                     // Feedback button for completed or sample-collected bookings
                     if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'Handed to Lab Pending' || booking.status == 'collected') && booking.rating == null) ...[
                       const SizedBox(height: 10),
-                      GestureDetector(
+                      _CardAction(
+                        icon: Icons.star_border_rounded,
+                        label: 'Rate your experience',
+                        tone: CxTone.warning,
                         onTap: () => _showFeedback(context, booking, onRefresh: onFeedbackSubmitted),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 9),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFFF3E0),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: const Color(0xFFFFCC02).withOpacity(0.5)),
-                          ),
-                          child: const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.star_border_rounded, size: 16, color: Color(0xFFE65100)),
-                              SizedBox(width: 6),
-                              Text('Rate your experience',
-                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
-                            ],
-                          ),
-                        ),
                       ),
                     ],
 
@@ -1533,24 +1440,27 @@ class _BookingCard extends StatelessWidget {
                     if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'Handed to Lab Pending' || booking.status == 'collected') && booking.rating != null) ...[
                       const SizedBox(height: 10),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: AppColors.brandGreenSurface,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: AppColors.brandGreenLight),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: const BoxDecoration(
+                          color: CxColors.brandSurface,
+                          borderRadius: CxRadius.mdAll,
                         ),
-                        child: Row(
+                        child: Semantics(
+                          label: 'You rated ${booking.rating ?? 0} out of 5',
+                          excludeSemantics: true,
+                          child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             ...List.generate(5, (i) => Icon(
                               i < (booking.rating ?? 0) ? Icons.star_rounded : Icons.star_border_rounded,
-                              size: 18,
+                              size: 20,
                               color: i < (booking.rating ?? 0) ? const Color(0xFFFFB300) : AppColors.divider,
                             )),
                             const SizedBox(width: 8),
                             const Text('Thank you!',
-                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.brandGreen)),
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
                           ],
+                          ),
                         ),
                       ),
                     ],
@@ -1562,25 +1472,11 @@ class _BookingCard extends StatelessWidget {
                         !_slotHasPassed(booking) &&
                         (booking.collectionStatus == null || booking.collectionStatus == 'assigned')) ...[
                       const SizedBox(height: 10),
-                      GestureDetector(
+                      _CardAction(
+                        icon: Icons.edit_calendar_outlined,
+                        label: 'Reschedule',
+                        tone: CxTone.info,
                         onTap: () => _showRescheduleSheet(context, booking, onCancelled),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 9),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF0F7FF),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: const Color(0xFF90CAF9)),
-                          ),
-                          child: const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.edit_calendar_outlined, size: 15, color: Color(0xFF1565C0)),
-                              SizedBox(width: 6),
-                              Text('Reschedule',
-                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1565C0))),
-                            ],
-                          ),
-                        ),
                       ),
                     ],
 
@@ -1594,25 +1490,11 @@ class _BookingCard extends StatelessWidget {
                                  'all_collected', 'cancelled'}
                             .contains(booking.collectionStatus)) ...[
                       const SizedBox(height: 10),
-                      GestureDetector(
+                      _CardAction(
+                        icon: Icons.cancel_outlined,
+                        label: 'Cancel Booking',
+                        tone: CxTone.error,
                         onTap: () => _showCancelSheet(context, booking, chargeApplies, onCancelled),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 9),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFFF8F8),
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(color: const Color(0xFFEF9A9A)),
-                          ),
-                          child: const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.cancel_outlined, size: 15, color: Color(0xFFD32F2F)),
-                              SizedBox(width: 6),
-                              Text('Cancel Booking',
-                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFFD32F2F))),
-                            ],
-                          ),
-                        ),
                       ),
                     ],
 
@@ -1622,9 +1504,41 @@ class _BookingCard extends StatelessWidget {
             ],
           ),
         ),
+        ),
       ),
     );
   }
+}
+
+// A full-width tinted action inside a booking card (rate, reschedule,
+// cancel) — 44px tall with a ripple.
+class _CardAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final CxTone tone;
+  final VoidCallback onTap;
+  const _CardAction({required this.icon, required this.label, required this.tone, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: tone.surface,
+        borderRadius: CxRadius.mdAll,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            height: 44,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, size: 18, color: tone.color),
+                const SizedBox(width: 6),
+                Text(label, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: tone.color)),
+              ],
+            ),
+          ),
+        ),
+      );
 }
 
 // ─── Booking Detail Sheet ─────────────────────────────────────────────────────
@@ -2122,37 +2036,36 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return CustomerThemeScope(
+      child: Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
       decoration: const BoxDecoration(
         color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: CxRadius.sheetTop,
       ),
-      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+      constraints: BoxConstraints(
+        maxWidth: CxSize.sheetMaxWidth,
+        maxHeight: MediaQuery.of(context).size.height * 0.88,
+      ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
           // Handle
-          Center(
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 40, height: 4,
-              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-            ),
-          ),
+          const CxDragHandle(),
 
           // Header
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+            padding: const EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, CxSpace.md),
             child: Row(
               children: [
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Booking Details',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                      const Text('Booking Details', style: CxText.sheetTitle),
                       if (b.referenceNo != null)
-                        Text(b.referenceNo!,
-                            style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                        Text(b.referenceNo!, style: CxText.bodySecondary),
                     ],
                   ),
                 ),
@@ -2165,7 +2078,8 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
           // Scrollable content
           Flexible(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+              padding: EdgeInsets.fromLTRB(CxSpace.xl, CxSpace.lg, CxSpace.xl,
+                  MediaQuery.of(context).padding.bottom + 32),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2256,17 +2170,13 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Preparation Instructions',
-                              style: TextStyle(
-                                  fontSize: 13, fontWeight: FontWeight.w600,
-                                  color: AppColors.textSecondary, letterSpacing: 0.3)),
+                          const Text('Preparation Instructions', style: CxText.sectionTitle),
                           const SizedBox(height: 10),
                           Container(
                             padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFFFDE7),
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: const Color(0xFFFFEB3B)),
+                            decoration: const BoxDecoration(
+                              color: CxColors.warningSurface,
+                              borderRadius: CxRadius.mdAll,
                             ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -2275,22 +2185,17 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                                 child: Row(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const Icon(Icons.info_outline_rounded,
-                                        size: 15, color: Color(0xFFF9A825)),
+                                    const Icon(Icons.checklist_rounded,
+                                        size: 18, color: CxColors.warning),
                                     const SizedBox(width: 8),
                                     Expanded(
                                       child: Column(
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
                                           Text(t.name,
-                                              style: const TextStyle(
-                                                  fontSize: 12, fontWeight: FontWeight.w600,
-                                                  color: AppColors.textPrimary)),
+                                              style: CxText.body.copyWith(fontWeight: FontWeight.w600)),
                                           const SizedBox(height: 2),
-                                          Text(t.preInstructions!,
-                                              style: const TextStyle(
-                                                  fontSize: 12, color: AppColors.textSecondary,
-                                                  height: 1.4)),
+                                          Text(t.preInstructions!, style: CxText.bodySecondary),
                                         ],
                                       ),
                                     ),
@@ -2305,26 +2210,12 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                   }),
 
                   if (_canEditTests) ...[
-                    const SizedBox(height: 10),
-                    GestureDetector(
-                      onTap: _showEditTests,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        decoration: BoxDecoration(
-                          border: Border.all(color: AppColors.brandGreen),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.edit_outlined, size: 16, color: AppColors.brandGreen),
-                            SizedBox(width: 8),
-                            Text('Edit Tests / Packages',
-                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                    color: AppColors.brandGreen)),
-                          ],
-                        ),
-                      ),
+                    const SizedBox(height: CxSpace.md),
+                    CxButton.secondary(
+                      onPressed: _showEditTests,
+                      icon: Icons.edit_outlined,
+                      label: 'Edit Tests / Packages',
+                      compact: true,
                     ),
                   ],
 
@@ -2349,7 +2240,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                       if (b.amountDue > 0)
                         _DetailRow(Icons.pending_outlined,
                             b.mode == 'Home Collection' ? 'Due at Collection' : 'Due at Lab',
-                            '₹${b.amountDue.toInt()}', valueColor: const Color(0xFFE65100)),
+                            '₹${b.amountDue.toInt()}', valueColor: CxColors.warning, valueBold: true),
                       if ((b.refundAmount ?? 0) > 0 || (b.actualRefundAmount ?? 0) > 0)
                         _DetailRow(
                           Icons.currency_rupee_rounded,
@@ -2363,7 +2254,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                               ? AppColors.brandGreen
                               : b.refundStatus == 'initiated'
                                   ? AppColors.brandGreen
-                                  : const Color(0xFFE65100),
+                                  : CxColors.warning,
                         ),
                     ],
                   ),
@@ -2373,33 +2264,21 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                   const SizedBox(height: 14),
                   Row(children: [
                     Expanded(
-                      child: OutlinedButton.icon(
+                      child: CxButton.secondary(
                         onPressed: _billBusy ? null : _downloadBill,
-                        icon: _billBusy
-                            ? const SizedBox(width: 14, height: 14,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
-                            : const Icon(Icons.download_outlined, size: 16, color: AppColors.brandGreen),
-                        label: const Text('Download Bill',
-                            style: TextStyle(fontSize: 13, color: AppColors.brandGreen)),
-                        style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: AppColors.brandGreen),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                        ),
+                        loading: _billBusy,
+                        icon: Icons.download_outlined,
+                        label: 'Download Bill',
+                        compact: true,
                       ),
                     ),
-                    const SizedBox(width: 10),
+                    const SizedBox(width: CxSpace.md),
                     Expanded(
-                      child: OutlinedButton.icon(
+                      child: CxButton.secondary(
                         onPressed: _billBusy ? null : _shareBill,
-                        icon: const Icon(Icons.share_outlined, size: 16, color: AppColors.brandGreen),
-                        label: const Text('Share Bill',
-                            style: TextStyle(fontSize: 13, color: AppColors.brandGreen)),
-                        style: OutlinedButton.styleFrom(
-                          side: const BorderSide(color: AppColors.brandGreen),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                        ),
+                        icon: Icons.share_outlined,
+                        label: 'Share Bill',
+                        compact: true,
                       ),
                     ),
                   ]),
@@ -2408,16 +2287,14 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                   // Prescription section
                   if (b.prescriptionImages.isNotEmpty) ...[
                     const SizedBox(height: 16),
-                    const Text('Prescription',
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                            color: AppColors.textSecondary, letterSpacing: 0.3)),
+                    const Text('Prescription', style: CxText.sectionTitle),
                     const SizedBox(height: 10),
                     Container(
                       padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(
-                        color: AppColors.background,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: AppColors.divider),
+                        color: Colors.white,
+                        borderRadius: CxRadius.mdAll,
+                        border: Border.all(color: CxColors.border),
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2428,10 +2305,10 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                               b.prescriptionStatus == 'verified'
                                   ? Icons.verified_outlined
                                   : Icons.hourglass_top_rounded,
-                              size: 14,
+                              size: 18,
                               color: b.prescriptionStatus == 'verified'
                                   ? AppColors.brandGreen
-                                  : const Color(0xFFE65100),
+                                  : CxColors.warning,
                             ),
                             const SizedBox(width: 6),
                             Text(
@@ -2439,11 +2316,11 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                                   ? 'Prescription Verified'
                                   : 'Awaiting Verification',
                               style: TextStyle(
-                                fontSize: 13,
+                                fontSize: 14,
                                 fontWeight: FontWeight.w600,
                                 color: b.prescriptionStatus == 'verified'
                                     ? AppColors.brandGreen
-                                    : const Color(0xFFE65100),
+                                    : CxColors.warning,
                               ),
                             ),
                           ]),
@@ -2473,7 +2350,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
                           ),
                           const SizedBox(height: 8),
                           Text('${b.prescriptionImages.length} image${b.prescriptionImages.length == 1 ? '' : 's'} uploaded',
-                              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
+                              style: CxText.caption),
                         ],
                       ),
                     ),
@@ -2481,62 +2358,24 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
 
                   // Pay Now button — only shown after prescription is verified (or no doc required)
                   if (_paymentPending && !_prescriptionBlocking) ...[
-                    const SizedBox(height: 20),
-                    GestureDetector(
-                      onTap: _isProcessing ? null : _triggerPayment,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        decoration: BoxDecoration(
-                          color: _isProcessing
-                              ? AppColors.brandGreen.withValues(alpha: 0.5)
-                              : const Color(0xFF1565C0),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: _isProcessing
-                            ? const Center(child: SizedBox(width: 20, height: 20,
-                                child: CircularProgressIndicator(strokeWidth: 2,
-                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white))))
-                            : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                                const Icon(Icons.payment_outlined, size: 18, color: Colors.white),
-                                const SizedBox(width: 8),
-                                Text(
-                                  'Pay ₹${(b.amountDue > 0 ? b.amountDue : b.grandTotal).toInt()} via Razorpay',
-                                  style: const TextStyle(fontSize: 14,
-                                      fontWeight: FontWeight.w600, color: Colors.white),
-                                ),
-                              ]),
-                      ),
+                    const SizedBox(height: CxSpace.xl),
+                    CxButton(
+                      onPressed: _isProcessing ? null : _triggerPayment,
+                      loading: _isProcessing,
+                      icon: Icons.payment_outlined,
+                      label: 'Pay ₹${(b.amountDue > 0 ? b.amountDue : b.grandTotal).toInt()} via Razorpay',
                     ),
                   ],
 
                   // Pay Due button — shown when booking is paid but has an outstanding due amount
                   // (e.g. user added tests and chose "Pay Later")
                   if (_hasDueOnPaidBooking) ...[
-                    const SizedBox(height: 20),
-                    GestureDetector(
-                      onTap: _isProcessing ? null : _triggerPayment,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        decoration: BoxDecoration(
-                          color: _isProcessing
-                              ? AppColors.brandGreen.withValues(alpha: 0.5)
-                              : const Color(0xFF1565C0),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: _isProcessing
-                            ? const Center(child: SizedBox(width: 20, height: 20,
-                                child: CircularProgressIndicator(strokeWidth: 2,
-                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white))))
-                            : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                                const Icon(Icons.payment_outlined, size: 18, color: Colors.white),
-                                const SizedBox(width: 8),
-                                Text(
-                                  'Pay Due ₹${b.amountDue.toInt()} via Razorpay',
-                                  style: const TextStyle(fontSize: 14,
-                                      fontWeight: FontWeight.w600, color: Colors.white),
-                                ),
-                              ]),
-                      ),
+                    const SizedBox(height: CxSpace.xl),
+                    CxButton(
+                      onPressed: _isProcessing ? null : _triggerPayment,
+                      loading: _isProcessing,
+                      icon: Icons.payment_outlined,
+                      label: 'Pay Due ₹${b.amountDue.toInt()} via Razorpay',
                     ),
                   ],
 
@@ -2545,6 +2384,8 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
             ),
           ),
         ],
+      ),
+      ),
       ),
     );
   }
@@ -2607,29 +2448,34 @@ class _TechnicianCard extends StatelessWidget {
       children: [
         Row(
           children: [
-            const Text('Technician Status',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                    color: AppColors.textSecondary, letterSpacing: 0.3)),
+            const Text('Technician Status', style: CxText.sectionTitle),
             const Spacer(),
             if (isRefreshing)
               const SizedBox(
-                width: 16, height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+                width: 44, height: 44,
+                child: Center(
+                  child: SizedBox(
+                    width: 18, height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
+                  ),
+                ),
               )
             else
-              GestureDetector(
-                onTap: onRefresh,
-                child: const Icon(Icons.refresh_rounded, size: 20, color: AppColors.brandGreen),
+              CxIconButton(
+                icon: Icons.refresh_rounded,
+                tooltip: 'Refresh technician status',
+                color: AppColors.brandGreen,
+                onPressed: onRefresh,
               ),
           ],
         ),
-        const SizedBox(height: 10),
+        const SizedBox(height: CxSpace.sm),
         Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            color: AppColors.background,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.divider),
+            color: Colors.white,
+            borderRadius: CxRadius.lgAll,
+            border: Border.all(color: CxColors.border),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -2637,25 +2483,12 @@ class _TechnicianCard extends StatelessWidget {
             children: [
               _assigned ? _assignedRow(context) : _pendingRow(),
               if (onTrack != null) ...[
-                const SizedBox(height: 12),
-                GestureDetector(
-                  onTap: onTrack,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    decoration: BoxDecoration(
-                      color: AppColors.brandGreen,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.my_location_rounded, size: 16, color: Colors.white),
-                        SizedBox(width: 8),
-                        Text('Track Live',
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
-                      ],
-                    ),
-                  ),
+                const SizedBox(height: CxSpace.md),
+                CxButton(
+                  onPressed: onTrack,
+                  icon: Icons.my_location_rounded,
+                  label: 'Track Live',
+                  compact: true,
                 ),
               ],
             ],
@@ -2681,12 +2514,9 @@ class _TechnicianCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Finding Technician',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary)),
+              Text('Finding Technician', style: CxText.cardTitle),
               SizedBox(height: 4),
-              Text('A technician will be assigned shortly',
-                  style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+              Text('A technician will be assigned shortly', style: CxText.bodySecondary),
             ],
           ),
         ),
@@ -2721,18 +2551,16 @@ class _TechnicianCard extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(name!,
-                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary)),
+              Text(name!, style: CxText.cardTitle),
               const SizedBox(height: 4),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
                 decoration: BoxDecoration(
                   color: _statusColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: CxRadius.pill,
                 ),
                 child: Text(_statusLabel,
-                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
                         color: _statusColor)),
               ),
             ],
@@ -2742,16 +2570,13 @@ class _TechnicianCard extends StatelessWidget {
             collectionStatus != 'sample_collected' &&
             collectionStatus != 'handed_to_lab_pending' &&
             collectionStatus != 'handed_to_lab')
-          GestureDetector(
-            onTap: () => launchUrl(Uri(scheme: 'tel', path: mobile)),
-            child: Container(
-              width: 40, height: 40,
-              decoration: BoxDecoration(
-                color: AppColors.brandGreenSurface,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Icon(Icons.phone_outlined, size: 20, color: AppColors.brandGreen),
-            ),
+          CxIconButton(
+            icon: Icons.phone_outlined,
+            tooltip: 'Call technician',
+            color: AppColors.brandGreen,
+            background: CxColors.brandSurface,
+            size: 48,
+            onPressed: () => launchUrl(Uri(scheme: 'tel', path: mobile)),
           ),
       ],
     );
@@ -2768,38 +2593,37 @@ class _DetailSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(title,
-            style: const TextStyle(
-                fontSize: 13, fontWeight: FontWeight.w600,
-                color: AppColors.textSecondary, letterSpacing: 0.3)),
-        const SizedBox(height: 10),
+        Text(title, style: CxText.sectionTitle),
+        const SizedBox(height: CxSpace.sm),
         Container(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           decoration: BoxDecoration(
-            color: AppColors.background,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.divider),
+            color: Colors.white,
+            borderRadius: CxRadius.lgAll,
+            border: Border.all(color: CxColors.border),
           ),
           child: Column(
             children: rows.map((r) => Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6),
+              padding: const EdgeInsets.symmetric(vertical: 7),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(r.icon, size: 14, color: AppColors.brandGreen),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1),
+                    child: Icon(r.icon, size: 18, color: CxColors.textHint),
+                  ),
                   const SizedBox(width: 10),
                   Expanded(
                     flex: 2,
-                    child: Text(r.label,
-                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                    child: Text(r.label, style: CxText.bodySecondary),
                   ),
                   Expanded(
                     flex: 3,
                     child: Text(r.value,
                         style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: r.valueBold ? FontWeight.w600 : FontWeight.w500,
-                            color: r.valueColor ?? AppColors.textPrimary),
+                            fontSize: 14,
+                            fontWeight: r.valueBold ? FontWeight.w700 : FontWeight.w500,
+                            color: r.valueColor ?? CxColors.textPrimary),
                         textAlign: TextAlign.end),
                   ),
                 ],
@@ -2852,116 +2676,85 @@ class _CancelSheetState extends State<_CancelSheet> {
   @override
   Widget build(BuildContext context) {
     final arrivedWarning = widget.chargeApplies;
-    return Container(
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      padding: EdgeInsets.fromLTRB(20, 16, 20, MediaQuery.of(context).viewInsets.bottom + 24),
+    // CxSheetFrame keeps the sheet above the keyboard and the safe area.
+    return CustomerThemeScope(
+      child: CxSheetFrame(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Center(
-            child: Container(
-              width: 36, height: 4,
-              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-            ),
-          ),
-          const SizedBox(height: 16),
           Row(children: [
-            const Icon(Icons.cancel_outlined, color: Color(0xFFD32F2F), size: 20),
-            const SizedBox(width: 8),
-            const Text('Cancel Booking',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+            const CxIconBadge(icon: Icons.cancel_outlined, tone: CxTone.error, size: 40),
+            const SizedBox(width: CxSpace.md),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Cancel Booking', style: CxText.sheetTitle),
+                Text('${widget.booking.member.name}${widget.booking.referenceNo != null ? ' · ${widget.booking.referenceNo}' : ''}',
+                    style: CxText.bodySecondary),
+              ]),
+            ),
           ]),
-          const SizedBox(height: 4),
-          Text('${widget.booking.member.name}${widget.booking.referenceNo != null ? ' · ${widget.booking.referenceNo}' : ''}',
-              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-          const SizedBox(height: 14),
+          const SizedBox(height: CxSpace.lg),
           if (arrivedWarning) ...[
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFF3E0),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: const Color(0xFFFFCC02)),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.info_outline, size: 16, color: Color(0xFFE65100)),
-                  SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'The technician has arrived. A service charge will be deducted from your refund.',
-                      style: TextStyle(fontSize: 12, color: Color(0xFFE65100)),
-                    ),
-                  ),
-                ],
-              ),
+            const CxBanner(
+              tone: CxTone.warning,
+              message: 'The technician has arrived. A service charge will be deducted from your refund.',
             ),
             const SizedBox(height: 14),
           ],
-          const Text('Reason (optional)',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-          const SizedBox(height: 8),
+          const Text('Reason (optional)', style: CxText.label),
+          const SizedBox(height: CxSpace.sm),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: _reasons.map((r) {
               final selected = _reason == r;
-              return GestureDetector(
+              return Semantics(
+                button: true,
+                selected: selected,
+                child: Material(
+                color: selected ? CxColors.errorSurface : Colors.white,
+                shape: StadiumBorder(
+                  side: BorderSide(color: selected ? CxColors.error : CxColors.border),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
                 onTap: () => setState(() => _reason = selected ? null : r),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                  decoration: BoxDecoration(
-                    color: selected ? const Color(0xFFFFEBEE) : AppColors.background,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                        color: selected ? const Color(0xFFD32F2F) : AppColors.divider),
-                  ),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 40),
+                  child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                   child: Text(r,
                       style: TextStyle(
-                          fontSize: 12,
-                          color: selected ? const Color(0xFFD32F2F) : AppColors.textSecondary,
-                          fontWeight: selected ? FontWeight.w600 : FontWeight.w400)),
+                          fontSize: 13,
+                          color: selected ? CxColors.error : CxColors.textPrimary,
+                          fontWeight: selected ? FontWeight.w600 : FontWeight.w500)),
+                  ),
+                ),
+                ),
                 ),
               );
             }).toList(),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: CxSpace.xl),
           Row(children: [
             Expanded(
-              child: OutlinedButton(
+              child: CxButton.secondary(
                 onPressed: _submitting ? null : () => Navigator.pop(context),
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: AppColors.divider),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  padding: const EdgeInsets.symmetric(vertical: 13),
-                ),
-                child: const Text('Go Back',
-                    style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.w600)),
+                label: 'Go Back',
               ),
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: CxSpace.md),
             Expanded(
-              child: ElevatedButton(
+              child: CxButton.destructive(
                 onPressed: _submitting ? null : _submit,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFFD32F2F),
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  padding: const EdgeInsets.symmetric(vertical: 13),
-                ),
-                child: _submitting
-                    ? const SizedBox(width: 18, height: 18,
-                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                    : const Text('Confirm Cancel',
-                        style: TextStyle(fontWeight: FontWeight.w600)),
+                loading: _submitting,
+                label: 'Confirm Cancel',
               ),
             ),
           ]),
         ],
+      ),
       ),
     );
   }
@@ -3029,35 +2822,16 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: const BoxDecoration(
-        color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      padding: EdgeInsets.fromLTRB(
-          20, 0, 20, MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).padding.bottom + 20),
-      child: SingleChildScrollView(
+    // CxSheetFrame keeps the sheet above the keyboard and the safe area.
+    return CustomerThemeScope(
+      child: CxSheetFrame(
+        title: 'Rate your experience',
+        subtitle: 'Technician visit on ${_formatDate(widget.booking.date)} · ${widget.booking.timeSlot}',
+        centerTitle: true,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Handle
-            Center(
-              child: Container(
-                margin: const EdgeInsets.symmetric(vertical: 12),
-                width: 40, height: 4,
-                decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
-
-            const Text('Rate your experience',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-            const SizedBox(height: 4),
-            Text(
-              'Technician visit on ${_formatDate(widget.booking.date)} · ${widget.booking.timeSlot}',
-              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
+            const SizedBox(height: CxSpace.sm),
 
             // Star rating
             Row(
@@ -3065,7 +2839,11 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
               children: List.generate(5, (i) {
                 final starVal = i + 1;
                 final filled = starVal <= (_hoveredRating > 0 ? _hoveredRating : _rating);
-                return GestureDetector(
+                return Semantics(
+                  button: true,
+                  selected: starVal <= _rating,
+                  label: '$starVal star${starVal == 1 ? '' : 's'}',
+                  child: GestureDetector(
                   onTap: () => setState(() => _rating = starVal),
                   onTapDown: (_) => setState(() => _hoveredRating = starVal),
                   onTapUp: (_) => setState(() => _hoveredRating = 0),
@@ -3076,10 +2854,11 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
                       child: Icon(
                         filled ? Icons.star_rounded : Icons.star_border_rounded,
                         key: ValueKey('$starVal-$filled'),
-                        size: 44,
+                        size: 46,
                         color: filled ? const Color(0xFFFFB300) : AppColors.divider,
                       ),
                     ),
+                  ),
                   ),
                 );
               }),
@@ -3092,96 +2871,60 @@ class _FeedbackSheetState extends State<_FeedbackSheet> {
                 _ratingLabel,
                 key: ValueKey(_rating),
                 style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
                     color: _rating > 0 ? _ratingColor : AppColors.textHint),
               ),
             ),
 
-            const SizedBox(height: 20),
+            const SizedBox(height: CxSpace.xl),
 
             // Quick tags
             const Align(
               alignment: Alignment.centerLeft,
-              child: Text('What went well?',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textPrimary)),
+              child: Text('What went well?', style: CxText.label),
             ),
             const SizedBox(height: 10),
-            Wrap(
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Wrap(
               spacing: 8,
               runSpacing: 8,
               children: _quickTags.map((tag) {
                 final sel = _selectedTags.contains(tag);
-                return GestureDetector(
+                return CxFilterChip(
+                  label: tag,
+                  selected: sel,
+                  icon: sel ? Icons.check_rounded : null,
                   onTap: () => setState(() {
                     sel ? _selectedTags.remove(tag) : _selectedTags.add(tag);
                   }),
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 150),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                    decoration: BoxDecoration(
-                      color: sel ? AppColors.brandGreenSurface : AppColors.background,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(
-                          color: sel ? AppColors.brandGreen : AppColors.divider,
-                          width: sel ? 1.5 : 1),
-                    ),
-                    child: Text(tag,
-                        style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: sel ? FontWeight.w600 : FontWeight.w400,
-                            color: sel ? AppColors.brandGreen : AppColors.textSecondary)),
-                  ),
                 );
               }).toList(),
+              ),
             ),
 
-            const SizedBox(height: 16),
+            const SizedBox(height: CxSpace.lg),
 
             // Comment
             TextField(
               controller: _commentCtrl,
               maxLines: 3,
-              style: const TextStyle(fontSize: 14),
-              decoration: InputDecoration(
+              textCapitalization: TextCapitalization.sentences,
+              style: CxText.body,
+              decoration: const InputDecoration(
                 hintText: 'Additional comments (optional)',
-                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
-                filled: true,
-                fillColor: AppColors.background,
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: AppColors.divider)),
-                enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: AppColors.divider)),
-                focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                contentPadding: const EdgeInsets.all(14),
               ),
             ),
 
-            const SizedBox(height: 20),
+            const SizedBox(height: CxSpace.xl),
 
             // Submit
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: _rating > 0 && !_submitting ? _submit : null,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.brandGreen,
-                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-                child: _submitting
-                    ? const SizedBox(width: 20, height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
-                    : const Text('Submit Feedback',
-                        style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500)),
-              ),
+            CxButton(
+              onPressed: _rating > 0 && !_submitting ? _submit : null,
+              loading: _submitting,
+              icon: Icons.send_rounded,
+              label: 'Submit Feedback',
             ),
           ],
         ),
@@ -3324,26 +3067,19 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
   void _showPresSourcePicker() {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
+      builder: (ctx) => CustomerThemeScope(
+        child: CxSheetFrame(
+        title: 'Upload prescription',
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            width: 40, height: 4,
-            margin: const EdgeInsets.only(bottom: 16),
-            decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-          ),
           _EditPresSourceTile(
             icon: Icons.camera_alt_outlined,
             title: 'Camera',
             subtitle: 'Take a photo now',
             onTap: () { Navigator.pop(ctx); _pickPres(ImageSource.camera); },
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: CxSpace.md),
           _EditPresSourceTile(
             icon: Icons.photo_library_outlined,
             title: 'Gallery',
@@ -3351,6 +3087,7 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
             onTap: () { Navigator.pop(ctx); _pickPres(ImageSource.gallery); },
           ),
         ]),
+        ),
       ),
     );
   }
@@ -3428,26 +3165,27 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
       final topUpStr = topUp.toStringAsFixed(0);
       final choice = await showDialog<String>(
         context: context,
-        builder: (_) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: const Text('Additional Amount', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          content: Text(
-            'Your updated tests require ₹$topUpStr more. How would you like to pay?',
-            style: const TextStyle(fontSize: 14, height: 1.5),
-          ),
+        // Three choices, stacked with the main one on top (same results).
+        builder: (_) => CxDialog(
+          icon: Icons.add_card_outlined,
+          title: 'Additional Amount',
+          message: 'Your updated tests require ₹$topUpStr more. How would you like to pay?',
           actions: [
-            TextButton(
+            CxButton.text(
               onPressed: () => Navigator.pop(context, null),
-              child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
+              label: 'Cancel',
+              expand: true,
             ),
-            TextButton(
+            CxButton.secondary(
               onPressed: () => Navigator.pop(context, 'later'),
-              child: const Text('Pay Later', style: TextStyle(color: AppColors.textSecondary)),
+              label: 'Pay Later',
+              compact: true,
             ),
-            TextButton(
+            CxButton(
               onPressed: () => Navigator.pop(context, 'now'),
-              child: Text('Pay ₹$topUpStr Now',
-                  style: const TextStyle(color: AppColors.brandGreen, fontWeight: FontWeight.w700)),
+              icon: Icons.payment_outlined,
+              label: 'Pay ₹$topUpStr Now',
+              compact: true,
             ),
           ],
         ),
@@ -3485,20 +3223,15 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
       final refundAmt = _refundAmount.toInt();
       final confirmed = await showDialog<bool>(
         context: context,
-        builder: (_) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: const Text('Confirm Changes',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          content: Text(
-            'Tests will be updated and ₹$refundAmt will be refunded to your original payment method within 5–7 business days.',
-            style: const TextStyle(fontSize: 14, height: 1.5),
-          ),
+        builder: (_) => CxDialog(
+          icon: Icons.currency_rupee_rounded,
+          title: 'Confirm Changes',
+          message: 'Tests will be updated and ₹$refundAmt will be refunded to your original payment method within 5–7 business days.',
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false),
-                child: const Text('Back', style: TextStyle(color: AppColors.textSecondary))),
-            TextButton(onPressed: () => Navigator.pop(context, true),
-                child: const Text('Confirm',
-                    style: TextStyle(color: AppColors.brandGreen, fontWeight: FontWeight.w700))),
+            CxButton.secondary(onPressed: () => Navigator.pop(context, false),
+                label: 'Back', compact: true),
+            CxButton(onPressed: () => Navigator.pop(context, true),
+                label: 'Confirm', compact: true),
           ],
         ),
       );
@@ -3561,26 +3294,26 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
   Widget _buildPrescriptionSection() {
     return Container(
       decoration: const BoxDecoration(
-        border: Border(top: BorderSide(color: Color(0xFFFFCC02))),
-        color: Color(0xFFFFF3E0),
+        border: Border(top: BorderSide(color: CxColors.border)),
+        color: CxColors.warningSurface,
       ),
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, CxSpace.md),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          const Icon(Icons.description_outlined, size: 15, color: Color(0xFFE65100)),
+          const Icon(Icons.description_outlined, size: 18, color: CxColors.warning),
           const SizedBox(width: 6),
           const Text('Prescription',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: CxColors.textPrimary)),
           const Text(' *',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFFD32F2F))),
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: CxColors.error)),
           const Spacer(),
           if (_prescriptions.isNotEmpty)
             Text('${_prescriptions.length}/5',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF795548))),
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: CxColors.warning)),
         ]),
         const SizedBox(height: 2),
         const Text('Upload a valid prescription for the selected test(s)',
-            style: TextStyle(fontSize: 11, color: Color(0xFF795548), height: 1.3)),
+            style: CxText.bodySecondary),
         const SizedBox(height: 10),
         SizedBox(
           height: 104,
@@ -3617,48 +3350,55 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                       ),
                     ),
                   ),
-                  Positioned(top: -6, right: -6, child: GestureDetector(
+                  Positioned(top: -8, right: -8, child: Semantics(
+                    button: true,
+                    label: 'Remove image',
+                    child: GestureDetector(
                     onTap: () => setState(() => _prescriptions.removeAt(e.key)),
                     child: Container(
-                      width: 22, height: 22,
-                      decoration: const BoxDecoration(color: Color(0xFFD32F2F), shape: BoxShape.circle),
-                      child: const Icon(Icons.close_rounded, size: 13, color: Colors.white),
+                      width: 28, height: 28,
+                      decoration: BoxDecoration(
+                        color: CxColors.error,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
+                      child: const Icon(Icons.close_rounded, size: 14, color: Colors.white),
                     ),
-                  )),
+                  ))),
                 ]),
               )),
               if (_prescriptions.length < 5)
-                GestureDetector(
+                Material(
+                  color: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: CxRadius.mdAll,
+                    side: BorderSide(color: CxColors.brand.withValues(alpha: 0.5), width: 1.5),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
                   onTap: _isPicking ? null : _showPresSourcePicker,
-                  child: Container(
+                  child: SizedBox(
                     width: 88, height: 88,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: _prescriptions.isEmpty ? const Color(0xFFE65100) : const Color(0xFFFFCC02),
-                        width: 1.5,
-                      ),
-                    ),
                     child: _isPicking
                         ? const Center(child: SizedBox(width: 20, height: 20,
                             child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
                         : Column(mainAxisAlignment: MainAxisAlignment.center, children: [
                             Icon(
                               _prescriptions.isEmpty ? Icons.upload_file_outlined : Icons.add_photo_alternate_outlined,
-                              size: 26,
-                              color: _prescriptions.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                              size: 28,
+                              color: CxColors.brand,
                             ),
                             const SizedBox(height: 4),
                             Text(
                               _prescriptions.isEmpty ? 'Upload' : 'Add more',
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w500,
-                                color: _prescriptions.isEmpty ? const Color(0xFFE65100) : const Color(0xFF795548),
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: CxColors.brand,
                               ),
                             ),
                           ]),
+                  ),
                   ),
                 ),
             ],
@@ -3670,69 +3410,66 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final mq = MediaQuery.of(context);
+    return CustomerThemeScope(
+      // Keeps the sheet above the on-screen keyboard while searching.
+      child: Padding(
+      padding: EdgeInsets.only(bottom: mq.viewInsets.bottom),
+      child: Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
       decoration: const BoxDecoration(
         color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: CxRadius.sheetTop,
       ),
-      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+      constraints: BoxConstraints(
+        maxWidth: CxSize.sheetMaxWidth,
+        maxHeight: (mq.size.height - mq.viewInsets.bottom) * 0.88,
+      ),
       child: Column(
         children: [
-          Center(
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 12),
-              width: 40, height: 4,
-              decoration: BoxDecoration(color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-            ),
-          ),
+          const CxDragHandle(),
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+            padding: const EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, CxSpace.md),
             child: Row(
               children: [
                 const Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Edit Tests / Packages',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
-                              color: AppColors.textPrimary)),
-                      Text('Tap to select or deselect',
-                          style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+                      Text('Edit Tests / Packages', style: CxText.sheetTitle),
+                      Text('Tap to select or deselect', style: CxText.bodySecondary),
                     ],
                   ),
                 ),
                 if (_selectedIds.isNotEmpty)
                   Text('₹${_total.toInt()}',
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800,
                           color: AppColors.brandGreen)),
               ],
             ),
           ),
           const Divider(height: 1),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+            padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, 6),
             child: TextField(
               controller: _searchCtrl,
-              style: const TextStyle(fontSize: 14),
-              decoration: InputDecoration(
+              textInputAction: TextInputAction.search,
+              style: CxText.body,
+              decoration: const InputDecoration(
                 hintText: 'Search tests...',
-                hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
-                prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
-                contentPadding: const EdgeInsets.symmetric(vertical: 10),
-                filled: true,
-                fillColor: AppColors.background,
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                prefixIcon: Icon(Icons.search_rounded, size: 20, color: CxColors.textHint),
               ),
             ),
           ),
           Expanded(
             child: _loading
-                ? const Center(child: CircularProgressIndicator(color: AppColors.brandGreen))
+                ? const CxLoading(label: 'Loading tests…')
                 : _filtered.isEmpty
-                    ? const Center(
-                        child: Text('No tests found',
-                            style: TextStyle(color: AppColors.textSecondary)))
+                    ? const CxEmptyState(
+                        icon: Icons.search_off_rounded,
+                        title: 'No tests found',
+                      )
                     : NotificationListener<ScrollNotification>(
                       onNotification: _pager.onScroll,
                       child: ListView.builder(
@@ -3748,17 +3485,35 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                                 child: _pager.loadingMore
                                     ? const SizedBox(width: 22, height: 22,
                                         child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
-                                    : TextButton(
+                                    : CxButton.secondary(
                                         onPressed: _pager.loadMore,
-                                        style: TextButton.styleFrom(foregroundColor: AppColors.brandGreen),
-                                        child: Text('Show more (${_pager.total - _pager.items.length} more)'),
+                                        icon: Icons.expand_more_rounded,
+                                        compact: true,
+                                        label: 'Show more (${_pager.total - _pager.items.length} more)',
                                       ),
                               ),
                             );
                           }
                           final t = _filtered[i];
                           final selected = _selectedTests.containsKey(t.id);
-                          return GestureDetector(
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: CxSpace.sm),
+                            child: Semantics(
+                            button: true,
+                            selected: selected,
+                            child: Material(
+                              color: selected
+                                  ? CxColors.brandSurface
+                                  : Colors.white,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: CxRadius.lgAll,
+                                side: BorderSide(
+                                  color: selected ? CxColors.brand : CxColors.border,
+                                  width: selected ? 1.5 : 1,
+                                ),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child: InkWell(
                             onTap: () => setState(() {
                               if (selected) {
                                 _selectedTests.remove(t.id);
@@ -3767,19 +3522,8 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                               }
                               if (!_needsPrescription) _prescriptions.clear();
                             }),
-                            child: Container(
-                              margin: const EdgeInsets.only(bottom: 8),
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: selected
-                                    ? AppColors.brandGreenSurface
-                                    : AppColors.background,
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: selected ? AppColors.brandGreen : AppColors.divider,
-                                  width: selected ? 1.5 : 1,
-                                ),
-                              ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(CxSpace.md),
                               child: Row(
                                 children: [
                                   Icon(
@@ -3794,37 +3538,27 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
-                                        Text(t.name,
-                                            style: TextStyle(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w600,
-                                                color: selected
-                                                    ? AppColors.brandGreen
-                                                    : AppColors.textPrimary)),
+                                        Text(t.name, style: CxText.cardTitle),
                                         if (t.category.isNotEmpty)
-                                          Text(t.category,
-                                              style: const TextStyle(
-                                                  fontSize: 11, color: AppColors.textSecondary)),
+                                          Text(t.category, style: CxText.caption),
                                       ],
                                     ),
                                   ),
                                   Text('₹${t.finalPrice.toInt()}',
-                                      style: TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                          color: selected
-                                              ? AppColors.brandGreen
-                                              : AppColors.textPrimary)),
-                                  const SizedBox(width: 8),
+                                      style: CxText.price.copyWith(fontSize: 15)),
+                                  const SizedBox(width: 10),
                                   Icon(
                                     selected
                                         ? Icons.check_circle_rounded
                                         : Icons.circle_outlined,
-                                    size: 20,
-                                    color: selected ? AppColors.brandGreen : AppColors.divider,
+                                    size: 22,
+                                    color: selected ? AppColors.brandGreen : CxColors.textHint,
                                   ),
                                 ],
                               ),
+                            ),
+                              ),
+                            ),
                             ),
                           );
                         },
@@ -3835,34 +3569,18 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
 
           Container(
             padding: EdgeInsets.fromLTRB(
-                16, 12, 16, MediaQuery.of(context).padding.bottom + 16),
+                CxSpace.gutter, CxSpace.md, CxSpace.gutter,
+                (mq.viewInsets.bottom > 0 ? 0 : mq.padding.bottom) + CxSpace.lg),
             decoration: const BoxDecoration(
               color: AppColors.white,
-              border: Border(top: BorderSide(color: AppColors.divider)),
+              border: Border(top: BorderSide(color: CxColors.border)),
             ),
-            child: SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
+            child: CxButton(
                 onPressed: _selectedIds.isEmpty || _saving ||
                     (_needsPrescription && _prescriptions.isEmpty)
                     ? null : _save,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _diffAmount > 0.5
-                      ? const Color(0xFF1565C0)
-                      : AppColors.brandGreen,
-                  disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.35),
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-                child: _saving
-                    ? const SizedBox(
-                        width: 20, height: 20,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
-                    : Text(
-                        _selectedIds.isEmpty
+                loading: _saving,
+                label: _selectedIds.isEmpty
                             ? 'Select at least one test'
                             : (_needsPrescription && _prescriptions.isEmpty)
                                 ? 'Upload prescription to continue'
@@ -3871,15 +3589,12 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
                                     : _removalCausesRefund
                                         ? 'Confirm & Get ₹${_refundAmount.toInt()} Refund'
                                         : 'Update Booking · ₹${_total.toInt()}',
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w500),
-                      ),
-              ),
             ),
           ),
         ],
+      ),
+      ),
+      ),
       ),
     );
   }
@@ -3900,45 +3615,14 @@ class _EditPresSourceTile extends StatelessWidget {
     required this.onTap,
   });
 
+  // Same look as the shared option card; tap behaviour unchanged.
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
+    return CxOptionCard(
+      icon: icon,
+      title: title,
+      subtitle: subtitle,
       onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: AppColors.background,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: AppColors.divider),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 44, height: 44,
-              decoration: BoxDecoration(
-                color: AppColors.brandGreenSurface,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(icon, color: AppColors.brandGreen, size: 22),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title,
-                      style: const TextStyle(
-                          fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                  Text(subtitle,
-                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right_rounded, color: AppColors.textHint, size: 20),
-          ],
-        ),
-      ),
     );
   }
 }
