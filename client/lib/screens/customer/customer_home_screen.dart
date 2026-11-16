@@ -15,6 +15,8 @@ import 'reports_screen.dart';
 import 'profile_screen.dart';
 import 'support_chatbot.dart';
 import 'package:microlab/widgets/skeleton_loader.dart';
+import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -122,36 +124,23 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
     final current = _bookingFor;
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40, height: 4,
-                margin: const EdgeInsets.only(top: 10, bottom: 14),
-                decoration: BoxDecoration(
-                    color: AppColors.divider, borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
-              child: Text('Who is this test for?',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-            ),
-            Flexible(
-              child: ListView(
-                shrinkWrap: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => CustomerThemeScope(
+        child: CxSheetFrame(
+          title: 'Who is this test for?',
+          child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   for (final m in [
                     if (_selfMember != null) _selfMember!,
                     ..._members.where((m) => m.id != _selfMember?.id),
                   ])
                     ListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                      shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
+                      selected: m.id == current?.id,
+                      selectedTileColor: CxColors.brandSurface,
                       leading: CircleAvatar(
                         backgroundColor: AppColors.brandGreenSurface,
                         child: Text(m.name.isNotEmpty ? m.name[0].toUpperCase() : '?',
@@ -159,9 +148,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                                 color: AppColors.brandGreen, fontWeight: FontWeight.w700)),
                       ),
                       title: Text(m.name,
-                          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                          style: CxText.cardTitle),
                       subtitle: m.relation != null
-                          ? Text(m.relation!, style: const TextStyle(fontSize: 12))
+                          ? Text(m.relation!, style: CxText.caption)
                           : null,
                       trailing: m.id == current?.id
                           ? const Icon(Icons.check_circle_rounded, color: AppColors.brandGreen)
@@ -172,6 +161,8 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                       },
                     ),
                   ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                    shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
                     leading: const CircleAvatar(
                       backgroundColor: AppColors.brandGreenSurface,
                       child: Icon(Icons.person_add_alt_1_rounded,
@@ -179,7 +170,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                     ),
                     title: const Text('Add member',
                         style: TextStyle(
-                            fontSize: 14,
+                            fontSize: 15,
                             fontWeight: FontWeight.w600,
                             color: AppColors.brandGreen)),
                     onTap: () {
@@ -188,10 +179,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                     },
                   ),
                 ],
-              ),
-            ),
-            const SizedBox(height: 8),
-          ],
+          ),
         ),
       ),
     );
@@ -340,21 +328,20 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   void _confirmDelete(String id, String name) {
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Remove customer?',
-            style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
-        content: Text(
-          '$name will be removed from your account.',
-          style: const TextStyle(fontSize: 14, color: AppColors.textSecondary),
-        ),
+      builder: (_) => CxDialog(
+        icon: Icons.person_remove_outlined,
+        tone: CxTone.error,
+        title: 'Remove customer?',
+        message: '$name will be removed from your account.',
         actions: [
-          TextButton(
+          CxButton.secondary(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel',
-                style: TextStyle(color: AppColors.textSecondary)),
+            label: 'Cancel',
+            compact: true,
           ),
-          TextButton(
+          CxButton.destructive(
+            compact: true,
+            label: 'Remove',
             onPressed: () async {
               Navigator.pop(context);
               try {
@@ -362,16 +349,10 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                 if (mounted) setState(() => _members.removeWhere((m) => m.id == id));
               } catch (_) {
                 if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text('Could not remove customer. Please try again.'),
-                    backgroundColor: Color(0xFFD32F2F),
-                  ));
+                  AppMessages.error(context, 'Could not remove customer. Please try again.');
                 }
               }
             },
-            child: const Text('Remove',
-                style: TextStyle(
-                    color: Color(0xFFD32F2F), fontWeight: FontWeight.w600)),
           ),
         ],
       ),
@@ -415,9 +396,11 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
           _loadRecentBooking();
         }
       },
+      // Customer look for the home shell (each tab also applies it).
+      child: CustomerThemeScope(
       child: Scaffold(
       key: _scaffoldKey,
-      backgroundColor: AppColors.background,
+      backgroundColor: CxColors.page,
       appBar: (!_inDashboard && _selectedIndex == 0)
           ? PreferredSize(
               preferredSize: const Size.fromHeight(88),
@@ -434,7 +417,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                             size: 100, color: Colors.white.withValues(alpha: 0.08)),
                       ),
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+                        padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           mainAxisSize: MainAxisSize.min,
@@ -468,16 +451,20 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                                             fontWeight: FontWeight.w700),
                                         overflow: TextOverflow.ellipsis,
                                       ),
-                                      const SizedBox(height: 6),
-                                      GestureDetector(
+                                      const SizedBox(height: 4),
+                                      Semantics(
+                                        button: true,
+                                        label: 'Change who this booking is for',
+                                        child: Material(
+                                        color: Colors.white.withValues(alpha: 0.16),
+                                        shape: StadiumBorder(
+                                          side: BorderSide(color: Colors.white.withValues(alpha: 0.35)),
+                                        ),
+                                        clipBehavior: Clip.antiAlias,
+                                        child: InkWell(
                                         onTap: _pickBookingFor,
                                         child: Container(
-                                          padding: const EdgeInsets.fromLTRB(10, 4, 6, 4),
-                                          decoration: BoxDecoration(
-                                            color: Colors.white.withValues(alpha: 0.16),
-                                            borderRadius: BorderRadius.circular(20),
-                                            border: Border.all(color: Colors.white.withValues(alpha: 0.35)),
-                                          ),
+                                          padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
                                           child: Row(
                                             mainAxisSize: MainAxisSize.min,
                                             children: [
@@ -488,15 +475,17 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                                                       : 'Booking for: ${_bookingFor == null ? 'Add member' : _bookingFor!.id == _selfMember?.id ? 'Self' : _firstName(_bookingFor!.name)}',
                                                   style: const TextStyle(
                                                       color: Colors.white,
-                                                      fontSize: 12.5,
+                                                      fontSize: 13,
                                                       fontWeight: FontWeight.w600),
                                                   overflow: TextOverflow.ellipsis,
                                                 ),
                                               ),
                                               const Icon(Icons.keyboard_arrow_down_rounded,
-                                                  color: Colors.white, size: 18),
+                                                  color: Colors.white, size: 20),
                                             ],
                                           ),
+                                        ),
+                                        ),
                                         ),
                                       ),
                                     ],
@@ -594,17 +583,25 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
           ),
         ],
       ),
-      bottomNavigationBar: BottomNavigationBar(
+      bottomNavigationBar: DecoratedBox(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: CxColors.border)),
+          boxShadow: [BoxShadow(color: Color(0x0F000000), blurRadius: 12, offset: Offset(0, -2))],
+        ),
+        child: BottomNavigationBar(
         currentIndex: _selectedIndex,
         onTap: _onNavTap,
         type: BottomNavigationBarType.fixed,
-        selectedItemColor: AppColors.brandGreen,
-        unselectedItemColor: AppColors.textSecondary,
+        selectedItemColor: CxColors.brand,
+        unselectedItemColor: CxColors.textSecondary,
         backgroundColor: Colors.white,
         selectedLabelStyle:
-            const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
-        unselectedLabelStyle: const TextStyle(fontSize: 11),
-        elevation: 8,
+            const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+        unselectedLabelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+        selectedIconTheme: const IconThemeData(size: 26),
+        unselectedIconTheme: const IconThemeData(size: 24),
+        elevation: 0,
         items: const [
           BottomNavigationBarItem(
             icon: Icon(Icons.home_outlined),
@@ -627,8 +624,10 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
             label: 'Profile',
           ),
         ],
+        ),
       ),
     ), // Scaffold
+    ), // CustomerThemeScope
     ), // PopScope
     ); // AnnotatedRegion
   }
@@ -640,70 +639,77 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       color: AppColors.brandGreen,
       onRefresh: () => Future.wait([_loadPatients(), _loadRecentBooking()]),
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
+        padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, 120),
         children: [
           // Book your next test
           _HomeCard(
-            color: AppColors.brandGreenSurface,
+            color: CxColors.brand,
             onTap: _startBooking,
             child: Row(children: [
               Container(
-                width: 48, height: 48,
-                decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
-                child: const Icon(Icons.water_drop_rounded, color: AppColors.brandGreen, size: 24),
+                width: 52, height: 52,
+                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.18), borderRadius: CxRadius.lgAll),
+                child: const Icon(Icons.water_drop_rounded, color: Colors.white, size: 26),
               ),
               const SizedBox(width: 14),
-              const Expanded(
+              Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('Book your next test',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-                  SizedBox(height: 3),
+                  const Text('Book your next test',
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: Colors.white)),
+                  const SizedBox(height: 3),
                   Text('Quick  •  Safe  •  Reliable',
-                      style: TextStyle(fontSize: 12.5, color: AppColors.brandGreen, fontWeight: FontWeight.w500)),
+                      style: TextStyle(fontSize: 13, color: Colors.white.withValues(alpha: 0.88), fontWeight: FontWeight.w500)),
                 ]),
               ),
-              const Icon(Icons.chevron_right_rounded, color: AppColors.textSecondary),
+              Container(
+                width: 36, height: 36,
+                decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
+                child: const Icon(Icons.arrow_forward_rounded, color: CxColors.brand, size: 20),
+              ),
             ]),
           ),
-          const SizedBox(height: 22),
+          const SizedBox(height: CxSpace.xxl),
 
           // Your Recent Bookings — latest booking of anyone on the account
           Row(children: [
             const Expanded(
-              child: Text('Your Recent Bookings',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+              child: Text('Your Recent Bookings', style: CxText.sectionTitle),
             ),
-            GestureDetector(
-              onTap: () => _onNavTap(1),
-              child: const Row(children: [
+            TextButton(
+              onPressed: () => _onNavTap(1),
+              style: TextButton.styleFrom(
+                foregroundColor: CxColors.brand,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: const Size(48, 40),
+              ),
+              child: const Row(mainAxisSize: MainAxisSize.min, children: [
                 Text('View All',
-                    style: TextStyle(fontSize: 13, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-                Icon(Icons.chevron_right_rounded, size: 18, color: AppColors.brandGreen),
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                Icon(Icons.chevron_right_rounded, size: 20),
               ]),
             ),
           ]),
-          const SizedBox(height: 10),
+          const SizedBox(height: CxSpace.sm),
           _recentBookingCard(),
-          const SizedBox(height: 22),
+          const SizedBox(height: CxSpace.xxl),
 
           // Quick Actions
-          const Text('Quick Actions',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
-          const SizedBox(height: 10),
+          const Text('Quick Actions', style: CxText.sectionTitle),
+          const SizedBox(height: CxSpace.md),
           Row(children: [
             _QuickAction(icon: Icons.event_available_rounded, label: 'Book Test',
                 color: AppColors.brandGreen, onTap: _startBooking),
             const SizedBox(width: 10),
             _QuickAction(icon: Icons.calendar_month_rounded, label: 'View Bookings',
-                color: const Color(0xFF1565C0), onTap: () => _onNavTap(1)),
+                color: CxColors.info, onTap: () => _onNavTap(1)),
             const SizedBox(width: 10),
             _QuickAction(icon: Icons.description_rounded, label: 'Reports',
                 color: const Color(0xFF6A4BC4), onTap: () => _onNavTap(2)),
             const SizedBox(width: 10),
             _QuickAction(icon: Icons.person_outline_rounded, label: 'Profile',
-                color: const Color(0xFFE07B39), onTap: () => _onNavTap(3)),
+                color: CxColors.offer, onTap: () => _onNavTap(3)),
           ]),
-          const SizedBox(height: 22),
+          const SizedBox(height: CxSpace.xxl),
 
           // Trusted Diagnostics — information only
           const _HomeCard(
@@ -713,11 +719,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
               SizedBox(width: 14),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('Trusted Diagnostics',
-                      style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                  Text('Trusted Diagnostics', style: CxText.cardTitle),
                   SizedBox(height: 3),
-                  Text('Accurate results for a healthier you',
-                      style: TextStyle(fontSize: 12.5, color: AppColors.textSecondary)),
+                  Text('Accurate results for a healthier you', style: CxText.bodySecondary),
                 ]),
               ),
             ]),
@@ -730,8 +734,8 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   // Latest booking (getMyBookings is newest first). Tap → Bookings tab.
   Widget _recentBookingCard() {
     if (_loadingRecent) {
-      return SkeletonShimmer(
-        child: SkeletonBox(height: 92, borderRadius: BorderRadius.circular(14)),
+      return const SkeletonShimmer(
+        child: SkeletonBox(height: 92, borderRadius: CxRadius.lgAll),
       );
     }
     final b = _recentBooking;
@@ -739,13 +743,12 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       return _HomeCard(
         onTap: _startBooking,
         child: const Row(children: [
-          Icon(Icons.event_note_outlined, color: AppColors.textHint, size: 28),
+          CxIconBadge(icon: Icons.event_note_outlined, tone: CxTone.neutral, size: 44),
           SizedBox(width: 12),
           Expanded(
-            child: Text('No bookings yet — book your first test',
-                style: TextStyle(fontSize: 13.5, color: AppColors.textSecondary)),
+            child: Text('No bookings yet — book your first test', style: CxText.body),
           ),
-          Icon(Icons.chevron_right_rounded, color: AppColors.textSecondary),
+          Icon(Icons.chevron_right_rounded, color: CxColors.textHint),
         ]),
       );
     }
@@ -768,9 +771,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
     final patient = b['patient_name'] as String?;
     final status  = _statusLabel(b['booking_status'] as String? ?? '');
     final (Color fg, Color bg) = switch (b['booking_status']) {
-      'cancelled' => (const Color(0xFFD32F2F), const Color(0xFFFFEBEE)),
+      'cancelled' => (CxColors.error, CxColors.errorSurface),
       'completed' => (AppColors.brandGreen, AppColors.brandGreenSurface),
-      _           => (const Color(0xFF1565C0), const Color(0xFFE3F2FD)),
+      _           => (CxColors.info, CxColors.infoSurface),
     };
 
     return _HomeCard(
@@ -787,14 +790,14 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
             Row(children: [
               Expanded(
                 child: Text(title,
-                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary),
+                    style: CxText.cardTitle,
                     overflow: TextOverflow.ellipsis),
               ),
               const SizedBox(width: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
-                decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
-                child: Text(status, style: TextStyle(fontSize: 11, color: fg, fontWeight: FontWeight.w600)),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(color: bg, borderRadius: CxRadius.pill),
+                child: Text(status, style: TextStyle(fontSize: 12, color: fg, fontWeight: FontWeight.w600)),
               ),
             ]),
             const SizedBox(height: 5),
@@ -855,20 +858,25 @@ class _HomeCard extends StatelessWidget {
   const _HomeCard({required this.child, this.color = Colors.white, this.onTap});
 
   @override
-  Widget build(BuildContext context) => Material(
+  Widget build(BuildContext context) => DecoratedBox(
+        decoration: const BoxDecoration(
+          borderRadius: CxRadius.lgAll,
+          boxShadow: [BoxShadow(color: Color(0x0D000000), blurRadius: 10, offset: Offset(0, 2))],
+        ),
+        child: Material(
         color: color,
-        borderRadius: BorderRadius.circular(14),
+        shape: RoundedRectangleBorder(
+          borderRadius: CxRadius.lgAll,
+          side: BorderSide(color: color == Colors.white ? CxColors.border : Colors.transparent),
+        ),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(14),
-          child: Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: AppColors.divider),
-            ),
+          child: Padding(
+            padding: const EdgeInsets.all(CxSpace.lg),
             child: child,
           ),
+        ),
         ),
       );
 }
@@ -883,21 +891,28 @@ class _QuickAction extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Expanded(
         child: Material(
-          color: color.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(12),
+          color: Colors.white,
+          shape: const RoundedRectangleBorder(
+            borderRadius: CxRadius.lgAll,
+            side: BorderSide(color: CxColors.border),
+          ),
+          clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: onTap,
-            borderRadius: BorderRadius.circular(12),
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 4),
+              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 4),
               child: Column(children: [
-                Icon(icon, color: color, size: 28),
+                Container(
+                  width: 44, height: 44,
+                  decoration: BoxDecoration(color: color.withValues(alpha: 0.1), borderRadius: CxRadius.mdAll),
+                  child: Icon(icon, color: color, size: 24),
+                ),
                 const SizedBox(height: 8),
                 Text(label,
                     textAlign: TextAlign.center,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textPrimary)),
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: CxColors.textPrimary)),
               ]),
             ),
           ),
@@ -992,28 +1007,24 @@ class _MemberDetailSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return CustomerThemeScope(
+      child: Align(
+      alignment: Alignment.bottomCenter,
+      child: Container(
       decoration: const BoxDecoration(
         color: AppColors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: CxRadius.sheetTop,
       ),
       // Cap at 85% screen height so it never covers the full screen
       constraints: BoxConstraints(
+        maxWidth: CxSize.sheetMaxWidth,
         maxHeight: MediaQuery.of(context).size.height * 0.85,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           // Handle
-          Container(
-            margin: const EdgeInsets.symmetric(vertical: 12),
-            width: 40,
-            height: 4,
-            decoration: BoxDecoration(
-              color: AppColors.divider,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
+          const CxDragHandle(),
 
           // Scrollable content
           Flexible(
@@ -1035,28 +1046,13 @@ class _MemberDetailSheet extends StatelessWidget {
             fontSize: 32,
           ),
           const SizedBox(height: 10),
-          Text(member.name,
-              style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textPrimary)),
+          Text(member.name, style: CxText.pageTitle),
           if (member.relation != null) ...[
-            const SizedBox(height: 4),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-              decoration: BoxDecoration(
-                color: AppColors.brandGreenSurface,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Text(member.relation!,
-                  style: const TextStyle(
-                      fontSize: 12,
-                      color: AppColors.brandGreen,
-                      fontWeight: FontWeight.w500)),
-            ),
+            const SizedBox(height: 6),
+            CxChip(label: member.relation!, tone: CxTone.brand),
           ],
 
-          const SizedBox(height: 20),
+          const SizedBox(height: CxSpace.xl),
 
           // Detail rows
           _DetailRow(
@@ -1103,6 +1099,8 @@ class _MemberDetailSheet extends StatelessWidget {
           ),
         ],
       ),
+      ),
+      ),
     );
   }
 }
@@ -1116,25 +1114,26 @@ class _DetailRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: CxColors.border)),
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 16, color: AppColors.brandGreen),
+          Icon(icon, size: 18, color: CxColors.textHint),
           const SizedBox(width: 12),
           SizedBox(
-            width: 100,
-            child: Text(label,
-                style: const TextStyle(
-                    fontSize: 13, color: AppColors.textSecondary)),
+            width: 110,
+            child: Text(label, style: CxText.bodySecondary),
           ),
           Expanded(
             child: Text(value,
                 style: const TextStyle(
-                    fontSize: 13,
+                    fontSize: 14,
                     fontWeight: FontWeight.w500,
-                    color: AppColors.textPrimary)),
+                    color: CxColors.textPrimary)),
           ),
         ],
       ),

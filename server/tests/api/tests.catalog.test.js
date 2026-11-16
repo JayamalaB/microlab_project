@@ -73,27 +73,36 @@ describe('GET /api/tests — paged', () => {
     expect(db.execute.mock.calls[0][0]).toMatch(/LIMIT 20 OFFSET 0/);
   });
 
-  test('search matches name, category or description, with LIKE wildcards escaped', async () => {
+  test('search matches name, category, description, search name or keywords, with LIKE wildcards escaped', async () => {
     db.execute.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[{ total: 0 }]]);
 
     await request(app).get('/api/tests?limit=20&search=' + encodeURIComponent(' 100%_vit '));
 
     const [sql, params] = db.execute.mock.calls[0];
-    expect(sql).toMatch(/product_name LIKE \? OR product_category LIKE \? OR product_description LIKE \?/);
-    expect(params).toEqual(['%100\\%\\_vit%', '%100\\%\\_vit%', '%100\\%\\_vit%']);
+    expect(sql).toMatch(/product_name LIKE \? OR product_category LIKE \? OR product_description LIKE \? OR search_name LIKE \? OR search_keywords LIKE \?/);
+    expect(params).toEqual(Array(5).fill('%100\\%\\_vit%'));
     // The COUNT query uses the same filter and params.
     expect(db.execute.mock.calls[1][1]).toEqual(params);
   });
 
-  test('category and offer filters are applied on the server', async () => {
+  test('package category, audience and offer filters are applied on the server', async () => {
     db.execute.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[{ total: 0 }]]);
 
-    await request(app).get('/api/tests?limit=20&category=Thyroid&offer=yes');
+    await request(app).get('/api/tests?limit=20&packageCategoryId=3&audience=Women&offer=yes');
 
     const [sql, params] = db.execute.mock.calls[0];
-    expect(sql).toMatch(/COALESCE\(NULLIF\(product_category, ''\), 'General'\) = \?/);
+    expect(sql).toMatch(/package_category_id = \?/);
+    expect(sql).toMatch(/FIND_IN_SET\(\?, product_audience\) > 0/);
     expect(sql).toMatch(/offer IN \('yes', '1'\)/);
-    expect(params).toEqual(['Thyroid']);
+    expect(params).toEqual([3, 'women']);
+  });
+
+  test('an invalid packageCategoryId and audience=all add no filter', async () => {
+    db.execute.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[{ total: 0 }]]);
+    await request(app).get('/api/tests?limit=20&packageCategoryId=abc&audience=all');
+    const sql = db.execute.mock.calls[0][0];
+    expect(sql).not.toMatch(/package_category_id/);
+    expect(sql).not.toMatch(/product_audience/);
   });
 
   test('category=All adds no category filter', async () => {
@@ -124,13 +133,16 @@ describe('GET /api/tests?ids= — the tests already on a booking', () => {
 });
 
 describe('GET /api/tests/categories', () => {
-  test('returns the distinct category names', async () => {
-    db.execute.mockResolvedValueOnce([[{ category: 'Blood' }, { category: 'General' }]]);
+  test('returns the active package categories, in sort order', async () => {
+    db.execute.mockResolvedValueOnce([[{ id: 1, name: 'Blood' }, { id: 2, name: 'General' }]]);
 
     const res = await request(app).get('/api/tests/categories');
 
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual(['Blood', 'General']);
-    expect(db.execute.mock.calls[0][0]).toMatch(/DISTINCT/);
+    expect(res.body.data).toEqual([{ id: 1, name: 'Blood' }, { id: 2, name: 'General' }]);
+    const sql = db.execute.mock.calls[0][0];
+    expect(sql).toMatch(/FROM ip_package_categories/);
+    expect(sql).toMatch(/is_active = 1/);
+    expect(sql).toMatch(/ORDER BY sort_order/);
   });
 });

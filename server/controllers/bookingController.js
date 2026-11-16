@@ -1,7 +1,7 @@
 ﻿const crypto = require('crypto');
 const db       = require('../config/db');
 const settings = require('../config/settings');
-const { calculateHomeCollectionProduct, FareCalculationError } = require('../services/fareCalculator');
+const { calculateHomeCollectionProduct, FareCalculationError, resolveMainBranchId } = require('../services/fareCalculator');
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { messaging } = require('../config/firebase');
@@ -150,14 +150,30 @@ exports.createBooking = async (req, res) => {
       return res.status(409).json({ success: false, message: prices.message });
     }
 
-    // No Home Collection service charge at booking — it is collected on the
-    // spot: worked out when a technician accepts (customer ↔ that branch, up
-    // and down) and added to the bill when they arrive (services/serviceCharge.js).
-    // The total and any pay-now payment are the tests only.
-    const homeCollectionFare = null;
+    // Calculate Home Collection service charge at booking time:
+    // resolve nearest branch → its main branch → distance round trip → ip_products lookup.
+    let homeCollectionFare = null;
+    if (bookingType === 'home_collection' && branchId) {
+      try {
+        const mainBranchId = await resolveMainBranchId(branchId, conn);
+        homeCollectionFare = await calculateHomeCollectionProduct({
+          branchId: mainBranchId,
+          pickupLat: collectionLatitude,
+          pickupLng: collectionLongitude,
+          dbConn: conn,
+        });
+        blog(`💰 [CREATE BOOKING] fare calculated: branchId=${branchId}→mainBranchId=${mainBranchId} distanceKm=${homeCollectionFare.distanceKm} fare=₹${homeCollectionFare.finalFare}`);
+      } catch (err) {
+        if (err instanceof FareCalculationError) {
+          blog(`⚠️  [CREATE BOOKING] fare calculation failed: ${err.code} — ${err.message}`);
+        } else {
+          throw err;
+        }
+      }
+    }
 
     const itemsTotal = items.reduce((sum, item) => sum + (Number(item.finalPrice) || 0), 0);
-    totalAmount = Number(itemsTotal.toFixed(2));
+    totalAmount = Number((itemsTotal + (homeCollectionFare?.finalFare ?? 0)).toFixed(2));
 
     // Pay-now: the customer authorised this payment before this request was
     // sent. It is only taken (captured) after the booking is saved, so if
@@ -214,7 +230,7 @@ exports.createBooking = async (req, res) => {
          (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
           booking_type, status, total_amount, discount_amount,
           amount_paid, amount_due,
-          source_channel, notes, doctor_name, collection_address, postal_code, city,
+          source_channel, notes, referring_doctor, collection_address, postal_code, city,
           collection_latitude, collection_longitude,
           home_collection_fare, home_collection_distance_km, service_charge_product_id,
           patient_id, patient_id_ref, product_id,
@@ -242,9 +258,10 @@ exports.createBooking = async (req, res) => {
     const bookingRef = String(bookingId + parseInt(settings.get('booking_ref_offset', '0'), 10));
     await conn.execute('UPDATE ip_bookings SET booking_ref = ? WHERE booking_id = ?', [bookingRef, bookingId]);
     blog(`✅ ip_bookings inserted → booking_id=${bookingId} ref=${bookingRef} branch_id=${branchId ?? 'NULL'}`);
-    if (bookingType === 'home_collection') {
+    if (bookingType === 'home_collection' && !homeCollectionFare) {
+      // Fare calculation failed at booking time — fall back to on-the-spot collection.
       const sc = await serviceCharge.markPending(conn, bookingId);
-      blog(`💰 [CREATE BOOKING] service charge collected on the spot — ${sc.skipped ? `not marked: ${sc.skipped}` : 'pending until a technician accepts'}`);
+      blog(`💰 [CREATE BOOKING] fare unavailable at booking — ${sc.skipped ? `not marked: ${sc.skipped}` : 'pending until a technician accepts'}`);
     }
 
     // 2. Patient → booking link
@@ -417,7 +434,8 @@ exports.getHomeCollectionFareQuote = async (req, res) => {
   }
 
   try {
-    const result = await calculateHomeCollectionProduct({ branchId, pickupLat, pickupLng });
+    const mainBranchId = await resolveMainBranchId(branchId);
+    const result = await calculateHomeCollectionProduct({ branchId: mainBranchId, pickupLat, pickupLng });
     res.json({
       success: true,
       fare: {
@@ -474,7 +492,7 @@ exports.getMyBookings = async (req, res) => {
          b.postal_code             AS collection_pincode,
          b.city                    AS collection_city,
          b.notes                   AS collection_notes,
-         b.doctor_name,
+         b.referring_doctor        AS doctor_name,
          -- Service charge collected on the spot: shown once it is in the bill
          -- (technician arrived, status 'applied'); bookings from before this
          -- change (status NULL) show their booking-time charge as before.
@@ -812,10 +830,13 @@ exports.cancelBooking = async (req, res) => {
     // Transfer service charge to the next active sibling so they carry it going forward
     if (siblingToTransfer && bookingServiceCharge > 0) {
       await db.execute(
-        `UPDATE ip_bookings SET total_amount = total_amount + ? WHERE booking_id = ?`,
-        [bookingServiceCharge, siblingToTransfer.booking_id]
+        `UPDATE ip_bookings
+         SET total_amount = total_amount + ?,
+             amount_due   = amount_due + ?
+         WHERE booking_id = ?`,
+        [bookingServiceCharge, bookingServiceCharge, siblingToTransfer.booking_id]
       );
-      logRefund(`[transfer] ₹${bookingServiceCharge} added to booking_id=${siblingToTransfer.booking_id} ref=${siblingToTransfer.booking_ref}`);
+      logRefund(`[transfer] ₹${bookingServiceCharge} added to booking_id=${siblingToTransfer.booking_id} ref=${siblingToTransfer.booking_ref} (total_amount + amount_due)`);
     }
 
     // Cascade to ip_technician_collection so the technician's dashboard list
@@ -1794,7 +1815,8 @@ exports.getLinkedPatients = async (req, res) => {
       `SELECT p.patient_id, p.patient_name, p.patient_mobile,
               NULL AS booking_ref, NULL AS reference_no, NULL AS booking_id,
               NULL AS total_amount, NULL AS amount_due, NULL AS payment_status,
-              NULL AS additional_charge_amount, NULL AS additional_charge_reason
+              NULL AS additional_charge_amount, NULL AS additional_charge_reason,
+              NULL AS doctor_name, NULL AS source_channel
        FROM ip_patient_bookings pb
        JOIN ip_patients p ON p.patient_id = pb.patient_id
        WHERE pb.booking_id = ?
@@ -1807,7 +1829,8 @@ exports.getLinkedPatients = async (req, res) => {
        SELECT p.patient_id, p.patient_name, p.patient_mobile,
               b2.booking_ref, b2.reference_no, b2.booking_id,
               b2.total_amount, b2.amount_due, b2.payment_status,
-              b2.additional_charge_amount, b2.additional_charge_reason
+              b2.additional_charge_amount, b2.additional_charge_reason,
+              b2.referring_doctor AS doctor_name, b2.source_channel
        FROM ip_bookings b1
        JOIN ip_bookings b2 ON b2.visit_group_id = b1.visit_group_id
                            AND b2.booking_id != b1.booking_id
@@ -2547,11 +2570,6 @@ exports.createFamilyBooking = async (req, res) => {
     } catch (_) {}
   }
 
-  // No Home Collection service charge at booking — it is collected on the
-  // spot: worked out when a technician accepts and added to the bill when they
-  // arrive (services/serviceCharge.js). The first member carries it, as before.
-  const familyFare = null;
-
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
@@ -2564,6 +2582,27 @@ exports.createFamilyBooking = async (req, res) => {
     if (!prices.ok) {
       await conn.rollback();
       return res.status(409).json({ success: false, message: prices.message });
+    }
+
+    // Calculate Home Collection service charge at booking time for the primary member.
+    let familyFare = null;
+    if (bookingType === 'home_collection' && branchId) {
+      try {
+        const mainBranchId = await resolveMainBranchId(branchId, conn);
+        familyFare = await calculateHomeCollectionProduct({
+          branchId: mainBranchId,
+          pickupLat: collectionLatitude,
+          pickupLng: collectionLongitude,
+          dbConn: conn,
+        });
+        blog(`💰 [CREATE FAMILY BOOKING] fare calculated: branchId=${branchId}→mainBranchId=${mainBranchId} distanceKm=${familyFare.distanceKm} fare=₹${familyFare.finalFare}`);
+      } catch (err) {
+        if (err instanceof FareCalculationError) {
+          blog(`⚠️  [CREATE FAMILY BOOKING] fare calculation failed: ${err.code} — ${err.message}`);
+        } else {
+          throw err;
+        }
+      }
     }
 
     // One Razorpay payment covers every member. Same rule as createBooking:
@@ -2608,7 +2647,7 @@ exports.createFamilyBooking = async (req, res) => {
         `INSERT INTO ip_bookings
            (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
             booking_type, status, total_amount, discount_amount,
-            amount_paid, amount_due, source_channel, notes, doctor_name,
+            amount_paid, amount_due, source_channel, notes, referring_doctor,
             collection_address, postal_code, city,
             collection_latitude, collection_longitude,
             home_collection_fare, home_collection_distance_km, service_charge_product_id,
@@ -2629,9 +2668,10 @@ exports.createFamilyBooking = async (req, res) => {
       isFirstMember = false;
       const bookingId  = bResult.insertId;
       blog(`[family-notes] INSERT done — booking_id=${bookingId} patient_id=${patientId} notes_stored=${JSON.stringify(notes ?? null)}`);
-      if (carriesServiceCharge) {
+      if (carriesServiceCharge && !familyFare) {
+        // Fare calculation failed — fall back to on-the-spot collection for primary member.
         const sc = await serviceCharge.markPending(conn, bookingId);
-        blog(`💰 [CREATE FAMILY BOOKING] service charge collected on the spot — ${sc.skipped ? `not marked: ${sc.skipped}` : `carried by booking_id=${bookingId}, pending until a technician accepts`}`);
+        blog(`💰 [CREATE FAMILY BOOKING] fare unavailable — ${sc.skipped ? `not marked: ${sc.skipped}` : `pending until a technician accepts (booking_id=${bookingId})`}`);
       }
       // Same booking_id + offset scheme as createBooking above — see that
       // function's own comment. visit_group_id (below) intentionally keeps

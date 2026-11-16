@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/widgets/tech/tech_widgets.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 String _resolvePhotoUrl(String raw) {
@@ -173,7 +174,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
             _name.trim().split(' ').take(2)
                 .map((w) => w.isNotEmpty ? w[0] : '').join().toUpperCase(),
             style: const TextStyle(
-                fontSize: 20,
+                fontSize: 18,
                 fontWeight: FontWeight.w700,
                 color: AppColors.brandGreen),
           ),
@@ -192,75 +193,14 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
   }
 
   Future<void> _confirmLogout() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        contentPadding: const EdgeInsets.fromLTRB(24, 28, 24, 20),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                color: const Color(0xFFFFEBEE),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.logout_rounded,
-                  size: 26, color: Color(0xFFD32F2F)),
-            ),
-            const SizedBox(height: 16),
-            const Text('Logout?',
-                style: TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textPrimary)),
-            const SizedBox(height: 8),
-            const Text(
-              'Are you sure you want to logout from MicroLab?',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-            ),
-            const SizedBox(height: 24),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: () => Navigator.pop(ctx, false),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: AppColors.textSecondary,
-                      side: const BorderSide(color: AppColors.divider),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                    ),
-                    child: const Text('Cancel',
-                        style: TextStyle(fontWeight: FontWeight.w600)),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: () => Navigator.pop(ctx, true),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFD32F2F),
-                      foregroundColor: Colors.white,
-                      elevation: 0,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                    ),
-                    child: const Text('Logout',
-                        style: TextStyle(fontWeight: FontWeight.w600)),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
+    // Same result as before: logs out only when Logout is tapped.
+    final confirmed = await showTechConfirm(
+      context,
+      icon: Icons.logout_rounded,
+      title: 'Logout?',
+      message: 'Are you sure you want to logout from MicroLab?',
+      confirmLabel: 'Logout',
+      destructive: true,
     );
     if (confirmed == true) widget.onLogout();
   }
@@ -289,55 +229,24 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
     final remaining =
         _availableSpecs.where((s) => !_editingSpecs.contains(s)).toList();
     if (remaining.isEmpty) return;
-    showModalBottomSheet(
+    showTechSheet<void>(
       context: context,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      title: 'Add Specialization',
       builder: (_) => Column(
         mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(height: 14),
-          Container(
-              width: 36, height: 4,
-              decoration: BoxDecoration(
-                  color: AppColors.divider,
-                  borderRadius: BorderRadius.circular(2))),
-          const SizedBox(height: 14),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 16),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text('Add Specialization',
-                  style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.textPrimary)),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Flexible(
-            child: ListView(
-              shrinkWrap: true,
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
-              children: remaining
-                  .map((s) => ListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.add_circle_outline_rounded,
-                            color: AppColors.brandGreen, size: 20),
-                        title: Text(s,
-                            style: const TextStyle(
-                                fontSize: 14, color: AppColors.textPrimary)),
-                        onTap: () {
-                          Navigator.pop(context);
-                          _addSpec(s);
-                        },
-                      ))
-                  .toList(),
-            ),
-          ),
-        ],
+        children: remaining
+            .map((s) => ListTile(
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  shape: const RoundedRectangleBorder(borderRadius: TechRadius.mdAll),
+                  leading: const Icon(Icons.add_circle_outline_rounded,
+                      color: TechColors.brand, size: 22),
+                  title: Text(s, style: TechText.body),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _addSpec(s);
+                  },
+                ))
+            .toList(),
       ),
     );
   }
@@ -354,7 +263,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
           const Text('Profile',
               style: TextStyle(
                   color: Colors.white,
-                  fontSize: 18,
+                  fontSize: 16,
                   fontWeight: FontWeight.w700)),
           const Spacer(),
           if (!_isEditing)
@@ -363,11 +272,11 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
               icon: const Icon(Icons.logout_rounded,
                   size: 15, color: Colors.white70),
               label: const Text('Logout',
-                  style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
               style: TextButton.styleFrom(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                minimumSize: const Size(48, TechSize.minTouch),
               ),
             ),
         ],
@@ -392,23 +301,22 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
           children: [
             const Text('Profile Details',
                 style: TextStyle(
-                    fontSize: 15,
+                    fontSize: 14,
                     fontWeight: FontWeight.w700,
                     color: AppColors.textPrimary)),
             const Spacer(),
             if (!_isEditing)
               TextButton.icon(
                 onPressed: _startEdit,
-                icon: const Icon(Icons.edit_outlined, size: 14),
+                icon: const Icon(Icons.edit_outlined, size: 18),
                 label: const Text('Edit'),
                 style: TextButton.styleFrom(
-                  foregroundColor: AppColors.brandGreen,
+                  foregroundColor: TechColors.brand,
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 4),
+                      horizontal: 12, vertical: 8),
+                  minimumSize: const Size(48, TechSize.minTouch),
                   textStyle: const TextStyle(
-                      fontSize: 12, fontWeight: FontWeight.w600),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  visualDensity: VisualDensity.compact,
+                      fontSize: 13, fontWeight: FontWeight.w600),
                 ),
               ),
           ],
@@ -416,14 +324,15 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
         const SizedBox(height: 10),
 
         Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(TechSpace.lg),
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
+            borderRadius: TechRadius.lgAll,
             border: Border.all(
-              color: _isEditing ? AppColors.brandGreen : AppColors.divider,
+              color: _isEditing ? TechColors.brand : TechColors.border,
               width: _isEditing ? 1.5 : 1,
             ),
+            boxShadow: const [BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2))],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -457,20 +366,12 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                                   style: const TextStyle(
                                       fontSize: 16,
                                       fontWeight: FontWeight.w700,
-                                      color: AppColors.textPrimary)),
-                              const SizedBox(height: 4),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: AppColors.brandGreenSurface,
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                                child: const Text('Senior Technician',
-                                    style: TextStyle(
-                                        fontSize: 11,
-                                        color: AppColors.brandGreen,
-                                        fontWeight: FontWeight.w500)),
+                                      color: TechColors.textPrimary)),
+                              const SizedBox(height: 6),
+                              const TechStatusChip(
+                                label: 'Senior Technician',
+                                icon: Icons.verified_outlined,
+                                tone: TechTone.brand,
                               ),
                             ],
                           ),
@@ -527,34 +428,18 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                 Row(
                   children: [
                     Expanded(
-                      child: OutlinedButton(
+                      child: TechButton.secondary(
                         onPressed: _cancelEdit,
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.textSecondary,
-                          side: const BorderSide(color: AppColors.divider),
-                          padding:
-                              const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10)),
-                        ),
-                        child: const Text('Cancel'),
+                        label: 'Cancel',
+                        compact: true,
                       ),
                     ),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: TechSpace.md),
                     Expanded(
-                      child: ElevatedButton(
+                      child: TechButton(
                         onPressed: _save,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.brandGreen,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          padding:
-                              const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10)),
-                        ),
-                        child: const Text('Save Changes',
-                            style: TextStyle(fontWeight: FontWeight.w600)),
+                        label: 'Save Changes',
+                        compact: true,
                       ),
                     ),
                   ],
@@ -572,8 +457,10 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
         if (_branches.isNotEmpty)
           ..._branches.map((b) => _BranchTile(branch: b))
         else if (_branchesLoaded)
-          const Text('No branch assigned yet. Please contact your admin.',
-              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+          const TechBanner(
+            tone: TechTone.warning,
+            message: 'No branch assigned yet. Please contact your admin.',
+          ),
 
         const SizedBox(height: 24),
 
@@ -583,28 +470,27 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
             const _SectionTitle('Specializations'),
             const Spacer(),
             if (_isEditing)
-              GestureDetector(
-                onTap: _showAddSpecDialog,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: AppColors.brandGreenSurface,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: AppColors.brandGreen),
-                  ),
-                  child: const Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.add_rounded,
-                          size: 14, color: AppColors.brandGreen),
-                      SizedBox(width: 4),
-                      Text('Add',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: AppColors.brandGreen,
-                              fontWeight: FontWeight.w600)),
-                    ],
+              Material(
+                color: TechColors.brandSurface,
+                shape: const StadiumBorder(side: BorderSide(color: TechColors.brand)),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: _showAddSpecDialog,
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.add_rounded,
+                            size: 18, color: TechColors.brand),
+                        SizedBox(width: 4),
+                        Text('Add',
+                            style: TextStyle(
+                                fontSize: 13,
+                                color: TechColors.brand,
+                                fontWeight: FontWeight.w600)),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -628,13 +514,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
         const _SectionTitle("Today's Summary"),
         const SizedBox(height: 10),
         if (_statsLoading)
-          const Center(
-            child: Padding(
-              padding: EdgeInsets.symmetric(vertical: 16),
-              child: CircularProgressIndicator(strokeWidth: 2,
-                  valueColor: AlwaysStoppedAnimation<Color>(AppColors.brandGreen)),
-            ),
-          )
+          const TechLoadingState(label: "Loading today's summary…")
         else ...[
           Row(
             children: [
@@ -652,7 +532,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                   label: 'Completed',
                   value: '$_completedToday',
                   icon: Icons.check_circle_outline,
-                  color: const Color(0xFF1565C0),
+                  color: TechColors.info,
                 ),
               ),
               const SizedBox(width: 10),
@@ -661,7 +541,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                   label: 'Pending',
                   value: '$_pendingToday',
                   icon: Icons.pending_outlined,
-                  color: const Color(0xFFE65100),
+                  color: TechColors.warning,
                 ),
               ),
             ],
@@ -713,7 +593,8 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
       );
     }
 
-    return Scaffold(
+    return TechThemeScope(
+      child: Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
         backgroundColor: AppColors.brandGreen,
@@ -722,7 +603,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
         title: const Text('Profile',
             style: TextStyle(
                 color: Colors.white,
-                fontSize: 17,
+                fontSize: 16,
                 fontWeight: FontWeight.w600)),
         actions: [
           if (!_isEditing)
@@ -731,11 +612,12 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
               icon: const Icon(Icons.logout_rounded,
                   size: 16, color: Colors.white70),
               label: const Text('Logout',
-                  style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
             ),
         ],
       ),
       body: body,
+      ),
     );
   }
 }
@@ -757,29 +639,11 @@ class _EditField extends StatelessWidget {
   Widget build(BuildContext context) => TextField(
         controller: controller,
         keyboardType: keyboardType,
-        style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
+        style: const TextStyle(fontSize: 14, color: TechColors.textPrimary),
+        // Borders, focus colour and padding come from the technician theme.
         decoration: InputDecoration(
-          prefixIcon: Icon(icon, size: 16, color: AppColors.textSecondary),
+          prefixIcon: Icon(icon, size: 20, color: TechColors.textHint),
           hintText: hint,
-          hintStyle: const TextStyle(
-              fontSize: 14, color: AppColors.textHint),
-          filled: true,
-          fillColor: AppColors.background,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: AppColors.divider),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: AppColors.divider),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
-            borderSide:
-                const BorderSide(color: AppColors.brandGreen, width: 1.5),
-          ),
         ),
       );
 }
@@ -797,25 +661,24 @@ class _LockedRow extends StatelessWidget {
   Widget build(BuildContext context) => Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 15, color: AppColors.textSecondary),
-          const SizedBox(width: 10),
+          Icon(icon, size: 18, color: TechColors.textHint),
+          const SizedBox(width: TechSpace.md),
           SizedBox(
             width: 96,
-            child: Text(label,
-                style: const TextStyle(
-                    fontSize: 13, color: AppColors.textSecondary)),
+            child: Text(label, style: TechText.bodySecondary),
           ),
-          const Text(':  ',
-              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
           Expanded(
             child: Text(value,
                 style: const TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
-                    color: AppColors.textPrimary)),
+                    color: TechColors.textPrimary)),
           ),
-          const Icon(Icons.lock_outline_rounded,
-              size: 12, color: AppColors.textHint),
+          const Tooltip(
+            message: 'Set by your admin',
+            child: Icon(Icons.lock_outline_rounded,
+                size: 14, color: TechColors.textHint),
+          ),
         ],
       );
 }
@@ -833,23 +696,18 @@ class _InfoRow extends StatelessWidget {
   Widget build(BuildContext context) => Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 15, color: AppColors.textSecondary),
-          const SizedBox(width: 10),
+          Icon(icon, size: 18, color: TechColors.textHint),
+          const SizedBox(width: TechSpace.md),
           SizedBox(
             width: 96,
-            child: Text(label,
-                style: const TextStyle(
-                    fontSize: 13, color: AppColors.textSecondary)),
+            child: Text(label, style: TechText.bodySecondary),
           ),
-          const Text(':  ',
-              style:
-                  TextStyle(fontSize: 13, color: AppColors.textSecondary)),
           Expanded(
             child: Text(value,
                 style: const TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
-                    color: AppColors.textPrimary)),
+                    color: TechColors.textPrimary)),
           ),
         ],
       );
@@ -871,10 +729,10 @@ class _SpecChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: EdgeInsets.fromLTRB(12, 6, onRemove != null ? 6 : 12, 6),
+        padding: EdgeInsets.fromLTRB(14, onRemove != null ? 2 : 8, onRemove != null ? 2 : 14, onRemove != null ? 2 : 8),
         decoration: BoxDecoration(
-          color: AppColors.brandGreenSurface,
-          borderRadius: BorderRadius.circular(20),
+          color: TechColors.brandSurface,
+          borderRadius: BorderRadius.circular(999),
           border: Border.all(color: AppColors.brandGreenLight),
         ),
         child: Row(
@@ -882,23 +740,29 @@ class _SpecChip extends StatelessWidget {
           children: [
             Text(label,
                 style: const TextStyle(
-                    fontSize: 12,
-                    color: AppColors.brandGreen,
-                    fontWeight: FontWeight.w500)),
-            if (onRemove != null) ...[
-              const SizedBox(width: 4),
-              GestureDetector(
+                    fontSize: 13,
+                    color: TechColors.brand,
+                    fontWeight: FontWeight.w600)),
+            if (onRemove != null)
+              // 40px tap area around the small ✕.
+              InkResponse(
                 onTap: onRemove,
-                child: Container(
-                  width: 16,
-                  height: 16,
-                  decoration: const BoxDecoration(
-                      color: AppColors.brandGreen, shape: BoxShape.circle),
-                  child: const Icon(Icons.close_rounded,
-                      size: 10, color: Colors.white),
+                radius: 20,
+                child: SizedBox(
+                  width: 36,
+                  height: 36,
+                  child: Center(
+                    child: Container(
+                      width: 18,
+                      height: 18,
+                      decoration: const BoxDecoration(
+                          color: TechColors.brand, shape: BoxShape.circle),
+                      child: const Icon(Icons.close_rounded,
+                          size: 12, color: Colors.white),
+                    ),
+                  ),
                 ),
               ),
-            ],
           ],
         ),
       );
@@ -924,12 +788,12 @@ class _BranchTile extends StatelessWidget {
 
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 10),
+      margin: const EdgeInsets.only(bottom: TechSpace.md),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.divider),
+        borderRadius: TechRadius.lgAll,
+        border: Border.all(color: TechColors.border),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -945,23 +809,12 @@ class _BranchTile extends StatelessWidget {
                     Expanded(
                       child: Text(name,
                           style: const TextStyle(
-                              fontSize: 14,
+                              fontSize: 13,
                               fontWeight: FontWeight.w600,
                               color: AppColors.textPrimary)),
                     ),
                     if (isMain)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: AppColors.brandGreenSurface,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: const Text('Default',
-                            style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.brandGreen)),
-                      ),
+                      const TechStatusChip(label: 'Default', tone: TechTone.brand),
                   ],
                 ),
                 if (location.isNotEmpty) ...[
@@ -989,7 +842,7 @@ class _SectionTitle extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Text(text,
       style: const TextStyle(
-          fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textPrimary));
+          fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textPrimary));
 }
 
 // ─── Stat card ────────────────────────────────────────────────────────────────
@@ -1007,24 +860,30 @@ class _StatCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(TechSpace.md),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.divider),
+          borderRadius: TechRadius.lgAll,
+          border: Border.all(color: TechColors.border),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, size: 18, color: color),
-            const SizedBox(height: 6),
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.1),
+                borderRadius: TechRadius.smAll,
+              ),
+              child: Icon(icon, size: 18, color: color),
+            ),
+            const SizedBox(height: TechSpace.sm),
             Text(value,
-                style: TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.w700, color: color)),
-            const SizedBox(height: 2),
-            Text(label,
                 style: const TextStyle(
-                    fontSize: 10, color: AppColors.textSecondary)),
+                    fontSize: 20, fontWeight: FontWeight.w700, color: TechColors.textPrimary)),
+            const SizedBox(height: 2),
+            Text(label, style: TechText.caption),
           ],
         ),
       );

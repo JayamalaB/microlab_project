@@ -11,6 +11,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/constants/app_constants.dart';
+import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/widgets/customer/cx_widgets.dart';
 
 enum TripState {
   enrouteToPickup,
@@ -166,21 +168,24 @@ class _PatientRideTrackingScreenState
   void _showPermissionDialog() {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Location Permission Required'),
-        content: const Text(
+      builder: (context) => CustomerThemeScope(
+        child: CxDialog(
+        icon: Icons.location_off_outlined,
+        tone: CxTone.warning,
+        title: 'Location Permission Required',
+        message:
           'Please enable location permission in settings to track your ride.',
-        ),
         actions: [
-          TextButton(
+          CxButton.secondary(
+            label: 'Cancel',
             onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
           ),
-          TextButton(
+          CxButton(
+            label: 'Open Settings',
             onPressed: () => openAppSettings(),
-            child: const Text('Open Settings'),
           ),
         ],
+        ),
       ),
     );
   }
@@ -368,24 +373,10 @@ class _PatientRideTrackingScreenState
   }
 
   void _showArrivalNotification() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const Icon(Icons.notifications_active, color: Colors.white),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                '${widget.driverName} has arrived at your location!',
-                style: const TextStyle(color: Colors.white),
-              ),
-            ),
-          ],
-        ),
-        backgroundColor: AppColors.brandGreen,
-        duration: const Duration(seconds: 5),
-        behavior: SnackBarBehavior.floating,
-      ),
+    AppMessages.success(
+      context,
+      '${widget.driverName} has arrived at your location!',
+      duration: const Duration(seconds: 5),
     );
   }
 
@@ -404,36 +395,23 @@ class _PatientRideTrackingScreenState
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Column(
-          children: [
-            Icon(Icons.check_circle, color: AppColors.brandGreen, size: 60),
-            SizedBox(height: 16),
-            Text('Trip Completed!'),
-          ],
-        ),
-        content: Text(
+      builder: (context) => CustomerThemeScope(
+        child: CxDialog(
+        icon: Icons.check_circle_rounded,
+        tone: CxTone.success,
+        title: 'Trip Completed!',
+        message:
           'You have been dropped at ${widget.hospital}.\nThank you for riding with us!',
-          textAlign: TextAlign.center,
-          style: const TextStyle(height: 1.5),
-        ),
         actions: [
-          ElevatedButton(
+          CxButton(
+            label: 'Back to Home',
             onPressed: () {
               Navigator.pop(context);
               Navigator.of(context).popUntil((r) => r.isFirst);
             },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.brandGreen,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            child: const Text('Back to Home'),
           ),
         ],
+        ),
       ),
     );
   }
@@ -455,13 +433,8 @@ class _PatientRideTrackingScreenState
         _fetchRoute(_driverPos!, _destinationLatLng);
       }
       
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Trip started! Heading to hospital.'),
-          backgroundColor: Colors.blue,
-          duration: Duration(seconds: 3),
-        ),
-      );
+      AppMessages.info(context, 'Trip started! Heading to hospital.',
+          duration: const Duration(seconds: 3));
     }
   }
 
@@ -518,17 +491,15 @@ class _PatientRideTrackingScreenState
   void _showStartTripButton() {
     if (_tripState != TripState.enrouteToPickup) return;
     
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: const Text('Driver has arrived! Ready to start the trip?'),
-        action: SnackBarAction(
-          label: 'Start Trip',
-          onPressed: _startTripToHospital,
-          textColor: Colors.white,
-        ),
-        backgroundColor: AppColors.brandGreen,
-        duration: const Duration(seconds: 10),
+    AppMessages.success(
+      context,
+      'Driver has arrived! Ready to start the trip?',
+      action: SnackBarAction(
+        label: 'Start Trip',
+        onPressed: _startTripToHospital,
+        textColor: Colors.white,
       ),
+      duration: const Duration(seconds: 10),
     );
   }
 
@@ -736,11 +707,14 @@ Destination: ${widget.hospital}
                 top: MediaQuery.of(context).padding.top + 60,
                 left: 12,
                 right: 12,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: Colors.red.shade600,
-                    borderRadius: BorderRadius.circular(12),
+                child: Semantics(
+                  liveRegion: true,
+                  child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: const BoxDecoration(
+                    color: CxColors.error,
+                    borderRadius: CxRadius.lgAll,
+                    boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 3))],
                   ),
                   child: const Row(
                     children: [
@@ -756,11 +730,12 @@ Destination: ${widget.hospital}
                       Expanded(
                         child: Text(
                           'Reconnecting to tracking service...',
-                          style: TextStyle(color: Colors.white),
+                          style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
                         ),
                       ),
                     ],
                   ),
+                ),
                 ),
               ),
 
@@ -774,11 +749,12 @@ Destination: ${widget.hospital}
                   padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
                   child: Row(
                     children: [
-                      GestureDetector(
+                      _MapIconButton(
+                        tooltip: 'Back',
                         onTap: () => Navigator.of(context).pop(),
                         child: Container(
-                          width: 40,
-                          height: 40,
+                          width: 44,
+                          height: 44,
                           decoration: BoxDecoration(
                             color: Colors.white,
                             shape: BoxShape.circle,
@@ -796,10 +772,10 @@ Destination: ${widget.hospital}
                       Expanded(
                         child: Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 11),
+                              horizontal: 16, vertical: 12),
                           decoration: BoxDecoration(
                             color: Colors.white,
-                            borderRadius: BorderRadius.circular(24),
+                            borderRadius: CxRadius.pill,
                             boxShadow: [
                               BoxShadow(
                                   color: Colors.black.withValues(alpha: 0.1),
@@ -816,19 +792,23 @@ Destination: ${widget.hospital}
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
                                   color: _arrived || _tripState == TripState.enrouteToDestination
-                                      ? AppColors.brandGreen
-                                      : const Color(0xFFF57C00),
+                                      ? CxColors.brand
+                                      : CxColors.warning,
                                 ),
                               ),
                               const SizedBox(width: 8),
-                              Text(
-                                _getStatusText(),
-                                style: TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                  color: _arrived || _tripState == TripState.enrouteToDestination
-                                      ? AppColors.brandGreen
-                                      : const Color(0xFFF57C00),
+                              Flexible(
+                                child: Text(
+                                  _getStatusText(),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                    color: _arrived || _tripState == TripState.enrouteToDestination
+                                        ? CxColors.brand
+                                        : CxColors.warning,
+                                  ),
                                 ),
                               ),
                             ],
@@ -836,11 +816,12 @@ Destination: ${widget.hospital}
                         ),
                       ),
                       const SizedBox(width: 10),
-                      GestureDetector(
+                      _MapIconButton(
+                        tooltip: 'Share trip status',
                         onTap: _shareTripStatus,
                         child: Container(
-                          width: 40,
-                          height: 40,
+                          width: 44,
+                          height: 44,
                           decoration: BoxDecoration(
                             color: Colors.white,
                             shape: BoxShape.circle,
@@ -891,21 +872,15 @@ Destination: ${widget.hospital}
                 bottom: 200,
                 left: 20,
                 right: 20,
-                child: ElevatedButton.icon(
-                  onPressed: _startTripToHospital,
-                  icon: const Icon(Icons.play_arrow_rounded, size: 24),
-                  label: const Text(
-                    'Start Trip to Hospital',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                child: DecoratedBox(
+                  decoration: const BoxDecoration(
+                    borderRadius: CxRadius.mdAll,
+                    boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, 4))],
                   ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.brandGreen,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    elevation: 4,
+                  child: CxButton(
+                    label: 'Start Trip to Hospital',
+                    icon: Icons.play_arrow_rounded,
+                    onPressed: _startTripToHospital,
                   ),
                 ),
               ),
@@ -915,7 +890,8 @@ Destination: ${widget.hospital}
               Positioned(
                 right: 16,
                 bottom: 280,
-                child: GestureDetector(
+                child: _MapIconButton(
+                  tooltip: 'Re-center on driver',
                   onTap: () {
                     setState(() => _followDriver = true);
                     _programmaticMove = true;
@@ -936,7 +912,7 @@ Destination: ${widget.hospital}
                       ],
                     ),
                     child: const Icon(Icons.my_location_rounded,
-                        size: 22, color: Color(0xFF1565C0)),
+                        size: 22, color: CxColors.info),
                   ),
                 ),
               ),
@@ -968,9 +944,9 @@ Destination: ${widget.hospital}
                         child: Container(
                           width: 40,
                           height: 4,
-                          decoration: BoxDecoration(
-                              color: AppColors.divider,
-                              borderRadius: BorderRadius.circular(2)),
+                          decoration: const BoxDecoration(
+                              color: CxColors.border,
+                              borderRadius: CxRadius.pill),
                         ),
                       ),
                       const SizedBox(height: 16),
@@ -982,7 +958,7 @@ Destination: ${widget.hospital}
                             width: 48,
                             height: 48,
                             decoration: const BoxDecoration(
-                              color: Color(0xFF1A2340),
+                              color: CxColors.brand,
                               shape: BoxShape.circle,
                             ),
                             child: Center(
@@ -1003,17 +979,17 @@ Destination: ${widget.hospital}
                               children: [
                                 Text(
                                   widget.driverName,
-                                  style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w700,
-                                      color: AppColors.textPrimary),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: CxText.cardTitle.copyWith(fontSize: 16),
                                 ),
+                                const SizedBox(height: 2),
                                 Text(
                                   _getDriverStatusText(),
                                   style: TextStyle(
-                                    fontSize: 12,
+                                    fontSize: 13,
                                     color: _arrived || _tripState == TripState.enrouteToDestination
-                                        ? AppColors.brandGreen
+                                        ? CxColors.brand
                                         : AppColors.textSecondary,
                                     fontWeight: _arrived
                                         ? FontWeight.w600
@@ -1028,11 +1004,11 @@ Destination: ${widget.hospital}
                                 horizontal: 10, vertical: 5),
                             decoration: BoxDecoration(
                               color: _arrived
-                                  ? AppColors.brandGreenSurface
+                                  ? CxColors.brandSurface
                                   : _tripState == TripState.enrouteToDestination
-                                  ? AppColors.brandGreenSurface
-                                  : const Color(0xFFFFF3E0),
-                              borderRadius: BorderRadius.circular(20),
+                                  ? CxColors.brandSurface
+                                  : CxColors.warningSurface,
+                              borderRadius: CxRadius.pill,
                             ),
                             child: Text(
                               _getStatusBadgeText(),
@@ -1040,8 +1016,8 @@ Destination: ${widget.hospital}
                                 fontSize: 12,
                                 fontWeight: FontWeight.w700,
                                 color: _arrived || _tripState == TripState.enrouteToDestination
-                                    ? AppColors.brandGreen
-                                    : const Color(0xFFF57C00),
+                                    ? CxColors.brand
+                                    : CxColors.warning,
                               ),
                             ),
                           ),
@@ -1054,28 +1030,29 @@ Destination: ${widget.hospital}
                         padding: const EdgeInsets.symmetric(
                             horizontal: 14, vertical: 12),
                         decoration: BoxDecoration(
-                          color: const Color(0xFFF5F6F8),
-                          borderRadius: BorderRadius.circular(12),
+                          color: CxColors.page,
+                          borderRadius: CxRadius.mdAll,
+                          border: Border.all(color: CxColors.border),
                         ),
                         child: Row(
                           children: [
                             Container(
-                              width: 30,
-                              height: 30,
+                              width: 36,
+                              height: 36,
                               decoration: BoxDecoration(
                                 color: _tripState == TripState.enrouteToDestination
-                                    ? const Color(0xFFFFEBEE)
-                                    : const Color(0xFFE8F5E9),
-                                borderRadius: BorderRadius.circular(8),
+                                    ? CxColors.errorSurface
+                                    : CxColors.brandSurface,
+                                borderRadius: CxRadius.smAll,
                               ),
                               child: Icon(
                                 _tripState == TripState.enrouteToDestination
                                     ? Icons.local_hospital_rounded
                                     : Icons.home_rounded,
                                 color: _tripState == TripState.enrouteToDestination
-                                    ? const Color(0xFFD32F2F)
-                                    : AppColors.brandGreen,
-                                size: 16,
+                                    ? CxColors.error
+                                    : CxColors.brand,
+                                size: 20,
                               ),
                             ),
                             const SizedBox(width: 12),
@@ -1085,19 +1062,19 @@ Destination: ${widget.hospital}
                                     ? widget.hospital
                                     : widget.patientAddress,
                                 style: const TextStyle(
-                                    fontSize: 13,
+                                    fontSize: 14,
                                     fontWeight: FontWeight.w600,
                                     color: AppColors.textPrimary),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
+                            const SizedBox(width: 8),
                             Text(
                               _tripState == TripState.enrouteToDestination
                                   ? 'Destination'
                                   : 'Pickup',
-                              style: const TextStyle(
-                                  fontSize: 11, color: AppColors.textHint),
+                              style: CxText.caption,
                             ),
                           ],
                         ),
@@ -1105,27 +1082,12 @@ Destination: ${widget.hospital}
                       const SizedBox(height: 16),
 
                       // Navigate button
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: _navigateToDestination,
-                          icon: const Icon(Icons.navigation_rounded, size: 16),
-                          label: Text(
-                            _tripState == TripState.enrouteToDestination
-                                ? 'Navigate to Hospital'
-                                : 'Navigate to Pickup',
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF1A2340),
-                            foregroundColor: Colors.white,
-                            elevation: 0,
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12)),
-                            textStyle: const TextStyle(
-                                fontSize: 14, fontWeight: FontWeight.w700),
-                          ),
-                        ),
+                      CxButton(
+                        label: _tripState == TripState.enrouteToDestination
+                            ? 'Navigate to Hospital'
+                            : 'Navigate to Pickup',
+                        icon: Icons.navigation_rounded,
+                        onPressed: _navigateToDestination,
                       ),
                     ],
                   ),
@@ -1213,8 +1175,28 @@ class _MapChip extends StatelessWidget {
             ),
             Text(label,
                 style: const TextStyle(
-                    fontSize: 10, color: AppColors.textHint)),
+                    fontSize: 12, color: AppColors.textSecondary)),
           ],
+        ),
+      );
+}
+
+/// Map overlay button: same tap callback, plus a tooltip and a
+/// screen-reader label.
+class _MapIconButton extends StatelessWidget {
+  final String tooltip;
+  final VoidCallback onTap;
+  final Widget child;
+  const _MapIconButton({required this.tooltip, required this.onTap, required this.child});
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+        message: tooltip,
+        child: Semantics(
+          button: true,
+          label: tooltip,
+          excludeSemantics: true,
+          child: GestureDetector(onTap: onTap, child: child),
         ),
       );
 }

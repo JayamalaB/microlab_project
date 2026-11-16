@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:permission_handler/permission_handler.dart' show openAppSettings;
 import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/widgets/tech/tech_widgets.dart';
 import 'package:microlab/services/foreground_service.dart';
 import 'package:microlab/services/socket_service.dart';
 import 'package:microlab/constants/app_constants.dart';
@@ -335,25 +336,27 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('Location Permission Required'),
-        content: const Text(
-          'This app needs location access to track your journey to the patient.',
-        ),
+      builder: (context) => TechDialog(
+        icon: Icons.location_off_outlined,
+        tone: TechTone.warning,
+        title: 'Location Permission Required',
+        message: 'This app needs location access to track your journey to the patient.',
         actions: [
-          TextButton(
+          TechButton.secondary(
+            label: 'Cancel',
+            compact: true,
             onPressed: () {
               Navigator.pop(context);
               Navigator.pop(context); // Go back to dashboard
             },
-            child: const Text('Cancel'),
           ),
-          TextButton(
+          TechButton(
+            label: 'Open Settings',
+            compact: true,
             onPressed: () {
               Navigator.pop(context);
               openAppSettings();
             },
-            child: const Text('Open Settings'),
           ),
         ],
       ),
@@ -365,25 +368,27 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('Location Services Disabled'),
-        content: const Text(
-          'Please enable location services to use this feature.',
-        ),
+      builder: (context) => TechDialog(
+        icon: Icons.gps_off_rounded,
+        tone: TechTone.warning,
+        title: 'Location Services Disabled',
+        message: 'Please enable location services to use this feature.',
         actions: [
-          TextButton(
+          TechButton.secondary(
+            label: 'Cancel',
+            compact: true,
             onPressed: () {
               Navigator.pop(context);
               Navigator.pop(context); // Go back to dashboard
             },
-            child: const Text('Cancel'),
           ),
-          TextButton(
+          TechButton(
+            label: 'Open Settings',
+            compact: true,
             onPressed: () {
               Navigator.pop(context);
               Geolocator.openLocationSettings();
             },
-            child: const Text('Open Settings'),
           ),
         ],
       ),
@@ -736,6 +741,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value:
           SystemUiOverlayStyle.dark.copyWith(statusBarColor: Colors.transparent),
+      child: TechThemeScope(
       child: Scaffold(
         body: _permissionDenied
             ? _buildPermissionError()
@@ -834,20 +840,20 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                         decoration: BoxDecoration(
-                          color: const Color(0xFFFFF3CD),
-                          borderRadius: BorderRadius.circular(10),
+                          color: TechColors.warningSurface,
+                          borderRadius: TechRadius.mdAll,
                           border: Border.all(
-                              color: const Color(0xFFFFCC02).withValues(alpha: 0.7)),
+                              color: TechColors.warning.withValues(alpha: 0.4)),
                         ),
                         child: const Row(children: [
                           Icon(Icons.location_off_outlined,
-                              size: 13, color: Color(0xFF856404)),
+                              size: 16, color: TechColors.warning),
                           SizedBox(width: 6),
                           Expanded(
                             child: Text(
                               'No GPS pin — tap Navigate for address-based route',
                               style:
-                                  TextStyle(fontSize: 11, color: Color(0xFF856404)),
+                                  TextStyle(fontSize: 12, color: TechColors.textPrimary),
                             ),
                           ),
                         ]),
@@ -884,8 +890,8 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                                   Text(
                                     _etaText,
                                     style: const TextStyle(
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.w800,
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w700,
                                         color: AppColors.textPrimary,
                                         height: 1.1),
                                   ),
@@ -909,8 +915,8 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                                   Text(
                                     _distText,
                                     style: const TextStyle(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w800,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
                                         color: AppColors.brandGreen,
                                         height: 1.1),
                                   ),
@@ -1009,7 +1015,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                                 const SizedBox(height: 16),
                                 const Text('Sample Handed to Lab!',
                                     style: TextStyle(
-                                        fontSize: 20, fontWeight: FontWeight.w700)),
+                                        fontSize: 18, fontWeight: FontWeight.w700)),
                                 const SizedBox(height: 6),
                                 const Text('All done for this booking.',
                                     style: TextStyle(
@@ -1028,11 +1034,14 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                       bottom: 0,
                       left: 0,
                       right: 0,
-                      child: Container(
+                      child: Center(
+                        child: ConstrainedBox(
+                        // Tablets: keep the card a readable width.
+                        constraints: const BoxConstraints(maxWidth: TechSize.sheetMaxWidth),
+                        child: Container(
                         decoration: const BoxDecoration(
                           color: Colors.white,
-                          borderRadius:
-                              BorderRadius.vertical(top: Radius.circular(24)),
+                          borderRadius: TechRadius.sheetTop,
                           boxShadow: [
                             BoxShadow(
                                 color: Colors.black12,
@@ -1040,21 +1049,14 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                                 offset: Offset(0, -4))
                           ],
                         ),
-                        padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+                        // Clears the home indicator / gesture bar.
+                        padding: EdgeInsets.fromLTRB(TechSpace.gutter, 0, TechSpace.gutter,
+                            MediaQuery.of(context).padding.bottom + TechSpace.xl),
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             // Handle
-                            Center(
-                              child: Container(
-                                width: 40,
-                                height: 4,
-                                margin: const EdgeInsets.only(bottom: 16),
-                                decoration: BoxDecoration(
-                                    color: AppColors.divider,
-                                    borderRadius: BorderRadius.circular(2)),
-                              ),
-                            ),
+                            const TechDragHandle(),
 
                             // Patient row
                             Row(
@@ -1071,7 +1073,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                                     _initial,
                                     style: const TextStyle(
                                       color: Colors.white,
-                                      fontSize: 20,
+                                      fontSize: 18,
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
@@ -1084,7 +1086,7 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                                       Text(
                                         widget.patientName,
                                         style: const TextStyle(
-                                            fontSize: 16,
+                                            fontSize: 15,
                                             fontWeight: FontWeight.w700,
                                             color: AppColors.textPrimary),
                                       ),
@@ -1222,42 +1224,41 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                             Row(
                               children: [
                                 Expanded(
-                                  child: ElevatedButton.icon(
-                                    onPressed: _openInMaps,
-                                    icon: const Icon(Icons.navigation_rounded,
-                                        size: 16),
-                                    label: const Text('Navigate'),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: _navy,
-                                      foregroundColor: Colors.white,
-                                      elevation: 0,
-                                      padding:
-                                          const EdgeInsets.symmetric(vertical: 14),
-                                      shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(12)),
-                                      textStyle: const TextStyle(
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w700),
+                                  child: SizedBox(
+                                    height: TechSize.buttonHeight,
+                                    child: ElevatedButton.icon(
+                                      onPressed: _openInMaps,
+                                      icon: const Icon(Icons.navigation_rounded,
+                                          size: 20),
+                                      label: const Text('Navigate'),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: _navy,
+                                        foregroundColor: Colors.white,
+                                        elevation: 0,
+                                        shape: const RoundedRectangleBorder(
+                                            borderRadius: TechRadius.mdAll),
+                                        textStyle: TechText.button,
+                                      ),
                                     ),
                                   ),
                                 ),
-                                const SizedBox(width: 12),
+                                const SizedBox(width: TechSpace.md),
                                 Expanded(
-                                  child: ElevatedButton.icon(
-                                    onPressed: _actionOnPress(),
-                                    icon: Icon(_actionIcon(), size: 16),
-                                    label: Text(_actionLabel()),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: _actionColor(),
-                                      foregroundColor: Colors.white,
-                                      elevation: 0,
-                                      padding:
-                                          const EdgeInsets.symmetric(vertical: 14),
-                                      shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(12)),
-                                      textStyle: const TextStyle(
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w700),
+                                  child: SizedBox(
+                                    height: TechSize.buttonHeight,
+                                    child: ElevatedButton.icon(
+                                      onPressed: _actionOnPress(),
+                                      icon: Icon(_actionIcon(), size: 20),
+                                      label: Text(_actionLabel(),
+                                          overflow: TextOverflow.ellipsis),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: _actionColor(),
+                                        foregroundColor: Colors.white,
+                                        elevation: 0,
+                                        shape: const RoundedRectangleBorder(
+                                            borderRadius: TechRadius.mdAll),
+                                        textStyle: TechText.button,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -1266,66 +1267,62 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
                           ],
                         ),
                       ),
+                        ),
+                      ),
                     ),
                 ],
               ),
       ),
+      ),   // TechThemeScope
     );
   }
 
   Widget _buildPermissionError() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.location_off,
-              size: 80,
-              color: Colors.grey.shade400,
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              'Location Access Required',
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Please enable location permissions in settings to track your journey.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 16,
-                color: Colors.grey,
-              ),
-            ),
-            const SizedBox(height: 32),
-            ElevatedButton.icon(
-              onPressed: () {
-                openAppSettings();
-              },
-              icon: const Icon(Icons.settings),
-              label: const Text('Open Settings'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppColors.brandGreen,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+    return SafeArea(
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(TechSpace.xxl),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Center(
+                  child: TechIconBadge(icon: Icons.location_off_rounded, tone: TechTone.warning, size: 80),
                 ),
-              ),
+                const SizedBox(height: TechSpace.xxl),
+                const Text(
+                  'Location Access Required',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700,
+                      color: TechColors.textPrimary),
+                ),
+                const SizedBox(height: TechSpace.md),
+                const Text(
+                  'Please enable location permissions in settings to track your journey.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, color: TechColors.textSecondary, height: 1.4),
+                ),
+                const SizedBox(height: 32),
+                TechButton(
+                  onPressed: () {
+                    openAppSettings();
+                  },
+                  icon: Icons.settings_outlined,
+                  label: 'Open Settings',
+                ),
+                const SizedBox(height: TechSpace.sm),
+                TechButton.text(
+                  onPressed: () {
+                    Navigator.pop(context);
+                  },
+                  label: 'Go Back',
+                  expand: true,
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-              },
-              child: const Text('Go Back'),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -1339,23 +1336,22 @@ class _TechnicianActiveJobScreenState extends State<TechnicianActiveJobScreen>
     Color? color,
     VoidCallback? onTap,
   }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        width: 40,
-        height: 40,
-        decoration: BoxDecoration(
-          color: active ? _navy : Colors.white,
-          shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-                color: Colors.black.withValues(alpha: 0.13), blurRadius: 8)
-          ],
+    // 44px round map button with a ripple (was a bare GestureDetector).
+    return Material(
+      color: active ? _navy : Colors.white,
+      shape: const CircleBorder(),
+      elevation: 3,
+      shadowColor: Colors.black.withValues(alpha: 0.3),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: SizedBox(
+          width: 44,
+          height: 44,
+          child: Icon(icon,
+              size: 22,
+              color: active ? Colors.white : (color ?? TechColors.textPrimary)),
         ),
-        child: Icon(icon,
-            size: 20,
-            color: active ? Colors.white : (color ?? AppColors.textPrimary)),
       ),
     );
   }

@@ -16,6 +16,7 @@ router.get('/bookings/:bookingId/additional-charges',            auth, requireTe
 router.post('/bookings/:bookingId/additional-charges',           auth, requireTechnician, technicianController.addAdditionalCharges);
 router.delete('/bookings/:bookingId/additional-charges/:chargeId', auth, requireTechnician, technicianController.removeAdditionalCharge);
 router.post('/add-visit-member',        auth, requireTechnician, technicianController.addVisitMember);
+router.post('/remove-visit-member',     auth, requireTechnician, technicianController.removeVisitMember);
 router.get('/patient-lookup',           auth, requireTechnician, technicianController.lookupPatient);
 router.get('/booking-family',           auth, requireTechnician, technicianController.getBookingFamily);
 router.post('/cancel-booking',          auth, requireTechnician, technicianController.cancelAssignedBooking);

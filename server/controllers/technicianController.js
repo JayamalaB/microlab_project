@@ -1646,6 +1646,7 @@ exports.addVisitMember = async (req, res) => {
       const {
         patientId: existingPatientId,
         name, mobile, email, dob, age, gender, relation, healthNotes,
+        doctorName = null,
         tests = [],
       } = member;
 
@@ -1729,17 +1730,18 @@ exports.addVisitMember = async (req, res) => {
         `INSERT INTO ip_bookings
            (booking_ref, client_id, branch_id, booking_date, lab_slot_id, available_slot_id,
             booking_type, status, total_amount, discount_amount,
-            amount_paid, amount_due, source_channel, notes,
+            amount_paid, amount_due, source_channel, notes, referring_doctor,
             collection_address, postal_code, city,
             collection_latitude, collection_longitude,
             patient_id, patient_id_ref, product_id,
             payment_status, visit_group_id, technician_id, technician_name,
             start_datetime, end_datetime, created_by, created_at)
          VALUES (NULL, ?, ?, ?, NULL, ?, 'home_collection', 'confirmed', ?, 0, 0, ?,
-                 'technician_app', NULL, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?,
+                 'technician_app', NULL, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'unpaid', ?, ?, ?,
                  NOW(), NOW(), ?, NOW())`,
         [parent.client_id, parent.branch_id || null, parent.booking_date,
          parent.available_slot_id || null, totalAmount, totalAmount,
+         doctorName || null,
          parent.collection_address, parent.postal_code, parent.city,
          parent.collection_latitude, parent.collection_longitude,
          patientId, patientIdRef,
@@ -1838,6 +1840,155 @@ exports.addVisitMember = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error', detail });
   } finally {
     conn.release();
+  }
+};
+
+// ── POST /api/technicians/remove-visit-member ────────────────────────────────
+// Removes one family member the technician added during the visit.
+// Body: { bookingId }   (bookingId = the member's own booking)
+//
+// Who can be removed:
+//   • only members the technician added (source_channel 'technician_app').
+//     Family members booked by the customer stay with the booking.
+//   • only while none of that member's samples are collected and nothing has
+//     been paid for it.
+//   • never the main member (the visit's first booking, which also carries the
+//     service charge).
+//
+// The member is deleted outright — booking, tests, charge packages, document
+// rows, the patient link, the technician job and the unpaid pay-later row —
+// as if never added. The patient (ip_patients) is kept: they are still the
+// customer's family member and can be booked again. Uploaded files are left in
+// uploads/, as with every other document removal. A technician-added member
+// reaches ASMX only at handover (visit_completed), so nothing to cancel there.
+// One line in technician.log is the only trace.
+const MEMBER_COLLECTED_STATUSES = [
+  'sample_collected', 'all_collected', 'otp_verified', 'collected',
+  'handed_to_lab_pending', 'handed_to_lab', 'sample_received', 'test_in_progress',
+  'report_ready', 'completed',
+];
+
+// Child rows first, the booking last.
+const MEMBER_DELETE_SQL = [
+  'DELETE FROM ip_booking_items WHERE booking_id = ?',
+  'DELETE FROM ip_booking_additional_charges WHERE booking_id = ?',
+  'DELETE FROM ip_booking_documents WHERE booking_id = ?',
+  'DELETE FROM ip_patient_bookings WHERE booking_id = ?',
+  'DELETE FROM ip_technician_collection WHERE booking_id = ?',
+  'DELETE FROM ip_payment_transactions WHERE booking_id = ?',
+];
+
+exports.removeVisitMember = async (req, res) => {
+  const technicianId = req.user.id;
+  const bookingId    = Number(req.body?.bookingId);
+
+  if (!Number.isInteger(bookingId) || bookingId <= 0) {
+    return res.status(400).json({ success: false, message: 'bookingId is required' });
+  }
+
+  try {
+    const [[member]] = await db.execute(
+      `SELECT b.booking_id, b.booking_ref, b.visit_group_id, b.status, b.source_channel,
+              COALESCE(b.amount_paid, 0) AS amount_paid, b.service_charge_status,
+              p.patient_name
+       FROM ip_bookings b
+       LEFT JOIN ip_patients p ON p.patient_id = b.patient_id
+       WHERE b.booking_id = ? AND b.deleted_at IS NULL
+       LIMIT 1`,
+      [bookingId]
+    );
+    if (!member || !member.visit_group_id) {
+      return res.status(404).json({ success: false, message: 'Visit member not found' });
+    }
+    const name = member.patient_name || 'This member';
+
+    // The technician must be on this visit.
+    const [[onVisit]] = await db.execute(
+      `SELECT 1 AS ok
+       FROM ip_technician_collection tc
+       JOIN ip_bookings b ON b.booking_id = tc.booking_id
+       WHERE tc.technician_id = ? AND b.visit_group_id = ? AND b.deleted_at IS NULL
+         AND tc.collection_status != 'cancelled'
+       LIMIT 1`,
+      [technicianId, member.visit_group_id]
+    );
+    if (!onVisit) {
+      return res.status(404).json({ success: false, message: 'Visit member not found' });
+    }
+
+    // Family members from the customer's booking stay.
+    if (member.source_channel !== 'technician_app') {
+      return res.status(400).json({ success: false, code: 'BOOKED_BY_CUSTOMER', message: `${name} was booked by the customer and can't be removed` });
+    }
+
+    // The main member holds the visit (and its service charge) together.
+    const [[main]] = await db.execute(
+      `SELECT booking_id FROM ip_bookings
+       WHERE visit_group_id = ? AND deleted_at IS NULL AND status != 'cancelled'
+       ORDER BY booking_id ASC LIMIT 1`,
+      [member.visit_group_id]
+    );
+    if (!main || Number(main.booking_id) === bookingId || member.service_charge_status != null) {
+      return res.status(400).json({ success: false, code: 'MAIN_MEMBER', message: `${name} is the main patient of this visit and can't be removed` });
+    }
+
+    // Samples already taken → keep the member.
+    const [[collected]] = await db.execute(
+      `SELECT
+         (SELECT tc.collection_status FROM ip_technician_collection tc WHERE tc.booking_id = ? LIMIT 1) AS collection_status,
+         (SELECT COUNT(*) FROM ip_booking_items bi
+           WHERE bi.booking_id = ? AND (bi.item_status = 'completed' OR bi.collected_at IS NOT NULL)) AS collected_items`,
+      [bookingId, bookingId]
+    );
+    if (MEMBER_COLLECTED_STATUSES.includes(collected?.collection_status)
+        || MEMBER_COLLECTED_STATUSES.includes(member.status)
+        || Number(collected?.collected_items ?? 0) > 0) {
+      return res.status(400).json({ success: false, code: 'SAMPLES_COLLECTED', message: `Samples are already collected for ${name} — can't remove` });
+    }
+
+    // Anything paid → keep the member; money is never deleted.
+    const [[paid]] = await db.execute(
+      `SELECT COALESCE(SUM(amount_paid), 0) AS paid FROM ip_payment_transactions
+       WHERE booking_id = ? AND (is_refund = 0 OR is_refund IS NULL)`,
+      [bookingId]
+    );
+    if (Number(member.amount_paid) > 0 || Number(paid?.paid ?? 0) > 0) {
+      return res.status(400).json({ success: false, code: 'MEMBER_PAID', message: `Payment already collected for ${name} — can't remove` });
+    }
+
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+      for (const sql of MEMBER_DELETE_SQL) {
+        await conn.execute(sql, [bookingId]);
+      }
+      // Re-checks inside the transaction: still technician-added and unpaid.
+      const [del] = await conn.execute(
+        `DELETE FROM ip_bookings
+         WHERE booking_id = ? AND source_channel = 'technician_app'
+           AND COALESCE(amount_paid, 0) = 0`,
+        [bookingId]
+      );
+      if (del.affectedRows === 0) {
+        await conn.rollback();
+        return res.status(400).json({ success: false, message: `${name} can no longer be removed — refresh and try again` });
+      }
+      await conn.commit();
+    } catch (txErr) {
+      await conn.rollback();
+      throw txErr;
+    } finally {
+      conn.release();
+    }
+
+    tlog(`[REMOVE_VISIT_MEMBER] deleted — technician_id=${technicianId} booking_id=${bookingId} ref=${member.booking_ref} ` +
+         `patient=${member.patient_name ?? '—'} visit_group=${member.visit_group_id} main=${main.booking_id}`);
+
+    res.json({ success: true, message: `${name} removed from this visit` });
+  } catch (e) {
+    tlog(`[REMOVE_VISIT_MEMBER] ERROR technician_id=${technicianId} booking_id=${bookingId}: ${e.message}`);
+    console.error('[removeVisitMember]', e.message);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 };
 
