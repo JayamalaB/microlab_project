@@ -4,13 +4,14 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 // ─── Background isolate entry point ───────────────────────────────────────────
 //
 // Android calls this in a separate Dart isolate when the foreground service
-// starts. @pragma('vm:keep') prevents the tree-shaker from removing it, since
-// it is invoked by platform reflection code, not by the main isolate directly.
+// starts. @pragma('vm:entry-point') lets native code look it up and keeps the
+// tree-shaker from removing it, since it is invoked by platform code, not by
+// the main isolate directly (iOS fails with "must be annotated" without it).
 //
 // All real work (socket, location stream, booking listeners) runs in the MAIN
 // Flutter isolate. The foreground service's only job is to keep the main
 // process alive by holding the "MicroLab — You are Online" notification.
-@pragma('vm:keep')
+@pragma('vm:entry-point')
 void foregroundTaskEntryPoint() {
   FlutterForegroundTask.setTaskHandler(_ForegroundHandler());
 }

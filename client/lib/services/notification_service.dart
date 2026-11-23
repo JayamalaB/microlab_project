@@ -192,10 +192,26 @@ class NotificationService {
     debugPrint('[FCM] NotificationService initialized');
   }
 
+  // On iOS, getToken() throws apns-token-not-set until Apple has delivered
+  // the APNs device token, which arrives a moment after launch. Wait for it
+  // (up to ~10 s) before asking Firebase for the FCM token.
+  Future<String?> _getFcmToken() async {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      String? apns;
+      for (var i = 0; i < 10 && apns == null; i++) {
+        apns = await FirebaseMessaging.instance.getAPNSToken();
+        if (apns == null) await Future.delayed(const Duration(seconds: 1));
+      }
+      debugPrint('[FCM] APNs token ${apns == null ? 'NOT available' : 'ready'}');
+      if (apns == null) return null;
+    }
+    return FirebaseMessaging.instance.getToken();
+  }
+
   // Call once after technician login.
   Future<void> loadToken() async {
     try {
-      final token = await FirebaseMessaging.instance.getToken();
+      final token = await _getFcmToken();
       if (token != null) {
         SocketService.instance.updateFcmToken(token);
         debugPrint('[FCM] token loaded: ...${token.substring(token.length - 10)}');
@@ -208,7 +224,7 @@ class NotificationService {
   // Call once after customer login so the server can send push notifications.
   Future<void> loadCustomerToken() async {
     try {
-      final token = await FirebaseMessaging.instance.getToken();
+      final token = await _getFcmToken();
       if (token != null) {
         await ApiService.registerFcmToken(token);
         debugPrint('[FCM] customer token registered');

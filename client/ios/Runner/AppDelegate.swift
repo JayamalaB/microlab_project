@@ -19,6 +19,10 @@ import flutter_foreground_task
     // Let flutter_local_notifications / flutter_foreground_task receive
     // notification callbacks while the app is in the foreground.
     UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
+    // With the UIScene lifecycle the firebase_messaging plugin is registered
+    // after launch and misses its own registerForRemoteNotifications() call,
+    // so the APNs token never arrives. Request it here explicitly.
+    application.registerForRemoteNotifications()
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
