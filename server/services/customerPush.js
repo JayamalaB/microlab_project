@@ -72,6 +72,7 @@ async function sendToBookingOwner(bookingId, title, body, extraData = {}) {
         priority: 'high',
         notification: { channelId: CHANNEL_ID },
       },
+      apns: { payload: { aps: { sound: 'default' } } }, // iOS sound; Android ignores
     });
 
     writeLog(`[customerPush] ✅ sent — booking_id=${bookingId} mobile=${row.user_mobile_no}`);

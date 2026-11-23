@@ -102,6 +102,27 @@ async function sendFcmPush(fcmToken, bookingData) {
       android: {
         priority: 'high',
       },
+      // iOS only (Android ignores this block): a data-only message is silent
+      // on iPhone when the app is backgrounded or killed, so give APNs a
+      // visible alert. No content-available, so the Dart background handler
+      // does not also show a second notification.
+      apns: {
+        headers: {
+          'apns-priority':   '10',
+          'apns-push-type':  'alert',
+          // Don't deliver after 40 s — same window as the Android timeoutAfter.
+          'apns-expiration': String(Math.floor(Date.now() / 1000) + 40),
+        },
+        payload: {
+          aps: {
+            alert: {
+              title: 'New Booking Request',
+              body:  `${bookingData.patientName || 'Patient'} · #${bookingData.bookingId ?? ''}`,
+            },
+            sound: 'default',
+          },
+        },
+      },
     });
     console.log(`   ✅ [FCM] push sent  booking=${bookingData.bookingId} msgId=${msgId}`);
   } catch (e) {
@@ -3620,6 +3641,7 @@ module.exports.unassignAndRedispatch = async function({
         notification: { title: notifyTitle, body: notifyBody },
         data: { type: notifyType, booking_id: String(bookingId) },
         android: { priority: 'high', notification: { channelId: 'booking_updates' } },
+        apns: { payload: { aps: { sound: 'default' } } }, // iOS sound; Android ignores
       });
       log('📤', 'UNASSIGN_NOTIFY', bookingId, `technician_id=${technicianId} type=${notifyType} sent`);
     } else {
