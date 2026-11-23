@@ -1214,6 +1214,7 @@ async function _sendBookingConfirmedNotification(booking, initiatorMobile, refer
         priority: 'high',
         notification: { channelId: 'booking_updates' },
       },
+      apns: { payload: { aps: { sound: 'default' } } }, // iOS sound; Android ignores
     });
     writeLog(`[clientSync] 🔔 push sent — booking_id=${booking.booking_id} mobile=${initiatorMobile}`);
   } catch (pushErr) {

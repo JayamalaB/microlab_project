@@ -1009,6 +1009,7 @@ exports.cancelBooking = async (req, res) => {
               priority: 'high',
               notification: { channelId: 'booking_updates' },
             },
+            apns: { payload: { aps: { sound: 'default' } } }, // iOS sound; Android ignores
           });
           logNotify(`✅ FCM sent — booking_id=${bookingId} booking_ref=${booking.booking_ref} technician_id=${tc.technician_id} mobile=${techUser?.user_mobile_no ?? 'unknown'}`);
         } else {

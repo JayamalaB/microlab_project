@@ -153,6 +153,7 @@ async function sendPush(technicianId, bookingId, msg) {
     notification: { title: msg.title, body: msg.body },
     data: { type: msg.type, booking_id: String(bookingId) },
     android: { priority: 'high', notification: { channelId: 'booking_updates' } },
+    apns: { payload: { aps: { sound: 'default' } } }, // iOS sound; Android ignores
   });
   return { sent: true };
 }
