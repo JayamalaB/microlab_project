@@ -89,6 +89,7 @@ app.use('/api/prescriptions', require('./routes/prescriptions'));
 app.use('/api/feedback',               require('./routes/feedback'));
 app.use('/api/prescription-requests',  require('./routes/prescriptionRequests'));
 app.use('/api/letterhead',             require('./routes/letterhead'));
+app.use('/api/addresses',              require('./routes/addresses'));
 
 app.get('/', (req, res) => {
   res.json({ success: true, message: 'MicroLab API running' });

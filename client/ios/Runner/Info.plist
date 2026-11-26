@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MicroLab needs microphone access to let you search for tests by voice.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>MicroLab uses speech recognition to convert your voice into a test search.</string>
     <key>NSCameraUsageDescription</key>
     <string>MicroLab needs camera access to take a customer profile photo.</string>
     <key>NSPhotoLibraryUsageDescription</key>

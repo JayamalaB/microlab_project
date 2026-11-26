@@ -5,7 +5,6 @@ import 'package:microlab/widgets/customer/cx_widgets.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 Future<void> _confirmLogout(BuildContext context, VoidCallback onLogout) async {
-  // Same result as before: logs out only when Logout is tapped.
   final confirmed = await showCxConfirm(
     context,
     icon: Icons.logout_rounded,
@@ -17,6 +16,18 @@ Future<void> _confirmLogout(BuildContext context, VoidCallback onLogout) async {
   if (confirmed == true) onLogout();
 }
 
+Future<void> _confirmDeleteAccount(BuildContext context, VoidCallback onDelete) async {
+  final confirmed = await showCxConfirm(
+    context,
+    icon: Icons.delete_forever_rounded,
+    title: 'Delete Account?',
+    message: 'This will permanently delete your account. You will not be able to log in with this number again. This action cannot be undone.',
+    confirmLabel: 'Delete',
+    destructive: true,
+  );
+  if (confirmed == true) onDelete();
+}
+
 class ProfileScreen extends StatelessWidget {
   final String mobile;
   final bool isVip;
@@ -24,10 +35,15 @@ class ProfileScreen extends StatelessWidget {
   final String? accountName;
   final VoidCallback onAddMember;
   final void Function(MemberModel) onEditMember;
-  // Family-member View / Remove (moved here from the old Customers tab).
   final void Function(MemberModel)? onViewMember;
   final void Function(MemberModel)? onRemoveMember;
   final VoidCallback onLogout;
+  final VoidCallback? onFamilyMembers;
+  final VoidCallback? onSavedAddresses;
+  final VoidCallback? onBookingHistory;
+  final VoidCallback? onHealthRecords;
+  final VoidCallback? onHelpSupport;
+  final VoidCallback? onDeleteAccount;
   final bool embedded;
 
   const ProfileScreen({
@@ -40,30 +56,26 @@ class ProfileScreen extends StatelessWidget {
     this.onViewMember,
     this.onRemoveMember,
     required this.onLogout,
+    this.onFamilyMembers,
+    this.onSavedAddresses,
+    this.onBookingHistory,
+    this.onHealthRecords,
+    this.onHelpSupport,
+    this.onDeleteAccount,
     this.isVip = false,
     this.embedded = false,
   });
 
   MemberModel? get _self {
-    try {
-      return members.firstWhere((m) => m.relation == 'Self');
-    } catch (_) {}
-    try {
-      return members.firstWhere((m) => m.mobile == mobile);
-    } catch (_) {}
+    try { return members.firstWhere((m) => m.relation == 'Self'); } catch (_) {}
+    try { return members.firstWhere((m) => m.mobile == mobile); } catch (_) {}
     return null;
-  }
-
-  List<MemberModel> get _patients {
-    final self = _self;
-    return members.where((m) => m.id != self?.id).toList();
   }
 
   @override
   Widget build(BuildContext context) {
     final topPad = embedded ? MediaQuery.of(context).padding.top : 0.0;
     final self = _self;
-    final patients = _patients;
 
     final header = Container(
       color: AppColors.brandGreen,
@@ -71,55 +83,36 @@ class ProfileScreen extends StatelessWidget {
       height: topPad + 56,
       padding: EdgeInsets.only(top: topPad),
       child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Row(
-        children: [
-          const Text('Profile',
-              style: TextStyle(
-                  color: Colors.white, fontSize: 20, fontWeight: FontWeight.w700)),
-          if (isVip) ...[
-            const SizedBox(width: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: const BoxDecoration(
-                color: Color(0xFFFFB300),
-                borderRadius: CxRadius.pill,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Row(
+          children: [
+            const Text('Profile',
+                style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w700)),
+            if (isVip) ...[
+              const SizedBox(width: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: const BoxDecoration(color: Color(0xFFFFB300), borderRadius: CxRadius.pill),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.star_rounded, size: 12, color: Colors.white),
+                    SizedBox(width: 3),
+                    Text('VIP', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Colors.white, letterSpacing: 0.5)),
+                  ],
+                ),
               ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.star_rounded, size: 12, color: Colors.white),
-                  SizedBox(width: 3),
-                  Text('VIP',
-                      style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                          letterSpacing: 0.5)),
-                ],
-              ),
-            ),
+            ],
+            const Spacer(),
           ],
-          const Spacer(),
-          TextButton.icon(
-            onPressed: () => _confirmLogout(context, onLogout),
-            icon: const Icon(Icons.logout_rounded, size: 18, color: Colors.white),
-            label: const Text('Logout',
-                style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
-            style: TextButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              minimumSize: const Size(48, 44),
-            ),
-          ),
-        ],
-      ),
+        ),
       ),
     );
 
     final body = ListView(
       padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.xl, CxSpace.gutter, 80),
       children: [
-        // ── Account Details ──────────────────────────────────
+        // ── Account Details ───────────────────────────────────────────────────
         Row(
           children: [
             const Text('Account Details', style: CxText.sectionTitle),
@@ -141,7 +134,6 @@ class ProfileScreen extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // ── Avatar + name row ──────────────────────────
               Row(
                 children: [
                   _Avatar(member: self),
@@ -150,10 +142,8 @@ class ProfileScreen extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          self?.name ?? accountName ?? mobile,
-                          style: CxText.pageTitle.copyWith(fontSize: 18),
-                        ),
+                        Text(self?.name ?? accountName ?? mobile,
+                            style: CxText.pageTitle.copyWith(fontSize: 18)),
                         if (self != null) ...[
                           const SizedBox(height: 3),
                           Text(
@@ -170,55 +160,23 @@ class ProfileScreen extends StatelessWidget {
                 ],
               ),
               const _HDivider(),
-
-              // ── Info rows ──────────────────────────────────
-              _InfoRow(
-                  icon: Icons.phone_outlined,
-                  label: 'Mobile',
-                  value: '+91 $mobile'),
+              _InfoRow(icon: Icons.phone_outlined, label: 'Mobile', value: '+91 $mobile'),
               if (self != null) ...[
                 if (self.email != null && self.email!.isNotEmpty) ...[
                   const _HDivider(),
-                  _InfoRow(
-                      icon: Icons.email_outlined,
-                      label: 'Email',
-                      value: self.email!),
+                  _InfoRow(icon: Icons.email_outlined, label: 'Email', value: self.email!),
                 ],
                 if (self.gender.isNotEmpty) ...[
                   const _HDivider(),
-                  _InfoRow(
-                      icon: Icons.person_outline_rounded,
-                      label: 'Gender',
-                      value: self.gender),
+                  _InfoRow(icon: Icons.person_outline_rounded, label: 'Gender', value: self.gender),
                 ],
                 if (self.dob != null) ...[
                   const _HDivider(),
-                  _InfoRow(
-                      icon: Icons.cake_outlined,
-                      label: 'Date of Birth',
-                      value: _formatDob(self.dob!, self.age)),
+                  _InfoRow(icon: Icons.cake_outlined, label: 'Date of Birth', value: _formatDob(self.dob!, self.age)),
                 ],
                 if (self.address.isNotEmpty) ...[
                   const _HDivider(),
-                  _InfoRow(
-                      icon: Icons.location_on_outlined,
-                      label: 'Address',
-                      value: self.address),
-                ],
-                if (self.location.isNotEmpty) ...[
-                  const _HDivider(),
-                  _InfoRow(
-                      icon: Icons.map_outlined,
-                      label: 'Location',
-                      value: self.location),
-                ],
-                if (self.healthCondition != null &&
-                    self.healthCondition!.isNotEmpty) ...[
-                  const _HDivider(),
-                  _InfoRow(
-                      icon: Icons.favorite_border_rounded,
-                      label: 'Health Info',
-                      value: self.healthCondition!),
+                  _InfoRow(icon: Icons.location_on_outlined, label: 'Address', value: self.address),
                 ],
               ],
             ],
@@ -227,61 +185,70 @@ class ProfileScreen extends StatelessWidget {
 
         const SizedBox(height: 24),
 
-        // ── Patients ─────────────────────────────────────────
-        Row(
-          children: [
-            const Text('Customer', style: CxText.sectionTitle),
-            const Spacer(),
-            OutlinedButton.icon(
-              onPressed: onAddMember,
-              icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
-              label: const Text('Add '),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: CxColors.brand,
-                side: const BorderSide(color: CxColors.brand, width: 1.4),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                minimumSize: const Size(64, 40),
-                textStyle: const TextStyle(
-                    fontSize: 14, fontWeight: FontWeight.w600),
-                shape: const StadiumBorder(),
-              ),
+        // ── Menu tiles ────────────────────────────────────────────────────────
+        _MenuSection(
+          tiles: [
+            _MenuTile(
+              icon: Icons.people_outline_rounded,
+              label: 'Family Members',
+              subtitle: 'Manage and Add Family Members',
+              onTap: onFamilyMembers ?? onAddMember,
+            ),
+            _MenuTile(
+              icon: Icons.location_on_outlined,
+              label: 'Saved Addresses',
+              subtitle: 'Edit, Add, and Manage Addresses',
+              onTap: onSavedAddresses,
+            ),
+            _MenuTile(
+              icon: Icons.receipt_long_outlined,
+              label: 'Booking History',
+              subtitle: 'View Order History and Transactions',
+              onTap: onBookingHistory,
+            ),
+            _MenuTile(
+              icon: Icons.folder_outlined,
+              label: 'Health Records',
+              subtitle: 'Download and Share Reports',
+              onTap: onHealthRecords,
+            ),
+            _MenuTile(
+              icon: Icons.support_agent_outlined,
+              label: 'Help & Support',
+              subtitle: 'Get Assistance & Resolve Queries',
+              onTap: onHelpSupport,
             ),
           ],
         ),
-        const SizedBox(height: CxSpace.md),
 
-        if (patients.isEmpty)
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: CxRadius.lgAll,
-              border: Border.all(color: CxColors.border),
+        const SizedBox(height: 12),
+
+        // ── Logout / Delete ────────────────────────────────────────────────────
+        _MenuSection(
+          tiles: [
+            _MenuTile(
+              icon: Icons.logout_rounded,
+              label: 'Logout',
+              onTap: () => _confirmLogout(context, onLogout),
             ),
-            child: const CxEmptyState(
-              icon: Icons.people_outline_rounded,
-              title: 'No customers added yet',
-              message: 'Tap "Add" to add family members',
+            _MenuTile(
+              icon: Icons.delete_outline_rounded,
+              label: 'Delete Account',
+              destructive: true,
+              onTap: onDeleteAccount == null
+                  ? null
+                  : () => _confirmDeleteAccount(context, onDeleteAccount!),
             ),
-          ),
+          ],
+        ),
 
-        ...patients.map((m) => _PatientCard(
-              member: m,
-              onEdit: m.isReadOnly ? null : () => onEditMember(m),
-              onView: onViewMember == null ? null : () => onViewMember!(m),
-              onRemove: m.isReadOnly || onRemoveMember == null ? null : () => onRemoveMember!(m),
-            )),
-
-        const SizedBox(height: 24),
+        const SizedBox(height: 20),
         FutureBuilder<PackageInfo>(
           future: PackageInfo.fromPlatform(),
           builder: (_, snap) {
             final version = snap.hasData ? 'v${snap.data!.version}+${snap.data!.buildNumber}' : '';
-            return Text(
-              version,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 12, color: AppColors.textHint),
-            );
+            return Text(version, textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 12, color: AppColors.textHint));
           },
         ),
         const SizedBox(height: 8),
@@ -291,48 +258,122 @@ class ProfileScreen extends StatelessWidget {
     if (embedded) {
       return CustomerThemeScope(
         child: Column(
-        children: [
-          header,
-          Expanded(
-            child: ColoredBox(color: CxColors.page, child: body),
-          ),
-        ],
+          children: [
+            header,
+            Expanded(child: ColoredBox(color: CxColors.page, child: body)),
+          ],
         ),
       );
     }
 
     return CustomerThemeScope(
       child: Scaffold(
-      backgroundColor: CxColors.page,
-      appBar: AppBar(
-        backgroundColor: AppColors.brandGreen,
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        automaticallyImplyLeading: false,
-        title: const Text('Profile',
-            style: TextStyle(
-                color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
-        actions: [
-          TextButton.icon(
-            onPressed: () => _confirmLogout(context, onLogout),
-            icon: const Icon(Icons.logout_rounded, size: 18, color: Colors.white),
-            label: const Text('Logout',
-                style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
-          ),
-        ],
-      ),
-      body: body,
+        backgroundColor: CxColors.page,
+        appBar: AppBar(
+          backgroundColor: AppColors.brandGreen,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          automaticallyImplyLeading: false,
+          title: const Text('Profile',
+              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+        ),
+        body: body,
       ),
     );
   }
 
   String _formatDob(DateTime dob, int? age) {
-    const months = [
-      '', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-    ];
+    const months = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     final formatted = '${dob.day} ${months[dob.month]} ${dob.year}';
     return age != null ? '$formatted  ($age yrs)' : formatted;
+  }
+}
+
+// ─── Menu section ─────────────────────────────────────────────────────────────
+
+class _MenuSection extends StatelessWidget {
+  final List<_MenuTile> tiles;
+  const _MenuSection({required this.tiles});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: CxRadius.lgAll,
+        border: Border.all(color: CxColors.border),
+        boxShadow: const [BoxShadow(color: Color(0x0D000000), blurRadius: 8, offset: Offset(0, 2))],
+      ),
+      child: Column(
+        children: [
+          for (int i = 0; i < tiles.length; i++) ...[
+            if (i > 0) const Divider(height: 1, thickness: 1, color: CxColors.border, indent: 52),
+            tiles[i],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _MenuTile extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String? subtitle;
+  final VoidCallback? onTap;
+  final bool destructive;
+
+  const _MenuTile({
+    required this.icon,
+    required this.label,
+    this.subtitle,
+    this.onTap,
+    this.destructive = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = destructive ? CxColors.error : CxColors.textPrimary;
+    final iconColor = destructive ? CxColors.error : AppColors.brandGreen;
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: CxRadius.lgAll,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: destructive
+                    ? CxColors.error.withValues(alpha: 0.08)
+                    : AppColors.brandGreenSurface,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, size: 20, color: iconColor),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label,
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: color)),
+                  if (subtitle != null) ...[
+                    const SizedBox(height: 2),
+                    Text(subtitle!,
+                        style: const TextStyle(fontSize: 12, color: CxColors.textHint)),
+                  ],
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right_rounded, size: 20, color: CxColors.textHint),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -345,31 +386,20 @@ class _Avatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (member?.photoBytes != null) {
-      return CircleAvatar(
-        radius: 30,
-        backgroundImage: MemoryImage(member!.photoBytes!),
-      );
+      return CircleAvatar(radius: 30, backgroundImage: MemoryImage(member!.photoBytes!));
     }
     if (member?.photoUrl != null && member!.photoUrl!.isNotEmpty) {
-      return CircleAvatar(
-        radius: 30,
-        backgroundImage: NetworkImage(member!.photoUrl!),
-      );
+      return CircleAvatar(radius: 30, backgroundImage: NetworkImage(member!.photoUrl!));
     }
     final initials = member?.name.isNotEmpty == true
         ? member!.name.trim().split(' ').where((w) => w.isNotEmpty).take(2).map((w) => w[0]).join()
         : '?';
     return Container(
-      width: 60,
-      height: 60,
-      decoration: const BoxDecoration(
-          color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+      width: 60, height: 60,
+      decoration: const BoxDecoration(color: AppColors.brandGreenSurface, shape: BoxShape.circle),
       child: Center(
         child: Text(initials.toUpperCase(),
-            style: const TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w700,
-                color: AppColors.brandGreen)),
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.brandGreen)),
       ),
     );
   }
@@ -390,8 +420,7 @@ class _EditButton extends StatelessWidget {
           foregroundColor: CxColors.brand,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           minimumSize: const Size(48, 40),
-          textStyle:
-              const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
         ),
       );
 }
@@ -402,8 +431,7 @@ class _InfoRow extends StatelessWidget {
   final IconData icon;
   final String label;
   final String value;
-  const _InfoRow(
-      {required this.icon, required this.label, required this.value});
+  const _InfoRow({required this.icon, required this.label, required this.value});
 
   @override
   Widget build(BuildContext context) => Row(
@@ -411,16 +439,10 @@ class _InfoRow extends StatelessWidget {
         children: [
           Icon(icon, size: 18, color: CxColors.textHint),
           const SizedBox(width: 12),
-          SizedBox(
-            width: 100,
-            child: Text(label, style: CxText.bodySecondary),
-          ),
+          SizedBox(width: 100, child: Text(label, style: CxText.bodySecondary)),
           Expanded(
             child: Text(value,
-                style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                    color: CxColors.textPrimary)),
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: CxColors.textPrimary)),
           ),
         ],
       );
@@ -432,117 +454,4 @@ class _HDivider extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       const Divider(height: 24, thickness: 1, color: CxColors.border);
-}
-
-// ─── Patient Card ─────────────────────────────────────────────────────────────
-
-class _PatientCard extends StatelessWidget {
-  final MemberModel member;
-  final VoidCallback? onEdit;
-  final VoidCallback? onView;   // tap the card
-  final VoidCallback? onRemove;
-  const _PatientCard({required this.member, this.onEdit, this.onView, this.onRemove});
-
-  @override
-  Widget build(BuildContext context) {
-    final chips = <String>[
-      if (member.relation != null) member.relation!,
-      if (member.gender.isNotEmpty) member.gender,
-      if (member.age != null) '${member.age} yrs',
-    ];
-
-    final content = Padding(
-      padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Avatar
-          Container(
-            width: 44,
-            height: 44,
-            margin: const EdgeInsets.only(right: 12, top: 2),
-            decoration: const BoxDecoration(
-                color: AppColors.brandGreenSurface, shape: BoxShape.circle),
-            child: ClipOval(
-              child: member.photoBytes != null
-                  ? Image.memory(member.photoBytes!, fit: BoxFit.cover)
-                  : member.photoUrl != null && member.photoUrl!.isNotEmpty
-                      ? Image.network(member.photoUrl!, fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => Center(
-                            child: Text(
-                              member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
-                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
-                            ),
-                          ))
-                      : Center(
-                          child: Text(
-                            member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
-                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
-                          ),
-                        ),
-            ),
-          ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(member.name, style: CxText.cardTitle),
-                if (chips.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 4,
-                    children: chips
-                        .map((c) => CxChip(label: c, tone: CxTone.neutral))
-                        .toList(),
-                  ),
-                ],
-                if (member.healthCondition != null &&
-                    member.healthCondition!.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      const Icon(Icons.favorite_border_rounded,
-                          size: 14, color: CxColors.textSecondary),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: Text(member.healthCondition!, style: CxText.caption),
-                      ),
-                    ],
-                  ),
-                ],
-              ],
-            ),
-          ),
-          if (onEdit != null)
-            CxIconButton(
-              icon: Icons.edit_outlined,
-              tooltip: 'Edit ${member.name}',
-              color: CxColors.brand,
-              onPressed: onEdit,
-            ),
-          if (onRemove != null)
-            CxIconButton(
-              icon: Icons.person_remove_outlined,
-              tooltip: 'Remove ${member.name}',
-              color: CxColors.error,
-              onPressed: onRemove,
-            ),
-        ],
-      ),
-    );
-    // Tapping the card opens the member's details (same as before).
-    return Padding(
-      padding: const EdgeInsets.only(bottom: CxSpace.md),
-      child: Material(
-        color: Colors.white,
-        shape: const RoundedRectangleBorder(
-          borderRadius: CxRadius.lgAll,
-          side: BorderSide(color: CxColors.border),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: onView == null ? content : InkWell(onTap: onView, child: content),
-      ),
-    );
-  }
 }

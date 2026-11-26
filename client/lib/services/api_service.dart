@@ -127,6 +127,21 @@ class ApiService {
         .timeout(const Duration(seconds: 15));
   }
 
+  static Future<bool> deleteAccount(String token) async {
+    try {
+      final res = await http
+          .delete(
+            Uri.parse('$baseUrl/api/auth/account'),
+            headers: {'Authorization': 'Bearer $token'},
+          )
+          .timeout(const Duration(seconds: 15));
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      return data['success'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static Future<void> saveToken(String token) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('auth_token', token);
@@ -1609,6 +1624,79 @@ class ApiService {
       if (data['success'] == true) return data;
     } catch (_) {}
     return null;
+  }
+
+  // ─── Saved Addresses ────────────────────────────────────────────────────────
+
+  static Future<List<AddressModel>> getAddresses() async {
+    try {
+      final token = await getToken();
+      final res = await _client.get(
+        Uri.parse('$baseUrl/api/addresses'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      if (data['success'] == true) {
+        return (data['addresses'] as List)
+            .map((j) => AddressModel.fromJson(j as Map<String, dynamic>))
+            .toList();
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  static Future<int?> addAddress(Map<String, dynamic> body) async {
+    try {
+      final token = await getToken();
+      final res = await _client.post(
+        Uri.parse('$baseUrl/api/addresses'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 10));
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      if (data['success'] == true) return data['addressId'] as int?;
+    } catch (_) {}
+    return null;
+  }
+
+  static Future<bool> updateAddress(int id, Map<String, dynamic> body) async {
+    try {
+      final token = await getToken();
+      final res = await _client.put(
+        Uri.parse('$baseUrl/api/addresses/$id'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 10));
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      return data['success'] == true;
+    } catch (_) {}
+    return false;
+  }
+
+  static Future<bool> deleteAddress(int id) async {
+    try {
+      final token = await getToken();
+      final res = await _client.delete(
+        Uri.parse('$baseUrl/api/addresses/$id'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      return data['success'] == true;
+    } catch (_) {}
+    return false;
+  }
+
+  static Future<bool> setDefaultAddress(int id) async {
+    try {
+      final token = await getToken();
+      final res = await _client.put(
+        Uri.parse('$baseUrl/api/addresses/$id/default'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 10));
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      return data['success'] == true;
+    } catch (_) {}
+    return false;
   }
 }
 

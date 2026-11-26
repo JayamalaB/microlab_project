@@ -985,3 +985,22 @@ exports.logout = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+exports.deleteAccount = async (req, res) => {
+  try {
+    const { user_id } = req.user;
+    // Soft-delete: set deleted_at so the number cannot log in again.
+    // The existing sendOtp check at the top of this controller blocks re-registration.
+    await db.query(
+      `UPDATE ip_users
+       SET deleted_at = NOW(), user_auth_token = NULL, user_token_expiry = NULL,
+           is_logged_in = 0, user_date_modified = NOW()
+       WHERE user_id = ?`,
+      [user_id]
+    );
+    res.json({ success: true, message: 'Account deleted' });
+  } catch (err) {
+    console.error('deleteAccount error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};

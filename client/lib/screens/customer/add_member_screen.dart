@@ -30,6 +30,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
   // ── Optional ──────────────────────────────────────────────
   final _emailController = TextEditingController();
   final _dobController = TextEditingController();
+  final _ageController = TextEditingController();
   String? _relation;
   final _healthController = TextEditingController();
   DateTime? _selectedDob;
@@ -47,7 +48,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
   final List<String> _genders = ['Male', 'Female', 'Other'];
   final List<String> _relations = [
     'Self', 'Spouse', 'Father', 'Mother',
-    'Son', 'Daughter', 'Brother', 'Sister', 'Other'
+    'Son', 'Daughter', 'Brother', 'Sister', 'Friend', 'Other'
   ];
 
   @override
@@ -81,6 +82,10 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
       _selectedDob = m.dob;
       _dobController.text = _formatDate(m.dob!);
       _calculatedAge = m.age;
+      if (_calculatedAge != null) _ageController.text = _calculatedAge.toString();
+    } else if (m.age != null) {
+      _calculatedAge = m.age;
+      _ageController.text = m.age.toString();
     }
   }
 
@@ -183,6 +188,20 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
 
   // ── Date picker ───────────────────────────────────────────
 
+  void _onAgeChanged(String val) {
+    final age = int.tryParse(val.trim());
+    if (age == null) return;
+    final now = DateTime.now();
+    // age 0 = infant born this year; use today's day+month, current year
+    final dobYear = age == 0 ? now.year : now.year - age;
+    final dob = DateTime(dobYear, now.month, now.day);
+    setState(() {
+      _selectedDob = dob;
+      _dobController.text = _formatDate(dob);
+      _calculatedAge = age;
+    });
+  }
+
   Future<void> _pickDate() async {
     final now = DateTime.now();
     final picked = await showDatePicker(
@@ -206,6 +225,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
         if (today.month < picked.month ||
             (today.month == picked.month && today.day < picked.day)) age--;
         _calculatedAge = age;
+        _ageController.text = age.toString();
       });
     }
   }
@@ -222,8 +242,8 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
       AppMessages.error(context, 'Please select a gender');
       return;
     }
-    if (_selectedDob == null) {
-      AppMessages.error(context, 'Please select a date of birth');
+    if (_selectedDob == null && _ageController.text.trim().isEmpty) {
+      AppMessages.error(context, 'Please enter a date of birth or age');
       return;
     }
 
@@ -324,6 +344,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
     _addressController.dispose();
     _emailController.dispose();
     _dobController.dispose();
+    _ageController.dispose();
     _healthController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -402,18 +423,63 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
               ),
 
               const SizedBox(height: 16),
-              _FieldLabel(label: 'Gender', required: true),
               Row(
-                children: List.generate(_genders.length, (i) => Expanded(
-                  child: Padding(
-                    padding: EdgeInsets.only(right: i < _genders.length - 1 ? 8 : 0),
-                    child: _GenderChip(
-                      label: _genders[i],
-                      selected: _gender == _genders[i],
-                      onTap: () => setState(() => _gender = _genders[i]),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _FieldLabel(label: 'Gender', required: true),
+                        DropdownButtonFormField<String>(
+                          value: _gender,
+                          hint: const Text('Select', style: TextStyle(fontSize: 13, color: AppColors.textHint)),
+                          decoration: const InputDecoration(
+                            prefixIcon: Icon(Icons.wc_outlined, size: 18, color: AppColors.textHint),
+                            filled: true,
+                            fillColor: AppColors.white,
+                            border: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.border)),
+                            enabledBorder: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.border)),
+                            focusedBorder: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.brand, width: 1.5)),
+                            contentPadding: EdgeInsets.symmetric(vertical: 15),
+                          ),
+                          style: const TextStyle(fontSize: 13, color: AppColors.textPrimary),
+                          dropdownColor: AppColors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          items: _genders.map((g) => DropdownMenuItem(value: g, child: Text(g))).toList(),
+                          onChanged: (v) => setState(() => _gender = v),
+                        ),
+                      ],
                     ),
                   ),
-                )),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const _FieldLabel(label: 'Relation'),
+                        DropdownButtonFormField<String>(
+                          value: _relation,
+                          hint: const Text('Select', style: TextStyle(fontSize: 13, color: AppColors.textHint)),
+                          decoration: const InputDecoration(
+                            prefixIcon: Icon(Icons.people_outline, size: 18, color: AppColors.textHint),
+                            filled: true,
+                            fillColor: AppColors.white,
+                            border: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.border)),
+                            enabledBorder: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.border)),
+                            focusedBorder: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.brand, width: 1.5)),
+                            contentPadding: EdgeInsets.symmetric(vertical: 15),
+                          ),
+                          style: const TextStyle(fontSize: 13, color: AppColors.textPrimary),
+                          dropdownColor: AppColors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          items: _relations.map((r) => DropdownMenuItem(value: r, child: Text(r))).toList(),
+                          onChanged: (v) => setState(() => _relation = v),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
 
               const SizedBox(height: 16),
@@ -441,50 +507,73 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
               ),
 
               const SizedBox(height: 16),
-              _FieldLabel(label: 'Date of Birth', required: true),
-              Semantics(
-                button: true,
-                label: 'Date of birth',
-                value: _dobController.text,
-                child: Material(
-                color: AppColors.white,
-                shape: const RoundedRectangleBorder(
-                  borderRadius: CxRadius.mdAll,
-                  side: BorderSide(color: CxColors.border),
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: InkWell(
-                onTap: _pickDate,
-                child: Container(
-                  height: CxSize.minTouch + 2,
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.cake_outlined,
-                          size: 18, color: AppColors.textHint),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          _dobController.text.isEmpty
-                              ? 'DD/MM/YYYY'
-                              : _dobController.text,
-                          style: TextStyle(
-                              fontSize: 14,
-                              color: _dobController.text.isEmpty
-                                  ? AppColors.textHint
-                                  : AppColors.textPrimary),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _FieldLabel(label: 'DOB or Age', required: true),
+                        Semantics(
+                          button: true,
+                          label: 'Date of birth',
+                          value: _dobController.text,
+                          child: Material(
+                            color: AppColors.white,
+                            shape: const RoundedRectangleBorder(
+                              borderRadius: CxRadius.mdAll,
+                              side: BorderSide(color: CxColors.border),
+                            ),
+                            clipBehavior: Clip.antiAlias,
+                            child: InkWell(
+                              onTap: _pickDate,
+                              child: Container(
+                                height: CxSize.minTouch + 2,
+                                padding: const EdgeInsets.symmetric(horizontal: 12),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.cake_outlined, size: 18, color: AppColors.textHint),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        _dobController.text.isEmpty ? 'DD/MM/YYYY' : _dobController.text,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: _dobController.text.isEmpty ? AppColors.textHint : AppColors.textPrimary,
+                                        ),
+                                      ),
+                                    ),
+                                    const Icon(Icons.calendar_month_outlined, size: 18, color: CxColors.brand),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
-                      ),
-                      if (_calculatedAge != null)
-                        CxChip(label: '${_calculatedAge ?? 0} yrs', tone: CxTone.brand),
-                      const SizedBox(width: 8),
-                      const Icon(Icons.calendar_month_outlined,
-                          size: 20, color: CxColors.brand),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-                ),
-                ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 2,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const _FieldLabel(label: 'Age'),
+                        _AppTextField(
+                          controller: _ageController,
+                          hint: 'e.g. 25',
+                          icon: Icons.numbers_outlined,
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                          onChanged: _onAgeChanged,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ]),
 
@@ -507,43 +596,6 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                   }
                   return null;
                 },
-              ),
-
-              const SizedBox(height: 16),
-              _FieldLabel(label: 'Relation'),
-              DropdownButtonFormField<String>(
-                value: _relation,
-                hint: const Text('Select relation',
-                    style: TextStyle(
-                        fontSize: 14, color: AppColors.textHint)),
-                decoration: const InputDecoration(
-                  prefixIcon: Icon(Icons.people_outline,
-                      size: 18, color: AppColors.textHint),
-                  filled: true,
-                  fillColor: AppColors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: CxRadius.mdAll,
-                    borderSide: BorderSide(color: CxColors.border),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: CxRadius.mdAll,
-                    borderSide: BorderSide(color: CxColors.border),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: CxRadius.mdAll,
-                    borderSide: BorderSide(
-                        color: CxColors.brand, width: 1.5),
-                  ),
-                  contentPadding: EdgeInsets.symmetric(vertical: 15),
-                ),
-                style: const TextStyle(
-                    fontSize: 14, color: AppColors.textPrimary),
-                dropdownColor: AppColors.white,
-                borderRadius: BorderRadius.circular(12),
-                items: _relations
-                    .map((r) => DropdownMenuItem(value: r, child: Text(r)))
-                    .toList(),
-                onChanged: (v) => setState(() => _relation = v),
               ),
 
               const SizedBox(height: 16),
@@ -840,6 +892,7 @@ class _AppTextField extends StatelessWidget {
   final List<TextInputFormatter>? inputFormatters;
   final String? Function(String?)? validator;
   final String? prefix;
+  final void Function(String)? onChanged;
 
   const _AppTextField({
     required this.controller,
@@ -851,6 +904,7 @@ class _AppTextField extends StatelessWidget {
     this.inputFormatters,
     this.validator,
     this.prefix,
+    this.onChanged,
   });
 
   @override
@@ -861,6 +915,7 @@ class _AppTextField extends StatelessWidget {
         maxLines: maxLines,
         inputFormatters: inputFormatters,
         validator: validator,
+        onChanged: onChanged,
         style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
         decoration: InputDecoration(
           hintText: hint,
@@ -903,56 +958,6 @@ class _AppTextField extends StatelessWidget {
           ),
           contentPadding: EdgeInsets.symmetric(
               vertical: maxLines > 1 ? 14 : 15, horizontal: 14),
-        ),
-      );
-}
-
-class _GenderChip extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-  const _GenderChip(
-      {required this.label, required this.selected, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) => Semantics(
-        button: true,
-        selected: selected,
-        label: 'Gender $label',
-        excludeSemantics: true,
-        child: GestureDetector(
-        onTap: onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          height: CxSize.minTouch,
-          decoration: BoxDecoration(
-            color: selected ? CxColors.brand : AppColors.white,
-            borderRadius: CxRadius.mdAll,
-            border: Border.all(
-                color: selected ? CxColors.brand : CxColors.border,
-                width: selected ? 1.5 : 1),
-          ),
-          alignment: Alignment.center,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (selected) ...[
-                const Icon(Icons.check_rounded, size: 16, color: Colors.white),
-                const SizedBox(width: 4),
-              ],
-              Flexible(
-                child: Text(
-                  label,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                      color: selected ? Colors.white : AppColors.textSecondary),
-                ),
-              ),
-            ],
-          ),
-        ),
         ),
       );
 }

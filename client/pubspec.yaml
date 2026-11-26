@@ -1,7 +1,7 @@
 name: microlab
 description: MicroLab - Home Blood Test Booking App
 publish_to: 'none'
-version: 1.0.0+7
+version: 1.0.0+8
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -25,6 +25,7 @@ dependencies:
   webview_flutter: ^4.9.0         # YouTube inline player
   webview_flutter_android: ^4.0.0  # AndroidWebViewController.setMediaPlaybackRequiresUserGesture
   webview_flutter_web: ^0.2.3+4    # WebView support on Flutter web (Chrome)
+  speech_to_text: ^7.0.0      # voice search in test catalog
   record: ^6.2.1              # microphone STT recording
   audioplayers: ^6.1.0        # TTS WAV playback
   path_provider: ^2.1.4       # temp directory for audio files
@@ -54,9 +55,6 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/banners/banner1.jpg
-    - assets/banners/banner2.png
-    - assets/banners/banner3.png
     - assets/sounds/beeb_sound.mp3
     - assets/icon/app_icon.png
     - assets/icon/microbes.png

@@ -1,5 +1,8 @@
+import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:microlab/theme/app_theme.dart';
@@ -14,6 +17,7 @@ import 'package:microlab/models.dart';
 import 'reports_screen.dart';
 import 'profile_screen.dart';
 import 'support_chatbot.dart';
+import 'saved_addresses_screen.dart';
 import 'package:microlab/widgets/skeleton_loader.dart';
 import 'package:microlab/utils/app_messages.dart';
 import 'package:microlab/widgets/customer/cx_widgets.dart';
@@ -42,6 +46,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
   List<MemberModel> _members = [];
   String? _accountName;
   final Map<String, BookingDraft> _drafts = {};
+  int _dashboardRebuildKey = 0;
   bool _loadingPatients = true;
   final _bookingsRefresh = ValueNotifier<int>(0);
   final _reportsRefresh  = ValueNotifier<int>(0);
@@ -107,16 +112,34 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
     }
   }
 
-  // "Book Test" / "Book your next test": opens the usual booking screen for
-  // the selected member. No members yet → add one first, then book for them.
-  Future<void> _startBooking() async {
+  // "Book Test" / quick actions: opens the booking screen for the selected
+  // member. Pass [mode] to pre-select 'Home Collection' or 'Lab Test'.
+  // No members yet → add one first, then book for them.
+  Future<void> _startBooking({String? mode}) async {
+    // Always treat the mode as chosen so the dashboard shows the location
+    // warning immediately — even when no specific mode was passed (e.g. search
+    // bar tap), default to Home Collection.
+    final effectiveMode = mode ?? 'Home Collection';
     final m = _bookingFor;
     if (m != null) {
+      // Preserve cart but override mode. Increment rebuild key so the
+      // IndexedStack creates a fresh dashboard widget that reads the new draft
+      // in initState (the existing widget ignores initialDraft changes).
+      _drafts[m.id] = BookingDraft(
+        cart:       _drafts[m.id]?.cart ?? [],
+        mode:       effectiveMode,
+        modeChosen: true,
+      );
+      _dashboardRebuildKey++;
       setState(() { _activeMember = m; _dashboardMember = m; });
       return;
     }
     final added = await _openAddMember(select: true);
-    if (added != null && mounted) setState(() { _activeMember = added; _dashboardMember = added; });
+    if (added != null && mounted) {
+      _drafts[added.id] = BookingDraft(mode: effectiveMode, modeChosen: true);
+      _dashboardRebuildKey++;
+      setState(() { _activeMember = added; _dashboardMember = added; });
+    }
   }
 
   void _pickBookingFor() {
@@ -128,7 +151,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       backgroundColor: Colors.transparent,
       builder: (ctx) => CustomerThemeScope(
         child: CxSheetFrame(
-          title: 'Who is this test for?',
+          title: 'Family members',
           child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -288,6 +311,62 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
     }
   }
 
+  void _openSavedAddresses() {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => const SavedAddressesScreen()));
+  }
+
+  void _openSupportChatbot() {
+    showSupportChatbot(context, patientId: _selfPatientId);
+  }
+
+  Future<void> _deleteAccount() async {
+    final token = await AuthService.getToken();
+    if (token == null) return;
+    final ok = await ApiService.deleteAccount(token);
+    if (!mounted) return;
+    if (ok) {
+      SocketService.instance.disconnect();
+      await AuthService.logout();
+      if (mounted) {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+          (route) => false,
+        );
+      }
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to delete account. Please try again.')),
+      );
+    }
+  }
+
+  void _openUploadPrescription() {
+    final member = _bookingFor ?? _selfMember ?? (_members.isNotEmpty ? _members.first : null);
+    if (member == null) {
+      AppMessages.error(context, 'Please add a family member first.');
+      return;
+    }
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => PrescriptionUploadSheet(member: member),
+    );
+  }
+
+  void _openNearestBranch() {
+    final member = _selfMember;
+    final addr = [member?.address, member?.location]
+        .where((s) => s != null && s.trim().isNotEmpty)
+        .join(', ');
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _NearestBranchSheet(defaultAddress: addr.isNotEmpty ? addr : null),
+    );
+  }
+
   // select: the new member becomes "Booking for" (added from the Home
   // dropdown or before a first booking).
   Future<MemberModel?> _openAddMember({bool select = false}) async {
@@ -424,7 +503,9 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                           children: [
                             // Greeting = the account holder; "Booking for" =
                             // who Book Test books for.
-                            Row(
+                            GestureDetector(
+                              onTap: () => _onNavTap(3),
+                              child: Row(
                               children: [
                                 CircleAvatar(
                                   radius: 24,
@@ -513,7 +594,27 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                                     ),
                                   ),
                                 ),
+                                const SizedBox(width: 8),
+                                // Logout
+                                Material(
+                                  color: Colors.white.withValues(alpha: 0.16),
+                                  shape: CircleBorder(
+                                      side: BorderSide(color: Colors.white.withValues(alpha: 0.35))),
+                                  child: InkWell(
+                                    customBorder: const CircleBorder(),
+                                    onTap: _logout,
+                                    child: const Tooltip(
+                                      message: 'Logout',
+                                      child: SizedBox(
+                                        width: 44,
+                                        height: 44,
+                                        child: Icon(Icons.logout_rounded, color: Colors.white, size: 22),
+                                      ),
+                                    ),
+                                  ),
+                                ),
                               ],
+                            ),
                             ),
                           ],
                         ),
@@ -537,7 +638,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                   top: false,
                   bottom: false,
                   child: CustomerDashboardScreen(
-                    key: ValueKey(_dashboardMember!.id),
+                    key: ValueKey('${_dashboardMember!.id}_$_dashboardRebuildKey'),
                     member: _dashboardMember!,
                     isVip: widget.isVip,
                     embedded: true,
@@ -566,10 +667,15 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                   embedded: true,
                   onAddMember: _openAddMember,
                   onEditMember: _openEditMember,
-                  // Moved here from the old Customers tab.
                   onViewMember: _viewMember,
                   onRemoveMember: (m) => _confirmDelete(m.id, m.name),
                   onLogout: _logout,
+                  onFamilyMembers: _openAddMember,
+                  onSavedAddresses: _openSavedAddresses,
+                  onBookingHistory: () => _onNavTap(1),
+                  onHealthRecords: () => _onNavTap(2),
+                  onHelpSupport: _openSupportChatbot,
+                  onDeleteAccount: _deleteAccount,
                 ),
               ),
             ],
@@ -641,32 +747,35 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
       child: ListView(
         padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, 120),
         children: [
-          // Book your next test
-          _HomeCard(
-            color: CxColors.brand,
+          // Search bar — tapping opens the booking / test-search flow
+          GestureDetector(
             onTap: _startBooking,
-            child: Row(children: [
-              Container(
-                width: 52, height: 52,
-                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.18), borderRadius: CxRadius.lgAll),
-                child: const Icon(Icons.water_drop_rounded, color: Colors.white, size: 26),
+            child: Container(
+              height: 52,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                boxShadow: [
+                  BoxShadow(color: Colors.black.withValues(alpha: 0.07), blurRadius: 8, offset: const Offset(0, 2)),
+                ],
               ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  const Text('Book your next test',
-                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: Colors.white)),
-                  const SizedBox(height: 3),
-                  Text('Quick  •  Safe  •  Reliable',
-                      style: TextStyle(fontSize: 13, color: Colors.white.withValues(alpha: 0.88), fontWeight: FontWeight.w500)),
-                ]),
-              ),
-              Container(
-                width: 36, height: 36,
-                decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
-                child: const Icon(Icons.arrow_forward_rounded, color: CxColors.brand, size: 20),
-              ),
-            ]),
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Row(children: [
+                Icon(Icons.search_rounded, color: Colors.grey.shade400, size: 22),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Search tests & packages...',
+                    style: TextStyle(fontSize: 15, color: Colors.grey.shade400, fontWeight: FontWeight.w400),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(color: CxColors.brand.withValues(alpha: 0.10), borderRadius: BorderRadius.circular(8)),
+                  child: const Icon(Icons.tune_rounded, color: CxColors.brand, size: 18),
+                ),
+              ]),
+            ),
           ),
           const SizedBox(height: CxSpace.xxl),
 
@@ -697,17 +806,17 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
           const Text('Quick Actions', style: CxText.sectionTitle),
           const SizedBox(height: CxSpace.md),
           Row(children: [
-            _QuickAction(icon: Icons.event_available_rounded, label: 'Book Test',
-                color: AppColors.brandGreen, onTap: _startBooking),
+            _QuickAction(icon: Icons.home_outlined, label: 'Home\nCollection',
+                color: AppColors.brandGreen, onTap: () => _startBooking(mode: 'Home Collection')),
             const SizedBox(width: 10),
-            _QuickAction(icon: Icons.calendar_month_rounded, label: 'View Bookings',
-                color: CxColors.info, onTap: () => _onNavTap(1)),
+            _QuickAction(icon: Icons.science_outlined, label: 'Book Lab\nVisit',
+                color: CxColors.info, onTap: () => _startBooking(mode: 'Lab Test')),
             const SizedBox(width: 10),
-            _QuickAction(icon: Icons.description_rounded, label: 'Reports',
-                color: const Color(0xFF6A4BC4), onTap: () => _onNavTap(2)),
+            _QuickAction(icon: Icons.upload_file_rounded, label: 'Upload\nPrescription',
+                color: const Color(0xFF6A4BC4), onTap: _openUploadPrescription),
             const SizedBox(width: 10),
-            _QuickAction(icon: Icons.person_outline_rounded, label: 'Profile',
-                color: CxColors.offer, onTap: () => _onNavTap(3)),
+            _QuickAction(icon: Icons.location_on_outlined, label: 'Nearest\nBranch',
+                color: CxColors.offer, onTap: _openNearestBranch),
           ]),
           const SizedBox(height: CxSpace.xxl),
 
@@ -910,9 +1019,9 @@ class _QuickAction extends StatelessWidget {
                 const SizedBox(height: 8),
                 Text(label,
                     textAlign: TextAlign.center,
-                    maxLines: 1,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: CxColors.textPrimary)),
+                    style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: CxColors.textPrimary)),
               ]),
             ),
           ),
@@ -1100,6 +1209,254 @@ class _MemberDetailSheet extends StatelessWidget {
         ],
       ),
       ),
+      ),
+    );
+  }
+}
+
+// ─── Nearest Branch Sheet ─────────────────────────────────────────────────────
+
+class _NearestBranchSheet extends StatefulWidget {
+  final String? defaultAddress;
+  const _NearestBranchSheet({this.defaultAddress});
+
+  @override
+  State<_NearestBranchSheet> createState() => _NearestBranchSheetState();
+}
+
+class _NearestBranchSheetState extends State<_NearestBranchSheet> {
+  late final TextEditingController _addrCtrl;
+  bool _loading = false;
+  String? _error;
+  List<({BranchModel branch, double? distKm})> _sorted = [];
+  List<BranchModel>? _allBranches;
+
+  @override
+  void initState() {
+    super.initState();
+    _addrCtrl = TextEditingController(text: widget.defaultAddress ?? '');
+    // Auto-search on open if we have an address; otherwise just load branches.
+    _search();
+  }
+
+  @override
+  void dispose() {
+    _addrCtrl.dispose();
+    super.dispose();
+  }
+
+  static double _haversine(double lat1, double lon1, double lat2, double lon2) {
+    const r = 6371.0;
+    final dLat = (lat2 - lat1) * pi / 180;
+    final dLon = (lon2 - lon1) * pi / 180;
+    final a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(lat1 * pi / 180) * cos(lat2 * pi / 180) * sin(dLon / 2) * sin(dLon / 2);
+    return r * 2 * atan2(sqrt(a), sqrt(1 - a));
+  }
+
+  // Geocode via Nominatim (OpenStreetMap — free, no key needed).
+  // Returns null if the address can't be resolved.
+  Future<({double lat, double lng})?> _geocode(String address) async {
+    try {
+      final uri = Uri.https('nominatim.openstreetmap.org', '/search', {
+        'q': address,
+        'format': 'json',
+        'limit': '1',
+        'countrycodes': 'in',
+      });
+      final res = await http.get(uri, headers: {
+        'User-Agent': 'microlab-flutter-app/1.0',
+        'Accept-Language': 'en',
+      }).timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final list = jsonDecode(res.body) as List<dynamic>;
+        if (list.isNotEmpty) {
+          final r = list.first as Map<String, dynamic>;
+          final lat = double.tryParse(r['lat']?.toString() ?? '');
+          final lng = double.tryParse(r['lon']?.toString() ?? '');
+          if (lat != null && lng != null) return (lat: lat, lng: lng);
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> _search() async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      _allBranches ??= await ApiService.getBranches();
+      final branches = _allBranches!;
+
+      final addr = _addrCtrl.text.trim();
+      double? refLat, refLng;
+
+      if (addr.isNotEmpty) {
+        final coords = await _geocode(addr);
+        if (coords != null) {
+          refLat = coords.lat;
+          refLng = coords.lng;
+        }
+      }
+
+      final sorted = branches.map((b) {
+        double? dist;
+        if (refLat != null && refLng != null && b.lat != null && b.lng != null) {
+          dist = _haversine(refLat, refLng, b.lat!, b.lng!);
+        }
+        return (branch: b, distKm: dist);
+      }).toList();
+
+      sorted.sort((a, b) {
+        if (a.distKm == null && b.distKm == null) return 0;
+        if (a.distKm == null) return 1;
+        if (b.distKm == null) return -1;
+        return a.distKm!.compareTo(b.distKm!);
+      });
+
+      if (mounted) {
+        setState(() {
+          _sorted = sorted;
+          _loading = false;
+          if (addr.isNotEmpty && refLat == null) {
+            _error = 'Could not locate that address. Try entering a pincode or city name.';
+          }
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _error = 'Could not load branches. Please try again.'; _loading = false; });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomerThemeScope(
+      child: CxSheetFrame(
+        title: 'Nearest Branches',
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Address input
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: _addrCtrl,
+                  textInputAction: TextInputAction.search,
+                  onSubmitted: (_) => _search(),
+                  decoration: InputDecoration(
+                    hintText: 'Enter address, city or pincode',
+                    hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                    prefixIcon: const Icon(Icons.location_on_outlined, size: 20),
+                    filled: true,
+                    fillColor: CxColors.page,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    border: OutlineInputBorder(
+                      borderRadius: CxRadius.mdAll,
+                      borderSide: const BorderSide(color: CxColors.border),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: CxRadius.mdAll,
+                      borderSide: const BorderSide(color: CxColors.border),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: CxRadius.mdAll,
+                      borderSide: BorderSide(color: CxColors.brand, width: 1.5),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              SizedBox(
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: _loading ? null : _search,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: CxColors.brand,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    elevation: 0,
+                  ),
+                  child: _loading
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                      : const Icon(Icons.search_rounded, size: 22),
+                ),
+              ),
+            ]),
+
+            if (_error != null) ...[
+              const SizedBox(height: 10),
+              Row(children: [
+                const Icon(Icons.info_outline, size: 16, color: CxColors.textSecondary),
+                const SizedBox(width: 6),
+                Expanded(child: Text(_error!, style: CxText.caption)),
+              ]),
+            ],
+
+            const SizedBox(height: 12),
+
+            if (!_loading && _sorted.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: Text('No branches found.', style: CxText.bodySecondary)),
+              )
+            else
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: _sorted.map((entry) {
+                  final b = entry.branch;
+                  final dist = entry.distKm;
+                  final phone = b.mobileNo?.isNotEmpty == true
+                      ? b.mobileNo!
+                      : b.telephoneNo?.isNotEmpty == true
+                          ? b.telephoneNo!
+                          : null;
+                  return ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    leading: Container(
+                      width: 44, height: 44,
+                      decoration: const BoxDecoration(
+                        color: AppColors.brandGreenSurface,
+                        borderRadius: CxRadius.mdAll,
+                      ),
+                      child: const Icon(Icons.location_on_rounded, color: AppColors.brandGreen, size: 22),
+                    ),
+                    title: Text(b.name, style: CxText.cardTitle),
+                    subtitle: Text(
+                      [b.address, if (b.location != null && b.location!.isNotEmpty) b.location].join(', '),
+                      style: CxText.caption,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        if (dist != null)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: const BoxDecoration(color: AppColors.brandGreenSurface, borderRadius: CxRadius.pill),
+                            child: Text(
+                              dist < 1 ? '${(dist * 1000).round()} m' : '${dist.toStringAsFixed(1)} km',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
+                            ),
+                          ),
+                        if (phone != null) ...[
+                          const SizedBox(height: 4),
+                          GestureDetector(
+                            onTap: () async {
+                              final uri = Uri(scheme: 'tel', path: phone);
+                              if (await canLaunchUrl(uri)) launchUrl(uri);
+                            },
+                            child: const Icon(Icons.phone_outlined, color: AppColors.brandGreen, size: 20),
+                          ),
+                        ],
+                      ],
+                    ),
+                  );
+                }).toList(),
+              ),
+          ],
+        ),
       ),
     );
   }

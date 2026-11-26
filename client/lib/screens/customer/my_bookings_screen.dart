@@ -41,9 +41,10 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
   bool _isLoading = true;
   String? _error;
   String _bookingsFilter = 'All';
+  String _dateFilter = 'All Time'; // 'All Time' | 'This Month' | 'Last Month' | 'This Year'
 
   static const _upcomingStatuses = {
-    'Pending', 'Scheduled', 'Confirmed', 'Technician Allocated', 'Technician Arrived', 'In Progress',
+    'Pending', 'Upcoming', 'Confirmed', 'Technician Allocated', 'Technician Arrived', 'In Progress',
   };
   static const _completedStatuses = {
     'Completed', 'Sample Collected', 'Handed to Lab', 'Handed to Lab Pending',
@@ -98,7 +99,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
   static String _mapStatus(String raw) {
     switch (raw) {
       case 'pending':    return 'Pending';
-      case 'scheduled':  return 'Scheduled';
+      case 'scheduled':  return 'Upcoming';
       case 'confirmed':  return 'Confirmed';
       case 'assigned':   return 'Technician Allocated';
       case 'arrived':              return 'Technician Arrived';
@@ -262,6 +263,19 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
     return groups;
   }
 
+  bool _matchesDateFilter(BookingModel b) {
+    if (_dateFilter == 'All Time') return true;
+    final now = DateTime.now();
+    final d = b.date;
+    if (_dateFilter == 'This Month') return d.year == now.year && d.month == now.month;
+    if (_dateFilter == 'Last Month') {
+      final lm = DateTime(now.year, now.month - 1);
+      return d.year == lm.year && d.month == lm.month;
+    }
+    if (_dateFilter == 'This Year') return d.year == now.year;
+    return true;
+  }
+
   List<_PatientGroupView> _visibleGroups() {
     final filter = _bookingsFilter;
     final result = <_PatientGroupView>[];
@@ -277,6 +291,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       } else {
         matched = g.bookings;
       }
+      matched = matched.where(_matchesDateFilter).toList();
       if (matched.isEmpty) continue;
 
       String badge;
@@ -495,6 +510,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
                               builder: (_) => _PatientBookingsPage(
                                 member: v.member,
                                 initialBookings: v.allBookings,
+                                initialFilter: _bookingsFilter,
                               ),
                             ),
                           ).then((_) => _loadBookings());
@@ -512,33 +528,99 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
   }
 
   Widget _buildSummaryHeader() {
-    final total = _bookings.length;
-    final upcoming = _bookings.where((b) => _upcomingStatuses.contains(b.status)).length;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, CxSpace.md),
-      child: Row(
-        children: [
-          Expanded(
-            child: _StatCard(
-              count: total,
-              label: 'Total',
-              icon: Icons.event_note_rounded,
-              selected: _bookingsFilter == 'All',
-              onTap: () => setState(() => _bookingsFilter = 'All'),
-            ),
+    final dateFiltered = _bookings.where(_matchesDateFilter).toList();
+    final statusFiltered = _bookingsFilter == 'Upcoming'
+        ? dateFiltered.where((b) => _upcomingStatuses.contains(b.status)).toList()
+        : _bookingsFilter == 'Completed'
+        ? dateFiltered.where((b) => _completedStatuses.contains(b.status)).toList()
+        : _bookingsFilter == 'Cancelled'
+        ? dateFiltered.where((b) => _cancelledStatuses.contains(b.status)).toList()
+        : dateFiltered;
+    final total    = statusFiltered.length;
+    final upcoming = dateFiltered.where((b) => _upcomingStatuses.contains(b.status)).length;
+    const tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, CxSpace.md),
+          child: Row(
+            children: [
+              Expanded(
+                child: _StatCard(
+                  count: total,
+                  label: 'Total',
+                  icon: Icons.event_note_rounded,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _StatCard(
+                  count: upcoming,
+                  label: 'Upcoming',
+                  icon: Icons.schedule_rounded,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: _StatCard(
-              count: upcoming,
-              label: 'Upcoming',
-              icon: Icons.schedule_rounded,
-              selected: _bookingsFilter == 'Upcoming',
-              onTap: () => setState(() => _bookingsFilter = 'Upcoming'),
-            ),
+        ),
+        // ── Status filter strip ───────────────────────────
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.fromLTRB(CxSpace.gutter, 0, CxSpace.gutter, 8),
+          child: Row(
+            children: tabs.map((t) {
+              final sel = _bookingsFilter == t;
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: GestureDetector(
+                  onTap: () => setState(() => _bookingsFilter = t),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: sel ? CxColors.brand : Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: sel ? CxColors.brand : CxColors.border),
+                    ),
+                    child: Text(t,
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                          color: sel ? Colors.white : CxColors.textSecondary)),
+                  ),
+                ),
+              );
+            }).toList(),
           ),
-        ],
-      ),
+        ),
+        // ── Date filter strip ─────────────────────────────
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.fromLTRB(CxSpace.gutter, 0, CxSpace.gutter, CxSpace.md),
+          child: Row(
+            children: ['All Time', 'This Month', 'Last Month', 'This Year'].map((t) {
+              final sel = _dateFilter == t;
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: GestureDetector(
+                  onTap: () => setState(() => _dateFilter = t),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: sel ? const Color(0xFFE8F5E9) : Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: sel ? CxColors.brand : CxColors.border),
+                    ),
+                    child: Text(t,
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500,
+                          color: sel ? CxColors.brand : CxColors.textSecondary)),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ],
     );
   }
 
@@ -579,25 +661,17 @@ class _StatCard extends StatelessWidget {
   final int count;
   final String label;
   final IconData icon;
-  final bool selected;
-  final VoidCallback? onTap;
-  const _StatCard({required this.count, required this.label, required this.icon, this.selected = false, this.onTap});
+  const _StatCard({required this.count, required this.label, required this.icon});
 
   @override
   Widget build(BuildContext context) {
-    // Also the filter: tapping selects All / Upcoming (same as before).
-    return Semantics(
-      button: true,
-      selected: selected,
-      child: Material(
-      color: selected ? CxColors.brand : Colors.white,
-      shape: RoundedRectangleBorder(
+    return Material(
+      color: Colors.white,
+      shape: const RoundedRectangleBorder(
         borderRadius: CxRadius.lgAll,
-        side: BorderSide(color: selected ? CxColors.brand : CxColors.border),
+        side: BorderSide(color: CxColors.border),
       ),
       clipBehavior: Clip.antiAlias,
-      child: InkWell(
-      onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         child: Row(
@@ -605,10 +679,10 @@ class _StatCard extends StatelessWidget {
             Container(
               width: 38, height: 38,
               decoration: BoxDecoration(
-                color: selected ? Colors.white.withValues(alpha: 0.2) : CxColors.brandSurface,
+                color: CxColors.brandSurface,
                 borderRadius: CxRadius.mdAll,
               ),
-              child: Icon(icon, size: 20, color: selected ? Colors.white : CxColors.brand),
+              child: Icon(icon, size: 20, color: CxColors.brand),
             ),
             const SizedBox(width: CxSpace.md),
             Expanded(
@@ -617,18 +691,16 @@ class _StatCard extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text('$count',
-                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, height: 1.1,
-                          color: selected ? Colors.white : CxColors.textPrimary)),
+                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, height: 1.1,
+                          color: CxColors.textPrimary)),
                   Text(label,
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
-                          color: selected ? Colors.white.withValues(alpha: 0.85) : CxColors.textSecondary)),
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                          color: CxColors.textSecondary)),
                 ],
               ),
             ),
           ],
         ),
-      ),
-      ),
       ),
     );
   }
@@ -731,16 +803,16 @@ class _PatientCard extends StatelessWidget {
 class _PatientBookingsPage extends StatefulWidget {
   final MemberModel member;
   final List<BookingModel> initialBookings;
+  final String initialFilter;
 
-  const _PatientBookingsPage({required this.member, required this.initialBookings});
+  const _PatientBookingsPage({required this.member, required this.initialBookings, this.initialFilter = 'All'});
 
   @override
   State<_PatientBookingsPage> createState() => _PatientBookingsPageState();
 }
 
 class _PatientBookingsPageState extends State<_PatientBookingsPage>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
-  late TabController _tabCtrl;
+    with WidgetsBindingObserver {
   late List<BookingModel> _bookings;
   bool _initialLoading = true;
 
@@ -751,15 +823,12 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
   StreamSubscription<bool>? _connectedSub;
   Timer? _pollTimer;
 
-  static const _tabs = ['All', 'Upcoming', 'Completed', 'Cancelled'];
-
   static const _activeStatuses = {'pending', 'confirmed', 'assigned', 'arrived'};
 
   @override
   void initState() {
     super.initState();
     _bookings = List.from(widget.initialBookings);
-    _tabCtrl = TabController(length: _tabs.length, vsync: this);
     WidgetsBinding.instance.addObserver(this);
     _acceptedSub  = SocketService.instance.onBookingAccepted.listen((_) => _reload());
     _enRouteSub   = SocketService.instance.onTechnicianEnRoute.listen((_) => _reload());
@@ -796,7 +865,6 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
     _collectedSub?.cancel();
     _connectedSub?.cancel();
     _pollTimer?.cancel();
-    _tabCtrl.dispose();
     super.dispose();
   }
 
@@ -816,29 +884,6 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
     }
   }
 
-  List<BookingModel> _filtered(String tab) {
-    if (tab == 'All') return _bookings;
-    if (tab == 'Upcoming') {
-      return _bookings
-          .where((b) =>
-              b.status == 'Scheduled' ||
-              b.status == 'Pending' ||
-              b.status == 'Confirmed' ||
-              b.status == 'Technician Allocated' ||
-              b.status == 'In Progress')
-          .toList();
-    }
-    if (tab == 'Completed') {
-      return _bookings
-          .where((b) => b.status == 'Completed' || b.status == 'Sample Collected')
-          .toList();
-    }
-    if (tab == 'Cancelled') {
-      return _bookings.where((b) => b.status == 'Cancelled').toList();
-    }
-    return _bookings;
-  }
-
   void _showDetail(BookingModel booking) {
     showModalBottomSheet(
       context: context,
@@ -848,14 +893,6 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
         booking: booking,
         onPaymentSuccess: _reload,
       ),
-    );
-  }
-
-  Widget _emptyState(String tab) {
-    return CxEmptyState(
-      icon: Icons.calendar_today_outlined,
-      title: tab == 'All' ? 'No bookings yet' : 'No $tab bookings',
-      message: 'Tests booked for this patient will appear here.',
     );
   }
 
@@ -878,48 +915,40 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
           style: const TextStyle(
               color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700),
         ),
-        bottom: TabBar(
-          controller: _tabCtrl,
-          indicatorColor: Colors.white,
-          indicatorWeight: 3,
-          indicatorSize: TabBarIndicatorSize.label,
-          dividerColor: Colors.transparent,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white70,
-          labelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-          unselectedLabelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
-          isScrollable: true,
-          tabAlignment: TabAlignment.start,
-          tabs: _tabs.map((t) => Tab(text: t)).toList(),
-        ),
       ),
       body: _initialLoading
           ? const CxLoading(label: 'Loading bookings…')
-          : TabBarView(
-              controller: _tabCtrl,
-              children: _tabs.map((tab) {
-                final list = _filtered(tab);
-                if (list.isEmpty) return _emptyState(tab);
-                return ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, 32),
-                  itemCount: list.length,
-                  itemBuilder: (_, i) {
-                    final b = list[i];
-                    // Service charge applies only when this booking carries a service
-                    // charge component (home collection fee) and technician has arrived.
-                    // Family members whose booking has no service charge never get deducted.
-                    const chargeApplies = false;
-                    return _BookingCard(
-                      booking: b,
-                      chargeApplies: chargeApplies,
-                      onTap: () => _showDetail(b),
-                      onFeedbackSubmitted: _reload,
-                      onCancelled: _reload,
-                    );
-                  },
+          : Builder(builder: (_) {
+              final filter = widget.initialFilter;
+              final displayed = filter == 'Upcoming'
+                  ? _bookings.where((b) => const {'Upcoming','Pending','Confirmed','Technician Allocated','In Progress'}.contains(b.status)).toList()
+                  : filter == 'Completed'
+                  ? _bookings.where((b) => const {'Completed','Sample Collected','Handed to Lab','Handed to Lab Pending'}.contains(b.status)).toList()
+                  : filter == 'Cancelled'
+                  ? _bookings.where((b) => b.status == 'Cancelled').toList()
+                  : _bookings;
+              if (displayed.isEmpty) {
+                return CxEmptyState(
+                  icon: Icons.calendar_today_outlined,
+                  title: filter == 'All' ? 'No bookings yet' : 'No $filter bookings',
+                  message: 'Tests booked for this patient will appear here.',
                 );
-              }).toList(),
-            ),
+              }
+              return ListView.builder(
+                padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, 32),
+                itemCount: displayed.length,
+                itemBuilder: (_, i) {
+                  final b = displayed[i];
+                  return _BookingCard(
+                    booking: b,
+                    chargeApplies: false,
+                    onTap: () => _showDetail(b),
+                    onFeedbackSubmitted: _reload,
+                    onCancelled: _reload,
+                  );
+                },
+              );
+            }),
       ),
     );
   }
@@ -1253,7 +1282,7 @@ class _BookingCard extends StatelessWidget {
       case 'Technician Allocated':  return const Color(0xFF1565C0);
       case 'In Progress':           return const Color(0xFF1565C0);
       case 'Cancelled':             return const Color(0xFFD32F2F);
-      case 'Scheduled':             return const Color(0xFF6A1B9A);
+      case 'Upcoming':              return const Color(0xFF1565C0);
       default:                      return const Color(0xFFE65100);
     }
   }
@@ -1269,7 +1298,7 @@ class _BookingCard extends StatelessWidget {
       case 'Technician Allocated':  return Icons.assignment_ind_outlined;
       case 'In Progress':           return Icons.directions_run_rounded;
       case 'Cancelled':             return Icons.cancel_outlined;
-      case 'Scheduled':             return Icons.event_outlined;
+      case 'Upcoming':              return Icons.event_available_outlined;
       default:                      return Icons.hourglass_empty_rounded;
     }
   }
@@ -1470,7 +1499,7 @@ class _BookingCard extends StatelessWidget {
 
                     // Reschedule button
                     if (booking.canReschedule &&
-                        (booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated') &&
+                        (booking.status == 'Pending' || booking.status == 'Upcoming' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated') &&
                         !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
                         !_slotHasPassed(booking) &&
                         (booking.collectionStatus == null || booking.collectionStatus == 'assigned')) ...[
@@ -1485,7 +1514,7 @@ class _BookingCard extends StatelessWidget {
 
                     // Cancel button — only for pending/scheduled/confirmed/assigned, future dates,
                     // slot time not yet passed, and before technician starts collection
-                    if ((booking.status == 'Pending' || booking.status == 'Scheduled' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated' || booking.status == 'Technician Arrived') &&
+                    if ((booking.status == 'Pending' || booking.status == 'Upcoming' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated' || booking.status == 'Technician Arrived') &&
                         !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
                         !_slotHasPassed(booking) &&
                         !const {'collection_started', 'otp_verified', 'sample_collected',
@@ -1967,7 +1996,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
       'handed_to_lab', 'handed_to_lab_pending',
     };
     if (b.collectionStatus != null && blocked.contains(b.collectionStatus)) return false;
-    return b.status == 'Pending' || b.status == 'Confirmed' || b.status == 'Scheduled' ||
+    return b.status == 'Pending' || b.status == 'Confirmed' || b.status == 'Upcoming' ||
         b.status == 'Technician Allocated';
   }
 

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -57,6 +58,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final TextEditingController _searchController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+
+  // ── Voice search ──────────────────────────────────────────
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  bool _speechAvailable = false;
+  bool _isListening = false;
 
   // ── Collection mode ───────────────────────────────────────
   String _mode = 'Home Collection'; // or 'Lab Test'
@@ -117,6 +123,13 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     _loadTests();
     _loadCategories();
     NotificationService.instance.loadCustomerToken();
+    _speech.initialize(onStatus: (s) {
+      if (s == 'done' || s == 'notListening') {
+        if (mounted) setState(() => _isListening = false);
+      }
+    }).then((ok) {
+      if (mounted) setState(() => _speechAvailable = ok);
+    });
     final draft = widget.initialDraft;
     if (draft != null && !draft.isEmpty) {
       _cart.addAll(draft.cart);
@@ -131,6 +144,17 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     } else if (widget.initialCartTests.isNotEmpty) {
       _cart.addAll(widget.initialCartTests);
     }
+    // Seed address from member profile if no draft address was restored.
+    if (_address == null || _address!.isEmpty) {
+      final memberAddr = widget.member.address;
+      final memberCity = widget.member.location;
+      if (memberAddr.isNotEmpty) {
+        _address = memberAddr;
+        if (memberCity.isNotEmpty) _city = memberCity;
+        final pinMatch = RegExp(r'\b(\d{6})\b').firstMatch(memberAddr);
+        if (pinMatch != null) _pincode = pinMatch.group(1);
+      }
+    }
     _searchController.addListener(() {
       if (_searchController.text == _searchQuery) return;
       setState(() => _searchQuery = _searchController.text);
@@ -138,6 +162,40 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       _searchDebounce?.cancel();
       _searchDebounce = Timer(const Duration(milliseconds: 400), _loadTests);
     });
+  }
+
+  Future<void> _toggleVoiceSearch() async {
+    if (!_speechAvailable) {
+      AppMessages.error(context, 'Voice search is not available on this device.');
+      return;
+    }
+    if (_isListening) {
+      await _speech.stop();
+      setState(() => _isListening = false);
+      return;
+    }
+    setState(() => _isListening = true);
+    await _speech.listen(
+      onResult: (result) {
+        final words = result.recognizedWords;
+        if (words.isNotEmpty) {
+          _searchController.text = words;
+          _searchController.selection = TextSelection.fromPosition(
+            TextPosition(offset: words.length),
+          );
+        }
+        if (result.finalResult) {
+          setState(() => _isListening = false);
+          _loadTests();
+        }
+      },
+      listenOptions: stt.SpeechListenOptions(
+        listenFor: const Duration(seconds: 10),
+        pauseFor: const Duration(seconds: 3),
+        localeId: 'en_IN',
+        cancelOnError: true,
+      ),
+    );
   }
 
   // First page for the current search + filters (also pull-to-refresh).
@@ -237,7 +295,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _PrescriptionUploadSheet(member: widget.member),
+      builder: (_) => PrescriptionUploadSheet(member: widget.member),
     );
   }
 
@@ -769,6 +827,161 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
             ),
           ),
         ),
+
+        // ── Sticky search + filter bar ────────────────────
+        SliverAppBar(
+          automaticallyImplyLeading: false,
+          toolbarHeight: 0,
+          pinned: true,
+          elevation: 0,
+          scrolledUnderElevation: 2,
+          shadowColor: CxColors.border,
+          backgroundColor: CxColors.page,
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(156),
+            child: Container(
+              color: CxColors.page,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Search + upload
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(CxSpace.gutter, 12, CxSpace.gutter, 0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Container(
+                            height: 48,
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: CxRadius.mdAll,
+                              border: Border.all(color: CxColors.border),
+                              boxShadow: const [
+                                BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2)),
+                              ],
+                            ),
+                            child: TextField(
+                              controller: _searchController,
+                              textInputAction: TextInputAction.search,
+                              style: const TextStyle(fontSize: 14, color: CxColors.textPrimary),
+                              decoration: InputDecoration(
+                                hintText: _isListening ? 'Listening…' : 'Search tests & packages…',
+                                hintStyle: TextStyle(
+                                  fontSize: 14,
+                                  color: _isListening ? CxColors.brand : CxColors.textHint,
+                                  fontStyle: _isListening ? FontStyle.italic : FontStyle.normal,
+                                ),
+                                prefixIcon: const Icon(Icons.search_rounded, size: 22, color: CxColors.textHint),
+                                suffixIcon: _speechAvailable
+                                    ? IconButton(
+                                        icon: Icon(
+                                          _isListening ? Icons.mic_rounded : Icons.mic_none_rounded,
+                                          size: 22,
+                                          color: _isListening ? CxColors.brand : CxColors.textHint,
+                                        ),
+                                        tooltip: _isListening ? 'Stop listening' : 'Search by voice',
+                                        onPressed: _toggleVoiceSearch,
+                                      )
+                                    : null,
+                                filled: false,
+                                border: InputBorder.none,
+                                enabledBorder: InputBorder.none,
+                                focusedBorder: InputBorder.none,
+                                contentPadding: const EdgeInsets.symmetric(vertical: 13),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Tooltip(
+                          message: 'Upload prescription',
+                          child: Material(
+                            color: CxColors.brandSurface,
+                            shape: const RoundedRectangleBorder(
+                              borderRadius: CxRadius.mdAll,
+                              side: BorderSide(color: CxColors.brandLight),
+                            ),
+                            clipBehavior: Clip.antiAlias,
+                            child: InkWell(
+                              onTap: _uploadPrescription,
+                              child: const SizedBox(
+                                width: 48,
+                                height: 48,
+                                child: Icon(Icons.upload_file_outlined, size: 22, color: CxColors.brand),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  // Group tabs: Offers + General/Men/Women/Kids
+                  SizedBox(
+                    height: 34,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
+                      children: [
+                        _CategoryTab(
+                          label: '🏷 Offers',
+                          selected: _showOffersOnly,
+                          selectedColor: CxColors.offer,
+                          onTap: () {
+                            setState(() => _showOffersOnly = !_showOffersOnly);
+                            _loadTests();
+                          },
+                        ),
+                        ...['General', 'Men', 'Women', 'Kids'].map((g) => Padding(
+                          padding: const EdgeInsets.only(left: 8),
+                          child: _CategoryTab(
+                            label: g == 'General' ? 'All' : g,
+                            selected: _selectedAudience == g,
+                            onTap: () {
+                              setState(() => _selectedAudience = g);
+                              _loadTests();
+                            },
+                          ),
+                        )),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  // Category tabs
+                  SizedBox(
+                    height: 34,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
+                      children: [
+                        _CategoryTab(
+                          label: 'All',
+                          selected: _selectedPackageCategoryId == null,
+                          onTap: () {
+                            setState(() => _selectedPackageCategoryId = null);
+                            _loadTests();
+                          },
+                        ),
+                        ..._packageCategories.map((cat) => Padding(
+                          padding: const EdgeInsets.only(left: 8),
+                          child: _CategoryTab(
+                            label: cat.name,
+                            selected: _selectedPackageCategoryId == cat.id,
+                            onTap: () {
+                              setState(() => _selectedPackageCategoryId = cat.id);
+                              _loadTests();
+                            },
+                          ),
+                        )),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          ),
+        ),
       ],
       body: RefreshIndicator(
         onRefresh: () async {
@@ -783,206 +996,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SizedBox(height: CxSpace.lg),
-
-              // ── Search + Upload ───────────────────────
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Container(
-                        height: 48,
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: CxRadius.mdAll,
-                          border: Border.all(color: CxColors.border),
-                          boxShadow: const [
-                            BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2)),
-                          ],
-                        ),
-                        child: TextField(
-                          controller: _searchController,
-                          textInputAction: TextInputAction.search,
-                          style: const TextStyle(
-                              fontSize: 14, color: CxColors.textPrimary),
-                          decoration: const InputDecoration(
-                            hintText: 'Search tests & packages…',
-                            hintStyle: TextStyle(
-                                fontSize: 14, color: CxColors.textHint),
-                            prefixIcon: Icon(Icons.search_rounded,
-                                size: 22, color: CxColors.textHint),
-                            filled: false,
-                            border: InputBorder.none,
-                            enabledBorder: InputBorder.none,
-                            focusedBorder: InputBorder.none,
-                            contentPadding:
-                                EdgeInsets.symmetric(vertical: 13),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    // Upload prescription
-                    Tooltip(
-                      message: 'Upload prescription',
-                      child: Material(
-                        color: CxColors.brandSurface,
-                        shape: const RoundedRectangleBorder(
-                          borderRadius: CxRadius.mdAll,
-                          side: BorderSide(color: CxColors.brandLight),
-                        ),
-                        clipBehavior: Clip.antiAlias,
-                        child: InkWell(
-                          onTap: _uploadPrescription,
-                          child: const SizedBox(
-                            width: 48,
-                            height: 48,
-                            child: Icon(Icons.upload_file_outlined,
-                                size: 22, color: CxColors.brand),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
               const SizedBox(height: CxSpace.md),
-
-              // ── Filters: Special Offers + Group dropdown + Category dropdown ───
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
-                child: Row(
-                  children: [
-                    // Special Offers chip
-                    Semantics(
-                      button: true,
-                      selected: _showOffersOnly,
-                      child: Material(
-                        color: _showOffersOnly ? CxColors.offer : CxColors.offerSurface,
-                        shape: StadiumBorder(
-                          side: BorderSide(
-                            color: _showOffersOnly ? CxColors.offer : CxColors.offer.withValues(alpha: 0.25),
-                          ),
-                        ),
-                        clipBehavior: Clip.antiAlias,
-                        child: InkWell(
-                          onTap: () {
-                            setState(() => _showOffersOnly = !_showOffersOnly);
-                            _loadTests();
-                          },
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(minHeight: 38),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(Icons.local_offer_rounded,
-                                      size: 15,
-                                      color: _showOffersOnly ? Colors.white : CxColors.offer),
-                                  const SizedBox(width: 5),
-                                  Text('Special Offers',
-                                      style: TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w600,
-                                          color: _showOffersOnly ? Colors.white : CxColors.offer)),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: CxSpace.sm),
-                    // Group dropdown
-                    Expanded(
-                      child: PopupMenuButton<String>(
-                        onSelected: (v) {
-                          setState(() => _selectedAudience = v);
-                          _loadTests();
-                        },
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        itemBuilder: (_) => ['General', 'Men', 'Women', 'Kids']
-                            .map((g) => PopupMenuItem(
-                                  value: g,
-                                  height: 40,
-                                  child: Row(children: [
-                                    if (_selectedAudience == g)
-                                      const Icon(Icons.check_rounded, size: 14, color: AppColors.brandGreen),
-                                    if (_selectedAudience == g) const SizedBox(width: 6),
-                                    Text(g, style: TextStyle(
-                                        fontSize: 13,
-                                        color: _selectedAudience == g ? AppColors.brandGreen : AppColors.textPrimary,
-                                        fontWeight: _selectedAudience == g ? FontWeight.w600 : FontWeight.w400)),
-                                  ]),
-                                ))
-                            .toList(),
-                        tooltip: 'Filter by group',
-                        child: _DropdownPill(
-                          icon: Icons.people_outline_rounded,
-                          label: _selectedAudience == 'General' ? 'Group' : _selectedAudience,
-                          active: _selectedAudience != 'General',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    // Category dropdown — uses 0 as sentinel for "All" because
-                    // PopupMenuButton<int?> never fires onSelected for null values.
-                    Expanded(
-                      child: PopupMenuButton<int>(
-                        onSelected: (v) {
-                          setState(() => _selectedPackageCategoryId = v == 0 ? null : v);
-                          _loadTests();
-                        },
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        itemBuilder: (_) => [
-                          PopupMenuItem<int>(
-                            value: 0,
-                            height: 40,
-                            child: Row(children: [
-                              if (_selectedPackageCategoryId == null)
-                                const Icon(Icons.check_rounded, size: 14, color: AppColors.brandGreen),
-                              if (_selectedPackageCategoryId == null) const SizedBox(width: 6),
-                              Text('All', style: TextStyle(
-                                  fontSize: 13,
-                                  color: _selectedPackageCategoryId == null ? AppColors.brandGreen : AppColors.textPrimary,
-                                  fontWeight: _selectedPackageCategoryId == null ? FontWeight.w600 : FontWeight.w400)),
-                            ]),
-                          ),
-                          ..._packageCategories.map((cat) => PopupMenuItem<int>(
-                                value: cat.id,
-                                height: 40,
-                                child: Row(children: [
-                                  if (_selectedPackageCategoryId == cat.id)
-                                    const Icon(Icons.check_rounded, size: 14, color: AppColors.brandGreen),
-                                  if (_selectedPackageCategoryId == cat.id) const SizedBox(width: 6),
-                                  Text(cat.name, style: TextStyle(
-                                      fontSize: 13,
-                                      color: _selectedPackageCategoryId == cat.id ? AppColors.brandGreen : AppColors.textPrimary,
-                                      fontWeight: _selectedPackageCategoryId == cat.id ? FontWeight.w600 : FontWeight.w400)),
-                                ]),
-                              )),
-                        ],
-                        tooltip: 'Filter by category',
-                        child: _DropdownPill(
-                          icon: Icons.category_outlined,
-                          label: _selectedPackageCategoryId == null
-                              ? 'Category'
-                              : (_packageCategories
-                                      .where((c) => c.id == _selectedPackageCategoryId)
-                                      .firstOrNull
-                                      ?.name ?? 'Category'),
-                          active: _selectedPackageCategoryId != null,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              const SizedBox(height: 20),
 
               // ── Content ───────────────────────────────
               if (!_modeChosen)
@@ -991,6 +1005,28 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                   child: CxEmptyState(
                     icon: Icons.touch_app_outlined,
                     title: 'Select a booking type to see available tests',
+                  ),
+                )
+              else if (_isLabTest && _selectedBranch == null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: CxSpace.xl),
+                  child: CxEmptyState(
+                    icon: Icons.store_outlined,
+                    title: 'Please select a branch',
+                    message: 'Tap "Select branch" above to choose your nearest branch.',
+                    actionLabel: 'Select Branch',
+                    onAction: _showLocationSheet,
+                  ),
+                )
+              else if (!_isLabTest && (_pincode == null || _pincode!.isEmpty) && (_city == null || _city!.isEmpty))
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: CxSpace.xl),
+                  child: CxEmptyState(
+                    icon: Icons.location_on_outlined,
+                    title: 'Please set your collection location',
+                    message: 'Tap "Set location" above to enter your address or pincode.',
+                    actionLabel: 'Set Location',
+                    onAction: _showLocationSheet,
                   ),
                 )
               else if (_loadingTests)
@@ -1180,39 +1216,38 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   }
 }
 
-// Visual for the Group / Category filter menus (the PopupMenuButton around
-// it handles the tap and the choices).
-class _DropdownPill extends StatelessWidget {
-  final IconData icon;
+// Horizontally scrollable filter chip (category tabs, group tabs, offers toggle).
+class _CategoryTab extends StatelessWidget {
   final String label;
-  final bool active;
-  const _DropdownPill({required this.icon, required this.label, required this.active});
+  final bool selected;
+  final VoidCallback onTap;
+  final Color? selectedColor;
+  const _CategoryTab({required this.label, required this.selected, required this.onTap, this.selectedColor});
 
   @override
   Widget build(BuildContext context) {
-    final fg = active ? Colors.white : CxColors.textPrimary;
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 180),
-      constraints: const BoxConstraints(minHeight: 38),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: active ? CxColors.brand : Colors.white,
-        borderRadius: CxRadius.pill,
-        border: Border.all(color: active ? CxColors.brand : CxColors.border),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, size: 15, color: active ? Colors.white : CxColors.textSecondary),
-          const SizedBox(width: 5),
-          Expanded(
-            child: Text(
-              label,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: fg),
-            ),
+    final activeColor = selectedColor ?? CxColors.brand;
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected ? activeColor : Colors.white,
+          borderRadius: CxRadius.pill,
+          border: Border.all(
+            color: selected ? activeColor : CxColors.border,
+            width: selected ? 1.5 : 1,
           ),
-          Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: fg),
-        ],
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w600,
+            color: selected ? Colors.white : CxColors.textSecondary,
+          ),
+        ),
       ),
     );
   }
@@ -1474,6 +1509,10 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
   // Location and Address stay disabled until the lookup finishes.
   bool _isPincodeLookup = false;
 
+  // Saved addresses for quick-select in Home Collection mode
+  List<AddressModel> _savedAddresses = [];
+  AddressModel? _selectedSavedAddress;
+
   @override
   void initState() {
     super.initState();
@@ -1503,6 +1542,10 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
       // the "Use Current Location" tap.
       WidgetsBinding.instance.addPostFrameCallback((_) => _getCurrentLocation());
     }
+    // Load saved addresses for Home Collection quick-select.
+    ApiService.getAddresses().then((list) {
+      if (mounted) setState(() => _savedAddresses = list);
+    });
 
     // React when the customer switches location on (from settings, the
     // quick panel or the notification shade). Not available on web.
@@ -2185,8 +2228,109 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
             const SizedBox(height: 20),
 
             if (_mode == 'Home Collection') ...[
-              const Text('Select Location Method', style: CxText.label),
-              const SizedBox(height: CxSpace.md),
+              // ── Saved Addresses quick-select ──────────────────────────────
+              if (_savedAddresses.isNotEmpty) ...[
+                const Text('Saved Addresses', style: CxText.label),
+                const SizedBox(height: CxSpace.sm),
+                ..._savedAddresses.map((addr) {
+                  final selected = _selectedSavedAddress?.id == addr.id;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Material(
+                      color: selected ? CxColors.brandSurface : Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: CxRadius.lgAll,
+                        side: BorderSide(color: selected ? CxColors.brand : CxColors.border, width: selected ? 2 : 1),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
+                        onTap: () {
+                          setState(() {
+                            _selectedSavedAddress = addr;
+                            _gpsSelected   = false;
+                            _manualSelected = false;
+                            _isManualMode  = false;
+                          });
+                          widget.onAddressChanged(addr.fullAddress);
+                          if (addr.pincode != null && addr.pincode!.isNotEmpty) {
+                            widget.onPincodeChanged(addr.pincode);
+                          }
+                          if (addr.city != null && addr.city!.isNotEmpty) {
+                            widget.onCityChanged(addr.city);
+                            _cityCtrl.text = addr.city!;
+                          }
+                          if (addr.pincode != null) _pincodeCtrl.text = addr.pincode!;
+                          if (addr.lat != null && addr.lng != null) {
+                            widget.onLatLngChanged?.call(addr.lat, addr.lng);
+                          }
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.all(14),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 40, height: 40,
+                                decoration: BoxDecoration(
+                                  color: selected ? CxColors.brand : CxColors.brandSurface,
+                                  borderRadius: CxRadius.mdAll,
+                                ),
+                                child: Icon(
+                                  addr.label.toLowerCase() == 'home'
+                                      ? Icons.home_outlined
+                                      : addr.label.toLowerCase() == 'work'
+                                          ? Icons.work_outline_rounded
+                                          : Icons.location_on_outlined,
+                                  size: 20,
+                                  color: selected ? Colors.white : CxColors.brand,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(children: [
+                                      Text(addr.label,
+                                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: CxColors.textPrimary)),
+                                      if (addr.isDefault) ...[
+                                        const SizedBox(width: 6),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                          decoration: BoxDecoration(color: CxColors.brandSurface, borderRadius: BorderRadius.circular(8)),
+                                          child: const Text('Default', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: CxColors.brand)),
+                                        ),
+                                      ],
+                                    ]),
+                                    const SizedBox(height: 2),
+                                    Text(addr.fullAddress,
+                                        style: const TextStyle(fontSize: 12, color: CxColors.textSecondary),
+                                        maxLines: 2, overflow: TextOverflow.ellipsis),
+                                    if (addr.city != null || addr.pincode != null) ...[
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        [if (addr.city != null) addr.city!, if (addr.pincode != null) addr.pincode!].join(' – '),
+                                        style: const TextStyle(fontSize: 11, color: CxColors.textHint),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                              if (selected)
+                                const Icon(Icons.check_circle_rounded, color: CxColors.brand, size: 22),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+                const SizedBox(height: 12),
+                const Text('Or choose a location', style: CxText.label),
+                const SizedBox(height: CxSpace.md),
+              ] else ...[
+                const Text('Select Location Method', style: CxText.label),
+                const SizedBox(height: CxSpace.md),
+              ],
 
               // Option 1: GPS Current Location Button
               Material(
@@ -3482,15 +3626,15 @@ class _DrawerItem extends StatelessWidget {
 
 // ─── Prescription Upload Sheet ────────────────────────────────────────────────
 
-class _PrescriptionUploadSheet extends StatefulWidget {
+class PrescriptionUploadSheet extends StatefulWidget {
   final MemberModel member;
-  const _PrescriptionUploadSheet({required this.member});
+  const PrescriptionUploadSheet({super.key, required this.member});
 
   @override
-  State<_PrescriptionUploadSheet> createState() => _PrescriptionUploadSheetState();
+  State<PrescriptionUploadSheet> createState() => _PrescriptionUploadSheetState();
 }
 
-class _PrescriptionUploadSheetState extends State<_PrescriptionUploadSheet> {
+class _PrescriptionUploadSheetState extends State<PrescriptionUploadSheet> {
   static const int _maxFiles = 5;
   final List<_PresDoc> _uploads = [];
   bool _isPicking = false;

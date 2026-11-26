@@ -23,10 +23,15 @@ class _FamilyMember {
   final List<TestModel> tests;
   final List<Uint8List> prescriptionBytes;
   final TextEditingController doctorCtrl;
+  String doctorType; // 'self' | 'doctor'
+  List<_CheckoutDoc> prescriptions;
   _FamilyMember({required this.patient, required this.tests, this.prescriptionBytes = const [], String? doctorName})
-      : doctorCtrl = TextEditingController(text: doctorName ?? '');
+      : doctorCtrl = TextEditingController(text: doctorName ?? ''),
+        doctorType = 'self',
+        prescriptions = [];
   double get testsTotal => tests.fold(0.0, (s, t) => s + t.finalPrice);
   bool get anyDocRequired => tests.any((t) => t.docRequired);
+  bool get isDoctor => doctorType == 'doctor';
   void dispose() => doctorCtrl.dispose();
 }
 
@@ -113,8 +118,32 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   bool                        _fallbackDateChanged = false;
   TimeInterval?               _selectedAppointmentTime;
 
-  List<TimeSlot> get _availableSlots =>
-      widget.branchId != null ? _branchSlots : _staticSlots;
+  // Flattened list of all pickable times across all loaded slots.
+  List<Map<String, dynamic>> get _allAvailableTimes {
+    if (widget.branchId != null) {
+      final times = <Map<String, dynamic>>[];
+      for (final raw in _branchSlotsRaw) {
+        final slotId     = raw['time_slot_id']?.toString() ?? '';
+        final parentSlot = raw['slot_id'] != null ? (raw['slot_id'] as num).toInt() : null;
+        final slotLabel  = raw['label'] as String? ?? '';
+        final intervals  = (raw['timeIntervals'] as List?)?.cast<Map<String, dynamic>>() ?? [];
+        if (intervals.isEmpty) {
+          times.add({'time': raw['time'] as String? ?? '', 'label': slotLabel,
+              'slotId': slotId, 'parentSlotId': parentSlot, 'interval': null});
+        } else {
+          for (final t in intervals) {
+            times.add({'time': t['time'] as String? ?? '', 'label': t['label'] as String? ?? '',
+                'slotId': slotId, 'parentSlotId': parentSlot, 'interval': t});
+          }
+        }
+      }
+      return times;
+    }
+    return _staticSlots.map((s) => {
+      'time': s.time, 'label': s.label,
+      'slotId': s.id, 'parentSlotId': null, 'interval': null,
+    }).toList();
+  }
 
   // Appointment times available for the currently selected slot (empty = no duration configured)
   List<TimeInterval> get _currentSlotIntervals {
@@ -143,6 +172,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   final TextEditingController _notesController = TextEditingController();
 
   // ── Doctor name (primary patient) ─────────────────────────
+  String _doctorType = 'self'; // 'self' | 'doctor'
+  bool get _isDoctor => _doctorType == 'doctor';
   final TextEditingController _doctorNameController = TextEditingController();
 
   // ── Address (mutable — user can edit in checkout) ─────────
@@ -271,55 +302,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     super.dispose();
   }
 
-  Future<void> _pickDate() async {
-    final now   = DateTime.now();
-    // Normalize to midnight so the picker's initialDate comparison never fails
-    // when a previously-selected today (midnight) is compared against now (with time).
-    final today = DateTime(now.year, now.month, now.day);
-    // Always allow today — the server controls slot availability for same-day bookings.
-    // Previously the old flow (no branchId) used tomorrow as firstDate, which grayed
-    // out today even when the user expected to book for the same day.
-    debugPrint('\n📅 [DATE PICKER] branchId=${widget.branchId} → firstDate=${today.toIso8601String().substring(0,10)}');
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: _selectedDate ?? today,
-      firstDate: today,
-      lastDate: today.add(const Duration(days: 2)),
-      helpText: 'SELECT BOOKING DATE',
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-          colorScheme: const ColorScheme.light(
-            primary: AppColors.brandGreen,
-            onPrimary: Colors.white,
-            surface: Colors.white,
-          ),
-        ),
-        child: child!,
-      ),
-    );
-    if (picked != null) {
-      debugPrint('   picked      : ${picked.toIso8601String().substring(0,10)}');
-      setState(() {
-        _selectedDate            = picked;
-        _selectedSlot            = null;
-        _selectedAppointmentTime = null;
-        _selectedTechnician      = null;
-        _branchSlots             = [];
-        _branchSlotsRaw          = [];
-        _slotsError              = '';
-        _fallbackDateChanged     = false;
-      });
-      if (widget.branchId != null) {
-        debugPrint('   → branchId=${widget.branchId} — loading API slots');
-        _loadBranchSlots(picked);
-      } else {
-        debugPrint('   → no branchId — static slots shown (${_staticSlots.length} options)');
-      }
-    } else {
-      debugPrint('   picker dismissed — no date selected');
-    }
-  }
-
   String _toApiDate(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-'
       '${d.day.toString().padLeft(2, '0')}';
@@ -362,12 +344,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           if (list.isEmpty) {
             final fbData = body['fallback'] as Map<String, dynamic>?;
             if (fbData != null) {
-              final fb = TimeSlot(id: '', label: fbData['label'] as String, time: '');
-              final fbDateStr = fbData['date'] as String?;
+              final fbLabel   = fbData['label'] as String? ?? '';
+              final fbTime    = fbData['time']  as String? ?? '';
+              final fbDateStr = fbData['date']  as String?;
               final fbDate    = fbDateStr != null ? DateTime.tryParse(fbDateStr) : null;
+              // Surface the fallback slot through _branchSlotsRaw so the new grid shows it.
+              final fbRaw = {'time_slot_id': '', 'slot_id': null, 'label': fbLabel,
+                  'time': fbTime, 'timeIntervals': [], '_isFallback': true};
               setState(() {
-                _branchSlotsRaw = [];
-                _branchSlots    = [fb];
+                _branchSlotsRaw = [fbRaw];
+                _branchSlots    = [];
                 _loadingSlots   = false;
                 _slotsError     = '';
                 if (fbDate != null && fbDate != _selectedDate) {
@@ -405,8 +391,89 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   static const String _slotsLoadFailed = 'We couldn\'t load the available slots. Please try again.';
 
-  // ── Slot section body ─────────────────────────────────────
-  Widget _buildSlotBody() {
+  void _selectTime(Map<String, dynamic> t) {
+    final slotId     = t['slotId'] as String? ?? '';
+    final parentSlot = t['parentSlotId'] as int?;
+    final label      = t['label'] as String? ?? '';
+    final time       = t['time'] as String? ?? '';
+    final interval   = t['interval'] as Map<String, dynamic>?;
+    setState(() {
+      _selectedSlot = TimeSlot(id: slotId, label: label, time: time, parentSlotId: parentSlot);
+      _selectedAppointmentTime = interval != null
+          ? TimeInterval(time: interval['time'] as String? ?? '', label: interval['label'] as String? ?? '')
+          : null;
+      _selectedTechnician = null;
+    });
+  }
+
+  // ── Date strip (3 days) ───────────────────────────────────
+  Widget _buildDateStrip() {
+    final now   = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    const dayAbbr   = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const monthAbbr = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    final days = List.generate(3, (i) => today.add(Duration(days: i)));
+
+    return SizedBox(
+      height: 72,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: days.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 10),
+        itemBuilder: (_, i) {
+          final d     = days[i];
+          final isSel = _selectedDate != null &&
+              _selectedDate!.year == d.year &&
+              _selectedDate!.month == d.month &&
+              _selectedDate!.day == d.day;
+          final sub = i == 0 ? 'Today' : i == 1 ? 'Tomorrow' : '${monthAbbr[d.month]} ${d.day}';
+          return GestureDetector(
+            onTap: () {
+              setState(() {
+                _selectedDate        = d;
+                _selectedSlot        = null;
+                _selectedAppointmentTime = null;
+                _selectedTechnician  = null;
+                _branchSlots         = [];
+                _branchSlotsRaw      = [];
+                _slotsError          = '';
+                _fallbackDateChanged = false;
+              });
+              if (widget.branchId != null) _loadBranchSlots(d);
+            },
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              width: 90,
+              decoration: BoxDecoration(
+                color: isSel ? AppColors.brandGreen : Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: isSel ? AppColors.brandGreen : CxColors.border,
+                  width: isSel ? 0 : 1,
+                ),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(dayAbbr[d.weekday - 1],
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                        color: isSel ? Colors.white70 : CxColors.textSecondary)),
+                  const SizedBox(height: 4),
+                  Text(sub,
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                        color: isSel ? Colors.white : CxColors.textPrimary)),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // ── Time grid ─────────────────────────────────────────────
+  Widget _buildTimeGrid() {
     if (_selectedDate == null) {
       return const CxBanner(
         tone: CxTone.neutral,
@@ -414,26 +481,22 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         message: 'Please select a date first',
       );
     }
-    if (_loadingSlots) {
-      return const CxLoading(label: 'Finding available slots…');
-    }
-    if (_slotsError.isNotEmpty) {
-      return CxBanner(
-        tone: CxTone.error,
-        message: _slotsError,
-      );
-    }
-    if (_availableSlots.isEmpty) {
+    if (_loadingSlots) return const CxLoading(label: 'Finding available slots…');
+    if (_slotsError.isNotEmpty) return CxBanner(tone: CxTone.error, message: _slotsError);
+
+    final times = _allAvailableTimes;
+    if (times.isEmpty) {
       return const CxBanner(
         tone: CxTone.warning,
         icon: Icons.event_busy_outlined,
         message: 'No slots available. Try another date.',
       );
     }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (_fallbackDateChanged) ...[
+        if (_fallbackDateChanged)
           const Padding(
             padding: EdgeInsets.only(bottom: 10),
             child: CxBanner(
@@ -441,29 +504,39 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               message: 'No slots on your selected date. Appointment date updated to the next available day.',
             ),
           ),
-        ],
-        Wrap(
-      spacing: 10,
-      runSpacing: 10,
-      children: _availableSlots.map((slot) {
-        final isSelected  = _selectedSlot?.id == slot.id;
-        final isFallback  = slot.id.isEmpty;
-        final activeColor = isFallback ? AppColors.amber : AppColors.brandGreen;
-        return _ChoicePill(
-          label: slot.label,
-          selected: isSelected,
-          activeColor: activeColor,
-          highlight: isFallback,
-          onTap: () => setState(() {
-            _selectedSlot            = slot;
-            _selectedAppointmentTime = null;
-          }),
-        );
-      }).toList(),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final pillW = (constraints.maxWidth - 12) / 3; // 2 × 6px gaps
+            return Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: times.map((t) {
+                final slotId     = t['slotId'] as String? ?? '';
+                final timeStr    = t['time'] as String? ?? '';
+                final labelStr   = t['label'] as String? ?? timeStr;
+                final isFallback = t['_isFallback'] == true;
+                final isSel      = _selectedSlot?.id == slotId &&
+                    (_selectedAppointmentTime == null
+                        ? t['interval'] == null
+                        : _selectedAppointmentTime!.time == timeStr);
+                return SizedBox(
+                  width: pillW,
+                  child: _ChoicePill(
+                    label: labelStr,
+                    selected: isSel,
+                    activeColor: isFallback ? AppColors.amber : AppColors.brandGreen,
+                    onTap: () => _selectTime(t),
+                  ),
+                );
+              }).toList(),
+            );
+          },
         ),
       ],
     );
   }
+
+
 
   // ── Prescription upload — multi-image ────────────────────
   // Shared Camera / Gallery chooser (same labels as before). It only returns
@@ -507,6 +580,46 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   void _deletePres(int index) {
     setState(() => _prescriptions.removeAt(index));
+  }
+
+  // ── Family member prescription pickers ───────────────────
+  Future<void> _showFamilyPresSourcePicker(_FamilyMember m) async {
+    final source = await showCxImageSourcePicker(context, title: 'Upload prescription');
+    if (source == null || !mounted) return;
+    _pickFamilyPres(m, source == CxImageSource.camera ? ImageSource.camera : ImageSource.gallery);
+  }
+
+  Future<void> _pickFamilyPres(_FamilyMember m, ImageSource source) async {
+    if (_isPicking || m.prescriptions.length >= _maxPrescrips) return;
+    setState(() => _isPicking = true);
+    try {
+      if (source == ImageSource.gallery) {
+        final images = await _picker.pickMultiImage(imageQuality: 80);
+        if (images.isNotEmpty) {
+          final toAdd = images.take(_maxPrescrips - m.prescriptions.length);
+          final docs = await Future.wait(toAdd.map((f) async => _CheckoutDoc(
+              bytes: await f.readAsBytes(), fileName: f.name, uploadedAt: DateTime.now())));
+          setState(() => m.prescriptions.addAll(docs));
+        }
+      } else {
+        final img = await _picker.pickImage(source: ImageSource.camera, imageQuality: 80);
+        if (img != null) {
+          final bytes = await img.readAsBytes();
+          setState(() => m.prescriptions.add(_CheckoutDoc(
+              bytes: bytes, fileName: img.name, uploadedAt: DateTime.now())));
+        }
+      }
+    } catch (_) {}
+    setState(() => _isPicking = false);
+  }
+
+  void _viewFamilyPres(_FamilyMember m, int index) {
+    Navigator.push(context, MaterialPageRoute(
+        builder: (_) => _PresViewerPage(images: m.prescriptions, initialIndex: index)));
+  }
+
+  void _deleteFamilyPres(_FamilyMember m, int index) {
+    setState(() => m.prescriptions.removeAt(index));
   }
 
   // ── Edit address (Home Collection) ───────────────────────
@@ -609,8 +722,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         }).toList(),
         'totalAmount':   _testsTotal + _serviceCharge,
         'serviceCharge': _serviceCharge,
-        if (_doctorNameController.text.trim().isNotEmpty)
-          'doctorName': _doctorNameController.text.trim(),
+        'doctorName': _isDoctor ? _doctorNameController.text.trim() : 'Self',
       },
       ..._familyMembers.map((m) => {
         'patientId':    m.patient.patientId,
@@ -621,7 +733,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         }).toList(),
         'totalAmount':   m.testsTotal,
         'serviceCharge': 0,
-        if (m.doctorCtrl.text.trim().isNotEmpty) 'doctorName': m.doctorCtrl.text.trim(),
+        'doctorName': m.isDoctor ? m.doctorCtrl.text.trim() : 'Self',
       }),
     ];
 
@@ -678,10 +790,10 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       }
     }
 
-    // Family members — prescriptions collected during add-member flow (Uint8List bytes)
+    // Family members — prescriptions collected in checkout screen (m.prescriptions)
     for (int i = 0; i < _familyMembers.length; i++) {
       final m = _familyMembers[i];
-      if (m.prescriptionBytes.isEmpty) continue;
+      if (m.prescriptions.isEmpty) continue;
       final memberBookingIndex = i + 1;
       if (memberBookingIndex >= bookings.length) continue;
       final memberBookingId  = bookings[memberBookingIndex]['bookingId']         as int?;
@@ -689,9 +801,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (memberBookingId == null) continue;
       try {
         final urls = <String>[];
-        for (final bytes in m.prescriptionBytes) {
-          final url = await ApiService.uploadFile(
-              bytes, 'pres_${DateTime.now().millisecondsSinceEpoch}.jpg');
+        for (final doc in m.prescriptions) {
+          final url = await ApiService.uploadFile(doc.bytes, doc.fileName);
           if (url != null) urls.add(url);
         }
         if (urls.isNotEmpty) {
@@ -774,13 +885,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   Future<void> _proceedToPayment() async {
     if (!_canProceed) return;
 
-    // Validate doctor name — required for primary patient and all family members
-    if (_doctorNameController.text.trim().isEmpty) {
+    // Validate doctor name — required only when 'Doctor' type is chosen
+    if (_isDoctor && _doctorNameController.text.trim().isEmpty) {
       AppMessages.error(context, 'Please enter a doctor name for ${widget.member.name}.');
       return;
     }
     for (final m in _familyMembers) {
-      if (m.doctorCtrl.text.trim().isEmpty) {
+      if (m.isDoctor && m.doctorCtrl.text.trim().isEmpty) {
         AppMessages.error(context, 'Please enter a doctor name for ${m.patient.name}.');
         return;
       }
@@ -879,7 +990,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       'discountAmount': 0,
       'sourceChannel':  'mobile_app',
       'notes':          _notesController.text.trim().isEmpty ? null : _notesController.text.trim(),
-      if (_doctorNameController.text.trim().isNotEmpty) 'doctorName': _doctorNameController.text.trim(),
+      'doctorName': _isDoctor ? _doctorNameController.text.trim() : 'Self',
       'items':          items,
       'paymentType':    isPayNow ? 'full' : 'pay_later',
       if (isPayNow) 'razorpayPaymentId': razorpayPaymentId,
@@ -1110,7 +1221,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
           ),
 
-          const SizedBox(height: CxSpace.md),
+          const SizedBox(height: CxSpace.sm),
 
           // ── Collection Info ───────────────────────────────
           _SectionCard(
@@ -1159,84 +1270,24 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
           ),
 
-          const SizedBox(height: CxSpace.md),
+          const SizedBox(height: CxSpace.sm),
 
-          // ── Date Selection ────────────────────────────────
+          // ── Schedule (Date strip + Time grid) ─────────────
           _SectionCard(
-            title: 'Booking Date',
+            title: 'Schedule',
             icon: Icons.calendar_today_outlined,
             required: true,
-            child: Material(
-              color: _selectedDate != null ? CxColors.brandSurface : Colors.white,
-              shape: RoundedRectangleBorder(
-                borderRadius: CxRadius.mdAll,
-                side: BorderSide(
-                  color: _selectedDate != null ? CxColors.brand : CxColors.border,
-                  width: _selectedDate != null ? 1.5 : 1,
-                ),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-              onTap: _pickDate,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-                child: Row(
-                  children: [
-                    Icon(Icons.event_outlined,
-                        size: 22,
-                        color: _selectedDate != null ? CxColors.brand : CxColors.textHint),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        _selectedDate != null ? _formatDate(_selectedDate!) : 'Select booking date',
-                        style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: _selectedDate != null ? FontWeight.w600 : FontWeight.w400,
-                            color: _selectedDate != null ? CxColors.textPrimary : CxColors.textHint),
-                      ),
-                    ),
-                    Icon(Icons.keyboard_arrow_down_rounded,
-                        color: _selectedDate != null ? CxColors.brand : CxColors.textHint),
-                  ],
-                ),
-              ),
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildDateStrip(),
+                const SizedBox(height: CxSpace.md),
+                _buildTimeGrid(),
+              ],
             ),
           ),
 
-          const SizedBox(height: CxSpace.md),
-
-          // ── Time Slot ─────────────────────────────────────
-          _SectionCard(
-            title: 'Time Slot',
-            icon: Icons.schedule_outlined,
-            required: true,
-            child: _buildSlotBody(),
-          ),
-
-          // ── Appointment Time (shown when slot has intervals) ─
-          if (_selectedSlot != null && _currentSlotIntervals.isNotEmpty) ...[
-            const SizedBox(height: CxSpace.md),
-            _SectionCard(
-              title: 'Appointment Time',
-              icon: Icons.access_time_outlined,
-              required: true,
-              child: Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: _currentSlotIntervals.map((interval) {
-                  final isSel = _selectedAppointmentTime?.time == interval.time;
-                  return _ChoicePill(
-                    label: interval.label,
-                    selected: isSel,
-                    onTap: () => setState(() => _selectedAppointmentTime = interval),
-                  );
-                }).toList(),
-              ),
-            ),
-          ],
-
-          const SizedBox(height: CxSpace.md),
+          const SizedBox(height: CxSpace.sm),
 
           // ── Prescription / Document (multi-image) ─────────
           if (_primaryNeedsPrescription || widget.isVip)
@@ -1356,9 +1407,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ),
             ),
 
-          if (_anyDocRequired) const SizedBox(height: CxSpace.md),
+          if (_anyDocRequired) const SizedBox(height: CxSpace.sm),
 
-          // ── Payment Options ───────────────────────────────
+          // ── Payment Options (horizontal) ──────────────────
           _SectionCard(
             title: 'Payment Option',
             icon: Icons.payment_outlined,
@@ -1366,51 +1417,40 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Service charge info banner
-                if (widget.mode != 'Lab Test') ...[
-                  const CxBanner(
-                    tone: CxTone.info,
-                    icon: Icons.directions_car_outlined,
-                    message: 'Home collection service charge is calculated based on distance and collected at the time of sample collection.',
+                IntrinsicHeight(
+                  child: Row(
+                    children: [
+                      // Pay Full Now
+                      Expanded(
+                        child: _PaymentOptionCompact(
+                          selected: _paymentType == 'full',
+                          title: 'Pay Now',
+                          amount: '₹${_grandTotal.toInt()}',
+                          accentColor: _fullPaymentEnabled ? AppColors.brandGreen : AppColors.textHint,
+                          enabled: _fullPaymentEnabled,
+                          onTap: _fullPaymentEnabled ? () => setState(() => _paymentType = 'full') : null,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      // Pay Later
+                      Expanded(
+                        child: _PaymentOptionCompact(
+                          selected: _paymentType == 'pay_later',
+                          title: 'Pay Later',
+                          amount: '₹0 now',
+                          accentColor: AppColors.blue,
+                          enabled: true,
+                          onTap: () => setState(() => _paymentType = 'pay_later'),
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 14),
-                ],
-
-                // Option 1: Pay Full Amount Now
-                _PaymentOptionTile(
-                  selected: _paymentType == 'full',
-                  title: 'Pay Full Amount Now',
-                  subtitle: _fullPaymentEnabled
-                      ? 'Pay ₹${_grandTotal.toInt()}${widget.mode == 'Lab Test' ? '' : ' (tests + service charge)'} · Nothing due at collection'
-                      : (widget.mode == 'Lab Test'
-                          ? 'Prescription required — payment collected at branch after verification'
-                          : 'Available after technician verifies your prescription'),
-                  amount: '₹${_grandTotal.toInt()} now',
-                  badge: _fullPaymentEnabled ? 'RECOMMENDED' : 'LOCKED',
-                  badgeColor: _fullPaymentEnabled ? AppColors.brandGreen : AppColors.textHint,
-                  enabled: _fullPaymentEnabled,
-                  onTap: _fullPaymentEnabled ? () => setState(() => _paymentType = 'full') : null,
-                ),
-                const SizedBox(height: 10),
-
-                // Option 2: Pay Later
-                _PaymentOptionTile(
-                  selected: _paymentType == 'pay_later',
-                  title: 'Pay Later',
-                  subtitle: widget.mode == 'Lab Test'
-                      ? 'Pay ₹${_grandTotal.toInt()} at the branch · No payment needed now'
-                      : 'Pay ₹${_grandTotal.toInt()} at the time of collection · No payment needed now',
-                  amount: '₹0 now',
-                  badge: 'FLEXIBLE',
-                  badgeColor: AppColors.blue,
-                  enabled: true,
-                  onTap: () => setState(() => _paymentType = 'pay_later'),
                 ),
               ],
             ),
           ),
 
-          const SizedBox(height: CxSpace.md),
+          const SizedBox(height: CxSpace.sm),
 
           // ── VIP: Technician Selection ─────────────────────
           if (widget.isVip) ...[
@@ -1446,52 +1486,142 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 ],
               ),
             ),
-            const SizedBox(height: CxSpace.md),
+            const SizedBox(height: CxSpace.sm),
           ],
 
-          // ── Notes (optional) ──────────────────────────────
-          const SizedBox(height: CxSpace.md),
+          // ── Additional Details (Doctor / Self + Notes) ───
+          const SizedBox(height: CxSpace.sm),
           _SectionCard(
-            title: 'Notes',
-            icon: Icons.notes_outlined,
-            child: TextField(
-              controller: _notesController,
-              maxLines: 3,
-              maxLength: 300,
-              textInputAction: TextInputAction.done,
-              textCapitalization: TextCapitalization.sentences,
-              style: CxText.body,
-              decoration: const InputDecoration(
-                hintText: 'Any special instructions',
-                counterStyle: CxText.caption,
-              ),
-            ),
-          ),
+            title: 'Additional Details',
+            icon: Icons.edit_note_outlined,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Self / Doctor toggle
+                Text('Referred by', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Row(children: [
+                  _DoctorTypeChip(
+                    label: 'Self',
+                    icon: Icons.person_outline_rounded,
+                    selected: !_isDoctor,
+                    onTap: () => setState(() {
+                      _doctorType = 'self';
+                      _doctorNameController.clear();
+                    }),
+                  ),
+                  const SizedBox(width: 10),
+                  _DoctorTypeChip(
+                    label: 'Doctor',
+                    icon: Icons.local_hospital_outlined,
+                    selected: _isDoctor,
+                    onTap: () => setState(() => _doctorType = 'doctor'),
+                  ),
+                ]),
 
-          // ── Doctor Name ─────────────────────────────────────
-          const SizedBox(height: CxSpace.md),
-          _SectionCard(
-            title: 'Doctor Name',
-            required: true,
-            icon: Icons.local_hospital_outlined,
-            child: TextField(
-              controller: _doctorNameController,
-              maxLines: 1,
-              maxLength: 150,
-              textInputAction: TextInputAction.done,
-              textCapitalization: TextCapitalization.words,
-              style: CxText.body,
-              decoration: const InputDecoration(
-                hintText: 'Enter doctor name or Self',
-                prefixIcon: Icon(Icons.person_outline_rounded, size: 20, color: CxColors.textHint),
-                counterStyle: CxText.caption,
-              ),
+                // Doctor name + optional prescription (only when Doctor chosen)
+                if (_isDoctor) ...[
+                  const SizedBox(height: CxSpace.md),
+                  Row(children: [
+                    Text('Doctor Name', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
+                    const Text(' *', style: TextStyle(color: CxColors.error, fontSize: 13)),
+                  ]),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _doctorNameController,
+                    maxLines: 1,
+                    maxLength: 150,
+                    textInputAction: TextInputAction.next,
+                    textCapitalization: TextCapitalization.words,
+                    style: CxText.body,
+                    decoration: const InputDecoration(
+                      hintText: 'Enter doctor\'s name',
+                      prefixIcon: Icon(Icons.person_outline_rounded, size: 20, color: CxColors.textHint),
+                      counterStyle: CxText.caption,
+                    ),
+                  ),
+                  const SizedBox(height: CxSpace.sm),
+                  Text('Prescription', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
+                  const Text('Optional', style: TextStyle(fontSize: 11, color: CxColors.textHint)),
+                  const SizedBox(height: 8),
+                  if (_prescriptions.isNotEmpty) ...[
+                    SizedBox(
+                      height: 100,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.only(right: 8),
+                        itemCount: _prescriptions.length +
+                            (_prescriptions.length < _maxPrescrips ? 1 : 0),
+                        separatorBuilder: (_, __) => const SizedBox(width: 8),
+                        itemBuilder: (_, i) {
+                          if (i == _prescriptions.length) {
+                            return _PresAddMoreTile(onTap: _isPicking ? null : _showPresSourcePicker);
+                          }
+                          return _PresThumbnailCard(
+                            doc: _prescriptions[i],
+                            onView: () => _viewPres(i),
+                            onDelete: () => _deletePres(i),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text('${_prescriptions.length} of $_maxPrescrips uploaded', style: CxText.caption),
+                    const SizedBox(height: 8),
+                  ],
+                  if (_prescriptions.isEmpty)
+                    Material(
+                      color: const Color(0xFFF5F5F5),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: CxRadius.mdAll,
+                        side: const BorderSide(color: CxColors.border),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
+                        onTap: _isPicking ? null : _showPresSourcePicker,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              _isPicking
+                                  ? const SizedBox(width: 18, height: 18,
+                                      child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
+                                  : const Icon(Icons.upload_file_outlined, size: 20, color: AppColors.brandGreen),
+                              const SizedBox(width: 8),
+                              Text(_isPicking ? 'Picking…' : 'Upload prescription (optional)',
+                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                                      color: AppColors.brandGreen)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+
+                // Notes
+                const SizedBox(height: CxSpace.md),
+                Text('Notes', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _notesController,
+                  maxLines: 2,
+                  maxLength: 300,
+                  textInputAction: TextInputAction.done,
+                  textCapitalization: TextCapitalization.sentences,
+                  style: CxText.body,
+                  decoration: const InputDecoration(
+                    hintText: 'Any special instructions (optional)',
+                    counterStyle: CxText.caption,
+                  ),
+                ),
+              ],
             ),
           ),
 
           // ── Family Members (Home Collection only) ─────────
           if (widget.mode == 'Home Collection') ...[
-            const SizedBox(height: CxSpace.md),
+            const SizedBox(height: CxSpace.sm),
             _SectionCard(
               title: 'Family Members (Same Visit)',
               icon: Icons.group_outlined,
@@ -1513,19 +1643,112 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                         member: m,
                         onRemove: () { m.dispose(); setState(() => _familyMembers.remove(m)); },
                       ),
+                      // Self / Doctor toggle for family member
                       Padding(
                         padding: const EdgeInsets.only(bottom: 8),
-                        child: TextField(
-                          controller: m.doctorCtrl,
-                          maxLength: 150,
-                          textInputAction: TextInputAction.done,
-                          textCapitalization: TextCapitalization.words,
-                          style: CxText.body,
-                          decoration: InputDecoration(
-                            hintText: 'Doctor name for ${m.patient.name}',
-                            prefixIcon: const Icon(Icons.local_hospital_outlined, size: 20, color: CxColors.textHint),
-                            counterStyle: CxText.caption,
-                          ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Referred by', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
+                            const SizedBox(height: 6),
+                            Row(children: [
+                              _DoctorTypeChip(
+                                label: 'Self',
+                                icon: Icons.person_outline_rounded,
+                                selected: !m.isDoctor,
+                                onTap: () => setState(() {
+                                  m.doctorType = 'self';
+                                  m.doctorCtrl.clear();
+                                }),
+                              ),
+                              const SizedBox(width: 10),
+                              _DoctorTypeChip(
+                                label: 'Doctor',
+                                icon: Icons.local_hospital_outlined,
+                                selected: m.isDoctor,
+                                onTap: () => setState(() => m.doctorType = 'doctor'),
+                              ),
+                            ]),
+                            if (m.isDoctor) ...[
+                              const SizedBox(height: CxSpace.md),
+                              Row(children: [
+                                Text('Doctor Name', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
+                                const Text(' *', style: TextStyle(color: CxColors.error, fontSize: 13)),
+                              ]),
+                              const SizedBox(height: 6),
+                              TextField(
+                                controller: m.doctorCtrl,
+                                maxLines: 1,
+                                maxLength: 150,
+                                textInputAction: TextInputAction.next,
+                                textCapitalization: TextCapitalization.words,
+                                style: CxText.body,
+                                decoration: InputDecoration(
+                                  hintText: 'Enter doctor\'s name',
+                                  prefixIcon: const Icon(Icons.person_outline_rounded, size: 20, color: CxColors.textHint),
+                                  counterStyle: CxText.caption,
+                                ),
+                              ),
+                              const SizedBox(height: CxSpace.sm),
+                              Text('Prescription', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
+                              const Text('Optional', style: TextStyle(fontSize: 11, color: CxColors.textHint)),
+                              const SizedBox(height: 8),
+                              if (m.prescriptions.isNotEmpty) ...[
+                                SizedBox(
+                                  height: 100,
+                                  child: ListView.separated(
+                                    scrollDirection: Axis.horizontal,
+                                    padding: const EdgeInsets.only(right: 8),
+                                    itemCount: m.prescriptions.length +
+                                        (m.prescriptions.length < _maxPrescrips ? 1 : 0),
+                                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                                    itemBuilder: (_, i) {
+                                      if (i == m.prescriptions.length) {
+                                        return _PresAddMoreTile(onTap: _isPicking ? null : () => _showFamilyPresSourcePicker(m));
+                                      }
+                                      return _PresThumbnailCard(
+                                        doc: m.prescriptions[i],
+                                        onView: () => _viewFamilyPres(m, i),
+                                        onDelete: () => _deleteFamilyPres(m, i),
+                                      );
+                                    },
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text('${m.prescriptions.length} of $_maxPrescrips uploaded', style: CxText.caption),
+                                const SizedBox(height: 8),
+                              ],
+                              if (m.prescriptions.isEmpty)
+                                Material(
+                                  color: const Color(0xFFF5F5F5),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: CxRadius.mdAll,
+                                    side: const BorderSide(color: CxColors.border),
+                                  ),
+                                  clipBehavior: Clip.antiAlias,
+                                  child: InkWell(
+                                    onTap: _isPicking ? null : () => _showFamilyPresSourcePicker(m),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 14),
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: [
+                                          _isPicking
+                                              ? const SizedBox(width: 18, height: 18,
+                                                  child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
+                                              : const Icon(Icons.upload_file_outlined, size: 20, color: AppColors.brandGreen),
+                                          const SizedBox(width: 8),
+                                          Text(_isPicking ? 'Picking…' : 'Upload prescription (optional)',
+                                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                                                  color: AppColors.brandGreen)),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              const SizedBox(height: CxSpace.sm),
+                            ],
+                          ],
                         ),
                       ),
                     ],
@@ -1542,7 +1765,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
           ],
 
-          const SizedBox(height: CxSpace.md),
+          const SizedBox(height: CxSpace.sm),
 
           // ── Billing Summary ───────────────────────────────
           _SectionCard(
@@ -1775,6 +1998,120 @@ class _TechnicianTile extends StatelessWidget {
       ),
     );
   }
+}
+
+// ─── Compact horizontal payment option card ───────────────────────────────────
+
+class _PaymentOptionCompact extends StatelessWidget {
+  final bool selected;
+  final String title;
+  final String amount;
+  final Color accentColor;
+  final bool enabled;
+  final VoidCallback? onTap;
+
+  const _PaymentOptionCompact({
+    required this.selected,
+    required this.title,
+    required this.amount,
+    required this.accentColor,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final borderColor = !enabled ? CxColors.border : selected ? accentColor : CxColors.border;
+    return Semantics(
+      button: true,
+      selected: selected,
+      enabled: enabled,
+      child: Material(
+        color: !enabled
+            ? CxColors.surfaceMuted
+            : selected ? accentColor.withValues(alpha: 0.07) : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: CxRadius.lgAll,
+          side: BorderSide(color: borderColor, width: selected ? 1.6 : 1),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+            child: Row(
+              children: [
+                Icon(
+                  selected ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
+                  color: !enabled ? CxColors.border : selected ? accentColor : CxColors.textHint,
+                  size: 20,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title,
+                          style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              color: !enabled ? CxColors.textHint : CxColors.textPrimary)),
+                      const SizedBox(height: 2),
+                      Text(amount,
+                          style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                              color: !enabled ? CxColors.textHint : accentColor)),
+                    ],
+                  ),
+                ),
+                if (!enabled)
+                  const Icon(Icons.lock_outline_rounded, size: 16, color: CxColors.textHint),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Doctor type toggle chip ──────────────────────────────────────────────────
+
+class _DoctorTypeChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  const _DoctorTypeChip({required this.label, required this.icon,
+      required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: onTap,
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 160),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: selected ? CxColors.brandSurface : Colors.white,
+        borderRadius: CxRadius.lgAll,
+        border: Border.all(
+          color: selected ? CxColors.brand : CxColors.border,
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 18,
+            color: selected ? CxColors.brand : CxColors.textSecondary),
+        const SizedBox(width: 6),
+        Text(label,
+            style: TextStyle(
+                fontSize: 14,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                color: selected ? CxColors.brand : CxColors.textPrimary)),
+      ]),
+    ),
+  );
 }
 
 // ─── Payment Option Tile ──────────────────────────────────────────────────────
@@ -2017,7 +2354,7 @@ class _BookingSuccessScreen extends StatelessWidget {
                   _ResultHero(
                     icon: Icons.check_circle_rounded,
                     tone: CxTone.success,
-                    title: 'Booking Successful!',
+                    title: 'Booking Confirmed!',
                     reference: booking.referenceNo,
                     footer: BookingStatusBadge(status: booking.status),
                   ),
@@ -2172,7 +2509,7 @@ class _BookingScheduledScreen extends StatelessWidget {
                   _ResultHero(
                     icon: Icons.event_available_rounded,
                     tone: CxTone.info,
-                    title: 'Booking Scheduled!',
+                    title: 'Booking Confirmed!',
                     reference: booking.referenceNo,
                     message: 'A technician will be assigned closer to your appointment time.',
                   ),
@@ -2305,14 +2642,13 @@ class _ChoicePill extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: onTap,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minHeight: 44, minWidth: 64),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
+              child: Center(
                 child: Text(label,
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                        fontSize: 14,
+                        fontSize: 12,
                         fontWeight: FontWeight.w600,
                         color: selected
                             ? Colors.white

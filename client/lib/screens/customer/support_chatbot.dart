@@ -412,6 +412,16 @@ class _Msg {
   });
 }
 
+void showSupportChatbot(BuildContext context, {String? patientId}) {
+  showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    constraints: const BoxConstraints(maxWidth: CxSize.sheetMaxWidth),
+    builder: (_) => _ChatbotSheet(patientId: patientId),
+  );
+}
+
 // ── FAB ───────────────────────────────────────────────────────────────────────
 class SupportChatbotButton extends StatelessWidget {
   /// Pass the logged-in patient's mobile / patient ID so the chatbot can

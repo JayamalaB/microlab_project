@@ -224,6 +224,60 @@ class BranchModel {
       );
 }
 
+// ─── Address Model ────────────────────────────────────────────────────────────
+
+class AddressModel {
+  final int id;
+  final String label;
+  final String fullAddress;
+  final String? pincode;
+  final String? city;
+  final double? lat;
+  final double? lng;
+  final bool isDefault;
+
+  const AddressModel({
+    required this.id,
+    required this.label,
+    required this.fullAddress,
+    this.pincode,
+    this.city,
+    this.lat,
+    this.lng,
+    this.isDefault = false,
+  });
+
+  factory AddressModel.fromJson(Map<String, dynamic> j) => AddressModel(
+        id:          j['address_id'] as int,
+        label:       j['label']?.toString() ?? 'Home',
+        fullAddress: j['full_address']?.toString() ?? '',
+        pincode:     j['pincode']?.toString(),
+        city:        j['city']?.toString(),
+        lat:         (j['lat'] as num?)?.toDouble(),
+        lng:         (j['lng'] as num?)?.toDouble(),
+        isDefault:   j['is_default'] == 1 || j['is_default'] == true,
+      );
+
+  AddressModel copyWith({
+    String? label,
+    String? fullAddress,
+    String? pincode,
+    String? city,
+    double? lat,
+    double? lng,
+    bool? isDefault,
+  }) => AddressModel(
+        id: id,
+        label: label ?? this.label,
+        fullAddress: fullAddress ?? this.fullAddress,
+        pincode: pincode ?? this.pincode,
+        city: city ?? this.city,
+        lat: lat ?? this.lat,
+        lng: lng ?? this.lng,
+        isDefault: isDefault ?? this.isDefault,
+      );
+}
+
 // ─── Booking Model ────────────────────────────────────────────────────────────
 
 class BookingModel {
@@ -380,7 +434,7 @@ class BookingDraft {
     this.selectedBranch,
   }) : cart = cart ?? [];
 
-  bool get isEmpty => cart.isEmpty && address == null && pincode == null;
+  bool get isEmpty => cart.isEmpty && address == null && pincode == null && !modeChosen;
 }
 
 // ─── Time Slot ────────────────────────────────────────────────────────────────

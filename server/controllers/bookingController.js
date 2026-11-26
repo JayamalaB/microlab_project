@@ -2738,12 +2738,15 @@ exports.createFamilyBooking = async (req, res) => {
         );
       }
 
-      // Find booking_item_id for first doc-required item (for prescription linking)
+      // Find booking_item_id for prescription linking:
+      // prefer a doc-required item, fall back to the first item (mirrors single-booking behaviour).
       const [docRows] = await conn.execute(
-        `SELECT bi.booking_item_id
+        `SELECT bi.booking_item_id,
+                CASE WHEN p.document_required IN (1, '1', 'yes') THEN 1 ELSE 0 END AS is_doc_required
          FROM ip_booking_items bi
          JOIN ip_products p ON p.product_id = bi.product_id
-         WHERE bi.booking_id = ? AND p.document_required IN (1, '1', 'yes')
+         WHERE bi.booking_id = ?
+         ORDER BY is_doc_required DESC
          LIMIT 1`,
         [bookingId]
       );
