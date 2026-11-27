@@ -284,6 +284,18 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
     isReadOnly:      p.patientIdRef != null,
   );
 
+  Future<void> _confirmLogout(BuildContext ctx) async {
+    final confirmed = await showCxConfirm(
+      ctx,
+      icon: Icons.logout_rounded,
+      title: 'Logout?',
+      message: 'Are you sure you want to logout from MicroLab?',
+      confirmLabel: 'Logout',
+      destructive: true,
+    );
+    if (confirmed == true) _logout();
+  }
+
   Future<void> _logout() async {
     SocketService.instance.disconnect();
 
@@ -308,6 +320,55 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
         MaterialPageRoute(builder: (_) => const OnboardingScreen()),
         (route) => false,
       );
+    }
+  }
+
+  void _openFamilyMembers() {
+    final self = _selfMember;
+    final nonSelf = _members.where((m) => m.id != (self?.id ?? '')).toList();
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FamilyMembersScreen(
+          initialMembers: nonSelf,
+          selfId: self?.id ?? '',
+          onAdd: () => _openAddMember(),
+          onEdit: (m) async {
+            final result = await Navigator.push<MemberModel>(
+              context,
+              MaterialPageRoute(builder: (_) => AddMemberScreen(existingMember: m)),
+            );
+            if (result != null && mounted) {
+              setState(() {
+                final idx = _members.indexWhere((x) => x.id == result.id);
+                if (idx != -1) _members[idx] = result;
+              });
+            }
+            return result;
+          },
+          onRemove: _deleteMemberAsync,
+        ),
+      ),
+    ).then((_) => _loadPatients());
+  }
+
+  Future<bool> _deleteMemberAsync(MemberModel m) async {
+    final confirmed = await showCxConfirm(
+      context,
+      icon: Icons.person_remove_outlined,
+      title: 'Remove customer?',
+      message: '${m.name} will be removed from your account.',
+      confirmLabel: 'Remove',
+      destructive: true,
+    );
+    if (confirmed != true) return false;
+    try {
+      await ApiService.deletePatient(m.id);
+      if (mounted) setState(() => _members.removeWhere((x) => x.id == m.id));
+      return true;
+    } catch (_) {
+      if (mounted) AppMessages.error(context, 'Could not remove customer. Please try again.');
+      return false;
     }
   }
 
@@ -602,7 +663,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                                       side: BorderSide(color: Colors.white.withValues(alpha: 0.35))),
                                   child: InkWell(
                                     customBorder: const CircleBorder(),
-                                    onTap: _logout,
+                                    onTap: () => _confirmLogout(context),
                                     child: const Tooltip(
                                       message: 'Logout',
                                       child: SizedBox(
@@ -670,10 +731,19 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
                   onViewMember: _viewMember,
                   onRemoveMember: (m) => _confirmDelete(m.id, m.name),
                   onLogout: _logout,
-                  onFamilyMembers: _openAddMember,
+                  onFamilyMembers: _openFamilyMembers,
                   onSavedAddresses: _openSavedAddresses,
-                  onBookingHistory: () => _onNavTap(1),
-                  onHealthRecords: () => _onNavTap(2),
+                  onBookingHistory: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const MyBookingsScreen()),
+                  ),
+                  onHealthRecords: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => ReportsScreen(onViewBookings: () {
+                      Navigator.pop(context);
+                      _onNavTap(1);
+                    })),
+                  ),
                   onHelpSupport: _openSupportChatbot,
                   onDeleteAccount: _deleteAccount,
                 ),
@@ -802,38 +872,74 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> with WidgetsBin
           _recentBookingCard(),
           const SizedBox(height: CxSpace.xxl),
 
-          // Quick Actions
+          // Quick Actions — 2×2 grid
           const Text('Quick Actions', style: CxText.sectionTitle),
           const SizedBox(height: CxSpace.md),
           Row(children: [
-            _QuickAction(icon: Icons.home_outlined, label: 'Home\nCollection',
-                color: AppColors.brandGreen, onTap: () => _startBooking(mode: 'Home Collection')),
+            _QuickAction(
+              icon: Icons.home_outlined,
+              label: 'Home Collection',
+              subtitle: 'Technician visits you',
+              color: AppColors.brandGreen,
+              onTap: () => _startBooking(mode: 'Home Collection'),
+            ),
             const SizedBox(width: 10),
-            _QuickAction(icon: Icons.science_outlined, label: 'Book Lab\nVisit',
-                color: CxColors.info, onTap: () => _startBooking(mode: 'Lab Test')),
+            _QuickAction(
+              icon: Icons.science_outlined,
+              label: 'Book Lab Visit',
+              subtitle: 'Walk-in appointment',
+              color: CxColors.info,
+              onTap: () => _startBooking(mode: 'Lab Test'),
+            ),
+          ]),
+          const SizedBox(height: 10),
+          Row(children: [
+            _QuickAction(
+              icon: Icons.upload_file_rounded,
+              label: 'Upload Prescription',
+              subtitle: 'Get tests prescribed',
+              color: const Color(0xFF6A4BC4),
+              onTap: _openUploadPrescription,
+            ),
             const SizedBox(width: 10),
-            _QuickAction(icon: Icons.upload_file_rounded, label: 'Upload\nPrescription',
-                color: const Color(0xFF6A4BC4), onTap: _openUploadPrescription),
-            const SizedBox(width: 10),
-            _QuickAction(icon: Icons.location_on_outlined, label: 'Nearest\nBranch',
-                color: CxColors.offer, onTap: _openNearestBranch),
+            _QuickAction(
+              icon: Icons.location_on_outlined,
+              label: 'Nearest Branch',
+              subtitle: 'Find labs near you',
+              color: CxColors.offer,
+              onTap: _openNearestBranch,
+            ),
           ]),
           const SizedBox(height: CxSpace.xxl),
 
-          // Trusted Diagnostics — information only
-          const _HomeCard(
-            color: AppColors.brandGreenSurface,
-            child: Row(children: [
-              Icon(Icons.verified_user_rounded, color: AppColors.brandGreen, size: 34),
-              SizedBox(width: 14),
-              Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // Trusted Diagnostics — feature strip
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 14),
+            decoration: BoxDecoration(
+              color: AppColors.brandGreenSurface,
+              borderRadius: CxRadius.lgAll,
+              border: Border.all(color: AppColors.brandGreenLight),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(children: [
+                  Icon(Icons.verified_user_rounded, color: AppColors.brandGreen, size: 20),
+                  SizedBox(width: 8),
                   Text('Trusted Diagnostics', style: CxText.cardTitle),
-                  SizedBox(height: 3),
-                  Text('Accurate results for a healthier you', style: CxText.bodySecondary),
                 ]),
-              ),
-            ]),
+                const SizedBox(height: 14),
+                Row(children: [
+                  const _FeatureBadge(icon: Icons.biotech_outlined,  label: '1000+\nTests'),
+                  const SizedBox(width: 10),
+                  const _FeatureBadge(icon: Icons.verified_outlined, label: 'Certified\nLabs'),
+                  const SizedBox(width: 10),
+                  const _FeatureBadge(icon: Icons.home_outlined,     label: 'Home\nCollection'),
+                  const SizedBox(width: 10),
+                  const _FeatureBadge(icon: Icons.flash_on_rounded,  label: 'Fast\nReports'),
+                ]),
+              ],
+            ),
           ),
         ],
       ),
@@ -993,9 +1099,16 @@ class _HomeCard extends StatelessWidget {
 class _QuickAction extends StatelessWidget {
   final IconData icon;
   final String label;
+  final String? subtitle;
   final Color color;
   final VoidCallback onTap;
-  const _QuickAction({required this.icon, required this.label, required this.color, required this.onTap});
+  const _QuickAction({
+    required this.icon,
+    required this.label,
+    this.subtitle,
+    required this.color,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) => Expanded(
@@ -1009,22 +1122,58 @@ class _QuickAction extends StatelessWidget {
           child: InkWell(
             onTap: onTap,
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 4),
-              child: Column(children: [
+              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+              child: Row(children: [
                 Container(
                   width: 44, height: 44,
                   decoration: BoxDecoration(color: color.withValues(alpha: 0.1), borderRadius: CxRadius.mdAll),
                   child: Icon(icon, color: color, size: 24),
                 ),
-                const SizedBox(height: 8),
-                Text(label,
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: CxColors.textPrimary)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: CxColors.textPrimary)),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 2),
+                      Text(subtitle!,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 11, color: CxColors.textHint)),
+                    ],
+                  ]),
+                ),
               ]),
             ),
           ),
+        ),
+      );
+}
+
+class _FeatureBadge extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _FeatureBadge({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: CxRadius.mdAll,
+            border: Border.all(color: AppColors.brandGreenLight),
+          ),
+          child: Column(children: [
+            Icon(icon, color: AppColors.brandGreen, size: 20),
+            const SizedBox(height: 5),
+            Text(label,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+          ]),
         ),
       );
 }

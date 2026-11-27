@@ -1439,7 +1439,10 @@ exports.getBooking = async (req, res) => {
               tech.tech_photo    AS tech_photo,
               GROUP_CONCAT(DISTINCT pkg.product_name ORDER BY pkg.product_name SEPARATOR ', ') AS test_names,
               GROUP_CONCAT(DISTINCT bi.product_id ORDER BY bi.product_id SEPARATOR ',') AS package_ids,
-              SUM(bi.final_price) AS items_total
+              SUM(bi.final_price) AS items_total,
+              (SELECT COUNT(*) FROM ip_booking_test_status bts
+               WHERE bts.booking_id = b.booking_id
+                 AND bts.report_status = 'report_ready') AS asmx_report_count
        FROM ip_bookings b
        LEFT JOIN ip_technician_collection tc ON tc.booking_id = b.booking_id
        LEFT JOIN ip_technicians tech ON tech.technician_id = tc.technician_id

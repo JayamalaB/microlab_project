@@ -339,7 +339,8 @@ class BookingModel {
   // bill yet (shown as "Collected on the spot"); 'applied' = in the bill,
   // from the technician's arrival.
   final String? serviceChargeStatus;
-  final double? serviceChargeKm; // km up & down the service charge was picked for
+  final double? serviceChargeKm;
+  final bool hasReport;
 
   BookingModel({
     required this.id,
@@ -395,6 +396,7 @@ class BookingModel {
     this.serviceChargeProductName,
     this.serviceChargeStatus,
     this.serviceChargeKm,
+    this.hasReport = false,
   });
 
   // Service charge not in the bill yet — collected by the technician on the spot.
