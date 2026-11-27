@@ -119,6 +119,9 @@ async function sendFcmPush(fcmToken, bookingData) {
               body:  `${bookingData.patientName || 'Patient'} · #${bookingData.bookingId ?? ''}`,
             },
             sound: 'default',
+            // Shows the Accept / Decline buttons the app registers for this
+            // category (NotificationService.initialize, iOS).
+            category: 'BOOKING_REQUEST',
           },
         },
       },
