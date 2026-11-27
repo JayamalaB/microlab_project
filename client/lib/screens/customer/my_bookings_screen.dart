@@ -25,6 +25,7 @@ import 'package:microlab/services/socket_service.dart';
 import 'booking_widgets.dart';
 import 'package:microlab/models.dart';
 import 'tracking_map_screen.dart';
+import 'order_details_screen.dart';
 
 class MyBookingsScreen extends StatefulWidget {
   final BookingModel? initialBooking;
@@ -245,6 +246,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       serviceChargeProductName: b['service_charge_product_name'] as String?,
       serviceChargeStatus:      b['service_charge_status'] as String?,
       serviceChargeKm:          double.tryParse(b['service_charge_km']?.toString() ?? ''),
+      hasReport:                ((b['asmx_report_count'] as num?) ?? 0) > 0,
     );
   }
 
@@ -1456,6 +1458,20 @@ class _BookingCard extends StatelessWidget {
                         ),
                       ],
                     ),
+
+                    // Track Order button — home collection, not cancelled/unknown
+                    if (booking.mode == 'Home Collection' &&
+                        booking.status != 'Cancelled') ...[
+                      const SizedBox(height: 10),
+                      _CardAction(
+                        icon: Icons.radar_rounded,
+                        label: 'Track Order',
+                        tone: CxTone.brand,
+                        onTap: () => Navigator.push(context,
+                            MaterialPageRoute(
+                                builder: (_) => OrderDetailsScreen(booking: booking))),
+                      ),
+                    ],
 
                     // Feedback button for completed or sample-collected bookings
                     if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'Handed to Lab Pending' || booking.status == 'collected') && booking.rating == null) ...[

@@ -26,6 +26,21 @@ class _SavedAddressesScreenState extends State<SavedAddressesScreen> {
     _load();
   }
 
+  void _showSuccess(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(children: [
+          const Icon(Icons.check_circle_outline, color: Colors.white, size: 18),
+          const SizedBox(width: 8),
+          Text(msg),
+        ]),
+        backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   Future<void> _load() async {
     setState(() => _loading = true);
     final list = await ApiService.getAddresses();
@@ -49,6 +64,7 @@ class _SavedAddressesScreenState extends State<SavedAddressesScreen> {
       }
       if (!mounted) return;
       if (ok) {
+        _showSuccess(editing == null ? 'Address saved successfully' : 'Address updated successfully');
         _load();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -81,6 +97,7 @@ class _SavedAddressesScreenState extends State<SavedAddressesScreen> {
     final ok = await ApiService.deleteAddress(a.id);
     if (!mounted) return;
     if (ok) {
+      _showSuccess('Address deleted successfully');
       _load();
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -93,6 +110,7 @@ class _SavedAddressesScreenState extends State<SavedAddressesScreen> {
     final ok = await ApiService.setDefaultAddress(a.id);
     if (!mounted) return;
     if (ok) {
+      _showSuccess('Default address updated');
       _load();
     } else {
       ScaffoldMessenger.of(context).showSnackBar(

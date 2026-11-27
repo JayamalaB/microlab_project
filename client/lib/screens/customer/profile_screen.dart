@@ -455,3 +455,235 @@ class _HDivider extends StatelessWidget {
   Widget build(BuildContext context) =>
       const Divider(height: 24, thickness: 1, color: CxColors.border);
 }
+
+// ─── Family Members Screen ────────────────────────────────────────────────────
+
+class FamilyMembersScreen extends StatefulWidget {
+  final List<MemberModel> initialMembers;
+  final String selfId;
+  /// Returns the new member on success, or null if cancelled.
+  final Future<MemberModel?> Function() onAdd;
+  /// Returns the updated member on success, or null if cancelled.
+  final Future<MemberModel?> Function(MemberModel) onEdit;
+  /// Returns true if the member was deleted.
+  final Future<bool> Function(MemberModel) onRemove;
+
+  const FamilyMembersScreen({
+    super.key,
+    required this.initialMembers,
+    required this.selfId,
+    required this.onAdd,
+    required this.onEdit,
+    required this.onRemove,
+  });
+
+  @override
+  State<FamilyMembersScreen> createState() => _FamilyMembersScreenState();
+}
+
+class _FamilyMembersScreenState extends State<FamilyMembersScreen> {
+  late List<MemberModel> _members;
+
+  @override
+  void initState() {
+    super.initState();
+    _members = List.from(widget.initialMembers);
+  }
+
+  List<MemberModel> get _patients =>
+      _members.where((m) => m.id != widget.selfId).toList();
+
+  void _showSuccess(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(children: [
+          const Icon(Icons.check_circle_outline, color: Colors.white, size: 18),
+          const SizedBox(width: 8),
+          Text(msg),
+        ]),
+        backgroundColor: AppColors.brandGreen,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _add() async {
+    final result = await widget.onAdd();
+    if (result != null && mounted) {
+      setState(() => _members.add(result));
+      _showSuccess('Profile added successfully');
+    }
+  }
+
+  Future<void> _edit(MemberModel m) async {
+    final result = await widget.onEdit(m);
+    if (result != null && mounted) {
+      setState(() {
+        final idx = _members.indexWhere((x) => x.id == result.id);
+        if (idx != -1) _members[idx] = result;
+      });
+      _showSuccess('Profile updated successfully');
+    }
+  }
+
+  Future<void> _remove(MemberModel m) async {
+    final ok = await widget.onRemove(m);
+    if (ok && mounted) {
+      setState(() => _members.removeWhere((x) => x.id == m.id));
+      _showSuccess('Profile removed successfully');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final patients = _patients;
+    return CustomerThemeScope(
+      child: Scaffold(
+        backgroundColor: CxColors.page,
+        appBar: AppBar(
+          backgroundColor: AppColors.brandGreen,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          title: const Text('Family Members',
+              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700)),
+          iconTheme: const IconThemeData(color: Colors.white),
+          actions: [
+            TextButton.icon(
+              onPressed: _add,
+              icon: const Icon(Icons.person_add_alt_1_rounded, size: 18, color: Colors.white),
+              label: const Text('Add', style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600)),
+              style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 12)),
+            ),
+          ],
+        ),
+        body: patients.isEmpty
+            ? Center(
+                child: CxEmptyState(
+                  icon: Icons.people_outline_rounded,
+                  title: 'No family members added yet',
+                  message: 'Tap "Add" to add a family member.',
+                  actionLabel: 'Add Member',
+                  onAction: _add,
+                ),
+              )
+            : ListView.separated(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
+                itemCount: patients.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 10),
+                itemBuilder: (_, i) => _FamilyMemberCard(
+                  member: patients[i],
+                  onEdit: patients[i].isReadOnly ? null : () => _edit(patients[i]),
+                  onRemove: patients[i].isReadOnly ? null : () => _remove(patients[i]),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+class _FamilyMemberCard extends StatelessWidget {
+  final MemberModel member;
+  final VoidCallback? onEdit;
+  final VoidCallback? onRemove;
+
+  const _FamilyMemberCard({required this.member, this.onEdit, this.onRemove});
+
+  @override
+  Widget build(BuildContext context) {
+    final chips = <String>[
+      if (member.relation != null) member.relation!,
+      if (member.gender.isNotEmpty) member.gender,
+      if (member.age != null) '${member.age} yrs',
+    ];
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: CxRadius.lgAll,
+        border: Border.all(color: CxColors.border),
+        boxShadow: const [BoxShadow(color: Color(0x0D000000), blurRadius: 8, offset: Offset(0, 2))],
+      ),
+      child: InkWell(
+        onTap: onEdit,
+        borderRadius: CxRadius.lgAll,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 44, height: 44,
+                margin: const EdgeInsets.only(right: 12, top: 2),
+                decoration: const BoxDecoration(color: AppColors.brandGreenSurface, shape: BoxShape.circle),
+                child: ClipOval(
+                  child: member.photoBytes != null
+                      ? Image.memory(member.photoBytes!, fit: BoxFit.cover)
+                      : member.photoUrl != null && member.photoUrl!.isNotEmpty
+                          ? Image.network(member.photoUrl!, fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => Center(
+                                child: Text(
+                                  member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
+                                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
+                                ),
+                              ))
+                          : Center(
+                              child: Text(
+                                member.name.isNotEmpty ? member.name[0].toUpperCase() : '?',
+                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
+                              ),
+                            ),
+                ),
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(member.name, style: CxText.cardTitle),
+                    if (chips.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6, runSpacing: 4,
+                        children: chips.map((c) => CxChip(label: c, tone: CxTone.neutral)).toList(),
+                      ),
+                    ],
+                    if (member.healthCondition != null && member.healthCondition!.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          const Icon(Icons.favorite_border_rounded, size: 14, color: CxColors.textSecondary),
+                          const SizedBox(width: 4),
+                          Expanded(child: Text(member.healthCondition!, style: CxText.caption)),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              Column(
+                children: [
+                  if (onEdit != null)
+                    IconButton(
+                      icon: const Icon(Icons.edit_outlined, size: 18, color: CxColors.textSecondary),
+                      onPressed: onEdit,
+                      tooltip: 'Edit',
+                      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                      padding: EdgeInsets.zero,
+                    ),
+                  if (onRemove != null)
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline_rounded, size: 18, color: CxColors.error),
+                      onPressed: onRemove,
+                      tooltip: 'Remove',
+                      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                      padding: EdgeInsets.zero,
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -28,9 +28,11 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
   final _cityCtrl   = TextEditingController();
   final _addrCtrl   = TextEditingController();
   final _dobCtrl    = TextEditingController();
+  final _ageCtrl    = TextEditingController();
 
   String? _gender;
   DateTime? _dob;
+  int? _calculatedAge;
   bool _saving = false;
 
   @override
@@ -39,15 +41,33 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
     _cityCtrl.dispose();
     _addrCtrl.dispose();
     _dobCtrl.dispose();
+    _ageCtrl.dispose();
     super.dispose();
   }
 
+  String _formatDate(DateTime d) =>
+      '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
+
+  void _onAgeChanged(String val) {
+    final age = int.tryParse(val.trim());
+    if (age == null) return;
+    final now = DateTime.now();
+    final dobYear = age == 0 ? now.year : now.year - age;
+    final dob = DateTime(dobYear, now.month, now.day);
+    setState(() {
+      _dob = dob;
+      _dobCtrl.text = _formatDate(dob);
+      _calculatedAge = age;
+    });
+  }
+
   Future<void> _pickDob() async {
+    final now = DateTime.now();
     final picked = await showDatePicker(
       context: context,
-      initialDate: DateTime(1990),
-      firstDate: DateTime(1900),
-      lastDate: DateTime.now(),
+      initialDate: _dob ?? DateTime(now.year - 30),
+      firstDate: DateTime(now.year - 120),
+      lastDate: now,
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
           colorScheme: const ColorScheme.light(primary: AppColors.brandGreen),
@@ -56,33 +76,41 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
       ),
     );
     if (picked == null) return;
+    int age = now.year - picked.year;
+    if (now.month < picked.month ||
+        (now.month == picked.month && now.day < picked.day)) { age--; }
     setState(() {
       _dob = picked;
-      _dobCtrl.text =
-          '${picked.day.toString().padLeft(2, '0')}/'
-          '${picked.month.toString().padLeft(2, '0')}/'
-          '${picked.year}';
+      _dobCtrl.text = _formatDate(picked);
+      _calculatedAge = age;
+      _ageCtrl.text = age.toString();
     });
   }
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
-    if (_gender == null || _dob == null) {
+    if (_gender == null || (_dob == null && _ageCtrl.text.trim().isEmpty)) {
       setState(() {});
       return;
     }
     setState(() => _saving = true);
 
-    final body = {
-      'name':          _namCtrl.text.trim(),
-      'mobile':        widget.mobile,
-      'gender':        _gender!,
-      'location':      _cityCtrl.text.trim(),
-      'address':       _addrCtrl.text.trim(),
-      'relation':      'Self',
-      'date_of_birth': '${_dob!.year}-'
+    String? dobForApi;
+    if (_dob != null) {
+      dobForApi = '${_dob!.year}-'
           '${_dob!.month.toString().padLeft(2, '0')}-'
-          '${_dob!.day.toString().padLeft(2, '0')}',
+          '${_dob!.day.toString().padLeft(2, '0')}';
+    }
+
+    final body = <String, dynamic>{
+      'name':     _namCtrl.text.trim(),
+      'mobile':   widget.mobile,
+      'gender':   _gender!,
+      'location': _cityCtrl.text.trim(),
+      'address':  _addrCtrl.text.trim(),
+      'relation': 'Self',
+      if (dobForApi != null) 'date_of_birth': dobForApi,
+      if (_calculatedAge != null) 'age': _calculatedAge.toString(),
     };
 
     final result = await ApiService.updatePatient(
@@ -278,27 +306,70 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
 
                       const SizedBox(height: 18),
 
-                      // Date of birth (mandatory)
-                      const _Label('Date of Birth', required: true),
+                      // DOB or Age
+                      const _Label('DOB or Age', required: true),
                       const SizedBox(height: 6),
-                      TextFormField(
-                        controller: _dobCtrl,
-                        readOnly: true,
-                        onTap: _pickDob,
-                        style: const TextStyle(
-                            fontSize: 14, color: AppColors.textPrimary),
-                        decoration: _inputDec(
-                          hint: 'DD/MM/YYYY',
-                          prefix: const Icon(Icons.cake_outlined,
-                              size: 18, color: AppColors.textHint),
-                          suffix: const Icon(Icons.calendar_month_outlined,
-                              size: 20, color: CxColors.brand),
-                        ),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: GestureDetector(
+                              onTap: _pickDob,
+                              child: Container(
+                                height: 50,
+                                padding: const EdgeInsets.symmetric(horizontal: 14),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: CxRadius.mdAll,
+                                  border: Border.all(color: CxColors.border),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.cake_outlined,
+                                        size: 18, color: AppColors.textHint),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        _dobCtrl.text.isEmpty ? 'DD/MM/YYYY' : _dobCtrl.text,
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          color: _dobCtrl.text.isEmpty
+                                              ? AppColors.textHint
+                                              : AppColors.textPrimary,
+                                        ),
+                                      ),
+                                    ),
+                                    const Icon(Icons.calendar_month_outlined,
+                                        size: 18, color: CxColors.brand),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            flex: 2,
+                            child: TextFormField(
+                              controller: _ageCtrl,
+                              keyboardType: TextInputType.number,
+                              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                              onChanged: _onAgeChanged,
+                              style: const TextStyle(
+                                  fontSize: 14, color: AppColors.textPrimary),
+                              decoration: _inputDec(
+                                hint: 'Age',
+                                prefix: const Icon(Icons.numbers_outlined,
+                                    size: 18, color: AppColors.textHint),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      if (_saving && _dob == null)
+                      if (_saving && _dob == null && _ageCtrl.text.trim().isEmpty)
                         const Padding(
                           padding: EdgeInsets.only(top: 6, left: 4),
-                          child: Text('Date of birth is required',
+                          child: Text('Date of birth or age is required',
                               style: TextStyle(
                                   fontSize: 12,
                                   color: CxColors.error)),
@@ -358,7 +429,7 @@ class _CompleteProfileScreenState extends State<CompleteProfileScreen> {
                         onPressed: _saving
                             ? null
                             : () {
-                                if (_gender == null || _dob == null) {
+                                if (_gender == null || (_dob == null && _ageCtrl.text.trim().isEmpty)) {
                                   setState(() {});
                                   return;
                                 }

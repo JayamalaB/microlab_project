@@ -1168,13 +1168,14 @@ class ApiService {
       if (body['success'] == true && body['booking'] != null) {
         final b = body['booking'] as Map<String, dynamic>;
         return {
-          'collection_status':   b['collection_status'],
-          'tech_name':           b['tech_name'],
-          'tech_mobile':         b['tech_mobile'],
-          'tech_photo':          b['tech_photo'],
-          'technician_id':       b['technician_id'],
-          'collection_latitude': b['collection_latitude'],
+          'collection_status':    b['collection_status'],
+          'tech_name':            b['tech_name'],
+          'tech_mobile':          b['tech_mobile'],
+          'tech_photo':           b['tech_photo'],
+          'technician_id':        b['technician_id'],
+          'collection_latitude':  b['collection_latitude'],
           'collection_longitude': b['collection_longitude'],
+          'has_report':           ((b['asmx_report_count'] as num?) ?? 0) > 0,
         };
       }
     } catch (_) {}
