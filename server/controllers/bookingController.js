@@ -5,6 +5,7 @@ const { calculateHomeCollectionProduct, FareCalculationError, resolveMainBranchI
 const { syncBookingToClient } = require('../services/clientSync');
 const { sendToBookingOwner } = require('../services/customerPush');
 const { messaging } = require('../config/firebase');
+const userSessions = require('../services/userSessions');
 const { getSecret, refreshSecret } = require('../services/secretCache');
 const { logAsmx } = require('../services/asmxLogger');
 const fs    = require('fs');
@@ -982,13 +983,21 @@ exports.cancelBooking = async (req, res) => {
     if (isHomeCollection && tc?.technician_id) {
       logNotify(`[cancel] booking_id=${bookingId} booking_ref=${booking.booking_ref} technician_id=${tc.technician_id} collection_status=${tc.collection_status}`);
       try {
-        const [[techUser]] = await db.execute(
+        // The technician app's own push token — not the customer app's, when
+        // this number uses both (services/userSessions.js).
+        const [[techUser]] = await userSessions.withSchemaFallback(db, 'execute',
+          `SELECT ${userSessions.TECHNICIAN_PUSH_TOKEN} AS user_notification_token,
+                  u.user_name, u.user_mobile_no, tll.fcm_token AS live_fcm_token
+           FROM ip_technicians t
+           JOIN ip_users u ON u.user_id = t.user_id${userSessions.PUSH_TOKEN_JOINS}
+           LEFT JOIN ip_technician_live_location tll ON tll.technician_id = t.technician_id
+           WHERE t.technician_id = ? LIMIT 1`,
+          [tc.technician_id],
           `SELECT u.user_notification_token, u.user_name, u.user_mobile_no, tll.fcm_token AS live_fcm_token
            FROM ip_technicians t
            JOIN ip_users u ON u.user_id = t.user_id
            LEFT JOIN ip_technician_live_location tll ON tll.technician_id = t.technician_id
-           WHERE t.technician_id = ? LIMIT 1`,
-          [tc.technician_id]
+           WHERE t.technician_id = ? LIMIT 1`
         );
         const fcmToken = techUser?.user_notification_token || techUser?.live_fcm_token;
         const tokenSource = techUser?.user_notification_token ? 'ip_users' : (techUser?.live_fcm_token ? 'ip_technician_live_location' : 'MISSING');

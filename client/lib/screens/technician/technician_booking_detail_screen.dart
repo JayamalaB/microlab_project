@@ -12,6 +12,7 @@ import 'package:microlab/services/api_service.dart';
 import 'package:microlab/models/technician_booking.dart';
 import 'package:microlab/models.dart' show BranchModel;
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/utils/dob_age.dart';
 import 'package:microlab/widgets/tech/tech_widgets.dart';
 import 'technician_active_job_screen.dart';
 // ₹ amount for display — whole rupees as "1229", and paise kept as
@@ -51,6 +52,8 @@ class _TechPresDoc {
   // Populated from ip_booking_documents.patient_id on fetch, or defaults to
   // the primary patient for docs the technician uploads from this screen.
   final int? patientId;
+  // Who added it: 'customer', 'technician', or null when unknown (older rows).
+  final String? uploadedBy;
 
   _TechPresDoc({
     this.docId,
@@ -61,9 +64,11 @@ class _TechPresDoc {
     this.isUploading = false,
     this.docStatus = 'pending_review',
     this.patientId,
+    this.uploadedBy,
   });
 
   bool get isVerified => docStatus == 'verified';
+  bool get byCustomer => uploadedBy == 'customer';
 }
 
 // (Test catalogue is now loaded from the server — see _loadItems)
@@ -814,6 +819,7 @@ class _TechnicianBookingDetailScreenState
             uploadedAt: DateTime.tryParse(d['created_at']?.toString() ?? '') ?? DateTime.now(),
             docStatus:  d['doc_status'] as String? ?? 'pending_review',
             patientId:  (d['patient_id'] as num?)?.toInt(),
+            uploadedBy: d['uploaded_by_role'] as String?,
           ));
         }
         _docVerified = _docUploads.isNotEmpty && _docUploads.every((d) => d.isVerified);
@@ -988,11 +994,29 @@ class _TechnicianBookingDetailScreenState
       _loadItems();
       _refreshPaymentInfo();
       _loadLinkedPatients();
+      // Prescriptions attached in the sheet: reload the list so they show in
+      // the Prescription section right away (cleared first — _loadDocs adds).
+      final presUploaded = result['presUploaded'] as int? ?? 0;
+      final presFailed   = result['presFailed']   as int? ?? 0;
+      if (presUploaded > 0) {
+        setState(() {
+          _docUploads.clear();
+          _docsLoading = true;
+        });
+        _loadDocs();
+      }
       if (mounted) {
-        final msg = count > 1
-            ? '$count members added — collect payment below'
-            : '$firstName added — collect payment below';
-        AppMessages.success(context, msg, duration: const Duration(seconds: 4));
+        if (presFailed > 0) {
+          AppMessages.warning(context,
+              'Member added, but $presFailed prescription image${presFailed == 1 ? '' : 's'} '
+              'didn\'t upload — add ${presFailed == 1 ? 'it' : 'them'} from the Prescription section.',
+              duration: const Duration(seconds: 6));
+        } else {
+          final msg = count > 1
+              ? '$count members added — collect payment below'
+              : '$firstName added — collect payment below';
+          AppMessages.success(context, msg, duration: const Duration(seconds: 4));
+        }
       }
     }
   }
@@ -2389,6 +2413,7 @@ void _resumeJourney() {
             docId: docId, url: url, fileName: fileName,
             uploadedAt: DateTime.now(), docStatus: 'pending_review',
             patientId: patientId,
+            uploadedBy: 'technician',
           );
         } else {
           _docUploads.removeAt(idx);
@@ -2515,16 +2540,8 @@ void _resumeJourney() {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Drag handle
-                      Center(
-                        child: Container(
-                          margin: const EdgeInsets.only(top: 10, bottom: 18),
-                          width: 36, height: 4,
-                          decoration: BoxDecoration(
-                              color: AppColors.divider,
-                              borderRadius: BorderRadius.circular(2)),
-                        ),
-                      ),
+                      // Drag handle + close (✕)
+                      const TechSheetHandleBar(),
 
                       // Header
                       const Text('Complete Booking',
@@ -4100,6 +4117,15 @@ void _resumeJourney() {
                           const SizedBox(width: TechSpace.sm),
                           const TechStatusChip(label: 'REQUIRED', tone: TechTone.warning),
                         ],
+                        // The customer attached a prescription at booking.
+                        if (patientDocs.any((d) => d.byCustomer)) ...[
+                          const SizedBox(width: TechSpace.sm),
+                          const TechStatusChip(
+                            label: 'Uploaded by customer',
+                            icon: Icons.person_outline_rounded,
+                            tone: TechTone.success,
+                          ),
+                        ],
                       ]),
                       const SizedBox(height: TechSpace.sm),
                       if (patientDocs.isEmpty)
@@ -4938,7 +4964,7 @@ class _ChargePackageSheetState extends State<_ChargePackageSheet> {
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: TechSpace.gutter),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                    const TechDragHandle(),
+                    const TechSheetHandleBar(),
                     const Text('Add charge package', textAlign: TextAlign.center, style: TechText.sheetTitle),
                     const SizedBox(height: 4),
                     Text(widget.patientName, textAlign: TextAlign.center, style: TechText.bodySecondary),
@@ -5304,6 +5330,53 @@ class _FormField extends StatelessWidget {
 
 // ─── Document upload widgets ──────────────────────────────────────────────────
 
+// "Self" / "Doctor" choice in the Add Visit Member review step (same choice
+// as the customer checkout). 44px tall, reads as selected for screen readers.
+class _ReferralChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  const _ReferralChip({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        selected: selected,
+        label: 'Referred by $label',
+        excludeSemantics: true,
+        child: Material(
+          color: selected ? TechColors.brand : Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+            side: BorderSide(color: selected ? TechColors.brand : AppColors.divider, width: 1.2),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: SizedBox(
+              height: 44,
+              child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                Icon(selected ? Icons.check_rounded : icon,
+                    size: 18, color: selected ? Colors.white : TechColors.textSecondary),
+                const SizedBox(width: 6),
+                Text(label,
+                    style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: selected ? Colors.white : TechColors.textPrimary)),
+              ]),
+            ),
+          ),
+        ),
+      );
+}
+
 class _DocThumbnailCard extends StatelessWidget {
   final _TechPresDoc doc;
   final VoidCallback onView;
@@ -5367,6 +5440,23 @@ class _DocThumbnailCard extends StatelessWidget {
               child: const Icon(Icons.fullscreen_rounded, size: 14, color: Colors.white),
             ),
           ),
+          // Who added this image.
+          if (!doc.isUploading && doc.uploadedBy != null)
+            Positioned(
+              bottom: 6,
+              left: 6,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: doc.byCustomer ? TechColors.info : TechColors.brand,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  doc.byCustomer ? 'Customer' : 'Technician',
+                  style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700, color: Colors.white),
+                ),
+              ),
+            ),
         ]),
       );
 }
@@ -5530,11 +5620,20 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   bool _searchedWithNoResult = false;
   final _nameCtrl           = TextEditingController();
   final _dobCtrl            = TextEditingController();
+  final _ageCtrl            = TextEditingController();
   final _healthCtrl         = TextEditingController();
   final List<TextEditingController> _doctorNameCtrls = [];
   // Set when Submit is tapped with a doctor name missing: every empty doctor
   // field then shows its error. (A SnackBar would open behind this sheet.)
   bool _showDoctorNameErrors = false;
+  // Per queued member (same order as _queuedMembers): referred by 'self' or
+  // 'doctor', and the prescription images picked for them (uploaded to the
+  // member's new booking after Submit — same as the customer checkout).
+  final List<String> _doctorTypes = [];
+  final List<List<({Uint8List bytes, String name})>> _memberPres = [];
+  final ImagePicker _presPicker = ImagePicker();
+  bool _presPicking = false;
+  static const int _maxPresPerMember = 5;
   DateTime? _dob;
   int? _age;
   String? _gender;
@@ -5597,6 +5696,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     _mobileCtrl.dispose();
     _nameCtrl.dispose();
     _dobCtrl.dispose();
+    _ageCtrl.dispose();
     _healthCtrl.dispose();
     for (final c in _doctorNameCtrls) { c.dispose(); }
     super.dispose();
@@ -5671,16 +5771,35 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
       ),
     );
     if (picked != null && mounted) {
-      int age = now.year - picked.year;
-      if (now.month < picked.month ||
-          (now.month == picked.month && now.day < picked.day)) { age--; }
+      // Picking a date fills Age (same as the customer "DOB or Age" fields).
+      final age = ageFromDob(picked, today: now);
       setState(() {
         _dob = picked;
         _age = age;
-        _dobCtrl.text =
-            '${picked.day.toString().padLeft(2, '0')}/${picked.month.toString().padLeft(2, '0')}/${picked.year}';
+        _dobCtrl.text = formatDob(picked);
+        _ageCtrl.text = age.toString();
       });
     }
+  }
+
+  // Typing an age fills the date of birth: today's day/month, that many years
+  // back (age 0 = born this year) — same rule as the customer side. Clearing
+  // the age (or an age over 120) clears the date too, so a stale date is
+  // never sent.
+  void _onAgeChanged(String val) {
+    final age = int.tryParse(val.trim());
+    setState(() {
+      if (age == null || age > 120) {
+        _dob = null;
+        _age = null;
+        _dobCtrl.clear();
+        return;
+      }
+      final dob = dobFromAge(age);
+      _dob = dob;
+      _age = age;
+      _dobCtrl.text = formatDob(dob);
+    });
   }
 
   void _onNextStep() {
@@ -5697,7 +5816,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   void _addToQueue() {
     if (_selectedTestIds.isEmpty) return;
     if (_mode == 'newPatient' && _dob == null) {
-      AppMessages.error(context, 'Please select a date of birth');
+      AppMessages.error(context, 'Please enter a date of birth or age');
       return;
     }
 
@@ -5738,9 +5857,13 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         .toList();
 
     final totalAmount = _selectedTotal;
+    final needsDoc = widget.catalogueItems
+        .where((t) => _selectedTestIds.contains(t['id']))
+        .any((t) => t['docRequired'] == 'yes');
 
     setState(() {
       _queuedMembers.add({
+        'needsDoc':   needsDoc, // UI-only field, stripped before API call
         'name':       name,
         'mobile':     mobile,
         if (patientId != null) 'patientId': patientId,
@@ -5753,6 +5876,8 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         'total': totalAmount,  // UI-only field, stripped before API call
       });
       _doctorNameCtrls.add(TextEditingController());
+      _doctorTypes.add('self');
+      _memberPres.add([]);
       _showDoctorNameErrors = false; // a new member starts without an error
       _step = 2;
     });
@@ -5768,6 +5893,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
       _mobileCtrl.clear();
       _nameCtrl.clear();
       _dobCtrl.clear();
+      _ageCtrl.clear();
       _healthCtrl.clear();
       _dob = null; _age = null; _gender = null; _relation = null;
       _selectedTestIds.clear();
@@ -5778,11 +5904,14 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   Future<void> _submitAll() async {
     if (_queuedMembers.isEmpty) return;
 
-    // Validate doctor name — required for every member. Shown on the fields
-    // themselves: a SnackBar would appear behind this sheet, unseen.
-    final missingDoctor = _doctorNameCtrls
-        .take(_queuedMembers.length)
-        .any((c) => c.text.trim().isEmpty);
+    // Validate doctor name — required only when "Doctor" is chosen. Shown on
+    // the fields themselves: a SnackBar would appear behind this sheet, unseen.
+    var missingDoctor = false;
+    for (var i = 0; i < _queuedMembers.length; i++) {
+      if (_doctorTypes[i] == 'doctor' && _doctorNameCtrls[i].text.trim().isEmpty) {
+        missingDoctor = true;
+      }
+    }
     if (missingDoctor) {
       setState(() => _showDoctorNameErrors = true);
       return;
@@ -5790,11 +5919,15 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
 
     setState(() => _isSaving = true);
 
-    // Strip UI-only 'total'; attach doctor name from per-member controllers
+    // Strip UI-only fields; doctor name is "Self" or the typed doctor name
+    // (the same values the server received before).
     final apiMembers = _queuedMembers.asMap().entries.map((e) {
       final copy = Map<String, dynamic>.from(e.value);
       copy.remove('total');
-      copy['doctorName'] = _doctorNameCtrls[e.key].text.trim();
+      copy.remove('needsDoc');
+      copy['doctorName'] = _doctorTypes[e.key] == 'doctor'
+          ? _doctorNameCtrls[e.key].text.trim()
+          : 'Self';
       return copy;
     }).toList();
 
@@ -5805,11 +5938,53 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
       );
       if (!mounted) return;
       if (result != null) {
+        // Members are added. Now attach each member's prescription to that
+        // member's new booking (same calls the customer checkout uses). A
+        // failed upload never undoes the add — it's reported afterwards.
+        final created = (result['members'] as List? ?? []).cast<Map<String, dynamic>>();
+        var presUploaded = 0;
+        var presFailed = 0;
+        for (var i = 0; i < _queuedMembers.length; i++) {
+          final files = _memberPres[i];
+          if (files.isEmpty) continue;
+          final bookingId = i < created.length ? (created[i]['newBookingId'] as num?)?.toInt() : null;
+          final patientId = i < created.length ? (created[i]['patientId'] as num?)?.toInt() : null;
+          if (bookingId == null || patientId == null) {
+            presFailed += files.length;
+            continue;
+          }
+          try {
+            final urls = <String>[];
+            for (final f in files) {
+              final url = await ApiService.uploadFile(f.bytes.toList(), f.name);
+              if (url != null) {
+                urls.add(url);
+              } else {
+                presFailed++;
+              }
+            }
+            if (urls.isNotEmpty) {
+              final ok = await ApiService.savePrescription(
+                bookingId: bookingId, patientId: patientId, imageUrls: urls);
+              if (ok) {
+                presUploaded += urls.length;
+              } else {
+                presFailed += urls.length;
+              }
+            }
+          } catch (e) {
+            debugPrint('[_AddVisitMemberSheet._submitAll] prescription upload ERROR: $e');
+            presFailed += files.length;
+          }
+        }
+        if (!mounted) return;
         final firstName = (_queuedMembers.first['name'] as String? ?? '');
         Navigator.pop(context, {
-          'count':     _queuedMembers.length,
-          'firstName': firstName,
-          'members':   result['members'],
+          'count':        _queuedMembers.length,
+          'firstName':    firstName,
+          'members':      result['members'],
+          'presUploaded': presUploaded,
+          'presFailed':   presFailed,
         });
       } else {
         setState(() => _isSaving = false);
@@ -5900,7 +6075,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                   borderRadius: TechRadius.sheetTop,
                 ),
                 child: Column(children: [
-                  const TechDragHandle(),
+                  const TechSheetHandleBar(),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(TechSpace.sm, 0, TechSpace.gutter, 0),
                     child: Row(children: [
@@ -6202,52 +6377,98 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         ),
         const SizedBox(height: 10),
 
-        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          RichText(text: const TextSpan(
-            style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-            children: [
-              TextSpan(text: 'Date of Birth'),
-              TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
-            ],
-          )),
-          const SizedBox(height: 6),
-          GestureDetector(
-            onTap: _pickDob,
-            child: Container(
-              height: 50,
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              decoration: BoxDecoration(
-                color: AppColors.background,
-                border: Border.all(color: AppColors.divider),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Row(children: [
-                const Icon(Icons.cake_outlined, size: 18, color: AppColors.textHint),
-                const SizedBox(width: 10),
-                Expanded(child: Text(
-                  _dobCtrl.text.isEmpty ? 'DD / MM / YYYY' : _dobCtrl.text,
-                  style: TextStyle(fontSize: 13,
-                      color: _dobCtrl.text.isEmpty
-                          ? AppColors.textHint : AppColors.textPrimary),
-                )),
-                if (_age != null)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        // DOB or Age — same pair as the customer "Add Family Member" form:
+        // pick a date (fills Age) or type an age (fills the date).
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(
+            flex: 3,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              RichText(text: const TextSpan(
+                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                children: [
+                  TextSpan(text: 'DOB or Age'),
+                  TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+                ],
+              )),
+              const SizedBox(height: 6),
+              Semantics(
+                button: true,
+                label: 'Date of birth',
+                value: _dobCtrl.text,
+                child: GestureDetector(
+                  onTap: _pickDob,
+                  child: Container(
+                    height: 50,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
                     decoration: BoxDecoration(
-                      color: AppColors.brandGreenSurface,
-                      borderRadius: BorderRadius.circular(20),
+                      color: AppColors.background,
+                      border: Border.all(color: AppColors.divider),
+                      borderRadius: BorderRadius.circular(10),
                     ),
-                    child: Text('$_age yrs', style: const TextStyle(
-                        fontSize: 12, color: AppColors.brandGreen,
-                        fontWeight: FontWeight.w600)),
+                    child: Row(children: [
+                      const Icon(Icons.cake_outlined, size: 18, color: AppColors.textHint),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(
+                        _dobCtrl.text.isEmpty ? 'DD/MM/YYYY' : _dobCtrl.text,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 13,
+                            color: _dobCtrl.text.isEmpty
+                                ? AppColors.textHint : AppColors.textPrimary),
+                      )),
+                      const Icon(Icons.calendar_month_outlined, size: 18,
+                          color: TechColors.brand),
+                    ]),
                   ),
-                const SizedBox(width: 6),
-                const Icon(Icons.calendar_month_outlined, size: 18,
-                    color: AppColors.textSecondary),
-              ]),
-            ),
+                ),
+              ),
+            ]),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            flex: 2,
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Age', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+              const SizedBox(height: 6),
+              SizedBox(
+                height: 50,
+                child: TextField(
+                  controller: _ageCtrl,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(3),
+                  ],
+                  onChanged: _onAgeChanged,
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    hintText: 'e.g. 25',
+                    hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
+                    prefixIcon: const Icon(Icons.numbers_outlined, size: 18, color: AppColors.textHint),
+                    filled: true,
+                    fillColor: AppColors.background,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: AppColors.divider),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+                    ),
+                  ),
+                ),
+              ),
+            ]),
           ),
         ]),
+        // Typed age over 120: say why the date didn't fill.
+        if ((int.tryParse(_ageCtrl.text.trim()) ?? 0) > 120) ...[
+          const SizedBox(height: 4),
+          const Text('Enter an age between 0 and 120',
+              style: TextStyle(fontSize: 12, color: TechColors.error)),
+        ],
         const SizedBox(height: 10),
 
         Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -6387,6 +6608,239 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     ]);
   }
 
+  // ── Referred by (Self / Doctor) + optional prescription, per member ────────
+  // Same choices as the customer checkout's "Additional Details".
+
+  void _setReferral(int i, String type) {
+    setState(() {
+      _doctorTypes[i] = type;
+      if (type == 'self') {
+        // Self: no doctor name and no prescription (both hidden).
+        _doctorNameCtrls[i].clear();
+        _memberPres[i].clear();
+      }
+    });
+  }
+
+  void _showMemberPresSource(int i) {
+    showTechSheet<void>(
+      context: context,
+      title: 'Upload prescription',
+      subtitle: 'Add a photo of the prescription',
+      builder: (sheetCtx) => Column(mainAxisSize: MainAxisSize.min, children: [
+        TechOptionCard(
+          icon: Icons.camera_alt_outlined,
+          title: 'Camera',
+          subtitle: 'Take a photo now',
+          onTap: () {
+            Navigator.pop(sheetCtx);
+            _pickMemberPres(i, ImageSource.camera);
+          },
+        ),
+        const SizedBox(height: TechSpace.md),
+        TechOptionCard(
+          icon: Icons.photo_library_outlined,
+          title: 'Gallery',
+          subtitle: 'Choose from your photos',
+          onTap: () {
+            Navigator.pop(sheetCtx);
+            _pickMemberPres(i, ImageSource.gallery);
+          },
+        ),
+      ]),
+    );
+  }
+
+  Future<void> _pickMemberPres(int i, ImageSource source) async {
+    if (_presPicking || i >= _memberPres.length) return;
+    final files = _memberPres[i];
+    if (files.length >= _maxPresPerMember) return;
+    setState(() => _presPicking = true);
+    try {
+      // Same size limits as the booking screen's prescription upload.
+      if (source == ImageSource.gallery) {
+        final images = await _presPicker.pickMultiImage(imageQuality: 80, maxWidth: 1600, maxHeight: 1600);
+        for (final f in images.take(_maxPresPerMember - files.length)) {
+          files.add((bytes: await f.readAsBytes(), name: f.name));
+        }
+      } else {
+        final f = await _presPicker.pickImage(
+            source: ImageSource.camera, imageQuality: 80, maxWidth: 1600, maxHeight: 1600);
+        if (f != null) files.add((bytes: await f.readAsBytes(), name: f.name));
+      }
+    } catch (e) {
+      debugPrint('[_AddVisitMemberSheet._pickMemberPres] ERROR: $e');
+    }
+    if (mounted) setState(() => _presPicking = false);
+  }
+
+  Widget _buildReferral(int i, String name, bool needsDoc) {
+    final isDoctor = _doctorTypes[i] == 'doctor';
+    final files = _memberPres[i];
+    final nameMissing = _showDoctorNameErrors && isDoctor && _doctorNameCtrls[i].text.trim().isEmpty;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      decoration: BoxDecoration(
+        color: TechColors.surfaceMuted,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.divider),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Referred by',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: _ReferralChip(
+              label: 'Self',
+              icon: Icons.person_outline_rounded,
+              selected: !isDoctor,
+              onTap: () => _setReferral(i, 'self'),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: _ReferralChip(
+              label: 'Doctor',
+              icon: Icons.local_hospital_outlined,
+              selected: isDoctor,
+              onTap: () => _setReferral(i, 'doctor'),
+            ),
+          ),
+        ]),
+
+        if (isDoctor) ...[
+          const SizedBox(height: 12),
+          TextField(
+            controller: _doctorNameCtrls[i],
+            maxLength: 150,
+            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z .]'))],
+            textCapitalization: TextCapitalization.words,
+            style: const TextStyle(fontSize: 14),
+            // Rebuild so the error clears as soon as a name is typed.
+            onChanged: (_) { if (_showDoctorNameErrors) setState(() {}); },
+            decoration: InputDecoration(
+              labelText: 'Doctor name *',
+              hintText: 'Doctor name for $name',
+              errorText: nameMissing ? 'Enter the doctor\'s name' : null,
+              prefixIcon: const Icon(Icons.local_hospital_outlined, size: 18, color: AppColors.textHint),
+              counterText: '',
+              filled: true,
+              fillColor: Colors.white,
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.divider),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
+              ),
+              errorBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: TechColors.error),
+              ),
+              focusedErrorBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: TechColors.error, width: 1.5),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(children: [
+            const Text('Prescription',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+            const SizedBox(width: 6),
+            Text(needsDoc ? '· Required for this test' : '· Optional',
+                style: TextStyle(
+                    fontSize: 12,
+                    color: needsDoc ? TechColors.warning : AppColors.textHint,
+                    fontWeight: needsDoc ? FontWeight.w600 : FontWeight.w400)),
+          ]),
+          if (needsDoc && files.isEmpty) ...[
+            const SizedBox(height: 4),
+            const Text('Add it now, or later from the Prescription section.',
+                style: TextStyle(fontSize: 11.5, color: AppColors.textSecondary)),
+          ],
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 72,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: files.length + (files.length < _maxPresPerMember ? 1 : 0),
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, k) {
+                if (k == files.length) {
+                  // Add tile
+                  return Semantics(
+                    button: true,
+                    label: 'Add prescription for $name',
+                    excludeSemantics: true,
+                    child: GestureDetector(
+                      onTap: _presPicking ? null : () => _showMemberPresSource(i),
+                      child: Container(
+                        width: 72,
+                        decoration: BoxDecoration(
+                          color: TechColors.brandSurface,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: AppColors.brandGreenLight, width: 1.4),
+                        ),
+                        child: _presPicking
+                            ? const Center(
+                                child: SizedBox(width: 20, height: 20,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
+                            : const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                Icon(Icons.add_photo_alternate_outlined, size: 22, color: AppColors.brandGreen),
+                                SizedBox(height: 2),
+                                Text('Add', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                                    color: AppColors.brandGreen)),
+                              ]),
+                      ),
+                    ),
+                  );
+                }
+                final f = files[k];
+                return Stack(clipBehavior: Clip.none, children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: Image.memory(f.bytes, width: 72, height: 72, fit: BoxFit.cover),
+                  ),
+                  Positioned(
+                    top: -6,
+                    right: -6,
+                    child: Semantics(
+                      button: true,
+                      label: 'Remove prescription image',
+                      excludeSemantics: true,
+                      child: GestureDetector(
+                        onTap: () => setState(() => files.removeAt(k)),
+                        child: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: const BoxDecoration(color: TechColors.error, shape: BoxShape.circle),
+                          child: const Icon(Icons.close_rounded, size: 14, color: Colors.white),
+                        ),
+                      ),
+                    ),
+                  ),
+                ]);
+              },
+            ),
+          ),
+          if (files.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text('${files.length} of $_maxPresPerMember added · uploads after Submit',
+                style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
+          ],
+        ],
+      ]),
+    );
+  }
+
   // ── Step 2: Queue review ──────────────────────────────────────────────────
 
   Widget _buildReviewStep(ScrollController scroll) {
@@ -6469,6 +6923,8 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                       _queuedMembers.removeAt(i);
                       _doctorNameCtrls[i].dispose();
                       _doctorNameCtrls.removeAt(i);
+                      _doctorTypes.removeAt(i);
+                      _memberPres.removeAt(i);
                     }),
                     child: const Padding(
                       padding: EdgeInsets.only(left: 8),
@@ -6477,46 +6933,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                   ),
                 ]),
               ),
-              Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: TextField(
-                  controller: _doctorNameCtrls[i],
-                  maxLength: 150,
-                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z .]'))],
-                  style: const TextStyle(fontSize: 13),
-                  // Rebuild so the error clears as soon as a name is typed.
-                  onChanged: (_) { if (_showDoctorNameErrors) setState(() {}); },
-                  decoration: InputDecoration(
-                    hintText: 'Self or doctor name for $name *',
-                    errorText: _showDoctorNameErrors && _doctorNameCtrls[i].text.trim().isEmpty
-                        ? 'Enter "Self" or the doctor name'
-                        : null,
-                    errorBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: Colors.red),
-                    ),
-                    focusedErrorBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: Colors.red, width: 1.5),
-                    ),
-                    hintStyle: const TextStyle(fontSize: 12, color: AppColors.textHint),
-                    prefixIcon: const Icon(Icons.local_hospital_outlined, size: 16, color: AppColors.textHint),
-                    counterText: '',
-                    filled: true,
-                    fillColor: AppColors.background,
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: AppColors.divider),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  ),
-                ),
-              ),
+              _buildReferral(i, name, m['needsDoc'] == true),
             ],
           );
         }),
@@ -6681,7 +7098,7 @@ class _QrPaymentSheetState extends State<_QrPaymentSheet> {
             ),
             child: Column(
               children: [
-                const TechDragHandle(),
+                const TechSheetHandleBar(),
                 const Text('UPI Payment', style: TechText.sheetTitle),
                 const SizedBox(height: TechSpace.sm),
 

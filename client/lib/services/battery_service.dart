@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:microlab/widgets/tech/tech_sheet.dart';
 
 // ─── OEM manufacturer identifiers ─────────────────────────────────────────────
 
@@ -264,18 +265,9 @@ class _OemGuideSheet extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Drag handle
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.grey.shade300,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 20),
+          // Drag handle + close (✕)
+          const TechSheetHandleBar(),
+          const SizedBox(height: 4),
 
           // Header
           Row(

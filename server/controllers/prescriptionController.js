@@ -2,6 +2,7 @@ const db   = require('../config/db');
 const fs   = require('fs');
 const path = require('path');
 const { syncBookingToClient } = require('../services/clientSync');
+const { withSchemaFallback } = require('../services/userSessions');
 
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'prescriptions.log');
 function writeLog(msg) {
@@ -30,16 +31,28 @@ exports.savePrescription = async (req, res) => {
     const uploadedBy = req.user.user_id ?? req.user.userId ?? null;
     writeLog(`[savePrescription] uploadedBy=user_id:${uploadedBy}`);
 
+    // Which app uploaded it, from the login token — so the "Customer /
+    // Technician" tag is right for a number that uses both apps.
+    const uploadedByRole = req.user.userId != null ? 'technician' : 'customer';
+
     const insertedIds = [];
     for (const url of imageUrls) {
       const fileName = url.split('/').pop().split('?')[0] || 'prescription';
       writeLog(`[savePrescription] inserting — url=${url} fileName=${fileName} bookingItemId=${bookingItemId}`);
-      const [result] = await db.execute(
+      const params = [bookingId, bookingItemId ?? null, patientId, url, fileName, uploadedBy];
+      // Falls back to the old INSERT until the uploaded_by_role column
+      // (migrations/create_user_sessions.sql) exists.
+      const [result] = await withSchemaFallback(db, 'execute',
+        `INSERT INTO ip_booking_documents
+           (booking_id, booking_item_id, patient_id, file_path, file_name,
+            file_description, uploaded_by, uploaded_by_role, doc_status, created_at)
+         VALUES (?, ?, ?, ?, ?, 'prescription', ?, ?, 'pending_review', NOW())`,
+        [...params, uploadedByRole],
         `INSERT INTO ip_booking_documents
            (booking_id, booking_item_id, patient_id, file_path, file_name,
             file_description, uploaded_by, doc_status, created_at)
          VALUES (?, ?, ?, ?, ?, 'prescription', ?, 'pending_review', NOW())`,
-        [bookingId, bookingItemId ?? null, patientId, url, fileName, uploadedBy]
+        params
       );
       insertedIds.push(result.insertId);
       writeLog(`[savePrescription] inserted doc_id=${result.insertId}`);
@@ -85,10 +98,19 @@ exports.getByBooking = async (req, res) => {
   const { bookingId } = req.params;
   writeLog(`[getByBooking] received — bookingId=${bookingId}`);
   try {
-    const [rows] = await db.execute(
-      `SELECT bd.doc_id, bd.file_path, bd.file_name, bd.file_description,
-              bd.doc_status, bd.created_at, bd.booking_id, bd.patient_id
+    // Who added it, so the app can label "Customer" / "Technician": the role
+    // saved at upload time, else (older rows) worked out from the uploader's
+    // account — uploaded_by is the uploader's ip_users.user_id.
+    const roleFromAccount = `CASE
+                WHEN bd.uploaded_by IS NULL               THEN NULL
+                WHEN u.user_microlab_type = 'technician'  THEN 'technician'
+                ELSE 'customer'
+              END`;
+    const docsSql = (roleSql) => `SELECT bd.doc_id, bd.file_path, bd.file_name, bd.file_description,
+              bd.doc_status, bd.created_at, bd.booking_id, bd.patient_id,
+              ${roleSql} AS uploaded_by_role
        FROM ip_booking_documents bd
+       LEFT JOIN ip_users u ON u.user_id = bd.uploaded_by
        WHERE (bd.booking_id = ?
           OR bd.booking_id IN (
             SELECT b2.booking_id
@@ -99,8 +121,11 @@ exports.getByBooking = async (req, res) => {
             WHERE b1.booking_id = ? AND b1.visit_group_id IS NOT NULL
           ))
          AND bd.file_description = 'prescription'
-       ORDER BY bd.created_at ASC`,
-      [bookingId, bookingId]
+       ORDER BY bd.created_at ASC`;
+    const [rows] = await withSchemaFallback(db, 'execute',
+      docsSql(`COALESCE(bd.uploaded_by_role, ${roleFromAccount})`),
+      [bookingId, bookingId],
+      docsSql(roleFromAccount)
     );
     writeLog(`[getByBooking] found=${rows.length} doc(s) — booking_ids=[${[...new Set(rows.map(r => r.booking_id))].join(',')}] patient_ids=[${[...new Set(rows.map(r => r.patient_id))].join(',')}]`);
     res.json({ success: true, docs: rows });

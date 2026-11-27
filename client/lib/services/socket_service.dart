@@ -488,7 +488,9 @@ class SocketService {
       // Register this socket so the server can push force_logout if another
       // device logs in with the same number (overwrites the auth token).
       if (ipUserId > 0) {
-        _socket?.emit('register_user_socket', {'userId': ipUserId});
+        // role: one number can be logged in to both the customer and the
+        // technician app, and the server logs out only the matching one.
+        _socket?.emit('register_user_socket', {'userId': ipUserId, 'role': role});
       }
 
       if (role == 'technician') {

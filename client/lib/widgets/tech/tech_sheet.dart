@@ -74,7 +74,7 @@ class TechSheetFrame extends StatelessWidget {
     final cross = centerTitle ? CrossAxisAlignment.center : CrossAxisAlignment.start;
 
     final header = <Widget>[
-      const TechDragHandle(),
+      const TechSheetHandleBar(),
       if (title != null)
         SizedBox(
           width: double.infinity,
@@ -125,6 +125,56 @@ class TechSheetFrame extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Top of a technician bottom sheet: the drag handle in the middle and a
+/// close (✕) button on the right. The ✕ closes the sheet exactly like
+/// swiping it down or tapping outside (the sheet returns null). Use only
+/// inside a bottom sheet — it closes the top-most route.
+class TechSheetHandleBar extends StatelessWidget {
+  const TechSheetHandleBar({super.key});
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+        width: double.infinity,
+        height: 48,
+        child: Stack(
+          alignment: Alignment.topCenter,
+          children: [
+            Container(
+              margin: const EdgeInsets.only(top: 10),
+              width: 36, height: 4,
+              decoration: BoxDecoration(
+                color: TechColors.border,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const Positioned(
+              top: 4,
+              right: 4,
+              child: TechSheetCloseButton(),
+            ),
+          ],
+        ),
+      );
+}
+
+/// The round ✕ used at the top right of every technician bottom sheet.
+class TechSheetCloseButton extends StatelessWidget {
+  const TechSheetCloseButton({super.key});
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+        tooltip: 'Close',
+        onPressed: () => Navigator.maybePop(context),
+        icon: const Icon(Icons.close_rounded, size: 20, color: TechColors.textSecondary),
+        style: IconButton.styleFrom(
+          backgroundColor: TechColors.surfaceMuted,
+          minimumSize: const Size(40, 40),
+          fixedSize: const Size(40, 40),
+          padding: EdgeInsets.zero,
+        ),
+      );
 }
 
 /// The small grey bar at the top of every sheet.

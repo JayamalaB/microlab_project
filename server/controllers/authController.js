@@ -8,6 +8,7 @@ const { getSecret, refreshSecret } = require('../services/secretCache');
 const dbLogger = require('../utils/dbLogger');
 const { logAsmx } = require('../services/asmxLogger');
 const { resolveBranchIdByCode } = require('../services/branchCodes');
+const sessions = require('../services/userSessions');
 
 const LOG_DIR  = path.join(__dirname, '..', 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'otp.log');
@@ -95,10 +96,9 @@ exports.sendOtp = async (req, res) => {
 
     step = 'select_user';
     writeLog(`[sendOtp] SELECT ip_users — ${elapsed()}`);
-    const [existing] = await db.query(
-      'SELECT user_id, client_id, user_microlab_type, user_auth_token, user_token_expiry, is_logged_in, deleted_at FROM ip_users WHERE user_mobile_no = ?',
-      [mobile]
-    );
+    // The account, plus the login session of the app being logged in to
+    // (customer or technician) — services/userSessions.js.
+    const [existing] = await sessions.findUserForLogin(mobile, role, db);
     writeLog(`[sendOtp] select done — found=${existing.length} — ${elapsed()}`);
 
     // Soft-deleted account — reject immediately, before any of the
@@ -116,8 +116,21 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    // Block technician numbers from logging in as customer
-    if (role !== 'technician' && existing.length > 0 && existing[0].user_microlab_type === 'technician') {
+    // Customer side closed by "Delete account" on a number that is also a
+    // technician (see deleteAccount) — the technician login still works.
+    if (role !== 'technician' && existing.length > 0 && existing[0].role_closed_at) {
+      writeLog(`[sendOtp] rejected — mobile=${mobile} customer account was deleted (technician login still active)`);
+      return res.status(403).json({
+        success: false,
+        message: 'This account has been deleted. Please contact support.',
+      });
+    }
+
+    // One number can be both a customer and a technician once each role has
+    // its own session (ip_user_sessions). Until that table exists, the old
+    // rule stays: technician numbers can't log in as customer.
+    if (!sessions.dualRoleEnabled()
+        && role !== 'technician' && existing.length > 0 && existing[0].user_microlab_type === 'technician') {
       writeLog(`[sendOtp] rejected — mobile=${mobile} is a technician account`);
       return res.status(403).json({
         success: false,
@@ -125,19 +138,26 @@ exports.sendOtp = async (req, res) => {
       });
     }
 
-    // Single-active-session guard at send-OTP — shows the message before the
-    // OTP screen so the user knows early. forceLogout=true (set when the user
-    // taps "Log out & continue") bypasses this and lets the OTP proceed.
+    // Single-active-session guard at send-OTP — one device per number, across
+    // both apps: a login to this app OR the other app (customer ↔
+    // technician) on another device blocks, and the message names the other
+    // app. Shows the message before the OTP screen so the user knows early.
+    // forceLogout=true (set when the user taps "Log out & continue")
+    // bypasses this; verifyOtp then logs the other device out.
     // Demo accounts bypass unconditionally.
     // Uses OR: fires if EITHER is_logged_in=1 OR user_auth_token is set —
     // defensive against the DB having only one of the two updated.
-    if (!isDemo && !forceLogout && existing.length > 0
-        && (existing[0].is_logged_in || existing[0].user_auth_token)) {
-      writeLog(`[sendOtp] blocked — mobile=${mobile} already logged in on another device (user_id=${existing[0].user_id})`);
-      return res.status(409).json({
-        success: false,
-        message: 'Already logged in on another device. Tap "Log out & continue" to sign in here instead.',
-      });
+    if (!isDemo && !forceLogout && existing.length > 0) {
+      const sameApp  = sessions.isActive(existing[0].is_logged_in, existing[0].user_auth_token);
+      const otherApp = sessions.isActive(existing[0].other_is_logged_in, existing[0].other_auth_token);
+      if (sameApp || otherApp) {
+        const otherRole = sameApp ? null : sessions.otherRoleOf(role);
+        writeLog(`[sendOtp] blocked — mobile=${mobile} already logged in on another device${otherRole ? ` as ${otherRole}` : ''} (user_id=${existing[0].user_id})`);
+        return res.status(409).json({
+          success: false,
+          message: sessions.alreadyLoggedInMessage(otherRole),
+        });
+      }
     }
 
     if (existing.length === 0) {
@@ -172,9 +192,14 @@ exports.sendOtp = async (req, res) => {
       writeLog(`[sendOtp] client_id linked — ${elapsed()}`);
     } else {
       step = 'update_otp';
+      // A technician login marks the account as a technician; a customer
+      // login never turns a technician back into a customer (the same person
+      // may use both apps).
       await db.query(
         `UPDATE ip_users
-         SET user_otp = ?, user_otp_expiry = ?, user_microlab_type = ?, user_date_modified = NOW()
+         SET user_otp = ?, user_otp_expiry = ?,
+             user_microlab_type = CASE WHEN ? = 'technician' THEN 'technician' ELSE user_microlab_type END,
+             user_date_modified = NOW()
          WHERE user_mobile_no = ?`,
         [otp, expiresAt, dbUserType, mobile]
       );
@@ -402,6 +427,36 @@ async function _findLocalTechnicianUser(mobile) {
   return rows[0] ?? null;
 }
 
+// After "Log out & continue": the number was logged in to the OTHER app
+// (customer ↔ technician) on another device. One device per number, so that
+// login ends now — its token stops working and the app is sent back to the
+// login screen. A technician is also taken offline, the same as logout().
+// Never fails the login that is happening now.
+async function _endOtherAppSession(userId, role, sessionRow, mobile) {
+  if (!sessionRow || !sessions.isActive(sessionRow.other_is_logged_in, sessionRow.other_auth_token)) return;
+  const other = sessions.otherRoleOf(role);
+  try {
+    await sessions.clearLogin(userId, other, db);
+    if (other === 'technician') {
+      const [[tech]] = await db.query(
+        'SELECT technician_id FROM ip_technicians WHERE user_id = ? LIMIT 1', [userId]);
+      if (tech) {
+        await db.query(
+          `UPDATE ip_technician_sessions SET ended_at = NOW(), session_status = 'ended'
+           WHERE technician_id = ? AND ended_at IS NULL`, [tech.technician_id]);
+        await db.query(
+          `UPDATE ip_technician_live_location SET online_status = 'offline', socket_id = NULL, updated_at = NOW()
+           WHERE technician_id = ?`, [tech.technician_id]);
+        try { forceTechnicianOffline(Number(tech.technician_id)); } catch (_) {}
+      }
+    }
+    try { emitForceLogout(userId, other); } catch (_) {}
+    writeLog(`[verifyOtp] mobile=${mobile} — "Log out & continue": ${other} login on the other device ended`);
+  } catch (err) {
+    writeLog(`[verifyOtp] ending the ${other} login failed (non-fatal) — ${err.message}`);
+  }
+}
+
 exports.verifyOtp = async (req, res) => {
   try {
     const { mobile, otp, role = 'customer', forceLogout = false } = req.body;
@@ -464,16 +519,29 @@ exports.verifyOtp = async (req, res) => {
     // Skip for demo logins and when the user explicitly confirmed force-logout.
     // Uses OR (same reasoning as sendOtp's guard above): fires if EITHER
     // is_logged_in=1 OR user_auth_token is set.
+    // This app's session and the other app's (customer ↔ technician): one
+    // device per number, so either one blocks unless the user confirmed
+    // "Log out & continue" — then the other device is logged out below.
+    let sessionRow;
+    if ((!isDemo && !forceLogout) || sessions.dualRoleEnabled()) {
+      sessionRow = await sessions.sessionState(dbUser.user_id, role, db);
+    }
+    // Customer side closed by deleteAccount (the technician login still
+    // works). sendOtp refuses it too; this also covers an OTP that was
+    // requested through the technician login.
+    if (role !== 'technician' && sessionRow?.closed_at) {
+      writeLog(`[verifyOtp] rejected — mobile=${mobile} customer account was deleted`);
+      return res.status(403).json({ success: false, message: 'This account has been deleted. Please contact support.' });
+    }
     if (!isDemo && !forceLogout) {
-      const [[sessionRow]] = await db.query(
-        `SELECT is_logged_in, user_auth_token FROM ip_users WHERE user_id = ? LIMIT 1`,
-        [dbUser.user_id]
-      );
-      if (sessionRow?.is_logged_in || sessionRow?.user_auth_token) {
-        writeLog(`[verifyOtp] blocked — mobile=${mobile} already logged in on another device (user_id=${dbUser.user_id})`);
+      const sameApp  = sessions.isActive(sessionRow?.is_logged_in, sessionRow?.user_auth_token);
+      const otherApp = sessions.isActive(sessionRow?.other_is_logged_in, sessionRow?.other_auth_token);
+      if (sameApp || otherApp) {
+        const otherRole = sameApp ? null : sessions.otherRoleOf(role);
+        writeLog(`[verifyOtp] blocked — mobile=${mobile} already logged in on another device${otherRole ? ` as ${otherRole}` : ''} (user_id=${dbUser.user_id})`);
         return res.status(409).json({
           success: false,
-          message: 'Already logged in on another device. Tap "Log out & continue" to sign in here instead.',
+          message: sessions.alreadyLoggedInMessage(otherRole),
         });
       }
     }
@@ -703,8 +771,10 @@ exports.verifyOtp = async (req, res) => {
          WHERE user_id = ?`,
         [token, tokenExpiry, dbUser.user_id]
       );
-      writeLog(`[verifyOtp] technician_id=${dbTechnicianId} — new session claimed for mobile=${mobile}, any previous session on this number is now invalid`);
-      try { emitForceLogout(dbUser.user_id); } catch (_) {}
+      await sessions.saveLogin(dbUser.user_id, 'technician', token, tokenExpiry, db);
+      writeLog(`[verifyOtp] technician_id=${dbTechnicianId} — new technician session claimed for mobile=${mobile}, any previous technician session on this number is now invalid`);
+      try { emitForceLogout(dbUser.user_id, 'technician'); } catch (_) {}
+      await _endOtherAppSession(dbUser.user_id, 'technician', sessionRow, mobile);
 
       // Create session + live_location rows
       let sessionId = null;
@@ -753,6 +823,22 @@ exports.verifyOtp = async (req, res) => {
     }
 
     // ── Customer / patient path ───────────────────────────────────────────────
+    // A technician account created outside the app (admin / registry) may
+    // have no ip_clients row. Customer bookings need one, so a technician
+    // logging in to the customer app for the first time gets it here —
+    // the same rows sendOtp creates for a brand-new number.
+    if (!dbUser.client_id) {
+      const [clientResult] = await db.query(
+        `INSERT INTO ip_clients
+           (client_name, client_mobile_no, client_reg_source, client_date_created, client_date_modified)
+         VALUES (?, ?, 'mobile_app', NOW(), NOW())`,
+        [dbUser.user_name || `user_${mobile}`, mobile]
+      );
+      dbUser.client_id = clientResult.insertId;
+      await db.query('UPDATE ip_users SET client_id = ? WHERE user_id = ?', [dbUser.client_id, dbUser.user_id]);
+      writeLog(`[verifyOtp] customer login on an account with no client — ip_clients created client_id=${dbUser.client_id} user_id=${dbUser.user_id}`);
+    }
+
     let patients = [];
     try {
       [patients] = await db.query('SELECT * FROM ip_patients WHERE patient_mobile = ?', [mobile]);
@@ -879,7 +965,10 @@ exports.verifyOtp = async (req, res) => {
         client_id: dbUser.client_id,
         mobile,
         role,
-        user_type: dbUser.user_microlab_type,
+        // Always the customer type here: for a number that is also a
+        // technician, user_microlab_type says 'technician', but this token
+        // is for the customer app (it becomes the clientSync initiator type).
+        user_type: 'patient_user',
       },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
@@ -898,8 +987,10 @@ exports.verifyOtp = async (req, res) => {
        WHERE user_id = ?`,
       [token, tokenExpiry, dbUser.user_id]
     );
-    writeLog(`[verifyOtp] client_id=${dbUser.client_id} — new session claimed for mobile=${mobile}, any previous session on this number is now invalid`);
-    try { emitForceLogout(dbUser.user_id); } catch (_) {}
+    await sessions.saveLogin(dbUser.user_id, 'customer', token, tokenExpiry, db);
+    writeLog(`[verifyOtp] client_id=${dbUser.client_id} — new customer session claimed for mobile=${mobile}, any previous customer session on this number is now invalid`);
+    try { emitForceLogout(dbUser.user_id, 'customer'); } catch (_) {}
+    await _endOtherAppSession(dbUser.user_id, 'customer', sessionRow, mobile);
 
     return res.json({
       success: true,
@@ -925,6 +1016,9 @@ exports.registerFcmToken = async (req, res) => {
       `UPDATE ip_users SET user_notification_token = ? WHERE user_id = ?`,
       [token, user_id]
     );
+    // Also kept per app, so customer notifications go to the customer app and
+    // technician notifications to the technician app on the same number.
+    await sessions.saveFcmToken(user_id ?? req.user.userId, sessions.roleOfToken(req.user), token, db);
     res.json({ success: true });
   } catch (err) {
     console.error('registerFcmToken error:', err);
@@ -943,6 +1037,9 @@ exports.logout = async (req, res) => {
        WHERE user_id = ?`,
       [user_id]
     );
+    // Ends this app's session only; the same number stays logged in to the
+    // other app (customer / technician).
+    await sessions.clearLogin(user_id ?? req.user.userId, sessions.roleOfToken(req.user), db);
 
     // Technician logout: close active session, mark offline, remove from dispatch pool.
     if (role === 'technician' && technicianId) {
@@ -989,6 +1086,18 @@ exports.logout = async (req, res) => {
 exports.deleteAccount = async (req, res) => {
   try {
     const { user_id } = req.user;
+
+    // A number that is also a technician: close the customer side only, so
+    // the technician app keeps working. Deleting the whole ip_users row
+    // (below) would block the technician login too.
+    const [[tech]] = await db.query(
+      'SELECT technician_id FROM ip_technicians WHERE user_id = ? LIMIT 1', [user_id]);
+    if (tech && await sessions.closeCustomerSide(user_id, db)) {
+      writeLog(`[deleteAccount] user_id=${user_id} is also technician_id=${tech.technician_id} — customer side closed, technician login kept`);
+      try { emitForceLogout(user_id, 'customer'); } catch (_) {}
+      return res.json({ success: true, message: 'Account deleted' });
+    }
+
     // Soft-delete: set deleted_at so the number cannot log in again.
     // The existing sendOtp check at the top of this controller blocks re-registration.
     await db.query(

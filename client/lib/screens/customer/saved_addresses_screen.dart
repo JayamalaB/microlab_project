@@ -344,7 +344,7 @@ class _AddressSheetState extends State<_AddressSheet> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Padding(
-        padding: EdgeInsets.fromLTRB(20, 20, 20, bottom + 20),
+        padding: EdgeInsets.fromLTRB(20, 4, 20, bottom + 20),
         child: Form(
           key: _formKey,
           child: SingleChildScrollView(
@@ -352,14 +352,8 @@ class _AddressSheetState extends State<_AddressSheet> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Handle bar
-                Center(
-                  child: Container(
-                    width: 36, height: 4,
-                    decoration: BoxDecoration(color: CxColors.border, borderRadius: BorderRadius.circular(2)),
-                  ),
-                ),
-                const SizedBox(height: 16),
+                // Handle bar + close (✕)
+                const CxSheetHandleBar(),
                 Text(widget.editing == null ? 'Add Address' : 'Edit Address',
                     style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: CxColors.textPrimary)),
                 const SizedBox(height: 20),

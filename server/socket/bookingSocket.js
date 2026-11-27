@@ -28,6 +28,7 @@ const { syncVisitCompletionToClient } = require('../services/clientSync');
 const { moveBookingToSlot } = require('../services/slotChange');
 const { slotAtBranchSql, slotAtBranchParams } = require('../services/slotBranches');
 const dispatchDistance = require('../services/dispatchDistance');
+const userSessions = require('../services/userSessions');
 const serviceCharge = require('../services/serviceCharge');
 const {
   findEligibleBranches,
@@ -733,6 +734,29 @@ function _queueStatus(dispatch, actorMap) {
 
 // Runs from timers and socket events, where an uncaught error would otherwise
 // stop the whole server.
+// Whether this booking belongs to the technician's own customer account: the
+// same number logged in to the customer app (ip_users.client_id = the
+// booking's client). Covers family members booked on that account too.
+// A failed lookup is treated as "not own", so dispatch never stalls on it.
+async function _isOwnBooking(technicianId, bookingId) {
+  if (technicianId == null || bookingId == null) return false;
+  try {
+    const [rows] = await db.execute(
+      `SELECT 1 AS own
+       FROM ip_bookings b
+       JOIN ip_technicians t ON t.technician_id = ?
+       JOIN ip_users u       ON u.user_id = t.user_id
+       WHERE b.booking_id = ? AND b.client_id IS NOT NULL AND u.client_id = b.client_id
+       LIMIT 1`,
+      [technicianId, bookingId]
+    );
+    return Array.isArray(rows) && rows[0]?.own === 1;
+  } catch (err) {
+    console.error(`[ownBooking] check failed technician=${technicianId} booking=${bookingId}: ${err.message}`);
+    return false;
+  }
+}
+
 function dispatchAttempt(io, bookingId) {
   return _dispatchAttempt(io, bookingId).catch((e) => {
     console.error(`❌ [dispatchAttempt] booking=${bookingId}: ${e.message}`);
@@ -980,6 +1004,26 @@ async function _dispatchAttempt(io, bookingId) {
           nextAfterSkip ? `${nextAfterSkip.name} (ID: ${nextAfterSkip.id})` : 'none — expanding queue'
         }`);
       continue;
+    }
+
+    // Self-booking rule: a technician who also uses the customer app is never
+    // offered their own booking (or their family's — same customer account).
+    // Looked up once per technician per dispatch; after the lookup the loop
+    // starts over, so a booking cancelled or claimed meanwhile is seen.
+    if (bookingType !== 'transport') {
+      const own = dispatch.ownBookingTechs ?? (dispatch.ownBookingTechs = new Map());
+      if (!own.has(actor.id)) {
+        own.set(actor.id, await _isOwnBooking(actor.id, bookingId));
+        continue;
+      }
+      if (own.get(actor.id)) {
+        dispatch.triedIds.add(actor.id);
+        dispatch.techIdx++;
+        dispatch.attemptNum = 1;
+        log('⚠️', 'ACTOR_SKIPPED', bookingId,
+          `${actor.name} (ID: ${actor.id}) [own booking — same customer account] skipped`);
+        continue;
+      }
     }
 
     // Record this tech as attempted before sending — persisted across expansions.
@@ -1945,13 +1989,21 @@ module.exports = function bookingSocket(io, socket) {
   // Track userId → socket so authController can push force_logout immediately
   // when a new login on another device overwrites this session's token.
   // Registered via explicit event (not handshake query) so it also fires on reconnect.
+  // Kept per app (customer / technician): one number can be logged in to both
+  // apps, and a new customer login must only log out the old customer app.
+  // The role comes from the socket's login token; an older app without one
+  // sends it in the event, and failing both it is filed under '?'.
   socket.on('register_user_socket', (data = {}) => {
     const uid = parseInt(data.userId, 10);
     if (!uid) return;
-    userSockets.set(uid, socket);
-    clog(`[register_user_socket] userId=${uid} socketId=${socket.id}`);
+    const tokenUser = socket.data?.user;
+    const role = tokenUser ? userSessions.roleOfToken(tokenUser)
+      : (data.role ? userSessions.roleOf(data.role) : '?');
+    const key = _userSocketKey(uid, role);
+    userSockets.set(key, socket);
+    clog(`[register_user_socket] userId=${uid} role=${role} socketId=${socket.id}`);
     socket.once('disconnect', () => {
-      if (userSockets.get(uid) === socket) userSockets.delete(uid);
+      if (userSockets.get(key) === socket) userSockets.delete(key);
     });
   });
 
@@ -2301,6 +2353,15 @@ module.exports = function bookingSocket(io, socket) {
       }
     } catch (e) {
       console.error(`❌ [booking_accepted] status check failed booking=${bookingId}: ${e.message}`);
+    }
+
+    // Self-booking rule (see _dispatchAttempt): refuse a technician accepting
+    // a booking made on their own customer account, e.g. from an old push.
+    if (technicianId && !driverId && await _isOwnBooking(technicianId, bookingId)) {
+      acceptedBookings.delete(bookingId);
+      dlog(bookingId, 'ACCEPT_REFUSED', `${actorName}(${actorId}) -- own booking (same customer account)`);
+      socket.emit('booking_cancelled', { bookingId });
+      return;
     }
 
     const dispatch        = dispatchQueues.get(bookingId);
@@ -3452,16 +3513,39 @@ module.exports = function bookingSocket(io, socket) {
 // reconcile the live dispatch engine's in-memory state — without this, a
 // technician stays marked busy/occupied for a cancelled appointment's slot
 // window until an unrelated event (disconnect, next status change) clears it.
-module.exports.emitForceLogout = function(userId) {
-  const sock = userSockets.get(userId);
-  userSockets.delete(userId); // session is now invalid — remove unconditionally
-  if (sock && sock.connected) {
-    sock.emit('force_logout');
-    clog(`[emitForceLogout] userId=${userId} — force_logout emitted to socketId=${sock.id}`);
-  } else {
-    clog(`[emitForceLogout] userId=${userId} — no active socket found (device offline or not yet registered)`);
+function _userSocketKey(userId, role) {
+  return `${Number(userId)}:${role}`;
+}
+
+// Logs out the app of [role] (customer / technician) for this user. A socket
+// whose role isn't known ('?', an old app with no login token) is only
+// logged out while each number has a single session (no ip_user_sessions
+// yet) — otherwise it could be the other app.
+module.exports.emitForceLogout = function(userId, role) {
+  const keys = [];
+  if (role) keys.push(_userSocketKey(userId, userSessions.roleOf(role)));
+  if (!role || !userSessions.dualRoleEnabled()) {
+    keys.push(_userSocketKey(userId, '?'));
+    if (!role) keys.push(..._userSocketKeysOf(userId));
+  }
+  let sent = 0;
+  for (const key of new Set(keys)) {
+    const sock = userSockets.get(key);
+    userSockets.delete(key); // session is now invalid — remove unconditionally
+    if (sock && sock.connected) {
+      sock.emit('force_logout');
+      sent++;
+      clog(`[emitForceLogout] userId=${userId} key=${key} — force_logout emitted to socketId=${sock.id}`);
+    }
+  }
+  if (sent === 0) {
+    clog(`[emitForceLogout] userId=${userId} role=${role ?? 'any'} — no active socket found (device offline or not yet registered)`);
   }
 };
+
+function _userSocketKeysOf(userId) {
+  return userSessions.ROLES.map(r => _userSocketKey(userId, r));
+}
 module.exports.freeTechnician = _freeTechnician;
 module.exports.stopDispatch = (bookingId) => (_io ? _stopDispatch(_io, bookingId) : false);
 module.exports.forceTechnicianOffline = _forceTechnicianOffline;
@@ -3514,13 +3598,20 @@ module.exports.unassignAndRedispatch = async function({
   technicianCancelNote = null,
 }) {
   try {
-    const [[techUser]] = await db.execute(
+    // The technician app's own push token (services/userSessions.js).
+    const [[techUser]] = await userSessions.withSchemaFallback(db, 'execute',
+      `SELECT ${userSessions.TECHNICIAN_PUSH_TOKEN} AS user_notification_token,
+              u.user_name, u.user_mobile_no, tll.fcm_token AS live_fcm_token
+       FROM ip_technicians t
+       JOIN ip_users u ON u.user_id = t.user_id${userSessions.PUSH_TOKEN_JOINS}
+       LEFT JOIN ip_technician_live_location tll ON tll.technician_id = t.technician_id
+       WHERE t.technician_id = ? LIMIT 1`,
+      [technicianId],
       `SELECT u.user_notification_token, u.user_name, u.user_mobile_no, tll.fcm_token AS live_fcm_token
        FROM ip_technicians t
        JOIN ip_users u ON u.user_id = t.user_id
        LEFT JOIN ip_technician_live_location tll ON tll.technician_id = t.technician_id
-       WHERE t.technician_id = ? LIMIT 1`,
-      [technicianId]
+       WHERE t.technician_id = ? LIMIT 1`
     );
     const fcmToken = techUser?.user_notification_token || techUser?.live_fcm_token;
     if (fcmToken && messaging) {

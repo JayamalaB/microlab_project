@@ -93,7 +93,7 @@ class CxSheetFrame extends StatelessWidget {
       mainAxisSize: heightFactor == null ? MainAxisSize.min : MainAxisSize.max,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const CxDragHandle(),
+        const CxSheetHandleBar(),
         header,
         if (heightFactor != null)
           Expanded(child: body)
@@ -133,6 +133,53 @@ class CxDragHandle extends StatelessWidget {
           margin: const EdgeInsets.only(top: 10, bottom: 14),
           width: 40, height: 4,
           decoration: BoxDecoration(color: CxColors.border, borderRadius: BorderRadius.circular(2)),
+        ),
+      );
+}
+
+/// Top of a bottom sheet: the drag handle in the middle and a close (✕)
+/// button on the right. The ✕ closes the sheet exactly like swiping it
+/// down or tapping outside (the sheet returns null). Use only inside a
+/// bottom sheet — it closes the top-most route.
+class CxSheetHandleBar extends StatelessWidget {
+  const CxSheetHandleBar({super.key});
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+        width: double.infinity,
+        height: 48,
+        child: Stack(
+          alignment: Alignment.topCenter,
+          children: [
+            Container(
+              margin: const EdgeInsets.only(top: 10),
+              width: 40, height: 4,
+              decoration: BoxDecoration(color: CxColors.border, borderRadius: BorderRadius.circular(2)),
+            ),
+            const Positioned(
+              top: 4,
+              right: 8,
+              child: CxSheetCloseButton(),
+            ),
+          ],
+        ),
+      );
+}
+
+/// The round ✕ used at the top right of every customer bottom sheet.
+class CxSheetCloseButton extends StatelessWidget {
+  const CxSheetCloseButton({super.key});
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+        tooltip: 'Close',
+        onPressed: () => Navigator.maybePop(context),
+        icon: const Icon(Icons.close_rounded, size: 20, color: CxColors.textSecondary),
+        style: IconButton.styleFrom(
+          backgroundColor: CxColors.page,
+          minimumSize: const Size(40, 40),
+          fixedSize: const Size(40, 40),
+          padding: EdgeInsets.zero,
         ),
       );
 }

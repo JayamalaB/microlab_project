@@ -2084,7 +2084,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
         mainAxisSize: MainAxisSize.min,
         children: [
           // Handle
-          const CxDragHandle(),
+          const CxSheetHandleBar(),
 
           // Header
           Padding(
@@ -3460,7 +3460,7 @@ class _EditTestsSheetState extends State<_EditTestsSheet> {
       ),
       child: Column(
         children: [
-          const CxDragHandle(),
+          const CxSheetHandleBar(),
           Padding(
             padding: const EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, CxSpace.md),
             child: Row(

@@ -1133,7 +1133,7 @@ class _MemberDetailSheet extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           // Handle
-          const CxDragHandle(),
+          const CxSheetHandleBar(),
 
           // Scrollable content
           Flexible(

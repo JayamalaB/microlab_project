@@ -3207,7 +3207,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
         ),
         child: Column(children: [
           // Handle
-          const CxDragHandle(),
+          const CxSheetHandleBar(),
           // Header
           Padding(
             padding: const EdgeInsets.fromLTRB(CxSpace.sm, 0, CxSpace.lg, 0),

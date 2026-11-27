@@ -2,6 +2,7 @@
 const jwt      = require('jsonwebtoken');
 const db       = require('../config/db');
 const settings = require('../config/settings');
+const sessions = require('../services/userSessions');
 
 // Login check for socket connections, the socket side of middleware/auth.js:
 // a valid signature, and still the token on file for that user.
@@ -17,11 +18,9 @@ async function _userFromToken(token) {
   if (!token) return null;
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const [[row]] = await db.execute(
-      'SELECT user_auth_token FROM ip_users WHERE user_id = ? LIMIT 1',
-      [decoded.userId ?? decoded.user_id]
-    );
-    return row && row.user_auth_token === token ? decoded : null;
+    // Checked against the session of the token's own role (customer or
+    // technician), like middleware/auth.js.
+    return (await sessions.isCurrentToken(decoded, token, db)) ? decoded : null;
   } catch {
     return null;
   }

@@ -120,11 +120,20 @@ void main() {
 
       expect(find.text('Upload document'), findsOneWidget);
       expect(find.text('RAJA'), findsOneWidget);
-      expect(find.byType(TechDragHandle), findsOneWidget);
+      expect(find.byType(TechSheetHandleBar), findsOneWidget);
 
       await tester.tap(find.text('Camera'));
       await tester.pumpAndSettle();
       expect(result, 'camera');
+
+      // The close (✕) button closes it like a swipe down: no result.
+      result = 'unchanged';
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+      expect(find.text('Upload document'), findsNothing);
+      expect(result, isNull);
     });
 
     testWidgets('fits a small phone with the keyboard open', (tester) async {

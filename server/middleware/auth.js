@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const db  = require('../config/db');
+const sessions = require('../services/userSessions');
 
 // Session-aware: a valid JWT signature alone is not enough — the token must
 // also still be the one currently on file in ip_users.user_auth_token. This
@@ -24,13 +25,10 @@ module.exports = async (req, res, next) => {
     return res.status(401).json({ success: false, message: 'Invalid token' });
   }
 
-  const userId = decoded.userId ?? decoded.user_id;
+  // Compared with the session of the token's own role (services/userSessions),
+  // so a customer login never invalidates the same person's technician login.
   try {
-    const [[row]] = await db.execute(
-      `SELECT user_auth_token FROM ip_users WHERE user_id = ? LIMIT 1`,
-      [userId]
-    );
-    if (!row || row.user_auth_token !== token) {
+    if (!(await sessions.isCurrentToken(decoded, token, db))) {
       return res.status(401).json({ success: false, message: 'Session expired or logged in elsewhere. Please log in again.' });
     }
   } catch (err) {

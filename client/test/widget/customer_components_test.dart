@@ -98,10 +98,23 @@ void main() {
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
       expect(find.text('Upload prescription'), findsOneWidget);
-      expect(find.byType(CxDragHandle), findsOneWidget);
+      expect(find.byType(CxSheetHandleBar), findsOneWidget);
       await tester.tap(find.text('Gallery'));
       await tester.pumpAndSettle();
       expect(picked, CxImageSource.gallery);
+    });
+
+    testWidgets('the close (✕) button closes the sheet like a swipe down', (tester) async {
+      var closedWith = CxImageSource.camera as CxImageSource?;
+      await tester.pumpWidget(_opener('open', (ctx) async =>
+          closedWith = await showCxImageSourcePicker(ctx, title: 'Upload prescription')));
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Close'), findsOneWidget);
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pumpAndSettle();
+      expect(find.text('Upload prescription'), findsNothing);
+      expect(closedWith, isNull);
     });
 
     testWidgets('sheet fits a small phone with the keyboard open', (tester) async {

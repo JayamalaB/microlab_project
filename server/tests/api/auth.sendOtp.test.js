@@ -168,10 +168,50 @@ describe('POST /api/auth/send-otp', () => {
 
   // Negative case: a technician's mobile number cannot log in on the
   // customer role.
-  test('rejects a known technician number trying to log in as customer', async () => {
+  // One number, two roles (services/userSessions.js): once ip_user_sessions
+  // exists, a technician number can also log in to the customer app.
+  test('a technician number can log in to the customer app too', async () => {
+    db.query
+      .mockResolvedValueOnce([[{
+        user_id: 17, client_id: null, user_microlab_type: 'technician',
+        user_auth_token: null, user_token_expiry: null, deleted_at: null,
+      }]])
+      .mockResolvedValueOnce([{}]); // UPDATE ip_users SET user_otp=...
+
+    const res = await request(app)
+      .post('/api/auth/send-otp')
+      .send({ mobile: '9000000001', role: 'customer' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    // The customer login must not turn the technician back into a customer.
+    const update = db.query.mock.calls[1];
+    expect(update[0]).toMatch(/CASE WHEN \? = 'technician' THEN 'technician' ELSE user_microlab_type END/);
+    expect(update[1][2]).toBe('patient_user');
+  });
+
+  test('a customer-app login on another device blocks a customer login', async () => {
     db.query.mockResolvedValueOnce([[{
-      user_id: 17, client_id: null, user_microlab_type: 'technician',
-      user_auth_token: null, user_token_expiry: null, deleted_at: null,
+      user_id: 17, client_id: 5, user_microlab_type: 'technician',
+      // the session columns come from the CUSTOMER row of ip_user_sessions
+      user_auth_token: 'customer-session', is_logged_in: 1, deleted_at: null,
+    }]]);
+
+    const res = await request(app)
+      .post('/api/auth/send-otp')
+      .send({ mobile: '9000000001', role: 'customer' });
+
+    expect(res.status).toBe(409);
+    const [sql, params] = db.query.mock.calls[0];
+    expect(sql).toMatch(/LEFT JOIN ip_user_sessions s ON s.user_id = u.user_id AND s.role = \?/);
+    // This app's session and the other app's (technician) are both looked at.
+    expect(params).toEqual(['customer', 'technician', '9000000001']);
+  });
+
+  test('a customer account deleted on a technician number stays deleted', async () => {
+    db.query.mockResolvedValueOnce([[{
+      user_id: 17, client_id: 5, user_microlab_type: 'technician',
+      user_auth_token: null, deleted_at: null, role_closed_at: new Date(),
     }]]);
 
     const res = await request(app)
@@ -179,6 +219,28 @@ describe('POST /api/auth/send-otp', () => {
       .send({ mobile: '9000000001', role: 'customer' });
 
     expect(res.status).toBe(403);
-    expect(res.body.message).toMatch(/technician account/i);
+    expect(res.body.message).toMatch(/deleted/i);
+  });
+
+  // Before migrations/create_user_sessions.sql is run, the old rule stays.
+  test('without ip_user_sessions, a technician number still cannot log in as customer', async () => {
+    const sessions = require('../../services/userSessions');
+    const missing = Object.assign(new Error("Table 'ip_user_sessions' doesn't exist"), { code: 'ER_NO_SUCH_TABLE' });
+    db.query
+      .mockRejectedValueOnce(missing)            // joined SELECT — table missing
+      .mockResolvedValueOnce([[{                 // old ip_users-only SELECT
+        user_id: 17, client_id: null, user_microlab_type: 'technician',
+        user_auth_token: null, user_token_expiry: null, deleted_at: null,
+      }]]);
+    try {
+      const res = await request(app)
+        .post('/api/auth/send-otp')
+        .send({ mobile: '9000000001', role: 'customer' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.message).toMatch(/technician account/i);
+    } finally {
+      sessions._resetForTests();
+    }
   });
 });

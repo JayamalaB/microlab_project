@@ -1427,7 +1427,20 @@ class _PendingBookingCard extends StatelessWidget {
                   _InfoRow(Icons.science_outlined,
                       booking.testNames.join(', ')),
 
-                  if (booking.docRequired) ...[
+                  // docVerified comes from the server's "a prescription
+                  // exists for this booking" check (customer or technician
+                  // upload), so it means "uploaded", not "verified".
+                  if (booking.docVerified) ...[
+                    const SizedBox(height: TechSpace.sm),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: TechStatusChip(
+                        label: 'Prescription uploaded',
+                        icon: Icons.check_circle_outline_rounded,
+                        tone: TechTone.success,
+                      ),
+                    ),
+                  ] else if (booking.docRequired) ...[
                     const SizedBox(height: TechSpace.sm),
                     const Align(
                       alignment: Alignment.centerLeft,

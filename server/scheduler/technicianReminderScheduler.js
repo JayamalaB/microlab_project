@@ -26,6 +26,7 @@ const fs       = require('fs');
 const path     = require('path');
 const cron     = require('node-cron');
 const db       = require('../config/db');
+const userSessions = require('../services/userSessions');
 const settings = require('../config/settings');
 const { messaging } = require('../config/firebase');
 const dbLogger = require('../utils/dbLogger');
@@ -138,13 +139,20 @@ const DUE_ROWS_SQL = `
             AND b2.status != 'cancelled'))`;
 
 async function sendPush(technicianId, bookingId, msg) {
-  const [[tech]] = await db.execute(
+  // The technician app's own push token (services/userSessions.js).
+  const [[tech]] = await userSessions.withSchemaFallback(db, 'execute',
+    `SELECT ${userSessions.TECHNICIAN_PUSH_TOKEN} AS user_notification_token,
+            tll.fcm_token AS live_fcm_token
+     FROM ip_technicians t
+     JOIN ip_users u ON u.user_id = t.user_id${userSessions.PUSH_TOKEN_JOINS}
+     LEFT JOIN ip_technician_live_location tll ON tll.technician_id = t.technician_id
+     WHERE t.technician_id = ? LIMIT 1`,
+    [technicianId],
     `SELECT u.user_notification_token, tll.fcm_token AS live_fcm_token
      FROM ip_technicians t
      JOIN ip_users u ON u.user_id = t.user_id
      LEFT JOIN ip_technician_live_location tll ON tll.technician_id = t.technician_id
-     WHERE t.technician_id = ? LIMIT 1`,
-    [technicianId]
+     WHERE t.technician_id = ? LIMIT 1`
   );
   const token = tech?.user_notification_token || tech?.live_fcm_token;
   if (!token || !messaging) return { sent: false, reason: !token ? 'no FCM token' : 'messaging not initialised' };

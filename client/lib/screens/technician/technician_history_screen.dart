@@ -510,7 +510,7 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
         mainAxisSize: MainAxisSize.min,
         children: [
           // Handle
-          const TechDragHandle(),
+          const TechSheetHandleBar(),
 
           // Header
           Padding(

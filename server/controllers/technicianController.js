@@ -13,6 +13,7 @@ const { savePartialReason } = require('../services/partialPaymentReason');
 const sms  = require('../utils/sms');
 const { forceTechnicianOffline, unassignAndRedispatch } = require('../socket/bookingSocket');
 const dbLogger = require('../utils/dbLogger');
+const sessions = require('../services/userSessions');
 const { getTechnicianBranches } = require('../services/technicianBranches');
 const serviceChargeSvc = require('../services/serviceCharge');
 const { verifyRazorpayPayment } = require('../services/razorpayVerify');
@@ -233,6 +234,9 @@ exports.logoutTechnician = async (req, res) => {
        WHERE t.technician_id = ?`,
       [technicianId]
     );
+    // End the technician session only — the same number's customer login
+    // (if any) stays valid (services/userSessions.js).
+    await sessions.clearTechnicianLogin(technicianId, connection);
 
     await connection.commit();
 

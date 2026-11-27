@@ -3,6 +3,7 @@ const { messaging } = require('../config/firebase');
 const fs            = require('fs');
 const path          = require('path');
 const dbLogger      = require('../utils/dbLogger');
+const userSessions  = require('./userSessions');
 
 const CHANNEL_ID = 'booking_updates';
 const LOG_FILE   = path.join(__dirname, '..', 'logs', 'customer_push.log');
@@ -34,13 +35,23 @@ async function sendToBookingOwner(bookingId, title, body, extraData = {}) {
   }
 
   try {
-    const [[row]] = await db.execute(
+    // The customer app's own push token. Not limited to
+    // user_microlab_type = 'patient_user' any more: a technician can also book
+    // as a customer on the same number (services/userSessions.js).
+    const [[row]] = await userSessions.withSchemaFallback(db, 'execute',
+      `SELECT ${userSessions.CUSTOMER_PUSH_TOKEN} AS user_notification_token,
+              u.user_mobile_no, u.client_id
+       FROM ip_bookings b
+       JOIN ip_users u ON u.client_id = b.client_id${userSessions.PUSH_TOKEN_JOINS}
+       WHERE b.booking_id = ?
+       ORDER BY (u.user_microlab_type = 'patient_user') DESC
+       LIMIT 1`,
+      [bookingId],
       `SELECT u.user_notification_token, u.user_mobile_no, u.client_id
        FROM ip_bookings b
        JOIN ip_users u ON u.client_id = b.client_id
        WHERE b.booking_id = ? AND u.user_microlab_type = 'patient_user'
-       LIMIT 1`,
-      [bookingId]
+       LIMIT 1`
     );
 
     writeLog(`[customerPush] db row — mobile=${row?.user_mobile_no ?? 'NULL'} client_id=${row?.client_id ?? 'NULL'} has_token=${!!row?.user_notification_token}`);

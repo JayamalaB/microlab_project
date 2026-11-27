@@ -2161,7 +2161,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const CxDragHandle(),
+            const CxSheetHandleBar(),
 
             const Text('Collection Mode', style: CxText.sheetTitle),
             const SizedBox(height: CxSpace.md),
@@ -2966,7 +2966,7 @@ class _TestDetailSheet extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const CxDragHandle(),
+          const CxSheetHandleBar(),
           Flexible(
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, CxSpace.xl),
@@ -3179,7 +3179,7 @@ class _RecommendedTestsSheetState extends State<_RecommendedTestsSheet> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const CxDragHandle(),
+          const CxSheetHandleBar(),
           const Padding(
             padding: EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, 4),
             child: Column(
@@ -3386,7 +3386,7 @@ class _CartSheetState extends State<_CartSheet> {
           ? Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const CxDragHandle(),
+                const CxSheetHandleBar(),
                 const CxEmptyState(
                   icon: Icons.shopping_cart_outlined,
                   title: 'Cart is empty',
@@ -3396,7 +3396,7 @@ class _CartSheetState extends State<_CartSheet> {
             )
           : Column(
               children: [
-                const CxDragHandle(),
+                const CxSheetHandleBar(),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(CxSpace.xl, 0, CxSpace.xl, CxSpace.md),
                   child: Row(
@@ -3833,7 +3833,7 @@ class _PrescriptionUploadSheetState extends State<PrescriptionUploadSheet> {
       child: Column(
         children: [
           // ── Handle ──────────────────────────────────────
-          const CxDragHandle(),
+          const CxSheetHandleBar(),
 
           // ── Header ──────────────────────────────────────
           Padding(

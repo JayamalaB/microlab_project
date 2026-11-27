@@ -10,6 +10,7 @@ const { getSecret, refreshSecret } = require('./secretCache');
 const dbLogger = require('../utils/dbLogger');
 const { logAsmx } = require('./asmxLogger');
 const { getBranchCode } = require('./branchCodes');
+const userSessions = require('./userSessions');
 
 const LOG_FILE = path.join(__dirname, '..', 'logs', 'client_sync.log');
 
@@ -993,7 +994,7 @@ async function syncVisitCompletionToClient(primaryBookingId, initiator) {
     const [[holder]] = await db.execute(
       `SELECT COALESCE(NULLIF(c.client_mobile_no, ''),
                        (SELECT u.user_mobile_no FROM ip_users u
-                        WHERE u.client_id = c.client_id AND u.user_microlab_type = 'patient_user'
+                        WHERE u.client_id = c.client_id
                         LIMIT 1)) AS mobile
        FROM ip_clients c WHERE c.client_id = ? LIMIT 1`,
       [primaryBooking.client_id]
@@ -1189,10 +1190,15 @@ async function _sendBookingConfirmedNotification(booking, initiatorMobile, refer
     return;
   }
   try {
-    const [[userRow]] = await db.execute(
+    // The customer app's own push token — also for a number that is a
+    // technician too (services/userSessions.js).
+    const [[userRow]] = await userSessions.withSchemaFallback(db, 'execute',
+      `SELECT ${userSessions.CUSTOMER_PUSH_TOKEN} AS user_notification_token
+       FROM ip_users u${userSessions.PUSH_TOKEN_JOINS}
+       WHERE u.user_mobile_no = ? LIMIT 1`,
+      [initiatorMobile],
       `SELECT user_notification_token FROM ip_users
-       WHERE user_mobile_no = ? AND user_microlab_type = 'patient_user' LIMIT 1`,
-      [initiatorMobile]
+       WHERE user_mobile_no = ? AND user_microlab_type = 'patient_user' LIMIT 1`
     );
     const fcmToken = userRow?.user_notification_token;
     if (!fcmToken) {
