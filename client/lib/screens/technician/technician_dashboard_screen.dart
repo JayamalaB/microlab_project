@@ -46,6 +46,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
 
   StreamSubscription<SocketBooking>? _bookingRequestSub;
   StreamSubscription<SocketBooking>? _bookingNotifAcceptSub;
+  StreamSubscription<int>? _iosBookingTapSub;
   bool _overlayOpen = false;
   int  _sessionRequestCount = 0;
 
@@ -135,6 +136,17 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   }
 
   Future<void> _verifyAndShowPendingBooking(SocketBooking booking) async {
+    // Opened from a notification, the socket is often still reconnecting
+    // (always on iOS, where the background app is suspended). Give it a moment
+    // instead of treating the request as stale straight away.
+    if (!SocketService.instance.isConnected) {
+      try {
+        await SocketService.instance.onConnected
+            .firstWhere((connected) => connected)
+            .timeout(const Duration(seconds: 10));
+      } catch (_) {/* still offline — checkPendingBooking reports stale */}
+      if (!mounted) return;
+    }
     final stillPending = await SocketService.instance.checkPendingBooking(
       bookingId:    booking.bookingId,
       technicianId: SocketService.instance.userId,
@@ -266,6 +278,14 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
         BookingNotificationService.instance.onAccepted.listen((booking) {
       if (!mounted) return;
       _onBookingAccepted(booking);
+    });
+
+    // iOS: tapped the booking request alert while the app was in memory. The
+    // booking is already pending — show the overlay now (verified with the
+    // server first) instead of waiting for the next dispatch attempt.
+    _iosBookingTapSub =
+        BookingNotificationService.instance.onIosBookingTapped.listen((_) {
+      if (mounted) _showPendingBackgroundBooking();
     });
 
     // booking_cancelled is handled inside BookingRequestOverlay itself.
@@ -924,6 +944,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
     WidgetsBinding.instance.removeObserver(this);
     _bookingRequestSub?.cancel();
     _bookingNotifAcceptSub?.cancel();
+    _iosBookingTapSub?.cancel();
     _refreshTimer?.cancel();
     _stopLocationStream();
     if (_isOnline) {

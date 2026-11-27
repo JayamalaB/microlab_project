@@ -142,12 +142,37 @@ class NotificationService {
     ));
 
     await _localNotifs.initialize(
-      const InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      InitializationSettings(
+        android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
         // Required on iOS — without it initialize() throws and local
         // booking notifications never work. Requests alert/badge/sound
         // permission on first launch (Android asks via FCM below).
-        iOS: DarwinInitializationSettings(),
+        iOS: DarwinInitializationSettings(
+          // Accept / Decline buttons on the booking_request push — the server
+          // sends aps.category = BOOKING_REQUEST. Both open the app, like
+          // showsUserInterface on Android. Presses are handled in
+          // AppDelegate.swift → BookingNotificationService.
+          notificationCategories: [
+            DarwinNotificationCategory(
+              'BOOKING_REQUEST',
+              actions: [
+                DarwinNotificationAction.plain(
+                  'accept_booking',
+                  'Accept',
+                  options: {DarwinNotificationActionOption.foreground},
+                ),
+                DarwinNotificationAction.plain(
+                  'decline_booking',
+                  'Decline',
+                  options: {
+                    DarwinNotificationActionOption.foreground,
+                    DarwinNotificationActionOption.destructive,
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
       // Fires when user taps a notification or action button while app is running
       // (foreground or background). Does NOT fire for cold-start taps — handled

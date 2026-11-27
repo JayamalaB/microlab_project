@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -65,6 +66,56 @@ class BookingNotificationService {
     _cancelSub?.cancel();
     _cancelSub = SocketService.instance.onBookingCancelled.listen(_onServerCancelled);
     _log('init() — listening to booking_cancelled');
+    _initIosPushActions();
+  }
+
+  // ── iOS booking_request push: Accept / Decline / tap ───────────────────────
+  // On iOS the booking request alert is shown by Apple (APNs), not by this
+  // app, so its button presses and taps don't reach
+  // onDidReceiveNotificationResponse. AppDelegate.swift catches them and keeps
+  // the latest one until we take it here; it also calls
+  // bookingActionAvailable when the app is already running. Each one is then
+  // handled exactly like the Android notification via handleNotificationAction.
+  static const _iosActionChannel = MethodChannel('microlab/booking_action');
+
+  final _iosTapCtrl = StreamController<int>.broadcast();
+  /// iOS: the technician tapped a booking request alert — the booking is now
+  /// the pending background booking, ready for the request overlay.
+  Stream<int> get onIosBookingTapped => _iosTapCtrl.stream;
+
+  void _initIosPushActions() {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return;
+    _iosActionChannel.setMethodCallHandler((call) async {
+      if (call.method == 'bookingActionAvailable') await _takeIosPushAction();
+    });
+    // Cold start: the tap/button that launched the app is already waiting.
+    _takeIosPushAction();
+  }
+
+  Future<void> _takeIosPushAction() async {
+    try {
+      final raw = await _iosActionChannel.invokeMethod<Map<dynamic, dynamic>>('takePendingAction');
+      if (raw == null) return;
+      final action = raw['action'] as String?;
+      final data   = Map<String, dynamic>.from(raw['data'] as Map? ?? const {});
+      if (data['type'] != 'booking_request') return;
+      final bookingId = int.tryParse('${data['bookingId']}') ?? 0;
+      if (bookingId == 0) return;
+      _log('iOS push $action — #$bookingId');
+
+      final isTap = action == 'tap';
+      handleNotificationAction(NotificationResponse(
+        notificationResponseType: isTap
+            ? NotificationResponseType.selectedNotification
+            : NotificationResponseType.selectedNotificationAction,
+        id:       bookingId,
+        actionId: isTap ? null : action, // accept_booking / decline_booking
+        payload:  jsonEncode(data),
+      ));
+      if (isTap) _iosTapCtrl.add(bookingId);
+    } catch (e) {
+      _log('iOS push action error: $e');
+    }
   }
 
   // Server sent booking_cancelled for this bookingId — all 3 attempts exhausted

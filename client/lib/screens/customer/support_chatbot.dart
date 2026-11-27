@@ -29,12 +29,6 @@ const _kYoutubeId      = 'gmUHEvrpYoU';
 const _kYoutubeTitle   = 'NeuralArc – IoT & AI Solutions';
 const _kYoutubeSub     = 'See how we build end-to-end smart systems for industry.';
 const _kYoutubeChannel = 'NeuralArc Global';
-// Asset paths — images live in client/assets/banners/ (bundled in the app)
-const _kBannerUrls = [
-  'assets/banners/banner1.jpg',
-  'assets/banners/banner2.png',
-  'assets/banners/banner3.png',
-];
 
 // ── Layer definitions ─────────────────────────────────────────────────────────
 enum _Layer { all, staticInfo, db, web, book }
@@ -479,9 +473,9 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
   _Layer _layer   = _Layer.all;
   final String _sid = 'ml_${DateTime.now().millisecondsSinceEpoch}';
 
-  // Banner carousel images — starts with the bundled fallback, replaced by
-  // ip_chatbot_banners (active, sort_order) once /api/chat/banners responds.
-  List<String> _bannerUrls = List.from(_kBannerUrls);
+  // Banner carousel images — empty (carousel hidden) until ip_chatbot_banners
+  // (active, sort_order) arrive from /api/chat/banners.
+  List<String> _bannerUrls = [];
 
   // Patient auth — set from widget.patientId (app login) or from inline form
   String? _verifiedPatientId;
@@ -568,9 +562,8 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
     _loadBanners();
   }
 
-  // Replaces the hardcoded banner assets with ip_chatbot_banners once fetched —
-  // silently keeps the bundled fallback on any failure or empty result so the
-  // carousel is never left blank.
+  // Loads the active ip_chatbot_banners for the carousel —
+  // silently keeps the carousel hidden on any failure or empty result.
   Future<void> _loadBanners() async {
     try {
       final res = await http
@@ -585,7 +578,7 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
           .toList();
       if (urls.isNotEmpty) setState(() => _bannerUrls = urls);
     } catch (_) {
-      // Keep the bundled fallback.
+      // Keep the carousel hidden.
     }
   }
 
@@ -1510,7 +1503,8 @@ class _ChatbotSheetState extends State<_ChatbotSheet> {
             _YoutubeCard(),
             SizedBox(height: 10),
           ],
-          _BannerCarousel(key: ValueKey(_bannerUrls.join(',')), imageUrls: _bannerUrls),
+          if (_bannerUrls.isNotEmpty)
+            _BannerCarousel(key: ValueKey(_bannerUrls.join(',')), imageUrls: _bannerUrls),
         ],
       ),
     );
