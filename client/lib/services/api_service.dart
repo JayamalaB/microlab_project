@@ -937,6 +937,100 @@ class ApiService {
     }
   }
 
+  /// Technician profile: saves name + email (PUT /api/technicians/profile).
+  static Future<Map<String, dynamic>> updateTechnicianProfile({
+    required String name,
+    required String email,
+  }) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await _client.put(
+        Uri.parse('$baseUrl/api/technicians/profile'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode({'name': name, 'email': email}),
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[updateTechnicianProfile] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
+  /// Technician's own profile photo. Returns {success, tech_photo (URL)}.
+  static Future<Map<String, dynamic>> uploadTechnicianPhoto(Uint8List bytes, String filename) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final req = http.MultipartRequest('POST', Uri.parse('$baseUrl/api/technicians/profile/photo'))
+        ..headers['Authorization'] = 'Bearer $token'
+        ..files.add(http.MultipartFile.fromBytes('photo', bytes,
+            filename: filename, contentType: MediaType('image', 'jpeg')));
+      final streamed = await _client.send(req).timeout(const Duration(seconds: 30));
+      final res = await http.Response.fromStream(streamed).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[uploadTechnicianPhoto] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
+  static Future<Map<String, dynamic>> removeTechnicianPhoto() async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await _client.delete(
+        Uri.parse('$baseUrl/api/technicians/profile/photo'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[removeTechnicianPhoto] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
+  /// The technician's own free times for the next few days, to reschedule an
+  /// accepted job: [{date: 'YYYY-MM-DD', slots: [{available_slot_id, time, label}]}].
+  static Future<Map<String, dynamic>> getTechnicianRescheduleSlots() async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await _client.get(
+        Uri.parse('$baseUrl/api/technicians/reschedule-slots'),
+        headers: {'Authorization': 'Bearer $token'},
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[getTechnicianRescheduleSlots] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
+  /// Technician moves an accepted (not yet started) job to one of their own
+  /// free times and keeps it. Returns {success, message, new_date, new_slot}.
+  static Future<Map<String, dynamic>> rescheduleAssignedBooking({
+    required int bookingId,
+    required int availableSlotId,
+  }) async {
+    final token = await getToken();
+    if (token == null) return {'success': false, 'message': 'Not logged in'};
+    try {
+      final res = await _client.post(
+        Uri.parse('$baseUrl/api/technicians/reschedule-booking'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'bookingId': bookingId, 'availableSlotId': availableSlotId}),
+      ).timeout(const Duration(seconds: 15));
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[rescheduleAssignedBooking] ERROR: $e');
+      return {'success': false, 'message': 'Network error'};
+    }
+  }
+
   // Returns [{patientId, patientName, patientMobile}] for additional patients linked to a booking
   // Returns {payment_status, amount_paid, amount_due, total_amount, items_total}
   // for a booking — used by the technician detail screen to get fresh payment

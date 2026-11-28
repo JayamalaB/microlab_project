@@ -677,6 +677,14 @@ exports.getMyBookings = async (req, res) => {
   }
 };
 
+// Once the technician has started the journey the customer can't cancel —
+// checked on both ip_bookings.status and the technician's step.
+// 'collected' = the older value of sample_collected.
+const CANCEL_BLOCKED_FROM_EN_ROUTE = [
+  'en_route', 'arrived', 'collection_started', 'sample_collected', 'collected', 'otp_verified',
+  'all_collected', 'handed_to_lab_pending', 'handed_to_lab', 'completed',
+];
+
 // ── POST /api/bookings/:bookingId/cancel ──────────────────────────────────────
 exports.cancelBooking = async (req, res) => {
   const clientId  = req.user.client_id;
@@ -685,8 +693,8 @@ exports.cancelBooking = async (req, res) => {
   const { reason } = req.body;
 
   try {
-    const allowedBookingStatuses    = settings.getList('cancel_allowed_booking_statuses',    ['pending', 'scheduled', 'confirmed', 'assigned', 'arrived']);
-    const allowedCollectionStatuses = settings.getList('cancel_allowed_collection_statuses', ['assigned', 'en_route', 'arrived']);
+    const allowedBookingStatuses    = settings.getList('cancel_allowed_booking_statuses',    ['pending', 'scheduled', 'confirmed', 'assigned']);
+    const allowedCollectionStatuses = settings.getList('cancel_allowed_collection_statuses', ['assigned']);
     const chargeStatuses            = settings.getList('cancel_charge_trigger_statuses',     ['arrived']);
     const serviceCharge             = parseFloat(settings.get('cancel_service_charge_amount', '0')) || 0;
     const cutoffMinutes             = parseInt(settings.get('cancel_cutoff_minutes', '0'), 10) || 0;
@@ -707,6 +715,12 @@ exports.cancelBooking = async (req, res) => {
 
     if (!booking) {
       return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    // Fixed rule (not a setting): once the technician is on the way, the
+    // customer can't cancel.
+    if (CANCEL_BLOCKED_FROM_EN_ROUTE.includes(booking.status)) {
+      return res.status(400).json({ success: false, code: 'TECHNICIAN_ON_THE_WAY', message: 'Your technician is already on the way, so this booking can\'t be cancelled now.' });
     }
 
     if (!allowedBookingStatuses.includes(booking.status)) {
@@ -742,6 +756,9 @@ exports.cancelBooking = async (req, res) => {
         [bookingId]
       );
       tc = row ?? null;
+      if (tc && CANCEL_BLOCKED_FROM_EN_ROUTE.includes(tc.collection_status)) {
+        return res.status(400).json({ success: false, code: 'TECHNICIAN_ON_THE_WAY', message: 'Your technician is already on the way, so this booking can\'t be cancelled now.' });
+      }
       if (tc && !allowedCollectionStatuses.includes(tc.collection_status)) {
         return res.status(400).json({ success: false, message: 'Cannot cancel — sample collection has already started' });
       }
@@ -1952,9 +1969,13 @@ exports.updateAdminStatus = async (req, res) => {
     pending:              'pending',
     confirmed:            'confirmed',
     technician_assigned:  'assigned',    // matches socket flow → UI shows "Technician Allocated"
-    en_route:              null,
-    arrived:               null,
-    sample_collected:      null,
+    // Same values the technician app writes at each step (bookingSocket.js).
+    en_route:             'en_route',
+    arrived:              'arrived',
+    collection_started:   'collection_started',
+    sample_collected:     'sample_collected',
+    otp_verified:         'otp_verified',
+    handed_to_lab_pending: 'handed_to_lab_pending',
     submitted_to_lab:      'handed_to_lab',  // admin verifies the technician's handover submission
     processing:            null,
     partial:               null,
@@ -1968,10 +1989,15 @@ exports.updateAdminStatus = async (req, res) => {
     technician_assigned: 'assigned',
     en_route:            'en_route',
     arrived:             'arrived',
+    collection_started:  'collection_started',
     sample_collected:    'sample_collected',
+    otp_verified:        'otp_verified',
+    handed_to_lab_pending: 'handed_to_lab_pending',
     submitted_to_lab:    'handed_to_lab',
-    processing:          'collected',
-    partial:             'collected',
+    // Lab is working on it: the technician's part stays finished (handed
+    // over) — 'collected' would put it back on their Dashboard.
+    processing:          'handed_to_lab',
+    partial:             'handed_to_lab',
     results_ready:       'completed',
     completed:           'completed',
     cancelled:           'cancelled',
@@ -2309,7 +2335,10 @@ exports.selfEditItems = async (req, res) => {
     }
 
     const blockedCollectionStatuses = ['en_route', 'arrived', 'collection_started', 'sample_collected', 'handed_to_lab'];
-    const blockedBookingStatuses    = ['collected', 'submitted', 'completed', 'cancelled'];
+    const blockedBookingStatuses    = [
+      'en_route', 'arrived', 'collection_started', 'sample_collected', 'collected', 'otp_verified',
+      'submitted', 'handed_to_lab_pending', 'handed_to_lab', 'completed', 'cancelled',
+    ];
     if (blockedCollectionStatuses.includes(booking.collection_status)) {
       await conn.rollback();
       return res.status(400).json({ success: false, message: 'Cannot edit — technician is already on the way' });
@@ -2843,7 +2872,9 @@ exports.dispatchBooking = async (req, res) => {
          p.patient_name,
          p.patient_mobile,
          COALESCE(ts.slot_id, ls.slot_id) AS slot_id,
-         ias.slot_time
+         ias.slot_time,
+         (SELECT COUNT(*) FROM ip_technician_collection tc
+           WHERE tc.booking_id = b.booking_id AND tc.collection_status <> 'cancelled') AS tech_rows
        FROM ip_bookings b
        JOIN ip_patients p   ON p.patient_id          = b.patient_id
        LEFT JOIN ip_available_slots  ias ON ias.available_slot_id  = b.available_slot_id
@@ -2861,6 +2892,19 @@ exports.dispatchBooking = async (req, res) => {
     }
 
     console.log(`[DISPATCH-API] booking found — id=${bid} status=${row.status} type=${row.booking_type} patient="${row.patient_name}" branch=${row.branch_id}`);
+
+    // A technician already has this booking (accepted or admin-assigned) —
+    // even if the status still reads pending/confirmed (e.g. the accept's
+    // status write hasn't landed yet, or the status was set back by hand).
+    // Dispatching again would offer it straight back to that technician.
+    if (Number(row.tech_rows ?? 0) > 0) {
+      console.warn(`[DISPATCH-API] REJECTED — booking ${bid} already has a technician`);
+      return res.status(409).json({
+        success: false,
+        code: 'ALREADY_ASSIGNED',
+        message: 'A technician is already assigned to this booking — dispatch not needed',
+      });
+    }
 
     if (!['pending', 'confirmed'].includes(row.status)) {
       console.warn(`[DISPATCH-API] REJECTED — status='${row.status}' (must be pending or confirmed)  bookingId=${bid}`);
@@ -3234,6 +3278,23 @@ exports.rescheduleBooking = async (req, res) => {
 
     const allIds = allBookings.map(b => b.booking_id);
 
+    // Old date + time as plain text (no timezone shift), for the technician
+    // History "Rescheduled" record below. Display-only, so never fatal.
+    let oldDate = null;
+    let oldSlotLabel = null;
+    try {
+      const [[old]] = await db.execute(
+        `SELECT DATE_FORMAT(b.booking_date, '%Y-%m-%d') AS old_date,
+                TIME_FORMAT(avs.slot_time, '%h:%i %p')   AS slot_label
+         FROM ip_bookings b
+         LEFT JOIN ip_available_slots avs ON avs.available_slot_id = b.available_slot_id
+         WHERE b.booking_id = ? LIMIT 1`,
+        [bookingId]
+      );
+      oldDate      = old?.old_date ?? null;
+      oldSlotLabel = old?.slot_label ?? null;
+    } catch (_) { /* display-only */ }
+
     // ── Transaction ───────────────────────────────────────────────────────────
     const conn = await db.getConnection();
     try {
@@ -3302,6 +3363,29 @@ exports.rescheduleBooking = async (req, res) => {
       throw err;
     } finally {
       conn.release();
+    }
+
+    // ── Record the reschedule (technician History "Rescheduled" tab) ──────────
+    // After the commit and best effort: the reschedule itself is already done,
+    // and must not fail if migrations/create_booking_reschedules.sql hasn't
+    // been run yet. One row per member booking.
+    try {
+      const placeholders = allIds.map(() => "(?, ?, ?, ?, ?, ?, 'customer')").join(', ');
+      await db.execute(
+        `INSERT INTO ip_booking_reschedules
+           (booking_id, technician_id, old_date, old_slot_label, new_date, new_slot_label, rescheduled_by)
+         VALUES ${placeholders}`,
+        allIds.flatMap(id => [
+          id, tcRow?.technician_id ?? null, oldDate, oldSlotLabel,
+          collectionDate, newSlot.slot_label ?? null,
+        ])
+      );
+    } catch (err) {
+      if (err.code === 'ER_NO_SUCH_TABLE') {
+        console.warn('[reschedule] ip_booking_reschedules missing — run migrations/create_booking_reschedules.sql');
+      } else {
+        console.error(`[reschedule] could not record reschedule booking_id=${bookingId}:`, err.message);
+      }
     }
 
     // ── Unassign + re-dispatch (technician was assigned pre-reschedule) ───────

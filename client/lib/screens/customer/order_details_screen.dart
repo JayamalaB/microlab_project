@@ -83,14 +83,17 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> with WidgetsBin
     final cs = _collectionStatus ?? '';
     final bs = widget.booking.status;
 
+    // The technician's step (cs) and the booking status label (bs) both
+    // follow every step now; either one moves the tracker.
     if (_hasReport) return 8;
-    if (const {'handed_to_lab', 'handed_to_lab_pending'}.contains(cs) ||
-        const {'Completed', 'Sample Collected', 'Handed to Lab', 'Handed to Lab Pending'}.contains(bs)) return 7;
-    if (const {'otp_verified', 'sample_collected'}.contains(cs)) return 5;
-    if (const {'arrived', 'collection_started'}.contains(cs)) return 4;
-    if (cs == 'en_route') return 3;
+    if (const {'handed_to_lab', 'handed_to_lab_pending', 'completed'}.contains(cs) ||
+        const {'Completed', 'Handed to Lab', 'Handed to Lab Pending'}.contains(bs)) return 7;
+    if (const {'otp_verified', 'sample_collected'}.contains(cs) || bs == 'Sample Collected') return 5;
+    if (const {'arrived', 'collection_started'}.contains(cs) ||
+        const {'Technician Arrived', 'Collection In Progress'}.contains(bs)) return 4;
+    if (cs == 'en_route' || bs == 'Technician On the Way') return 3;
     if (cs.isNotEmpty ||
-        const {'Technician Allocated', 'Technician Arrived', 'In Progress'}.contains(bs)) return 2;
+        const {'Technician Allocated', 'In Progress'}.contains(bs)) return 2;
     return 1;
   }
 

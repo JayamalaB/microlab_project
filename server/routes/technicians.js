@@ -4,6 +4,34 @@ const technicianController = require('../controllers/technicianController');
 const auth = require('../middleware/auth');
 const rolloutAuth = require('../middleware/rolloutAuth');
 const { requireTechnician, requireSameTechnician } = require('../middleware/access');
+const multer = require('multer');
+const path   = require('path');
+const fs     = require('fs');
+
+// Technician profile photo: images only (served publicly from /uploads),
+// named technician_<id>_… so login keeps it over the registry photo.
+const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const PHOTO_TYPES = new Set(['.jpg', '.jpeg', '.png', '.webp', '.heic']);
+const photoUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    filename: (req, file, cb) => {
+      const ext = (path.extname(file.originalname) || '.jpg').toLowerCase();
+      cb(null, `technician_${Number(req.user.id)}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext === '' || PHOTO_TYPES.has(ext)) return cb(null, true);
+    cb(new Error('Only photos (JPG, PNG, WEBP, HEIC) can be uploaded'));
+  },
+});
+function receivePhoto(req, res, next) {
+  photoUpload.single('photo')(req, res, (err) =>
+    err ? res.status(422).json({ success: false, message: err.message || 'Upload failed' }) : next());
+}
 
 // Static POST/GET routes must be registered BEFORE /:technicianId to avoid path collision
 router.post('/add-customer',            auth, requireTechnician, technicianController.addCustomerBooking);
@@ -20,6 +48,11 @@ router.post('/remove-visit-member',     auth, requireTechnician, technicianContr
 router.get('/patient-lookup',           auth, requireTechnician, technicianController.lookupPatient);
 router.get('/booking-family',           auth, requireTechnician, technicianController.getBookingFamily);
 router.post('/cancel-booking',          auth, requireTechnician, technicianController.cancelAssignedBooking);
+router.put('/profile',                  auth, requireTechnician, technicianController.updateProfile);
+router.post('/profile/photo',           auth, requireTechnician, receivePhoto, technicianController.uploadProfilePhoto);
+router.delete('/profile/photo',         auth, requireTechnician, technicianController.removeProfilePhoto);
+router.get('/reschedule-slots',         auth, requireTechnician, technicianController.getRescheduleSlots);
+router.post('/reschedule-booking',      auth, requireTechnician, technicianController.rescheduleAssignedBooking);
 
 // Booking OTP (sample-collection handoff)
 router.post('/booking-otp/generate',    auth, requireTechnician, technicianController.generateBookingOtp);

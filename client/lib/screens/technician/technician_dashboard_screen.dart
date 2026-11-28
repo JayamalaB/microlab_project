@@ -53,6 +53,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   bool _isOnline = false;
   bool _isTogglingOnline = false;
   bool _isRefreshing = false;
+  String _photoUrl = ''; // tech_photo saved at login, shown in the header avatar
   StreamSubscription<Position>? _locationSub;
   Timer? _refreshTimer;
 
@@ -63,6 +64,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
   void initState() {
     super.initState();
     _loadMockData();
+    _loadHeaderPhoto();
     // Sync local flag from the singleton so that if this widget is recreated
     // (hot-reload, navigation stack rebuild) while the tech is already online,
     // incoming booking_request events are not silently dropped by the
@@ -227,6 +229,15 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
     _bookingRequestSub =
         SocketService.instance.onBookingRequest.listen((booking) {
       if (!mounted || !_isOnline) return;
+
+      // Already accepted here (or already in my jobs): a repeated request for
+      // the same booking — no popup, no notification, no beep.
+      if (SocketService.instance.acceptedBookingIds.contains(booking.bookingId) ||
+          _bookings.any((b) => b.id == booking.bookingId.toString())) {
+        debugPrint('[REQUEST] #${booking.bookingId} already accepted — repeated request ignored');
+        BookingNotificationService.instance.cancelBookingNotification(booking.bookingId);
+        return;
+      }
 
       // Screen off / app backgrounded: show notification only (no overlay UI).
       // Also store the booking so if the tech opens the app via the app icon
@@ -497,6 +508,98 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
     await _loadActiveBookings();
     if (mounted) setState(() => _isRefreshing = false);
   }
+
+  // Same photo source as the Profile tab (tech_photo, saved at login).
+  Future<void> _loadHeaderPhoto() async {
+    final prefs = await SharedPreferences.getInstance();
+    final photo = prefs.getString('tech_photo') ?? '';
+    if (mounted && photo != _photoUrl) setState(() => _photoUrl = photo);
+  }
+
+  // ── Header pieces ────────────────────────────────────────────────────────────
+  String get _techName => SocketService.instance.userName.trim();
+
+  Widget _headerInitials() {
+    final initials = _techName.split(RegExp(r'\s+')).take(2)
+        .map((w) => w.isNotEmpty ? w[0] : '').join().toUpperCase();
+    return Container(
+      width: 44,
+      height: 44,
+      color: AppColors.brandGreenSurface,
+      alignment: Alignment.center,
+      child: initials.isEmpty
+          ? const Icon(Icons.person, color: AppColors.brandGreen, size: 24)
+          : Text(initials,
+              style: const TextStyle(
+                  fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.brandGreen)),
+    );
+  }
+
+  Widget _headerAvatar() => Container(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 1.5),
+        ),
+        child: ClipOval(
+          child: _photoUrl.isNotEmpty
+              ? Image.network(
+                  resolveTechPhotoUrl(_photoUrl),
+                  width: 44,
+                  height: 44,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => _headerInitials(),
+                )
+              : _headerInitials(),
+        ),
+      );
+
+  // Same look as the customer home header's logout button.
+  Widget _headerLogoutButton() => Material(
+        color: Colors.white.withValues(alpha: 0.16),
+        shape: CircleBorder(
+            side: BorderSide(color: Colors.white.withValues(alpha: 0.35))),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: _confirmLogout,
+          child: const Tooltip(
+            message: 'Logout',
+            child: SizedBox(
+              width: 44,
+              height: 44,
+              child: Icon(Icons.logout_rounded, color: Colors.white, size: 22),
+            ),
+          ),
+        ),
+      );
+
+  // Same confirmation as the Profile tab's logout; same logout flow.
+  Future<void> _confirmLogout() async {
+    final confirmed = await showTechConfirm(
+      context,
+      icon: Icons.logout_rounded,
+      title: 'Logout?',
+      message: 'Are you sure you want to logout from MicroLab?',
+      confirmLabel: 'Logout',
+      destructive: true,
+    );
+    if (confirmed == true) _handleLogout();
+  }
+
+  // Pull-down refresh for the non-list states (empty / offline), so the
+  // gesture works on every Home state now that the header button is gone.
+  Widget _pullToRefresh(Widget child) => RefreshIndicator(
+        onRefresh: _manualRefresh,
+        color: AppColors.brandGreen,
+        child: LayoutBuilder(
+          builder: (_, c) => SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: c.maxHeight),
+              child: Center(child: child),
+            ),
+          ),
+        ),
+      );
 
   // ── Online / Offline toggle ────────────────────────────────────────────────
 
@@ -917,7 +1020,12 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
     launchUrl(Uri.parse('tel:+91$phone'));
   }
 
-  void _onNavTap(int index) => setState(() => _selectedIndex = index);
+  int _profileTick = 0; // bumped when the Profile tab opens → it reloads
+
+  void _onNavTap(int index) => setState(() {
+        if (index == 3 && _selectedIndex != 3) _profileTick++;
+        _selectedIndex = index;
+      });
 
   @override
   void dispose() {
@@ -971,14 +1079,11 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                             crossAxisAlignment: CrossAxisAlignment.start,
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                          // Single-row header: avatar + greeting + refresh + online toggle
+                          // Single-row header: photo + greeting + online toggle + logout.
+                          // Refresh is pull-down on the list below.
                           Row(
                             children: [
-                              const CircleAvatar(
-                                radius: 22,
-                                backgroundColor: Colors.white,
-                                child: Icon(Icons.person, color: AppColors.brandGreen, size: 24),
-                              ),
+                              _headerAvatar(),
                               const SizedBox(width: 12),
                               Expanded(
                                 child: Column(
@@ -986,7 +1091,7 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Text(
-                                      'Welcome, ${SocketService.instance.userName.trim().isNotEmpty ? SocketService.instance.userName.trim().split(RegExp(r"\s+")).first : "Technician"}!',
+                                      'Welcome, ${_techName.isNotEmpty ? _techName.split(RegExp(r"\s+")).first : "Technician"}!',
                                       style: const TextStyle(
                                           color: Colors.white,
                                           fontSize: 17,
@@ -1000,16 +1105,6 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                                     ),
                                   ],
                                 ),
-                              ),
-                              IconButton(
-                                icon: _isRefreshing
-                                    ? const SizedBox(
-                                        width: 18, height: 18,
-                                        child: CircularProgressIndicator(
-                                            strokeWidth: 2, color: Colors.white))
-                                    : const Icon(Icons.refresh_rounded, color: Colors.white70),
-                                onPressed: _isRefreshing ? null : _manualRefresh,
-                                tooltip: 'Refresh bookings',
                               ),
                               _isTogglingOnline
                                   ? const SizedBox(
@@ -1052,6 +1147,8 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                                         ),
                                       ],
                                     ),
+                              const SizedBox(width: 8),
+                              _headerLogoutButton(),
                             ],
                           ),
                             ],
@@ -1072,15 +1169,15 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
               // If the technician has pre-assigned bookings, show them with a
               // slim banner — new requests are still blocked while offline.
               !_isOnline && _pending.isEmpty
-                    ? _offlineState()
+                    ? _pullToRefresh(_offlineState())
                     : Column(
                         children: [
                           if (!_isOnline) _offlineBanner(),
                           Expanded(
                             child: _pending.isEmpty
-                                ? _emptyState('No pending bookings', Icons.calendar_today_outlined)
+                                ? _pullToRefresh(_emptyState('No pending bookings', Icons.calendar_today_outlined))
                                 : RefreshIndicator(
-                                    onRefresh: _loadActiveBookings,
+                                    onRefresh: _manualRefresh,
                                     color: AppColors.brandGreen,
                                     child: ListView.builder(
                                       padding: const EdgeInsets.fromLTRB(TechSpace.lg, TechSpace.lg, TechSpace.lg, 100),
@@ -1111,6 +1208,10 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                                                 _bookings.removeWhere((bk) => bk.id == b.id);
                                                 _cachedPending = null;
                                               });
+                                            } else if (wasCompleted == kRescheduled && mounted) {
+                                              // Technician moved it to another of their
+                                              // times: show it at the new date/time.
+                                              _manualRefresh();
                                             }
                                           });
                                         },
@@ -1135,6 +1236,12 @@ class _TechnicianDashboardScreenState extends State<TechnicianDashboardScreen>
                       embedded: true,
                       mobile: widget.mobile,
                       onLogout: () => _handleLogout(),
+                      refreshTick: _profileTick,
+                      // Name / photo edited: refresh the header ("Welcome, …" + avatar).
+                      onProfileChanged: () {
+                        if (mounted) setState(() {});
+                        _loadHeaderPhoto();
+                      },
                     )),
               ],
             ),
@@ -1284,6 +1391,7 @@ class _PendingBookingCard extends StatelessWidget {
     }
   }
 
+  // Short date for the time box: Today / Tomorrow / Yesterday / 3 Dec.
   String _formatDate(DateTime d) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -1293,230 +1401,269 @@ class _PendingBookingCard extends StatelessWidget {
     if (diff == 0) return 'Today';
     if (diff == 1) return 'Tomorrow';
     if (diff == -1) return 'Yesterday';
-    return '${d.day} ${months[d.month]} ${d.year}';
+    return d.year == now.year
+        ? '${d.day} ${months[d.month]}'
+        : '${d.day} ${months[d.month]} ${d.year}';
   }
 
+  // Same rule as the Schedule tab's appointment card.
+  String _partOfDay(DateTime d, String timeSlot) {
+    final match = RegExp(r'^(\d{1,2}):').firstMatch(timeSlot);
+    int hour = d.hour;
+    if (match != null) hour = int.tryParse(match.group(1)!) ?? d.hour;
+    final isPm = timeSlot.toUpperCase().contains('PM');
+    if (isPm && hour != 12) hour += 12;
+    if (!isPm && hour == 12) hour = 0;
+    if (hour < 12) return 'Morning';
+    if (hour < 16) return 'Afternoon';
+    if (hour < 20) return 'Evening';
+    return 'Night';
+  }
+
+  // Card layout follows the Schedule tab's "Today's Appointments" card:
+  // time box | name, ref, address, chips | Manage + Start/Resume.
   @override
   Widget build(BuildContext context) {
-    // Determine if booking is in progress (journey started but not completed)
+    // Journey started but not completed.
     final isInProgress = booking.status == 'En Route' ||
                          booking.status == 'Journey Started' ||
                          booking.status == 'Arrived' ||
                          booking.status == 'Destination Reached' ||
                          booking.status == 'Collection Started';
-
-    // Determine if booking is confirmed (ready to start)
     final isConfirmed = booking.status == 'Confirmed';
-    final name = booking.customerName;
+    final ref = booking.referenceNo?.trim() ?? '';
+    final address = [booking.address, booking.city, booking.pincode]
+        .where((s) => s.isNotEmpty).join(', ');
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: TechSpace.md),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: TechRadius.lgAll,
-        border: Border.all(
-          color: isInProgress
-              ? _statusColor.withValues(alpha: 0.45)
-              : TechColors.border,
-          width: isInProgress ? 1.5 : 1,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: TechSpace.md),
+      child: Material(
+        color: TechColors.brandSurface,
+        shape: RoundedRectangleBorder(
+          borderRadius: TechRadius.lgAll,
+          side: BorderSide(
+            color: isInProgress ? _statusColor.withValues(alpha: 0.55) : AppColors.brandGreenLight,
+            width: isInProgress ? 1.5 : 1,
+          ),
         ),
-        boxShadow: const [BoxShadow(color: Color(0x0A000000), blurRadius: 8, offset: Offset(0, 2))],
-      ),
-      child: ClipRRect(
-        borderRadius: TechRadius.lgAll,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Status strip
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: TechSpace.lg, vertical: 10),
-              color: _statusColor.withValues(alpha: 0.08),
-              child: Row(
-                children: [
-                  Icon(_statusIcon, size: 16, color: _statusColor),
-                  const SizedBox(width: 6),
-                  // Expanded (not Flexible + Spacer) so the reference
-                  // number sits right in the corner.
-                  Expanded(
-                    child: Text(booking.status,
-                        overflow: TextOverflow.ellipsis,
-                        maxLines: 1,
-                        style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            color: _statusColor)),
-                  ),
-                  const SizedBox(width: TechSpace.sm),
-                  if (booking.isVip)
-                    const TechStatusChip(label: 'VIP', icon: Icons.star_rounded, tone: TechTone.warning),
-                  if (booking.isVip) const SizedBox(width: TechSpace.sm),
-                  if (booking.referenceNo != null)
-                    Text(booking.referenceNo!, style: TechText.caption),
-                ],
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onManage,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // ── Time box ──
+              Container(
+                width: 76,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(booking.timeSlot,
+                      maxLines: 2,
+                      style: const TextStyle(
+                          fontSize: 12.5, fontWeight: FontWeight.w700, color: AppColors.brandGreen)),
+                  const SizedBox(height: 2),
+                  Text(_partOfDay(booking.date, booking.timeSlot),
+                      style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
+                  const SizedBox(height: 4),
+                  Text(_formatDate(booking.date),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 10.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                ]),
               ),
-            ),
+              const SizedBox(width: 10),
 
-            Padding(
-              padding: const EdgeInsets.all(TechSpace.lg),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Customer name + call
-                  Row(
-                    children: [
-                      CircleAvatar(
-                        radius: 20,
-                        backgroundColor: TechColors.brandSurface,
-                        child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?',
-                            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700,
-                                color: TechColors.brand)),
-                      ),
-                      const SizedBox(width: TechSpace.md),
-                      Expanded(
-                        child: Text(name,
-                            maxLines: 2,
+              // ── Details ──
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Flexible(
+                      child: Text(booking.customerName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
+                    ),
+                    if (booking.isVip) ...[
+                      const SizedBox(width: 4),
+                      const Icon(Icons.star_rounded, size: 16, color: Color(0xFFF59E0B)),
+                    ],
+                    const SizedBox(width: 6),
+                    if (booking.customerPhone.isNotEmpty) _CallButton(onTap: onCall),
+                  ]),
+                  if (ref.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Row(children: [
+                      const Icon(Icons.tag_rounded, size: 13, color: AppColors.textSecondary),
+                      const SizedBox(width: 3),
+                      Flexible(
+                        child: Text(ref,
+                            maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                                color: TechColors.textPrimary)),
+                                fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
                       ),
-                      const SizedBox(width: TechSpace.sm),
-                      Material(
-                        color: TechColors.brandSurface,
-                        shape: const StadiumBorder(),
-                        clipBehavior: Clip.antiAlias,
-                        child: InkWell(
-                          onTap: onCall,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                            child: Row(mainAxisSize: MainAxisSize.min, children: [
-                              const Icon(Icons.phone_outlined, size: 16, color: TechColors.brand),
-                              const SizedBox(width: 5),
-                              Text(booking.customerPhone,
-                                  style: const TextStyle(
-                                      fontSize: 13,
-                                      color: TechColors.brand,
-                                      fontWeight: FontWeight.w600)),
-                            ]),
-                          ),
-                        ),
+                    ]),
+                  ],
+                  if (address.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Icon(Icons.location_on_outlined, size: 13, color: AppColors.textSecondary),
+                      const SizedBox(width: 3),
+                      Expanded(
+                        child: Text(address,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 11.5, color: AppColors.textSecondary)),
                       ),
-                    ],
-                  ),
-
-                  const SizedBox(height: TechSpace.md),
-
-                  // Date + time
-                  _InfoRow(Icons.event_outlined,
-                      '${_formatDate(booking.date)}  ·  ${booking.timeSlot}'),
+                    ]),
+                  ],
                   const SizedBox(height: 6),
+                  Wrap(spacing: 6, runSpacing: 4, children: [
+                    _StatusPill(label: booking.status, icon: _statusIcon, color: _statusColor),
+                    // docVerified means "a prescription was uploaded" (customer
+                    // or technician), not "verified".
+                    if (booking.docVerified)
+                      const _StatusPill(
+                          label: 'Prescription uploaded',
+                          icon: Icons.check_circle_outline_rounded,
+                          color: AppColors.brandGreen)
+                    else if (booking.docRequired)
+                      const _StatusPill(
+                          label: 'Prescription required',
+                          icon: Icons.description_outlined,
+                          color: Color(0xFFE65100)),
+                  ]),
+                ]),
+              ),
+              const SizedBox(width: 8),
 
-                  // Location
-                  _InfoRow(
-                    booking.mode == 'Home Collection'
-                        ? Icons.home_outlined
-                        : Icons.local_hospital_outlined,
-                    [booking.address, booking.city, booking.pincode]
-                        .where((s) => s.isNotEmpty)
-                        .join(', '),
+              // ── Actions ──
+              SizedBox(
+                width: 84,
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  _CardAction(
+                    label: 'Manage',
+                    icon: Icons.edit_note_rounded,
+                    onTap: onManage,
+                    filled: false,
                   ),
-                  const SizedBox(height: 6),
-
-                  // Tests
-                  _InfoRow(Icons.science_outlined,
-                      booking.testNames.join(', ')),
-
-                  // docVerified comes from the server's "a prescription
-                  // exists for this booking" check (customer or technician
-                  // upload), so it means "uploaded", not "verified".
-                  if (booking.docVerified) ...[
-                    const SizedBox(height: TechSpace.sm),
-                    const Align(
-                      alignment: Alignment.centerLeft,
-                      child: TechStatusChip(
-                        label: 'Prescription uploaded',
-                        icon: Icons.check_circle_outline_rounded,
-                        tone: TechTone.success,
-                      ),
-                    ),
-                  ] else if (booking.docRequired) ...[
-                    const SizedBox(height: TechSpace.sm),
-                    const Align(
-                      alignment: Alignment.centerLeft,
-                      child: TechStatusChip(
-                        label: 'Prescription required',
-                        icon: Icons.description_outlined,
-                        tone: TechTone.warning,
-                      ),
+                  if (isConfirmed || isInProgress) ...[
+                    const SizedBox(height: 6),
+                    _CardAction(
+                      label: isConfirmed ? 'Start' : 'Resume',
+                      icon: Icons.directions_bike_rounded,
+                      onTap: isConfirmed ? onStartCollection : onResume,
+                      filled: true,
                     ),
                   ],
-
-                  const SizedBox(height: TechSpace.lg),
-
-                  // Action buttons
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TechButton.secondary(
-                          onPressed: onManage,
-                          icon: Icons.edit_note_rounded,
-                          label: 'Manage',
-                          compact: true,
-                        ),
-                      ),
-                      if (isConfirmed) ...[
-                        const SizedBox(width: TechSpace.sm),
-                        Expanded(
-                          child: TechButton(
-                            onPressed: onStartCollection,
-                            icon: Icons.directions_bike_rounded,
-                            label: 'Start Journey',
-                            compact: true,
-                          ),
-                        ),
-                      ] else if (isInProgress) ...[
-                        const SizedBox(width: TechSpace.sm),
-                        Expanded(
-                          child: TechButton(
-                            onPressed: onResume,
-                            icon: Icons.directions_bike_rounded,
-                            label: 'Continue Journey',
-                            compact: true,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ],
+                ]),
               ),
-            ),
-          ],
+            ]),
+          ),
         ),
       ),
     );
   }
 }
 
-class _InfoRow extends StatelessWidget {
-  final IconData icon;
-  final String text;
-  const _InfoRow(this.icon, this.text);
+// Round call button beside the customer name.
+class _CallButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _CallButton({required this.onTap});
 
   @override
-  Widget build(BuildContext context) => Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 1),
-            child: Icon(icon, size: 16, color: TechColors.textHint),
+  Widget build(BuildContext context) => Material(
+        color: Colors.white,
+        shape: const CircleBorder(side: BorderSide(color: AppColors.brandGreenLight)),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onTap,
+          child: const Tooltip(
+            message: 'Call customer',
+            child: SizedBox(
+              width: 32,
+              height: 32,
+              child: Icon(Icons.phone_rounded, size: 17, color: AppColors.brandGreen),
+            ),
           ),
-          const SizedBox(width: TechSpace.sm),
-          Expanded(
-            child: Text(text,
-                style: const TextStyle(
-                    fontSize: 13, color: TechColors.textSecondary, height: 1.35)),
-          ),
-        ],
+        ),
       );
+}
+
+// Small coloured chip (status / prescription).
+class _StatusPill extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final Color color;
+  const _StatusPill({required this.label, required this.icon, required this.color});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: color.withValues(alpha: 0.35)),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 12, color: color),
+          const SizedBox(width: 4),
+          Flexible(
+            child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: color)),
+          ),
+        ]),
+      );
+}
+
+// Compact button for the card's right-side action column.
+class _CardAction extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final VoidCallback onTap;
+  final bool filled;
+  const _CardAction({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+    required this.filled,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = filled ? Colors.white : TechColors.brand;
+    return Material(
+      color: filled ? TechColors.brand : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: TechRadius.mdAll,
+        side: filled ? BorderSide.none : const BorderSide(color: TechColors.brand, width: 1.2),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: SizedBox(
+          height: TechSize.minTouch,
+          width: double.infinity,
+          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(icon, size: 16, color: fg),
+            const SizedBox(width: 4),
+            Flexible(
+              child: Text(label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: fg)),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
 }

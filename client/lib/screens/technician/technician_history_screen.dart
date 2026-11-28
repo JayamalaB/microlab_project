@@ -24,8 +24,44 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
   List<TechnicianBooking> _history = [];
   bool _loading = true;
   String? _error;
-  int _activeTab = 0; // 0 = Completed, 1 = Cancelled
-  DateTime? _dateFilter;
+  int _activeTab = 0; // 0 = Completed, 1 = Rescheduled, 2 = Cancelled
+  DateTime? _dateFilter; // one exact day (header ≡ button); overrides _range
+  String _range = 'All Time';
+
+  static const _ranges = ['All Time', 'Today', 'This Week', 'Last Week', 'This Month', 'Last Month'];
+
+  // "Completed" = Handed to Lab (server HISTORY_DONE_STATUSES); completed /
+  // all_collected are finished jobs from older app builds.
+  static const _completedStatuses = {
+    'handed_to_lab', 'handed_to_lab_pending', 'completed', 'all_collected',
+  };
+
+  // Quick period filter. Weeks run Monday–Sunday.
+  bool _inRange(DateTime d) {
+    if (_range == 'All Time') return true;
+    final now   = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final day   = DateTime(d.year, d.month, d.day);
+    final weekStart = today.subtract(Duration(days: today.weekday - 1));
+    switch (_range) {
+      case 'Today':
+        return day == today;
+      case 'This Week':
+        return !day.isBefore(weekStart) && !day.isAfter(today);
+      case 'Last Week':
+        final lastStart = weekStart.subtract(const Duration(days: 7));
+        return !day.isBefore(lastStart) && day.isBefore(weekStart);
+      case 'This Month':
+        return d.year == now.year && d.month == now.month;
+      case 'Last Month':
+        final last = DateTime(now.year, now.month - 1); // handles January
+        return d.year == last.year && d.month == last.month;
+    }
+    return true;
+  }
+
+  bool _matchesFilter(TechnicianBooking b) =>
+      _dateFilter != null ? _sameDay(b.date, _dateFilter!) : _inRange(b.date);
 
   @override
   void initState() {
@@ -95,16 +131,24 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
         debugPrint('✅ [HISTORY] rows=${rows.length}');
 
         setState(() {
-          _history = rows.map((r) {
+          _history = rows.where((r) {
+            // Same rule as the server and the Profile Summary: only finished
+            // (handed to lab or later), rescheduled and cancelled jobs.
+            // Anything else (an in-progress job from an older server) is not
+            // history — it is on the Dashboard.
+            final s = (r as Map<String, dynamic>)['collection_status'] as String? ?? '';
+            return _completedStatuses.contains(s) || s == 'rescheduled' || s == 'cancelled';
+          }).map((r) {
             final map    = r as Map<String, dynamic>;
             final rawStatus = map['collection_status'] as String? ?? '';
-            const completedStatuses = {
-              'completed', 'all_collected', 'collected',
-              'handed_to_lab', 'handed_to_lab_pending', 'sample_collected', 'collection_started',
-            };
-            final status = completedStatuses.contains(rawStatus)
+            final status = _completedStatuses.contains(rawStatus)
                 ? 'Completed'
-                : 'Cancelled';
+                : rawStatus == 'rescheduled'
+                    ? 'Rescheduled'
+                    : 'Cancelled';
+            // Rescheduled rows: where the customer moved it to ("YYYY-MM-DD").
+            final newDateStr = map['new_date'] as String?;
+            final movedAt    = map['rescheduled_at'] as String?;
             final dateStr = (map['collection_date'] ?? map['assigned_at'] ?? map['collected_at']) as String?;
             // Parse as UTC then convert to local so IST dates don't shift back one day
             final date    = dateStr != null
@@ -123,12 +167,16 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
               date:               date,
               timeSlot:           (map['slot_time_formatted'] as String?) ??
                                   (map['slot_label']          as String?) ?? '—',
-              testNames:          const ['Home Collection'],
+              testNames:          const [],
               mode:               'Home Collection',
               status:             status,
               serviceChargePaid:  0,
               testsTotal:         double.tryParse(map['amount_paid']?.toString() ?? '') ?? 0,
               assignedAt:         date,
+              rescheduledToDate:  newDateStr != null ? DateTime.tryParse(newDateStr) : null,
+              rescheduledToSlot:  map['new_slot_label'] as String?,
+              rescheduledAt:      movedAt != null ? DateTime.tryParse(movedAt)?.toLocal() : null,
+              rescheduledBy:      map['rescheduled_by'] as String?,
             );
           }).toList();
           _loading = false;
@@ -157,11 +205,13 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
   @override
   Widget build(BuildContext context) {
     var completed = _history.where((b) => b.status == 'Completed').toList();
+    var rescheduled = _history.where((b) => b.status == 'Rescheduled').toList();
     var cancelled = _history.where((b) => b.status == 'Cancelled').toList();
-    if (_dateFilter != null) {
-      completed = completed.where((b) => _sameDay(b.date, _dateFilter!)).toList();
-      cancelled = cancelled.where((b) => _sameDay(b.date, _dateFilter!)).toList();
-    }
+    completed   = completed.where(_matchesFilter).toList();
+    rescheduled = rescheduled.where(_matchesFilter).toList();
+    cancelled   = cancelled.where(_matchesFilter).toList();
+    // Tab order: 0 Completed · 1 Rescheduled · 2 Cancelled.
+    final tabLists = [completed, rescheduled, cancelled];
 
     Widget body;
     if (_loading) {
@@ -190,7 +240,8 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
                   child: Row(children: [
                     Expanded(
                       child: _HistoryTabButton(
-                        label: 'Completed (${completed.length})',
+                        label: 'Completed',
+                        count: completed.length,
                         icon: Icons.check_circle_outline_rounded,
                         selected: _activeTab == 0,
                         onTap: () => setState(() => _activeTab = 0),
@@ -199,48 +250,56 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
                     const SizedBox(width: 4),
                     Expanded(
                       child: _HistoryTabButton(
-                        label: 'Cancelled (${cancelled.length})',
-                        icon: Icons.cancel_outlined,
+                        label: 'Rescheduled',
+                        count: rescheduled.length,
+                        icon: Icons.update_rounded,
                         selected: _activeTab == 1,
                         onTap: () => setState(() => _activeTab = 1),
                       ),
                     ),
-                  ]),
-                ),
-                if (_dateFilter != null) ...[
-                  const SizedBox(height: 10),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Material(
-                      color: TechColors.brandSurface,
-                      shape: const StadiumBorder(),
-                      clipBehavior: Clip.antiAlias,
-                      child: InkWell(
-                        onTap: () => setState(() => _dateFilter = null),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            const Icon(Icons.event_outlined, size: 16, color: TechColors.brand),
-                            const SizedBox(width: 6),
-                            Text(_formatDateShort(_dateFilter!),
-                                style: const TextStyle(
-                                    fontSize: 13, fontWeight: FontWeight.w600, color: TechColors.brand)),
-                            const SizedBox(width: 6),
-                            const Icon(Icons.close_rounded, size: 16, color: TechColors.brand),
-                          ]),
-                        ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: _HistoryTabButton(
+                        label: 'Cancelled',
+                        count: cancelled.length,
+                        icon: Icons.cancel_outlined,
+                        selected: _activeTab == 2,
+                        onTap: () => setState(() => _activeTab = 2),
                       ),
                     ),
-                  ),
-                ],
+                  ]),
+                ),
               ],
             ),
+          ),
+          // Period chips (same look as the customer My Bookings filter). A day
+          // picked with the header ≡ button shows first as its own chip and
+          // overrides the period until cleared; tapping a period clears it.
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: Row(children: [
+              if (_dateFilter != null)
+                _PeriodChip(
+                  label: _formatDateShort(_dateFilter!),
+                  icon: Icons.event_outlined,
+                  selected: true,
+                  trailingClose: true,
+                  onTap: () => setState(() => _dateFilter = null),
+                ),
+              for (final r in _ranges)
+                _PeriodChip(
+                  label: r,
+                  selected: _dateFilter == null && _range == r,
+                  onTap: () => setState(() { _range = r; _dateFilter = null; }),
+                ),
+            ]),
           ),
           Expanded(
             child: ColoredBox(
               color: AppColors.background,
               child: _BookingList(
-                bookings: _activeTab == 0 ? completed : cancelled,
+                bookings: tabLists[_activeTab.clamp(0, 2)],
                 formatDate: _formatDate,
                 onRefresh: _loadHistory,
               ),
@@ -278,7 +337,7 @@ class _TechnicianHistoryScreenState extends State<TechnicianHistoryScreen> {
                           style: TextStyle(
                               color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
                       SizedBox(height: 2),
-                      Text('Completed & Cancelled Appointments',
+                      Text('Completed, Rescheduled & Cancelled',
                           style: TextStyle(color: Colors.white70, fontSize: 11.5)),
                     ],
                   ),
@@ -486,6 +545,14 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
     return '${w[d.weekday - 1]}, ${d.day} ${m[d.month]} ${d.year}';
   }
 
+  // "15 Nov, 09:12 PM"
+  String _fmtStamp(DateTime d) {
+    const m = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    final h12 = ((d.hour + 11) % 12) + 1;
+    final mm  = d.minute.toString().padLeft(2, '0');
+    return '${d.day} ${m[d.month]}, ${h12.toString().padLeft(2, '0')}:$mm ${d.hour < 12 ? 'AM' : 'PM'}';
+  }
+
   double get _testsTotal => _items.isEmpty
       ? b.testsTotal
       : _items.fold(0.0, (s, i) => s + (double.tryParse(i['price']?.toString() ?? '0') ?? 0));
@@ -493,6 +560,9 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
   @override
   Widget build(BuildContext context) {
     final isCompleted = b.status == 'Completed';
+    final isRescheduled = b.status == 'Rescheduled';
+    final movedTo = _movedToLabel(b, _fmt);
+    final when = b.timeSlot.isNotEmpty && b.timeSlot != '—' ? '${_fmt(b.date)} · ${b.timeSlot}' : _fmt(b.date);
 
     return TechThemeScope(
       child: Align(
@@ -525,8 +595,12 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
               ),
               TechStatusChip(
                 label: b.status,
-                icon: isCompleted ? Icons.check_rounded : Icons.close_rounded,
-                tone: isCompleted ? TechTone.success : TechTone.error,
+                icon: isCompleted
+                    ? Icons.check_rounded
+                    : isRescheduled ? Icons.update_rounded : Icons.close_rounded,
+                tone: isCompleted
+                    ? TechTone.success
+                    : isRescheduled ? TechTone.info : TechTone.error,
               ),
             ]),
           ),
@@ -544,9 +618,20 @@ class _TechHistoryDetailSheetState extends State<_TechHistoryDetailSheet> {
                   // Appointment
                   _HDetailSection(title: 'Appointment', rows: [
                     _HDetailRow(Icons.person_outline, 'Customer', b.customerName),
-                    _HDetailRow(Icons.event_outlined, 'Date', _fmt(b.date)),
-                    _HDetailRow(Icons.schedule_outlined, 'Time', b.timeSlot),
-                    _HDetailRow(Icons.home_outlined, 'Mode', b.mode),
+                    if (isRescheduled) ...[
+                      // The appointment this technician had, and where it went.
+                      _HDetailRow(Icons.event_busy_outlined, 'Was', when),
+                      if (movedTo != null)
+                        _HDetailRow(Icons.arrow_forward_rounded, 'Moved to', movedTo),
+                      if (b.rescheduledAt != null)
+                        _HDetailRow(Icons.update_rounded, 'Rescheduled on', _fmtStamp(b.rescheduledAt!)),
+                      if (_rescheduledByLabel(b).isNotEmpty)
+                        _HDetailRow(Icons.person_pin_outlined, 'Rescheduled',
+                            b.rescheduledBy == 'technician' ? 'By you' : 'By the customer'),
+                    ] else ...[
+                      _HDetailRow(Icons.event_outlined, 'Date', _fmt(b.date)),
+                      _HDetailRow(Icons.schedule_outlined, 'Time', b.timeSlot),
+                    ],
                     if (b.address.isNotEmpty)
                       _HDetailRow(Icons.home_outlined, 'Collection Address', b.address),
                     if (b.city.isNotEmpty || b.pincode.isNotEmpty)
@@ -735,6 +820,37 @@ class _HistoryCardSkeleton extends StatelessWidget {
   }
 }
 
+// ─── Status look (card + details sheet) ──────────────────────────────────────
+
+const _rescheduledBlue = Color(0xFF1565C0);
+
+Color _historyStatusColor(String status) => switch (status) {
+      'Completed'   => TechColors.success,
+      'Rescheduled' => _rescheduledBlue,
+      _             => TechColors.error,
+    };
+
+IconData _historyStatusIcon(String status) => switch (status) {
+      'Completed'   => Icons.check_circle_outline,
+      'Rescheduled' => Icons.update_rounded,
+      _             => Icons.cancel_outlined,
+    };
+
+/// "by you" / "by customer" for a rescheduled row ('' when unknown).
+String _rescheduledByLabel(TechnicianBooking b) => switch (b.rescheduledBy) {
+      'technician' => 'by you',
+      'customer'   => 'by customer',
+      _            => '',
+    };
+
+/// "Wed, 18 Nov 2026 · 10:00 AM" for a rescheduled row, or null.
+String? _movedToLabel(TechnicianBooking b, String Function(DateTime) formatDate) {
+  final d = b.rescheduledToDate;
+  if (d == null) return null;
+  final slot = b.rescheduledToSlot?.trim() ?? '';
+  return slot.isEmpty ? formatDate(d) : '${formatDate(d)} · $slot';
+}
+
 // ─── History Card ─────────────────────────────────────────────────────────────
 
 class _HistoryCard extends StatelessWidget {
@@ -746,8 +862,10 @@ class _HistoryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isCompleted  = booking.status == 'Completed';
-    final statusColor  = isCompleted ? TechColors.success : TechColors.error;
+    final isRescheduled = booking.status == 'Rescheduled';
+    final statusColor  = _historyStatusColor(booking.status);
     final totalCollected = booking.serviceChargePaid + booking.testsTotal;
+    final movedTo = _movedToLabel(booking, formatDate);
 
     return Container(
       margin: const EdgeInsets.only(bottom: TechSpace.md),
@@ -766,12 +884,12 @@ class _HistoryCard extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               color: statusColor.withValues(alpha: 0.07),
               child: Row(children: [
-                Icon(
-                  isCompleted ? Icons.check_circle_outline : Icons.cancel_outlined,
-                  size: 16, color: statusColor,
-                ),
+                Icon(_historyStatusIcon(booking.status), size: 16, color: statusColor),
                 const SizedBox(width: 6),
-                Text(booking.status,
+                Text(
+                    isRescheduled && _rescheduledByLabel(booking).isNotEmpty
+                        ? '${booking.status} ${_rescheduledByLabel(booking)}'
+                        : booking.status,
                     style: TextStyle(
                         fontSize: 13, fontWeight: FontWeight.w700, color: statusColor)),
                 const Spacer(),
@@ -793,7 +911,7 @@ class _HistoryCard extends StatelessWidget {
                       color: AppColors.brandGreenSurface,
                       borderRadius: BorderRadius.circular(10),
                     ),
-                    child: const Icon(Icons.home_rounded, color: AppColors.brandGreen, size: 20),
+                    child: const Icon(Icons.person_outline_rounded, color: AppColors.brandGreen, size: 20),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -837,20 +955,21 @@ class _HistoryCard extends StatelessWidget {
                             ),
                           ]),
 
-                        const SizedBox(height: 8),
-
-                        // Tests
-                        Wrap(spacing: 6, runSpacing: 4,
-                          children: booking.testNames.take(2).map((t) => Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: AppColors.brandGreenSurface,
-                              borderRadius: BorderRadius.circular(6),
+                        // Rescheduled: where the customer moved it to.
+                        if (isRescheduled && movedTo != null) ...[
+                          const SizedBox(height: 6),
+                          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Icon(Icons.arrow_forward_rounded, size: 13, color: statusColor),
+                            const SizedBox(width: 5),
+                            Expanded(
+                              child: Text('Moved to $movedTo',
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      fontSize: 12, fontWeight: FontWeight.w600, color: statusColor)),
                             ),
-                            child: Text(t,
-                                style: const TextStyle(fontSize: 11, color: AppColors.brandGreen)),
-                          )).toList(),
-                        ),
+                          ]),
+                        ],
 
                         // Amount collected
                         if (isCompleted && totalCollected > 0) ...[
@@ -878,16 +997,81 @@ class _HistoryCard extends StatelessWidget {
   }
 }
 
+// ─── Period filter chip ──────────────────────────────────────────────────────
+
+class _PeriodChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final IconData? icon;
+  final bool trailingClose;
+
+  const _PeriodChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.icon,
+    this.trailingClose = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = selected ? TechColors.brand : TechColors.textSecondary;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Semantics(
+        button: true,
+        selected: selected,
+        label: trailingClose ? 'Clear date $label' : label,
+        excludeSemantics: true,
+        child: Material(
+          color: selected ? TechColors.brandSurface : Colors.white,
+          shape: StadiumBorder(side: BorderSide(color: selected ? TechColors.brand : TechColors.border)),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 36),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (icon != null) ...[
+                    Icon(icon, size: 15, color: fg),
+                    const SizedBox(width: 5),
+                  ],
+                  Text(label,
+                      style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                          color: fg)),
+                  if (trailingClose) ...[
+                    const SizedBox(width: 5),
+                    Icon(Icons.close_rounded, size: 15, color: fg),
+                  ],
+                ]),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ─── History segmented tab button ────────────────────────────────────────────
 
+// Three tabs share the row, so the count sits on its own line under the
+// label and the whole thing scales down (never clips) on narrow phones.
 class _HistoryTabButton extends StatelessWidget {
   final String label;
+  final int count;
   final IconData icon;
   final bool selected;
   final VoidCallback onTap;
 
   const _HistoryTabButton({
     required this.label,
+    required this.count,
     required this.icon,
     required this.selected,
     required this.onTap,
@@ -895,28 +1079,34 @@ class _HistoryTabButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: selected ? TechColors.brand : Colors.transparent,
-      borderRadius: TechRadius.mdAll,
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 18, color: selected ? Colors.white : TechColors.textSecondary),
-              const SizedBox(width: 6),
-              Flexible(
-                child: Text(label,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: selected ? Colors.white : TechColors.textSecondary)),
-              ),
-            ],
+    final fg = selected ? Colors.white : TechColors.textSecondary;
+    return Semantics(
+      button: true,
+      selected: selected,
+      label: '$label, $count',
+      excludeSemantics: true,
+      child: Material(
+        color: selected ? TechColors.brand : Colors.transparent,
+        borderRadius: TechRadius.mdAll,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(icon, size: 16, color: fg),
+                  const SizedBox(width: 4),
+                  Text('$count',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: fg)),
+                ]),
+                const SizedBox(height: 1),
+                Text(label,
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: fg)),
+              ]),
+            ),
           ),
         ),
       ),

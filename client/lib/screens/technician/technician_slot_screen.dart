@@ -595,7 +595,13 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => TechnicianBookingDetailScreen(booking: apt)),
-            ),
+            ).then((result) {
+              // Rescheduled / released / completed: the list and free times changed.
+              if (result != null && mounted) {
+                _loadSlots();
+                _loadTodayAppointments();
+              }
+            }),
           ),
         )),
       ],
@@ -1126,14 +1132,6 @@ class _AppointmentCard extends StatelessWidget {
                   ),
                 ),
               ]),
-              const SizedBox(height: 6),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(6)),
-                child: Text(booking.mode,
-                    style: const TextStyle(
-                        fontSize: 10.5, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-              ),
             ]),
           ),
           const Icon(Icons.chevron_right_rounded, color: AppColors.brandGreen, size: 22),

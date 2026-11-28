@@ -1161,6 +1161,10 @@ class SocketService {
   /// the reconnect guard then re-emits technician_online so the server keeps
   /// the fresh socket ID while still maintaining isAvailable=false via
   /// technicianActiveSlots.
+  /// Bookings this technician has accepted (this app run). A repeated
+  /// booking_request / push for one of these is ignored — no popup, no beep.
+  final Set<int> acceptedBookingIds = <int>{};
+
   void emitBookingAccepted({
     required int    bookingId,
     required int    technicianId,
@@ -1168,6 +1172,7 @@ class SocketService {
     int? sessionId,
     bool isAppointmentBased = false,
   }) {
+    acceptedBookingIds.add(bookingId);
     _isBusy          = true;
     _activeBookingId = bookingId;
     if (isAppointmentBased) _appointmentBookingIds.add(bookingId);

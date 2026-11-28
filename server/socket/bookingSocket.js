@@ -453,6 +453,27 @@ async function _cascadeTcStatus(bookingId, status, timestampCol) {
   }
 }
 
+// ip_bookings.status follows each journey step, for the booking and every
+// member of its family visit:
+//   en_route → arrived → collection_started → sample_collected → otp_verified
+// (handed_to_lab_pending is set by the handed_to_lab handler). Never touches
+// a cancelled booking, and never moves a finished one (handed over /
+// completed) back.
+const VISIT_STATUS_LOCKED = ['cancelled', 'handed_to_lab_pending', 'handed_to_lab', 'completed'];
+function _setVisitBookingStatus(bookingId, status) {
+  dbRun(
+    `UPDATE ip_bookings b
+     JOIN ip_bookings p ON p.booking_id = ?
+     SET b.status = ?, b.updated_at = NOW()
+     WHERE (b.booking_id = p.booking_id
+            OR (p.visit_group_id IS NOT NULL AND b.visit_group_id = p.visit_group_id))
+       AND b.deleted_at IS NULL
+       AND b.status NOT IN (${VISIT_STATUS_LOCKED.map(() => '?').join(', ')})`,
+    [bookingId, status, ...VISIT_STATUS_LOCKED]
+  );
+}
+module.exports._setVisitBookingStatus = _setVisitBookingStatus;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 //  QUEUE BUILDERS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1050,6 +1071,16 @@ async function _dispatchAttempt(io, bookingId) {
       }
     }
 
+    // Accepted while this loop was waiting (the accept handler is between its
+    // own checks and stopping this search): send nothing more. Checked again
+    // shortly — the accept removes this search; if that accept is refused
+    // (e.g. own booking) the search simply carries on.
+    if (acceptedBookings.has(bookingId)) {
+      dlog(bookingId, 'SEND_SKIPPED', `booking accepted -> no request to ${actor.name}(${actor.id})`);
+      dispatch.handle = setTimeout(() => dispatchAttempt(io, bookingId), RETRY_GAP_MS);
+      return;
+    }
+
     // Record this tech as attempted before sending — persisted across expansions.
     dispatch.triedIds.add(actor.id);
 
@@ -1432,8 +1463,41 @@ async function _notifySlotNoAvailability(io, bookingId, failedSlotId, branchId, 
 //  CORE DISPATCH LOGIC  (called by socket handler + cron scheduler)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ip_bookings.status values that mean a technician already has the job (or
+// it is over). 'collected' = older value of sample_collected.
+const TAKEN_BOOKING_STATUSES = [
+  'assigned', 'en_route', 'arrived', 'collection_started', 'sample_collected', 'collected',
+  'otp_verified', 'handed_to_lab_pending', 'handed_to_lab', 'completed', 'cancelled',
+];
+
+// True when the booking must not be dispatched again: accepted in this
+// process, a technician job row exists, or its status is past dispatch.
+// A failed lookup never blocks dispatch (only the in-memory check applies).
+async function _bookingAlreadyTaken(bookingId) {
+  if (acceptedBookings.has(bookingId)) return true;
+  try {
+    const [[row]] = await db.execute(
+      `SELECT b.status,
+              (SELECT COUNT(*) FROM ip_technician_collection tc
+                WHERE tc.booking_id = b.booking_id AND tc.collection_status <> 'cancelled') AS tech_rows
+       FROM ip_bookings b WHERE b.booking_id = ? LIMIT 1`,
+      [bookingId]
+    );
+    if (!row) return false;
+    return Number(row.tech_rows ?? 0) > 0 || TAKEN_BOOKING_STATUSES.includes(row.status);
+  } catch (e) {
+    console.error(`❌ [_bookingAlreadyTaken] booking=${bookingId}: ${e.message}`);
+    return false;
+  }
+}
+
 async function _handleBookingRequest(io, socket, data = {}) {
   try {
+    // An accepted booking is never moved to another time from here.
+    if (acceptedBookings.has(data.bookingId)) {
+      dlog(data.bookingId, 'ALREADY_ASSIGNED', 'booking already accepted -> request ignored');
+      return;
+    }
     if (data.slotChanged && data.slotId != null && !dispatchQueues.has(data.bookingId)) {
       const savedTime = await _saveChosenTime(data.bookingId, data);
       if (savedTime) data = { ...data, appointmentTime: savedTime };
@@ -1567,6 +1631,19 @@ async function _runBookingRequest(io, socket, data = {}) {
       return;
     }
     earlyBookingDate = bDate;
+  }
+
+  // Never dispatch a booking that already has its technician. Every trigger
+  // (customer app, admin create, admin /dispatch, scheduler, redispatch) comes
+  // through here; without this, a trigger arriving after an accept started a
+  // fresh search that offered the job straight back to the technician who
+  // already had it — repeated requests + beeps that couldn't be accepted.
+  // (A release / reschedule deletes the technician's row and resets the
+  // status before re-dispatching, so it still goes through.)
+  if (await _bookingAlreadyTaken(bookingId)) {
+    dlog(bookingId, 'ALREADY_ASSIGNED', 'booking already has a technician -> dispatch not started');
+    log('🛑', 'DISPATCH_SKIPPED_ASSIGNED', bookingId, 'already accepted / assigned — no new search');
+    return;
   }
 
   // Appointment context for per-slot-aware queue building. Built whenever the
@@ -2350,6 +2427,37 @@ module.exports = function bookingSocket(io, socket) {
       dlog(bookingId, 'DUPLICATE_BLOCKED', `actor=${who} -- already claimed`);
       log('🚫', 'DUPLICATE_BLOCKED', bookingId,
         `actor=${who} — booking already claimed by another`);
+      // The technician who already HOLDS this job accepting again means a
+      // repeated request reached them. Instead of ignoring it (which left a
+      // search retrying and beeping at them): stop any search still running
+      // for it, and close the repeated popup / notification on their phone
+      // (booking_cancelled only dismisses the offer UI — their job stays).
+      if (technicianId && !driverId) {
+        try {
+          const [[holder]] = await db.execute(
+            `SELECT technician_id FROM ip_technician_collection
+             WHERE booking_id = ? AND collection_status <> 'cancelled' LIMIT 1`,
+            [bookingId]
+          );
+          if (holder && Number(holder.technician_id) === Number(technicianId)) {
+            const running = dispatchQueues.get(bookingId);
+            if (running && !running._claiming) {
+              if (running.handle) clearTimeout(running.handle);
+              dispatchQueues.delete(bookingId);
+              dlog(bookingId, 'REPEAT_SEARCH_STOPPED', `holder ${who} accepted again -> search stopped`);
+            }
+            socket.emit('booking_cancelled', { bookingId });
+            dbRun(
+              `UPDATE ip_booking_requests
+               SET request_status = 'accepted', updated_at = NOW()
+               WHERE booking_id = ? AND technician_id = ? AND request_status = 'pending'`,
+              [bookingId, technicianId]
+            );
+          }
+        } catch (e) {
+          console.error(`❌ [booking_accepted] repeat-accept check failed booking=${bookingId}: ${e.message}`);
+        }
+      }
       return;
     }
     acceptedBookings.add(bookingId);
@@ -2738,6 +2846,7 @@ module.exports = function bookingSocket(io, socket) {
       [bookingId]
     );
     _cascadeTcStatus(bookingId, 'en_route', 'en_route_at');
+    _setVisitBookingStatus(bookingId, 'en_route');
     dbRun(
       `UPDATE ip_technician_live_location
        SET task_status = 'en_route', updated_at = NOW()
@@ -2768,6 +2877,7 @@ module.exports = function bookingSocket(io, socket) {
       [bookingId]
     );
     _cascadeTcStatus(bookingId, 'arrived', 'arrived_at');
+    _setVisitBookingStatus(bookingId, 'arrived');
     dbRun(
       `UPDATE ip_technician_live_location
        SET task_status = 'arrived', updated_at = NOW()
@@ -2859,6 +2969,7 @@ module.exports = function bookingSocket(io, socket) {
       [bookingId]
     );
     _cascadeTcStatus(bookingId, 'collection_started', 'collection_started_at');
+    _setVisitBookingStatus(bookingId, 'collection_started');
     _notifyPatient(io, bookingId, 'collection_started', { bookingId });
   });
 
@@ -2893,43 +3004,10 @@ module.exports = function bookingSocket(io, socket) {
       [bookingId]
     );
 
-    // Mirrors the ip_bookings.status='collected' write already done in the
-    // handed_to_lab handler below — just triggered one step earlier in the
-    // same journey, so the main booking status reflects "sample collected"
-    // immediately instead of only once the technician later hands off to the
-    // lab. handed_to_lab still runs its own identical UPDATE afterward; since
-    // the value is the same ('collected'), that is a harmless no-op re-write.
-    dbRun(
-      `UPDATE ip_bookings
-       SET status = 'collected', updated_at = NOW()
-       WHERE booking_id = ?`,
-      [bookingId]
-    );
-
-    // Cascade to sibling bookings in the same visit group — same pattern as
-    // handed_to_lab's sibling cascade. Only ip_bookings.status needs handling
-    // here; siblings' ip_technician_collection.collection_status is already
-    // cascaded by the existing _cascadeTcStatus() call below.
-    ;(async () => {
-      try {
-        const [[parentRow]] = await db.execute(
-          'SELECT visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
-          [bookingId]
-        );
-        if (parentRow?.visit_group_id) {
-          const vgId = parentRow.visit_group_id;
-          dbRun(
-            `UPDATE ip_bookings
-             SET status = 'collected', updated_at = NOW()
-             WHERE visit_group_id = ? AND booking_id != ?`,
-            [vgId, bookingId]
-          );
-          clog(`[sample_collected] sibling cascade — visit_group=${vgId} booking=${bookingId}`);
-        }
-      } catch (e) {
-        console.error(`[sample_collected] sibling cascade error: ${e.message}`);
-      }
-    })();
+    // ip_bookings.status = 'sample_collected' for the booking and its family
+    // visit (was 'collected' before; old rows keep 'collected' and every
+    // reader accepts both).
+    _setVisitBookingStatus(bookingId, 'sample_collected');
 
     _cascadeTcStatus(bookingId, 'sample_collected', 'collected_at');
     _notifyPatient(io, bookingId, 'sample_collected', { bookingId });
@@ -3769,6 +3847,50 @@ module.exports.recoverPendingDispatches = async function () {
   }
 };
 
+// ── Technician-initiated reschedule: move the job's busy window ───────────────
+// The technician keeps the job (unlike unassignAndRedispatch), so dispatch must
+// see them busy at the NEW time instead of the old one. Windows are keyed by
+// booking_id; every member id of a family visit is cleared and one window is
+// recorded under the visit's main booking. A job moved to another day also
+// stops counting as "busy right now" today.
+module.exports.moveTechnicianWindow = function ({
+  technicianId, bookingId, allIds, slotDate, slotTime, durationMinutes, slotId = null,
+}) {
+  const slots = technicianActiveSlots.get(technicianId);
+  if (slots) for (const id of allIds) slots.delete(id);
+
+  if (slotTime && durationMinutes) {
+    const [h, m] = String(slotTime).split(':').map(Number);
+    const startMinutes = h * 60 + m;
+    if (!technicianActiveSlots.has(technicianId)) technicianActiveSlots.set(technicianId, new Map());
+    technicianActiveSlots.get(technicianId).set(bookingId, {
+      slotDate,
+      startMinutes,
+      endMinutes: startMinutes + Number(durationMinutes) + APPOINTMENT_BUFFER_MINUTES,
+      slotId,
+    });
+  } else if (slots && slots.size === 0) {
+    technicianActiveSlots.delete(technicianId);
+  }
+
+  const todayIST = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+  if (slotDate !== todayIST && allIds.includes(technicianActiveBookings.get(technicianId))) {
+    technicianActiveBookings.delete(technicianId);
+    const stillBusyToday = [...(technicianActiveSlots.get(technicianId)?.values() ?? [])]
+      .some(w => w.slotDate === todayIST);
+    const t = onlineTechnicians.get(technicianId);
+    if (t && !stillBusyToday) onlineTechnicians.set(technicianId, { ...t, isAvailable: true });
+    dbRun(
+      `UPDATE ip_technician_live_location
+       SET booking_id = NULL, task_status = 'idle', updated_at = NOW()
+       WHERE technician_id = ? AND booking_id IN (${allIds.map(() => '?').join(',')})`,
+      [technicianId, ...allIds]
+    );
+  }
+  log('🗓️', 'TECH_RESCHEDULE_WINDOW', bookingId,
+    `tech=${technicianId} → ${slotDate} ${slotTime ?? '(no time)'}${durationMinutes ? ` ${durationMinutes}min` : ''}`);
+};
+
 // ── Startup recovery ────────────────────────────────────────────────────────────
 // Called once from server.js after the DB is ready.  Queries today's assigned
 // bookings and re-populates technicianActiveSlots so dispatch does not treat a
@@ -3779,6 +3901,12 @@ module.exports.recoverPendingDispatches = async function () {
 // endMinutes+buffer).  Bookings without appointment context mark the tech
 // globally busy via onlineTechnicians.isAvailable=false (old model; Phase 1+
 // will phase this out once the Flutter app signals technician_online on start).
+// ip_bookings.status of a job the technician still has in hand (accepted, not
+// yet handed to the lab) — 'collected' is the pre-sample_collected value.
+const ACTIVE_JOB_STATUSES_SQL =
+  ['assigned', 'en_route', 'arrived', 'collection_started', 'sample_collected', 'collected', 'otp_verified']
+    .map(s => `'${s}'`).join(', ');
+
 module.exports.initDispatchState = async function () {
   try {
     const [rows] = await db.execute(
@@ -3791,15 +3919,15 @@ module.exports.initDispatchState = async function () {
        FROM   ip_bookings b
        LEFT JOIN ip_available_slots  ias ON ias.available_slot_id  = b.available_slot_id
        LEFT JOIN ip_technician_slots ts  ON ts.tech_slot_id        = ias.technician_slot_id
-       WHERE  b.status        = 'assigned'
+       WHERE  b.status        IN (${ACTIVE_JOB_STATUSES_SQL})
          AND  b.booking_date  = CURDATE()
          AND  b.technician_id IS NOT NULL
          AND  b.deleted_at    IS NULL
-         -- a family visit is one job: every member is 'assigned'
+         -- a family visit is one job: every member has the same status
          AND  (b.visit_group_id IS NULL OR b.booking_id = (
                 SELECT MIN(b2.booking_id) FROM ip_bookings b2
                 WHERE b2.visit_group_id = b.visit_group_id
-                  AND b2.status = 'assigned' AND b2.deleted_at IS NULL))`
+                  AND b2.status IN (${ACTIVE_JOB_STATUSES_SQL}) AND b2.deleted_at IS NULL))`
     );
 
     let slotRecovered = 0;

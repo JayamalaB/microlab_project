@@ -128,6 +128,13 @@ class BookingNotificationService {
   // ── Show notification ──────────────────────────────────────────────────────
 
   Future<void> showBookingNotification(SocketBooking booking) async {
+    // 0. Already accepted by this technician — a repeated request (socket or
+    //    push) for it never shows or beeps again.
+    if (SocketService.instance.acceptedBookingIds.contains(booking.bookingId)) {
+      _log('Ignored — booking #${booking.bookingId} already accepted');
+      return;
+    }
+
     // 1. Block if the overlay is already showing this booking.
     if (_overlayIds.contains(booking.bookingId)) return;
 

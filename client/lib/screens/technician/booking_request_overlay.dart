@@ -398,7 +398,7 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                               fontSize: 16,
                               fontWeight: FontWeight.w700)),
                       const SizedBox(height: 2),
-                      Text('Request #${widget.requestNumber}  ·  Home Collection',
+                      Text('Request #${widget.requestNumber}',
                           style: const TextStyle(
                               color: Colors.white70, fontSize: 12)),
                     ],
@@ -717,14 +717,16 @@ class _BookingRequestOverlayState extends State<BookingRequestOverlay>
                           ? 'Address not provided'
                           : widget.booking.patientAddress,
                     ),
-                    const SizedBox(height: 10),
-                    _DetailRow(
-                      icon: Icons.science_outlined,
-                      label: 'Type',
-                      value: widget.booking.hospital.isEmpty
-                          ? 'Home Collection'
-                          : widget.booking.hospital,
-                    ),
+                    // Booking type is not shown on the technician side; a lab
+                    // name still shows when the booking has one.
+                    if (widget.booking.hospital.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      _DetailRow(
+                        icon: Icons.science_outlined,
+                        label: 'Lab',
+                        value: widget.booking.hospital,
+                      ),
+                    ],
                     if (widget.booking.slotLabel?.isNotEmpty == true) ...[
                       const SizedBox(height: 10),
                       _DetailRow(

@@ -657,7 +657,9 @@ exports.verifyOtp = async (req, res) => {
                default_branch_id  = COALESCE(?, default_branch_id),
                technician_code    = COALESCE(?, technician_code),
                specialization     = COALESCE(?, specialization),
-               tech_photo         = COALESCE(?, tech_photo),
+               -- A photo the technician uploaded in the app (technicianController.
+               -- uploadProfilePhoto, file technician_<id>_…) wins over the registry's.
+               tech_photo         = IF(tech_photo LIKE '%/uploads/technician\\_%', tech_photo, COALESCE(?, tech_photo)),
                tech_city          = COALESCE(?, tech_city),
                max_daily_bookings = COALESCE(?, max_daily_bookings)
            WHERE technician_id = ?`,

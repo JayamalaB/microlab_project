@@ -153,6 +153,10 @@ class _ReportsScreenState extends State<ReportsScreen> with WidgetsBindingObserv
       case 'scheduled':  return 'Scheduled';
       case 'confirmed':  return 'Confirmed';
       case 'collected':  return 'Sample Collected';
+      case 'sample_collected': return 'Sample Collected';
+      case 'otp_verified': return 'Sample Collected';
+      case 'handed_to_lab_pending': return 'Handed to Lab';
+      case 'handed_to_lab': return 'Handed to Lab';
       case 'completed':  return 'Completed';
       case 'cancelled':  return 'Cancelled';
       default:           return 'Pending';

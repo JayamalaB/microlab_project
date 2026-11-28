@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, Tar
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/constants/app_constants.dart';
@@ -36,6 +37,10 @@ String _inr(num v) {
 // the Dashboard varies: TechnicianActiveJobScreen can be reached either
 // directly from the Dashboard, or from inside Manage Booking itself.
 const kExitToDashboard = 'exit_to_dashboard';
+
+// Popped by Manage Booking after the technician moved the job to another of
+// their times (they keep it): the Dashboard reloads its list.
+const kRescheduled = 'rescheduled';
 
 // ─── Prescription doc model ──────────────────────────────────────────────────
 
@@ -1852,14 +1857,18 @@ void _resumeJourney() {
                   TextField(
                     autofocus: true,
                     onChanged: (v) => setSheet(() => searchQuery = v),
+                    style: const TextStyle(fontSize: 14),
                     decoration: const InputDecoration(
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(vertical: 10),
                       hintText: 'Search tests…',
                       prefixIcon: Icon(Icons.search_rounded, size: 20, color: TechColors.textHint),
+                      prefixIconConstraints: BoxConstraints(minWidth: 40, minHeight: 40),
                     ),
                   ),
-                  const SizedBox(height: TechSpace.md),
+                  const SizedBox(height: TechSpace.sm),
                   Container(
-                    height: filtered.isEmpty ? null : (filtered.length * 64.0).clamp(64.0, 320.0),
+                    height: filtered.isEmpty ? null : (filtered.length * 48.0).clamp(48.0, 320.0),
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: TechRadius.mdAll,
@@ -1879,26 +1888,16 @@ void _resumeJourney() {
                               final t = filtered[i];
                               final id = t['id'] ?? '';
                               final checked = pendingIds.contains(id);
-                              return CheckboxListTile(
-                                value: checked,
-                                onChanged: adding
+                              return _PickTestRow(
+                                name: t['name'] ?? '',
+                                price: t['price'] ?? '0',
+                                isPackage: t['category'] == 'Package',
+                                selected: checked,
+                                onTap: adding
                                     ? null
-                                    : (v) => setSheet(() {
-                                          if (v == true) pendingIds.add(id);
-                                          else pendingIds.remove(id);
+                                    : () => setSheet(() {
+                                          if (!pendingIds.remove(id)) pendingIds.add(id);
                                         }),
-                                activeColor: TechColors.brand,
-                                tileColor: checked ? TechColors.brandSurface : null,
-                                controlAffinity: ListTileControlAffinity.leading,
-                                contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-                                title: Text(t['name'] ?? '',
-                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                        color: TechColors.textPrimary)),
-                                subtitle: (t['category'] ?? '').isEmpty ? null
-                                    : Text(t['category']!, style: TechText.caption),
-                                secondary: Text('₹${t['price'] ?? '0'}',
-                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
-                                        color: TechColors.textPrimary)),
                               );
                             },
                           ),
@@ -2895,6 +2894,48 @@ void _resumeJourney() {
     }
   }
 
+  // Technician reschedule: pick one of my own free times; I keep the job.
+  // Pops with 'rescheduled' so the Dashboard reloads the list at the new time.
+  void _rescheduleJob() async {
+    final picked = await showModalBottomSheet<_RescheduleChoice>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _TechRescheduleSheet(
+        customerName: widget.booking.customerName,
+        currentWhen: '${_formatDate(widget.booking.date)} · ${widget.booking.timeSlot}',
+      ),
+    );
+    if (picked == null || !mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Material(
+          color: Colors.white,
+          borderRadius: TechRadius.lgAll,
+          child: SizedBox(width: 200, child: TechLoadingState(label: 'Rescheduling…')),
+        ),
+      ),
+    );
+    final result = await ApiService.rescheduleAssignedBooking(
+      bookingId: int.tryParse(widget.booking.id) ?? 0,
+      availableSlotId: picked.availableSlotId,
+    );
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop(); // close loading dialog
+
+    if (result['success'] == true) {
+      AppMessages.success(context, AppMessages.serverMessage(result['message'],
+          fallback: 'Booking moved to ${picked.label}.'));
+      Navigator.pop(context, kRescheduled);
+    } else {
+      AppMessages.error(context, AppMessages.serverMessage(result['message'],
+          fallback: 'We couldn\'t reschedule this booking. Please try again.'));
+    }
+  }
+
   void _collectPayment({VoidCallback? onDone}) async {
     final choice = await _showPaymentMethodSheet(
       maxAmount: _amountDue,
@@ -3496,38 +3537,39 @@ void _resumeJourney() {
           ],
         ),
         actions: [
-          IconButton(
-            icon: _isReloading
-                ? const SizedBox(
-                    width: 18, height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                  )
-                : const Icon(Icons.refresh_rounded, color: Colors.white),
-            tooltip: 'Reload booking details',
-            onPressed: _isReloading ? null : _reloadBookingData,
-          ),
-          IconButton(
-            icon: const Icon(Icons.phone_outlined, color: Colors.white),
-            tooltip: 'Call customer',
-            onPressed: () {
-              AppMessages.info(context, 'Calling ${widget.booking.customerPhone}…');
-            },
-          ),
+          // Reload is pull-down on the page (RefreshIndicator below).
+          if (widget.booking.customerPhone.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.phone_outlined, color: Colors.white),
+              tooltip: 'Call customer',
+              onPressed: () => launchUrl(Uri.parse('tel:+91${widget.booking.customerPhone}')),
+            ),
           // Only before travel starts — matches the server-side gate exactly
           // (collection_status must still be 'assigned').
-          if (_currentStatus == 'Confirmed')
+          if (_currentStatus == 'Confirmed') ...[
+            // Move to another of my free times and keep the job.
+            IconButton(
+              icon: const Icon(Icons.event_repeat_rounded, color: Colors.white),
+              tooltip: 'Reschedule',
+              onPressed: _rescheduleJob,
+            ),
             IconButton(
               icon: const Icon(Icons.cancel_outlined, color: Colors.white),
               tooltip: "Can't make it",
               onPressed: _cancelJob,
             ),
+          ],
         ],
       ),
       body: Center(
         // Tablets: keep the cards a readable width.
         child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 720),
+        child: RefreshIndicator(
+        onRefresh: _reloadBookingData,
+        color: AppColors.brandGreen,
         child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(TechSpace.lg, TechSpace.lg, TechSpace.lg, 120),
         children: [
 
@@ -3657,22 +3699,165 @@ void _resumeJourney() {
 
           const SizedBox(height: 14),
 
-          // ── Customer Info ─────────────────────────────────
-          // Name, phone, mode, date, slot and VIP are in the header card at
-          // the top; the remaining details stay here.
+          // ── Visit Members (Same Location) ─────────────────
           _SectionCard(
-            title: 'Customer Details',
-            icon: Icons.person_outline,
-            child: Column(children: [
-              _InfoRow(Icons.person_outline, 'Name', widget.booking.customerName),
-              _InfoRow(Icons.phone_outlined, 'Phone', '+91 ${widget.booking.customerPhone}'),
-              _InfoRow(Icons.location_on_outlined, 'Address',
-                  [widget.booking.address, widget.booking.city, widget.booking.pincode]
-                      .where((s) => s.isNotEmpty)
-                      .join(', ')),
-              if (widget.booking.collectionNotes != null && widget.booking.collectionNotes!.isNotEmpty)
-                _InfoRow(Icons.notes_outlined, 'Notes', widget.booking.collectionNotes!),
-            ]),
+            title: 'Family Members',
+            icon: Icons.group_outlined,
+            // Locked look once the visit is finalized — no new members after OTP.
+            trailing: _HeaderAction(
+              label: 'Add member',
+              icon: Icons.person_add_alt_1_outlined,
+              onTap: _isFinalized ? null : _openAddVisitMemberSheet,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Explainer only while there are no members yet.
+                if (_linkedPatients.isEmpty)
+                  const Text(
+                    'Family members at this address who also need a test during this visit.',
+                    style: TechText.bodySecondary,
+                  ),
+
+                if (_linkedPatients.isNotEmpty) ...[
+                  ..._linkedPatients.map((c) {
+                    final amountDue   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
+                    final totalAmount = double.tryParse(c['total_amount']?.toString() ?? '0') ?? 0.0;
+                    final isPaid      = amountDue <= 0;
+                    final hasPayment  = (c['booking_id'] as num?) != null && totalAmount > 0;
+                    final memberBookingId = (c['booking_id'] as num?)?.toInt();
+                    final memberItems     = memberBookingId != null ? _familyItems[memberBookingId] : null;
+                    // ✕ only for members the technician added this visit, while
+                    // nothing is collected or paid for them. Members from the
+                    // customer's booking stay (the server checks all of it again).
+                    final addedByTech  = c['source_channel'] == 'technician_app';
+                    final anyCollected = memberItems?.any((t) => t['collected'] == 'completed') ?? false;
+                    final paidSome     = totalAmount - amountDue > 0.009;
+                    final canRemove    = !_isFinalized && memberBookingId != null && addedByTech
+                        && !anyCollected && !paidSome;
+                    final pname = (c['patient_name'] ?? '').toString();
+                    // referring_doctor holds "self" for a self-referral.
+                    final doctor   = c['doctor_name']?.toString().trim() ?? '';
+                    final referral = doctor.isEmpty
+                        ? ''
+                        : doctor.toLowerCase() == 'self'
+                            ? 'Referred: Self'
+                            : 'Referred: ${RegExp(r'^dr\.?\s', caseSensitive: false).hasMatch(doctor) ? doctor : 'Dr. $doctor'}';
+                    final ref     = (c['reference_no'] as String?)?.trim() ?? '';
+                    final subLine = [if (ref.isNotEmpty) ref, if (referral.isNotEmpty) referral].join(' · ');
+                    return Container(
+                      margin: EdgeInsets.only(bottom: c == _linkedPatients.last ? 0 : TechSpace.sm),
+                      padding: const EdgeInsets.fromLTRB(12, 10, 4, 6),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: TechRadius.mdAll,
+                        border: Border.all(color: TechColors.border),
+                      ),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          // From Collection Started the letter avatar becomes
+                          // this member's own sample-photo tile.
+                          if (_showCollectionChecklist && memberBookingId != null)
+                            _proofPhotoTile(
+                              bookingId: memberBookingId,
+                              name: pname.toUpperCase(),
+                              size: 56,
+                            )
+                          else
+                            CircleAvatar(
+                              radius: 16,
+                              backgroundColor: TechColors.brandSurface,
+                              child: Text(pname.isNotEmpty ? pname[0].toUpperCase() : '?',
+                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                                      color: TechColors.brand)),
+                            ),
+                          const SizedBox(width: 10),
+                          Expanded(child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                [pname, (c['patient_mobile'] ?? '').toString()]
+                                    .where((s) => s.isNotEmpty).join(' · '),
+                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                    color: TechColors.textPrimary),
+                              ),
+                              if (subLine.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Text(subLine, style: TechText.caption),
+                                ),
+                            ],
+                          )),
+                          if (hasPayment)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2, left: TechSpace.sm),
+                              child: isPaid
+                                  ? const TechStatusChip(label: 'Paid', icon: Icons.check_rounded, tone: TechTone.success)
+                                  : TechStatusChip(label: '₹${_inr(amountDue)} due', tone: TechTone.info),
+                            ),
+                          if (canRemove)
+                            IconButton(
+                              onPressed: () => _confirmRemoveMember(c, memberBookingId),
+                              tooltip: 'Remove member',
+                              icon: const Icon(Icons.close_rounded, size: 20, color: TechColors.textSecondary),
+                            )
+                          else
+                            const SizedBox(width: TechSpace.sm),
+                        ]),
+                        // Family member's tests — always shown (edit + checklist).
+                        if (memberBookingId != null && memberItems != null && memberItems.isNotEmpty) ...[
+                          const Padding(
+                            padding: EdgeInsets.only(right: TechSpace.sm),
+                            child: Divider(height: 16),
+                          ),
+                          for (final t in memberItems)
+                            _CompactTestRow(
+                              name: t['name'] ?? '',
+                              price: t['price'] ?? '0',
+                              isPackage: t['category'] == 'Package',
+                              showChecklist: _showCollectionChecklist,
+                              collected: t['collected'] == 'completed',
+                              onToggle: () => _toggleItemCollected(
+                                t['id'] ?? '', t['collected'] != 'completed',
+                                targetBookingId: memberBookingId,
+                              ),
+                              onRemove: _isFinalized
+                                  ? null
+                                  : () => _removeFamilyTest(t['id'] ?? '', memberBookingId),
+                            ),
+                        ],
+                        if (!_isFinalized && memberBookingId != null)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              onPressed: () => _showAddFamilyTestSheet(memberBookingId),
+                              icon: const Icon(Icons.add_rounded, size: 18),
+                              label: const Text('Add test'),
+                              style: TextButton.styleFrom(
+                                foregroundColor: TechColors.brand,
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                minimumSize: const Size(48, 36),
+                                textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                          ),
+                        if (memberBookingId != null &&
+                            (_familyPendingRefund[memberBookingId] ?? 0) > 0.5) ...[
+                          const SizedBox(height: TechSpace.sm),
+                          Padding(
+                            padding: const EdgeInsets.only(right: TechSpace.sm),
+                            child: TechBanner(
+                              tone: TechTone.warning,
+                              message: 'Refund ₹${_inr((_familyPendingRefund[memberBookingId]!))} pending',
+                            ),
+                          ),
+                        ],
+                      ]),
+                    );
+                  }),
+                ],
+              ],
+            ),
           ),
 
           const SizedBox(height: 14),
@@ -3681,6 +3866,14 @@ void _resumeJourney() {
           _SectionCard(
             title: 'Tests & Packages',
             icon: Icons.science_outlined,
+            // Locked look once the visit is finalized (OTP Verified / Handed to Lab).
+            trailing: (!_isCompleted && !_showAddTest)
+                ? _HeaderAction(
+                    label: 'Add',
+                    icon: Icons.add_rounded,
+                    onTap: _isFinalized ? null : () => setState(() => _showAddTest = true),
+                  )
+                : null,
             child: _itemsLoading
                 ? const TechLoadingState(label: 'Loading tests…')
                 : Column(
@@ -3692,109 +3885,61 @@ void _resumeJourney() {
                     child: Text('No tests on this booking yet.',
                         textAlign: TextAlign.center, style: TechText.bodySecondary),
                   ),
-                ..._selectedTests.map((t) {
-                  final collected = t['collected'] == 'completed';
-                  return Container(
-                  margin: const EdgeInsets.only(bottom: TechSpace.sm),
-                  padding: const EdgeInsets.fromLTRB(TechSpace.md, 10, 4, 10),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: TechRadius.mdAll,
-                    border: Border.all(
-                      color: _showCollectionChecklist && collected
-                          ? TechColors.brand.withValues(alpha: 0.5)
-                          : TechColors.border,
-                    ),
-                  ),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Row(children: [
-                      TechIconBadge(
-                        icon: t['category'] == 'Package'
-                            ? Icons.inventory_2_outlined : Icons.science_outlined,
-                        tone: t['category'] == 'Package' ? TechTone.brand : TechTone.info,
-                        size: 36,
+                // One bordered list; the collected/pending toggle (from
+                // "Collection Started") is the row's leading icon. Purely a
+                // per-item tracking toggle: does not gate "Sample Collected".
+                if (_selectedTests.isNotEmpty) ...[
+                  _DividedList(children: [
+                    for (final t in _selectedTests)
+                      _CompactTestRow(
+                        name: t['name'] ?? '',
+                        price: t['price'] ?? '0',
+                        isPackage: t['category'] == 'Package',
+                        showChecklist: _showCollectionChecklist,
+                        collected: t['collected'] == 'completed',
+                        onToggle: () => _toggleItemCollected(t['id'] ?? '', t['collected'] != 'completed'),
+                        // No ✕ once the visit is finalized (OTP Verified or Handed to Lab).
+                        onRemove: _isFinalized ? null : () { _removeTest(t['id'] ?? ''); },
                       ),
-                      const SizedBox(width: TechSpace.md),
-                      Expanded(
-                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Text(t['name'] ?? '',
-                              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                  color: TechColors.textPrimary)),
-                          if ((t['category'] ?? '').isNotEmpty)
-                            Text(t['category'] ?? '', style: TechText.caption),
-                        ]),
-                      ),
-                      const SizedBox(width: TechSpace.sm),
-                      Text('₹${t['price'] ?? '0'}',
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
-                              color: TechColors.textPrimary)),
-                      // Hide the remove control entirely once the visit is finalized (OTP Verified or Handed to Lab).
-                      if (!_isFinalized)
-                        IconButton(
-                          onPressed: () { _removeTest(t['id'] ?? ''); },
-                          tooltip: 'Remove test',
-                          icon: const Icon(Icons.close_rounded, size: 20, color: TechColors.textHint),
-                        )
-                      else
-                        const SizedBox(width: TechSpace.sm),
-                    ]),
-                    // Collection checklist — visible from "Collection Started"
-                    // onward. Purely a per-item tracking toggle: does not gate
-                    // or affect the "Sample Collected" step in any way.
-                    if (_showCollectionChecklist) ...[
-                      const SizedBox(height: TechSpace.xs),
-                      InkWell(
-                        borderRadius: TechRadius.smAll,
-                        onTap: () => _toggleItemCollected(t['id'] ?? '', t['collected'] != 'completed'),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            Icon(
-                              collected
-                                  ? Icons.check_circle_rounded
-                                  : Icons.radio_button_unchecked_rounded,
-                              size: 22,
-                              color: collected ? TechColors.brand : TechColors.textHint,
-                            ),
-                            const SizedBox(width: TechSpace.sm),
-                            Text(
-                              collected ? 'Collected' : 'Pending',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: collected ? TechColors.brand : TechColors.textSecondary,
-                              ),
-                            ),
-                          ]),
-                        ),
-                      ),
-                    ],
                   ]),
-                );
-                }),
-
-                // Always visible; shows a lock icon and disabled style once the visit is finalized.
-                if (!_isCompleted && !_showAddTest)
-                  TechButton.secondary(
-                    onPressed: _isFinalized ? null : () => setState(() => _showAddTest = true),
-                    icon: _isFinalized ? Icons.lock_outline_rounded : Icons.add_rounded,
-                    label: _isFinalized ? 'Tests Locked' : 'Add Test / Package',
-                    compact: true,
+                  const SizedBox(height: TechSpace.sm),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Row(children: [
+                      Text(
+                        _showCollectionChecklist
+                            ? '${_selectedTests.where((t) => t['collected'] == 'completed').length} of ${_selectedTests.length} collected'
+                            : '${_selectedTests.length} ${_selectedTests.length == 1 ? 'item' : 'items'}',
+                        style: TechText.caption,
+                      ),
+                      const Spacer(),
+                      Text(
+                        'Total ₹${_inr(_testsTotal)}',
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                            color: TechColors.textPrimary),
+                      ),
+                    ]),
                   ),
+                ],
 
                 if (_showAddTest) ...[
                   const SizedBox(height: TechSpace.sm),
                   TextField(
                     autofocus: true,
                     onChanged: (v) => setState(() => _searchQuery = v),
+                    style: const TextStyle(fontSize: 14),
                     decoration: InputDecoration(
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 10),
                       hintText: 'Search test…',
                       prefixIcon: const Icon(Icons.search_rounded, size: 20, color: TechColors.textHint),
+                      prefixIconConstraints: const BoxConstraints(minWidth: 40, minHeight: 40),
                       suffixIcon: IconButton(
                         onPressed: _addingTests ? null : _closeAddTest,
                         tooltip: 'Close search',
                         icon: const Icon(Icons.close_rounded, size: 20, color: TechColors.textHint),
                       ),
+                      suffixIconConstraints: const BoxConstraints(minWidth: 44, minHeight: 40),
                     ),
                   ),
                   const SizedBox(height: TechSpace.sm),
@@ -3810,7 +3955,7 @@ void _resumeJourney() {
                       Container(
                         // Fixed height (not shrinkWrap) so a large catalogue
                         // only builds the rows on screen.
-                        height: results.isEmpty ? null : (results.length * 64.0).clamp(64.0, 320.0),
+                        height: results.isEmpty ? null : (results.length * 48.0).clamp(48.0, 320.0),
                         decoration: BoxDecoration(
                           color: Colors.white,
                           borderRadius: TechRadius.mdAll,
@@ -3829,30 +3974,16 @@ void _resumeJourney() {
                                 itemBuilder: (_, i) {
                                   final t = results[i];
                                   final id = t['id'] ?? '';
-                                  return CheckboxListTile(
-                                    value: _pendingTestIds.contains(id),
-                                    onChanged: _addingTests
+                                  return _PickTestRow(
+                                    name: t['name'] ?? '',
+                                    price: t['price'] ?? '0',
+                                    isPackage: t['category'] == 'Package',
+                                    selected: _pendingTestIds.contains(id),
+                                    onTap: _addingTests
                                         ? null
-                                        : (v) => setState(() {
-                                              if (v == true) {
-                                                _pendingTestIds.add(id);
-                                              } else {
-                                                _pendingTestIds.remove(id);
-                                              }
+                                        : () => setState(() {
+                                              if (!_pendingTestIds.remove(id)) _pendingTestIds.add(id);
                                             }),
-                                    activeColor: TechColors.brand,
-                                    tileColor: _pendingTestIds.contains(id) ? TechColors.brandSurface : null,
-                                    controlAffinity: ListTileControlAffinity.leading,
-                                    contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-                                    title: Text(t['name'] ?? '',
-                                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                            color: TechColors.textPrimary)),
-                                    subtitle: (t['category'] ?? '').isEmpty
-                                        ? null
-                                        : Text(t['category']!, style: TechText.caption),
-                                    secondary: Text('₹${t['price']}',
-                                        style: const TextStyle(
-                                            fontSize: 13, fontWeight: FontWeight.w700, color: TechColors.textPrimary)),
                                   );
                                 },
                               ),
@@ -3884,187 +4015,6 @@ void _resumeJourney() {
                 ],
               ],
             ),
-          ),
-
-          const SizedBox(height: 14),
-
-          // ── Sample Collection Photo ──────────────────────────
-          // Optional real-time proof photo. Visible from "Collection Started"
-          // onward (same gate as the checklist, _showCollectionChecklist) so
-          // it stays available for the whole collection window — a
-          // technician who skips it at first still has a clear "Take Photo"
-          // entry point later, and can retake it any time before completing
-          // the flow. Does not gate or otherwise affect Sample Collected,
-          // the checklist, or any booking status transition.
-          if (_showCollectionChecklist) _SectionCard(
-            title: 'Sample Collection Photo',
-            icon: Icons.camera_alt_outlined,
-            child: _collectionProofLoading
-                ? const TechLoadingState(label: 'Loading photos…')
-                // One block per patient in this visit (primary + any family
-                // members) — each keyed to their own booking_id via
-                // _proofUrlByBookingId, so one patient's photo never
-                // overwrites or is shown for another patient.
-                : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    for (final patient in _visitPatients) ...[
-                      Builder(builder: (context) {
-                        // Everything here is keyed by this patient's own
-                        // booking id (always known — the primary patient's
-                        // patient id is not, e.g. when opened from the live
-                        // map). isCapturing must never be true for "no id":
-                        // that left a box spinning on "Opening camera…"
-                        // forever with its tap disabled.
-                        final patientBookingId = patient['bookingId'] as int?;
-                        final pname         = patient['name'] as String;
-                        final proofUrl      = patientBookingId != null ? _proofUrlByBookingId[patientBookingId] : null;
-                        final isCapturing   = patientBookingId != null && _capturingProofBookingId == patientBookingId;
-                        final canCapture    = patientBookingId != null;
-                        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Row(children: [
-                            Flexible(
-                              child: Text(pname, style: TechText.cardTitle, overflow: TextOverflow.ellipsis),
-                            ),
-                            const SizedBox(width: TechSpace.sm),
-                            proofUrl != null
-                                ? const TechStatusChip(label: 'ADDED', icon: Icons.check_rounded, tone: TechTone.success)
-                                : const TechStatusChip(label: 'NOT ADDED', tone: TechTone.warning),
-                          ]),
-                          const SizedBox(height: TechSpace.sm),
-                          if (proofUrl == null)
-                            Material(
-                              color: TechColors.surfaceMuted,
-                              shape: const RoundedRectangleBorder(
-                                borderRadius: TechRadius.mdAll,
-                                side: BorderSide(color: TechColors.border, width: 1.2),
-                              ),
-                              clipBehavior: Clip.antiAlias,
-                              child: InkWell(
-                              // While busy, a tap cancels (camera or upload
-                              // step) — see _cancelProofCapture.
-                              onTap: !canCapture
-                                  ? null
-                                  : isCapturing
-                                      ? _cancelProofCapture
-                                      : (_capturingProofBookingId != null
-                                          ? null // another patient's photo is in progress
-                                          : () => _captureAndUploadCollectionProof(
-                                              bookingId: patientBookingId)),
-                              child: Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.symmetric(vertical: 22),
-                                child: Column(mainAxisSize: MainAxisSize.min, children: [
-                                  isCapturing
-                                      ? const SizedBox(
-                                          width: 24, height: 24,
-                                          child: CircularProgressIndicator(strokeWidth: 2.2, color: TechColors.brand),
-                                        )
-                                      : const Icon(Icons.camera_alt_outlined, size: 28, color: TechColors.brand),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    !isCapturing
-                                        ? 'Take Collection Photo'
-                                        : switch (_proofStep) {
-                                            _ProofStep.camera    => 'Opening camera…',
-                                            _ProofStep.uploading => 'Uploading photo…',
-                                            _ProofStep.saving    => 'Saving photo…',
-                                          },
-                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                        color: TechColors.textPrimary),
-                                  ),
-                                  if (isCapturing && _proofStep != _ProofStep.saving) ...[
-                                    const SizedBox(height: 2),
-                                    const Text('Tap to cancel', style: TechText.caption),
-                                  ],
-                                ]),
-                              ),
-                              ),
-                            )
-                          else
-                            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                              // Thumbnail with a ✕ to remove the photo — the
-                              // same style as prescription thumbnails. Hidden
-                              // once the visit is OTP-verified (the server
-                              // also refuses then) and while any photo is
-                              // being captured or removed.
-                              Stack(clipBehavior: Clip.none, children: [
-                                GestureDetector(
-                                  onTap: () => _viewCollectionProofImage(proofUrl),
-                                  child: Container(
-                                    width: 88,
-                                    height: 88,
-                                    decoration: BoxDecoration(
-                                      borderRadius: TechRadius.mdAll,
-                                      border: Border.all(color: TechColors.border),
-                                    ),
-                                    child: ClipRRect(
-                                      borderRadius: TechRadius.mdAll,
-                                      child: _removingProofBookingId == patientBookingId
-                                          ? const Center(child: SizedBox(width: 22, height: 22,
-                                              child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
-                                          : Image.network(
-                                              proofUrl,
-                                              fit: BoxFit.cover,
-                                              loadingBuilder: (_, child, progress) => progress == null
-                                                  ? child
-                                                  : const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
-                                              errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: AppColors.textHint),
-                                            ),
-                                    ),
-                                  ),
-                                ),
-                                if (!_isFinalized && canCapture &&
-                                    _capturingProofBookingId == null && _removingProofBookingId == null)
-                                  Positioned(
-                                    top: -6, right: -6,
-                                    child: Semantics(
-                                      button: true,
-                                      label: 'Remove photo for $pname',
-                                      child: GestureDetector(
-                                        onTap: () => _confirmRemoveCollectionProof(
-                                            bookingId: patientBookingId, patientName: pname),
-                                        child: Container(
-                                          width: 26, height: 26,
-                                          decoration: BoxDecoration(
-                                            color: TechColors.error,
-                                            shape: BoxShape.circle,
-                                            border: Border.all(color: Colors.white, width: 2),
-                                          ),
-                                          child: const Icon(Icons.close_rounded, size: 14, color: Colors.white),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                              ]),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                  const Text('Proof photo captured', style: TechText.bodySecondary),
-                                  const SizedBox(height: TechSpace.sm),
-                                  TextButton.icon(
-                                    onPressed: (!canCapture || isCapturing) ? null : () =>
-                                        _captureAndUploadCollectionProof(bookingId: patientBookingId),
-                                    icon: isCapturing
-                                        ? const SizedBox(
-                                            width: 14, height: 14,
-                                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen),
-                                          )
-                                        : const Icon(Icons.refresh_rounded, size: 16),
-                                    label: Text(isCapturing ? 'Retaking…' : 'Retake Photo'),
-                                    style: TextButton.styleFrom(
-                                      foregroundColor: TechColors.brand,
-                                      padding: const EdgeInsets.symmetric(horizontal: 10),
-                                      minimumSize: const Size(48, 40),
-                                      textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                                    ),
-                                  ),
-                                ]),
-                              ),
-                            ]),
-                        ]);
-                      }),
-                      if (patient != _visitPatients.last) const SizedBox(height: 14),
-                    ],
-                  ]),
           ),
 
           const SizedBox(height: 14),
@@ -4427,183 +4377,9 @@ void _resumeJourney() {
                 ),
               ]),
             ),
-
-          const SizedBox(height: 14),
-
-          // ── Visit Members (Same Location) ─────────────────
-          _SectionCard(
-            title: 'Visit Members',
-            icon: Icons.group_outlined,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Add family members at this address who also need a blood test during this visit.',
-                  style: TechText.bodySecondary,
-                ),
-                const SizedBox(height: TechSpace.md),
-
-                if (_linkedPatients.isNotEmpty) ...[
-                  ..._linkedPatients.map((c) {
-                    final amountDue   = double.tryParse(c['amount_due']?.toString() ?? '0') ?? 0.0;
-                    final totalAmount = double.tryParse(c['total_amount']?.toString() ?? '0') ?? 0.0;
-                    final isPaid      = amountDue <= 0;
-                    final hasPayment  = (c['booking_id'] as num?) != null && totalAmount > 0;
-                    final memberBookingId = (c['booking_id'] as num?)?.toInt();
-                    final memberItems     = memberBookingId != null ? _familyItems[memberBookingId] : null;
-                    // ✕ only for members the technician added this visit, while
-                    // nothing is collected or paid for them. Members from the
-                    // customer's booking stay (the server checks all of it again).
-                    final addedByTech  = c['source_channel'] == 'technician_app';
-                    final anyCollected = memberItems?.any((t) => t['collected'] == 'completed') ?? false;
-                    final paidSome     = totalAmount - amountDue > 0.009;
-                    final canRemove    = !_isFinalized && memberBookingId != null && addedByTech
-                        && !anyCollected && !paidSome;
-                    final pname = (c['patient_name'] ?? '').toString();
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: TechSpace.md),
-                      padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: TechRadius.mdAll,
-                        border: Border.all(color: TechColors.border),
-                      ),
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          CircleAvatar(
-                            radius: 18,
-                            backgroundColor: TechColors.brandSurface,
-                            child: Text(pname.isNotEmpty ? pname[0].toUpperCase() : '?',
-                                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
-                                    color: TechColors.brand)),
-                          ),
-                          const SizedBox(width: TechSpace.md),
-                          Expanded(child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${c['patient_name'] ?? ''}  ·  ${c['patient_mobile'] ?? ''}',
-                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                    color: TechColors.textPrimary),
-                              ),
-                              if ((c['reference_no'] as String?) != null)
-                                Text(c['reference_no'] as String, style: TechText.caption),
-                              if ((c['doctor_name']?.toString().trim() ?? '').isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 2),
-                                  child: Row(children: [
-                                    const Icon(Icons.local_hospital_outlined, size: 14, color: TechColors.textHint),
-                                    const SizedBox(width: 4),
-                                    Expanded(
-                                      child: Text('Doctor: ${c['doctor_name'].toString().trim()}',
-                                          style: TechText.caption),
-                                    ),
-                                  ]),
-                                ),
-                            ],
-                          )),
-                          if (hasPayment)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 2, left: TechSpace.sm),
-                              child: isPaid
-                                  ? const TechStatusChip(label: 'Paid', icon: Icons.check_rounded, tone: TechTone.success)
-                                  : TechStatusChip(label: '₹${_inr(amountDue)} due', tone: TechTone.info),
-                            ),
-                          if (canRemove)
-                            IconButton(
-                              onPressed: () => _confirmRemoveMember(c, memberBookingId),
-                              tooltip: 'Remove member',
-                              icon: const Icon(Icons.close_rounded, size: 20, color: TechColors.textSecondary),
-                            )
-                          else
-                            const SizedBox(width: TechSpace.sm),
-                        ]),
-                        // Family member's tests — always shown (edit + checklist).
-                        if (memberBookingId != null && memberItems != null && memberItems.isNotEmpty) ...[
-                          const Padding(
-                            padding: EdgeInsets.only(right: TechSpace.sm),
-                            child: Divider(height: 20),
-                          ),
-                          ...memberItems.map((t) => Row(children: [
-                              if (_showCollectionChecklist)
-                                IconButton(
-                                  onPressed: () => _toggleItemCollected(
-                                    t['id'] ?? '', t['collected'] != 'completed',
-                                    targetBookingId: memberBookingId,
-                                  ),
-                                  tooltip: t['collected'] == 'completed' ? 'Mark pending' : 'Mark collected',
-                                  visualDensity: VisualDensity.compact,
-                                  icon: Icon(
-                                    t['collected'] == 'completed'
-                                        ? Icons.check_circle_rounded
-                                        : Icons.radio_button_unchecked_rounded,
-                                    size: 22,
-                                    color: t['collected'] == 'completed' ? TechColors.brand : TechColors.textHint,
-                                  ),
-                                )
-                              else
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(horizontal: 6, vertical: 10),
-                                  child: Icon(Icons.science_outlined, size: 16, color: TechColors.textHint),
-                                ),
-                              const SizedBox(width: 4),
-                              Expanded(
-                                child: Text(t['name'] ?? '', style: TechText.body),
-                              ),
-                              Text('₹${t['price'] ?? '0'}',
-                                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                                      color: TechColors.textSecondary)),
-                              if (!_isFinalized)
-                                IconButton(
-                                  onPressed: () => _removeFamilyTest(t['id'] ?? '', memberBookingId),
-                                  tooltip: 'Remove test',
-                                  visualDensity: VisualDensity.compact,
-                                  icon: const Icon(Icons.close_rounded, size: 18, color: TechColors.textHint),
-                                )
-                              else
-                                const SizedBox(width: TechSpace.sm),
-                            ])),
-                        ],
-                        if (!_isFinalized && memberBookingId != null) ...[
-                          const SizedBox(height: TechSpace.sm),
-                          Padding(
-                            padding: const EdgeInsets.only(right: TechSpace.sm),
-                            child: TechButton.secondary(
-                              icon: Icons.add_rounded,
-                              label: 'Add Test / Package',
-                              compact: true,
-                              onPressed: () => _showAddFamilyTestSheet(memberBookingId),
-                            ),
-                          ),
-                        ],
-                        if (memberBookingId != null &&
-                            (_familyPendingRefund[memberBookingId] ?? 0) > 0.5) ...[
-                          const SizedBox(height: TechSpace.sm),
-                          Padding(
-                            padding: const EdgeInsets.only(right: TechSpace.sm),
-                            child: TechBanner(
-                              tone: TechTone.warning,
-                              message: 'Refund ₹${_inr((_familyPendingRefund[memberBookingId]!))} pending',
-                            ),
-                          ),
-                        ],
-                      ]),
-                    );
-                  }),
-                  const SizedBox(height: TechSpace.xs),
-                ],
-
-                // Disabled with lock icon once visit is finalized — no new family members after OTP.
-                TechButton.secondary(
-                  onPressed: _isFinalized ? null : _openAddVisitMemberSheet,
-                  icon: _isFinalized ? Icons.lock_outline_rounded : Icons.person_add_outlined,
-                  label: _isFinalized ? 'Visit Member Locked' : 'Add Visit Member',
-                ),
-              ],
-            ),
-          ),
         ],
       ),
+        ),   // RefreshIndicator
         ),
       ),
 
@@ -4645,8 +4421,10 @@ void _resumeJourney() {
     final b = widget.booking;
     final name = b.customerName;
     final isHome = b.mode == 'Home Collection';
+    final address = [b.address, b.city, b.pincode].where((s) => s.isNotEmpty).join(', ');
+    final notes = b.collectionNotes?.trim() ?? '';
 
-    Widget fact(IconData icon, String label, String value) => Expanded(
+    Widget fact(IconData icon, String label, String value, {int maxLines = 2}) => Expanded(
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
             decoration: const BoxDecoration(
@@ -4661,7 +4439,7 @@ void _resumeJourney() {
               ]),
               const SizedBox(height: 4),
               Text(value,
-                  maxLines: 2,
+                  maxLines: maxLines,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
                       color: TechColors.textPrimary)),
@@ -4716,6 +4494,11 @@ void _resumeJourney() {
               ]),
             ]),
           ),
+          // Main patient's sample photo — from Collection Started on.
+          if (_showCollectionChecklist) ...[
+            const SizedBox(width: TechSpace.sm),
+            _proofPhotoTile(bookingId: int.tryParse(b.id), name: name, size: 72),
+          ],
         ]),
         const SizedBox(height: TechSpace.lg),
         Row(children: [
@@ -4723,12 +4506,165 @@ void _resumeJourney() {
           const SizedBox(width: TechSpace.sm),
           fact(Icons.schedule_outlined, 'Slot', b.timeSlot),
         ]),
-        const SizedBox(height: TechSpace.sm),
-        Row(children: [
-          fact(isHome ? Icons.home_outlined : Icons.local_hospital_outlined, 'Mode', b.mode),
-        ]),
+        // Address + notes (moved here from the old Customer Details card).
+        if (address.isNotEmpty) ...[
+          const SizedBox(height: TechSpace.sm),
+          Row(children: [
+            fact(isHome ? Icons.location_on_outlined : Icons.local_hospital_outlined, 'Address', address,
+                maxLines: 3),
+          ]),
+        ],
+        if (notes.isNotEmpty) ...[
+          const SizedBox(height: TechSpace.sm),
+          Row(children: [fact(Icons.notes_outlined, 'Notes', notes, maxLines: 4)]),
+        ],
       ]),
     );
+  }
+
+  // ── Sample collection photo tile ──────────────────────────────────────────
+  // Optional real-time proof photo, one per patient in this visit. Shown next
+  // to that patient's name: the main patient in the header card, each visit
+  // member in their own Visit Members card. Keyed to the patient's own
+  // booking_id via _proofUrlByBookingId, so one patient's photo is never shown
+  // for another. Does not gate any booking status transition.
+  //
+  //   no photo   → orange-bordered "Take" box (tap again while busy = cancel)
+  //   has photo  → thumbnail (tap = view), ✕ remove, "Retake" link below
+  Widget _proofPhotoTile({required int? bookingId, required String name, double size = 72}) {
+    // isCapturing must never be true for "no id": that left a box spinning on
+    // "Opening camera…" forever with its tap disabled.
+    final proofUrl    = bookingId != null ? _proofUrlByBookingId[bookingId] : null;
+    final isCapturing = bookingId != null && _capturingProofBookingId == bookingId;
+    final canCapture  = bookingId != null;
+    final small       = size < 64;
+
+    if (_collectionProofLoading) {
+      return Container(
+        width: size,
+        height: size,
+        decoration: const BoxDecoration(color: TechColors.surfaceMuted, borderRadius: TechRadius.mdAll),
+        alignment: Alignment.center,
+        child: const SizedBox(width: 18, height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2, color: TechColors.brand)),
+      );
+    }
+
+    if (proofUrl == null) {
+      final label = !isCapturing
+          ? 'Take'
+          : switch (_proofStep) {
+              _ProofStep.camera    => 'Cancel',
+              _ProofStep.uploading => 'Cancel',
+              _ProofStep.saving    => 'Saving…',
+            };
+      return Semantics(
+        button: true,
+        label: 'Take sample photo for $name',
+        child: Material(
+          color: TechColors.warningSurface,
+          shape: RoundedRectangleBorder(
+            borderRadius: TechRadius.mdAll,
+            side: BorderSide(color: TechColors.warning.withValues(alpha: 0.6), width: 1.4),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            // While busy, a tap cancels (camera or upload step) — see
+            // _cancelProofCapture.
+            onTap: !canCapture
+                ? null
+                : isCapturing
+                    ? (_proofStep == _ProofStep.saving ? null : _cancelProofCapture)
+                    : (_capturingProofBookingId != null
+                        ? null // another patient's photo is in progress
+                        : () => _captureAndUploadCollectionProof(bookingId: bookingId)),
+            child: SizedBox(
+              width: size,
+              height: size,
+              child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                isCapturing
+                    ? const SizedBox(width: 20, height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2.2, color: TechColors.brand))
+                    : Icon(Icons.camera_alt_outlined, size: small ? 20 : 24, color: TechColors.brand),
+                const SizedBox(height: 3),
+                Text(label,
+                    style: TextStyle(fontSize: small ? 10.5 : 11.5, fontWeight: FontWeight.w700,
+                        color: TechColors.textPrimary)),
+              ]),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Thumbnail with a ✕ to remove — hidden once the visit is OTP-verified
+    // (the server also refuses then) and while any photo is busy.
+    final canEdit = !_isFinalized && canCapture &&
+        _capturingProofBookingId == null && _removingProofBookingId == null;
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Stack(clipBehavior: Clip.none, children: [
+        GestureDetector(
+          onTap: () => _viewCollectionProofImage(proofUrl),
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              borderRadius: TechRadius.mdAll,
+              border: Border.all(color: TechColors.brand.withValues(alpha: 0.5), width: 1.4),
+            ),
+            child: ClipRRect(
+              borderRadius: TechRadius.mdAll,
+              child: (_removingProofBookingId == bookingId || isCapturing)
+                  ? const Center(child: SizedBox(width: 20, height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
+                  : Image.network(
+                      proofUrl,
+                      fit: BoxFit.cover,
+                      loadingBuilder: (_, child, progress) => progress == null
+                          ? child
+                          : const Center(child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                      errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: AppColors.textHint),
+                    ),
+            ),
+          ),
+        ),
+        if (canEdit)
+          Positioned(
+            top: -6, right: -6,
+            child: Semantics(
+              button: true,
+              label: 'Remove photo for $name',
+              child: GestureDetector(
+                onTap: () => _confirmRemoveCollectionProof(bookingId: bookingId, patientName: name),
+                child: Container(
+                  width: 24, height: 24,
+                  decoration: BoxDecoration(
+                    color: TechColors.error,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 2),
+                  ),
+                  child: const Icon(Icons.close_rounded, size: 13, color: Colors.white),
+                ),
+              ),
+            ),
+          ),
+      ]),
+      if (canEdit)
+        InkWell(
+          borderRadius: TechRadius.smAll,
+          onTap: () => _captureAndUploadCollectionProof(bookingId: bookingId),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.refresh_rounded, size: 14, color: TechColors.brand),
+              const SizedBox(width: 2),
+              Text('Retake',
+                  style: TextStyle(fontSize: small ? 11 : 12, fontWeight: FontWeight.w700,
+                      color: TechColors.brand)),
+            ]),
+          ),
+        ),
+    ]);
   }
 
   String _formatDate(DateTime d) {
@@ -4745,7 +4681,8 @@ class _SectionCard extends StatelessWidget {
   final IconData icon;
   final Widget child;
   final String? badge;
-  const _SectionCard({required this.title, required this.icon, required this.child, this.badge});
+  final Widget? trailing; // small action at the right of the title (e.g. "+ Add")
+  const _SectionCard({required this.title, required this.icon, required this.child, this.badge, this.trailing});
 
   @override
   Widget build(BuildContext context) => Container(
@@ -4767,6 +4704,10 @@ class _SectionCard extends StatelessWidget {
               const SizedBox(width: 8),
               TechStatusChip(label: badge!, tone: TechTone.warning),
             ],
+            if (trailing != null) ...[
+              const SizedBox(width: 8),
+              trailing!,
+            ],
           ]),
           const SizedBox(height: TechSpace.lg),
           child,
@@ -4774,25 +4715,216 @@ class _SectionCard extends StatelessWidget {
       );
 }
 
-class _InfoRow extends StatelessWidget {
-  final IconData icon;
+// Small pill action for a section header ("+ Add", "+ Add member").
+// onTap null → locked look (lock icon, greyed).
+class _HeaderAction extends StatelessWidget {
   final String label;
-  final String value;
-  const _InfoRow(this.icon, this.label, this.value);
+  final IconData icon;
+  final VoidCallback? onTap;
+  const _HeaderAction({required this.label, required this.icon, required this.onTap});
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 6),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 1),
-            child: Icon(icon, size: 18, color: TechColors.textHint),
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    final color = enabled ? TechColors.brand : TechColors.textHint;
+    return Material(
+      color: enabled ? TechColors.brandSurface : TechColors.surfaceMuted,
+      shape: StadiumBorder(
+        side: BorderSide(color: enabled ? AppColors.brandGreenLight : TechColors.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 36),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(enabled ? icon : Icons.lock_outline_rounded, size: 16, color: color),
+              const SizedBox(width: 4),
+              Text(label, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: color)),
+            ]),
           ),
-          const SizedBox(width: TechSpace.md),
-          SizedBox(width: 72, child: Text(label, style: TechText.bodySecondary)),
-          Expanded(child: Text(value,
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
-                  color: TechColors.textPrimary, height: 1.35))),
+        ),
+      ),
+    );
+  }
+}
+
+// One compact test/package row, used for the main patient's list and for
+// each visit member. From "Collection Started" the leading icon becomes the
+// collected/pending toggle.
+class _CompactTestRow extends StatelessWidget {
+  final String name;
+  final String price;
+  final bool isPackage;
+  final bool showChecklist;
+  final bool collected;
+  final VoidCallback? onToggle;
+  final VoidCallback? onRemove; // null → no ✕ (e.g. finalized)
+
+  const _CompactTestRow({
+    required this.name,
+    required this.price,
+    required this.isPackage,
+    required this.showChecklist,
+    required this.collected,
+    required this.onToggle,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget leading = showChecklist
+        ? InkResponse(
+            onTap: onToggle,
+            radius: 22,
+            child: Tooltip(
+              message: collected ? 'Mark pending' : 'Mark collected',
+              child: SizedBox(
+                width: 36,
+                height: 40,
+                child: Icon(
+                  collected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+                  size: 22,
+                  color: collected ? TechColors.brand : TechColors.textHint,
+                ),
+              ),
+            ),
+          )
+        : SizedBox(
+            width: 36,
+            height: 40,
+            child: Icon(isPackage ? Icons.inventory_2_outlined : Icons.science_outlined,
+                size: 18, color: isPackage ? TechColors.brand : TechColors.textHint),
+          );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(children: [
+        leading,
+        const SizedBox(width: 4),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(name,
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                      color: TechColors.textPrimary, height: 1.3)),
+              if (isPackage || (showChecklist && collected))
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    [if (isPackage) 'Package', if (showChecklist && collected) 'Collected'].join(' · '),
+                    style: TextStyle(
+                        fontSize: 11, fontWeight: FontWeight.w600,
+                        color: showChecklist && collected ? TechColors.brand : TechColors.textSecondary),
+                  ),
+                ),
+            ]),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text('₹$price',
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: TechColors.textPrimary)),
+        if (onRemove != null)
+          IconButton(
+            onPressed: onRemove,
+            tooltip: 'Remove test',
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.close_rounded, size: 18, color: TechColors.textHint),
+          )
+        else
+          const SizedBox(width: 10),
+      ]),
+    );
+  }
+}
+
+// Compact pick row for the Add Test search results (checkbox, name, price).
+// Replaces CheckboxListTile (~64px) with a ~44px row; no "General" line.
+class _PickTestRow extends StatelessWidget {
+  final String name;
+  final String price;
+  final bool isPackage;
+  final bool selected;
+  final VoidCallback? onTap;
+  final bool needsDoc; // short orange "Prescription needed" tag
+
+  const _PickTestRow({
+    required this.name,
+    required this.price,
+    required this.isPackage,
+    required this.selected,
+    required this.onTap,
+    this.needsDoc = false,
+  });
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: selected ? TechColors.brandSurface : Colors.white,
+        child: InkWell(
+          onTap: onTap,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 44),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(4, 4, 12, 4),
+              child: Row(children: [
+                SizedBox(
+                  width: 36,
+                  child: Checkbox(
+                    value: selected,
+                    onChanged: onTap == null ? null : (_) => onTap!(),
+                    activeColor: TechColors.brand,
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(name,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                            color: TechColors.textPrimary, height: 1.3)),
+                    if (isPackage)
+                      const Text('Package',
+                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: TechColors.brand)),
+                    if (needsDoc)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 1),
+                        child: Text('⚠ Prescription needed',
+                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: Color(0xFFE65100))),
+                      ),
+                  ]),
+                ),
+                const SizedBox(width: 8),
+                Text('₹$price',
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: TechColors.textPrimary)),
+              ]),
+            ),
+          ),
+        ),
+      );
+}
+
+// Thin-bordered box that stacks rows with dividers between them.
+class _DividedList extends StatelessWidget {
+  final List<Widget> children;
+  const _DividedList({required this.children});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: TechRadius.mdAll,
+          border: Border.all(color: TechColors.border),
+        ),
+        padding: const EdgeInsets.only(left: 4),
+        child: Column(children: [
+          for (var i = 0; i < children.length; i++) ...[
+            if (i > 0) const Divider(height: 1, color: TechColors.border),
+            children[i],
+          ],
         ]),
       );
 }
@@ -5270,62 +5402,6 @@ class _CompleteOtpRow extends StatelessWidget {
       ],
     );
   }
-}
-
-// ─── Form Field Widget ────────────────────────────────────────────────────────
-
-class _FormField extends StatelessWidget {
-  final String label;
-  final TextEditingController controller;
-  final String hint;
-  final IconData icon;
-  final TextInputType keyboardType;
-  final int maxLines;
-
-  const _FormField({
-    required this.label,
-    required this.controller,
-    required this.hint,
-    required this.icon,
-    this.keyboardType = TextInputType.text,
-    this.maxLines = 1,
-  });
-
-  @override
-  Widget build(BuildContext context) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label,
-              style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-          const SizedBox(height: 5),
-          TextField(
-            controller: controller,
-            keyboardType: keyboardType,
-
-            maxLines: maxLines,
-            style: const TextStyle(fontSize: 13),
-            decoration: InputDecoration(
-              hintText: hint,
-              hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
-              prefixIcon: Icon(icon, size: 18, color: AppColors.textHint),
-              counterText: '',
-              filled: true,
-              fillColor: AppColors.background,
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.divider)),
-              enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.divider)),
-              focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-              contentPadding: EdgeInsets.symmetric(
-                  vertical: maxLines > 1 ? 14 : 12, horizontal: 14),
-            ),
-          ),
-        ],
-      );
 }
 
 // ─── Document upload widgets ──────────────────────────────────────────────────
@@ -6019,7 +6095,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
       return 'Select Tests for $n';
     }
     if (_mode == 'newPatient' && _availableMembers.isNotEmpty) return 'Add New Customer';
-    return 'Add Visit Member';
+    return 'Add Family Member';
   }
 
   bool get _showBackArrow =>
@@ -6095,13 +6171,17 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      TechStatusChip(
-                        label: 'Step ${stepIndex + 1} of 3 · ${stepLabels[stepIndex]}',
-                        tone: TechTone.brand,
+                      const SizedBox(width: TechSpace.sm),
+                      Semantics(
+                        label: 'Step ${stepIndex + 1} of 3, ${stepLabels[stepIndex]}',
+                        excludeSemantics: true,
+                        child: Text('${stepIndex + 1}/3',
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                                color: TechColors.brand)),
                       ),
                     ]),
                   ),
-                  const SizedBox(height: TechSpace.sm),
+                  const SizedBox(height: TechSpace.xs),
                   // Step progress
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: TechSpace.gutter),
@@ -6121,7 +6201,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                       ],
                     ]),
                   ),
-                  const SizedBox(height: TechSpace.md),
+                  const SizedBox(height: TechSpace.sm),
                   const Divider(height: 1),
                   Expanded(child: switch (_step) {
                     0 => _buildStep0(scroll),
@@ -6169,24 +6249,41 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     }
     return SingleChildScrollView(
       controller: scroll,
-      padding: const EdgeInsets.fromLTRB(TechSpace.gutter, TechSpace.lg, TechSpace.gutter, TechSpace.sm),
+      padding: const EdgeInsets.fromLTRB(TechSpace.gutter, TechSpace.md, TechSpace.gutter, TechSpace.sm),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         const Text('Select a family member', style: TechText.bodySecondary),
-        const SizedBox(height: TechSpace.md),
-
-        ..._availableMembers.map(_buildFamilyCard),
-
-        const SizedBox(height: TechSpace.xs),
-        const Divider(height: TechSpace.xxl),
-
-        // Add new customer option
-        TechOptionCard(
-          icon: Icons.person_add_rounded,
-          title: 'Add New Customer',
-          subtitle: 'Search or create a new patient',
-          onTap: () => setState(() => _mode = 'newPatient'),
-        ),
         const SizedBox(height: TechSpace.sm),
+
+        // One bordered list, compact rows.
+        Container(
+          decoration: BoxDecoration(
+            borderRadius: TechRadius.mdAll,
+            border: Border.all(color: TechColors.border),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(children: [
+            for (var i = 0; i < _availableMembers.length; i++) ...[
+              if (i > 0) const Divider(height: 1, color: TechColors.border),
+              _buildFamilyCard(_availableMembers[i]),
+            ],
+          ]),
+        ),
+
+        // Add new customer — search by mobile or create a new patient.
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: () => setState(() => _mode = 'newPatient'),
+            icon: const Icon(Icons.person_add_alt_1_outlined, size: 18),
+            label: const Text('Add new customer'),
+            style: TextButton.styleFrom(
+              foregroundColor: TechColors.brand,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(48, TechSize.minTouch),
+              textStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700),
+            ),
+          ),
+        ),
       ]),
     );
   }
@@ -6199,33 +6296,24 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     final initial  = name.isNotEmpty ? name[0].toUpperCase() : '?';
     final color    = _avatarColor(name);
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: TechSpace.md),
-      child: Material(
+    // A row inside the bordered list built by _buildSelectMode.
+    return Material(
         color: isSelected ? TechColors.brandSurface : Colors.white,
-        shape: RoundedRectangleBorder(
-          borderRadius: TechRadius.lgAll,
-          side: BorderSide(
-            color: isSelected ? TechColors.brand : TechColors.border,
-            width: isSelected ? 1.5 : 1,
-          ),
-        ),
-        clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: () => _selectFamilyMember(m),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(children: [
               CircleAvatar(
-                radius: 22,
+                radius: 17,
                 backgroundColor: color.withValues(alpha: 0.15),
                 child: Text(initial,
-                    style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 16)),
+                    style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 14)),
               ),
-              const SizedBox(width: TechSpace.md),
+              const SizedBox(width: 10),
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text(name, style: TechText.cardTitle),
-                const SizedBox(height: 3),
+                const SizedBox(height: 2),
                 Wrap(spacing: 6, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
                   if (relation.isNotEmpty)
                     Container(
@@ -6249,25 +6337,46 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
             ]),
           ),
         ),
-      ),
     );
   }
 
   // ── Step 0-B: New patient form ────────────────────────────────────────────
 
+  // Compact field look for this form: label floats inside the box, ~44px tall.
+  InputDecoration _compactField(String label, IconData icon,
+      {bool required = false, String? hint, Widget? suffix}) {
+    OutlineInputBorder border(Color c, [double w = 1]) => OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide(color: c, width: w),
+        );
+    return InputDecoration(
+      label: Text.rich(TextSpan(text: label, children: [
+        if (required) const TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
+      ])),
+      labelStyle: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
+      hintText: hint,
+      hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
+      prefixIcon: Icon(icon, size: 18, color: AppColors.textHint),
+      prefixIconConstraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+      suffixIcon: suffix,
+      counterText: '',
+      isDense: true,
+      filled: true,
+      fillColor: AppColors.background,
+      contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+      border: border(AppColors.divider),
+      enabledBorder: border(AppColors.divider),
+      focusedBorder: border(AppColors.brandGreen, 1.5),
+    );
+  }
+
   Widget _buildNewPatientForm(ScrollController scroll) {
+    const gap = SizedBox(height: 10);
     return SingleChildScrollView(
       controller: scroll,
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        RichText(text: const TextSpan(
-          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-          children: [
-            TextSpan(text: 'Mobile Number'),
-            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
-          ],
-        )),
-        const SizedBox(height: 6),
+        // Mobile + search
         Row(children: [
           Expanded(
             child: TextField(
@@ -6277,32 +6386,21 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               autofocus: true,
               style: const TextStyle(fontSize: 14),
-              decoration: InputDecoration(
-                hintText: '10-digit mobile number',
-                hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
-                prefixIcon: const Icon(Icons.phone_outlined, size: 18, color: AppColors.textHint),
-                counterText: '',
-                filled: true, fillColor: AppColors.background,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: AppColors.divider)),
-                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: AppColors.divider)),
-                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                    borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                contentPadding: const EdgeInsets.symmetric(vertical: 14),
-              ),
+              decoration: _compactField('Mobile number', Icons.phone_outlined,
+                  required: true, hint: '10-digit mobile number'),
             ),
           ),
           const SizedBox(width: 8),
           SizedBox(
-            height: 50,
+            height: 44,
+            width: 48,
             child: ElevatedButton(
               onPressed: _isSearching ? null : _searchPatient,
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.brandGreen,
                 disabledBackgroundColor: AppColors.brandGreen.withValues(alpha: 0.5),
                 elevation: 0,
-                padding: const EdgeInsets.symmetric(horizontal: 14),
+                padding: EdgeInsets.zero,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
               ),
               child: _isSearching
@@ -6314,28 +6412,20 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         ]),
 
         if (_foundPatient != null) ...[
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: AppColors.brandGreenSurface,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: AppColors.brandGreenLight),
-            ),
-            child: Row(children: [
-              const Icon(Icons.person_pin_rounded, size: 16, color: AppColors.brandGreen),
-              const SizedBox(width: 8),
-              Expanded(child: Text(
-                _foundPatient!['patient_name'] as String? ?? '',
-                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                    color: AppColors.brandGreen),
-              )),
-              const Text('Existing patient',
-                  style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-            ]),
-          ),
+          const SizedBox(height: 6),
+          Row(children: [
+            const Icon(Icons.check_circle_rounded, size: 15, color: AppColors.brandGreen),
+            const SizedBox(width: 6),
+            Flexible(child: Text(
+              _foundPatient!['patient_name'] as String? ?? '',
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.brandGreen),
+            )),
+            const Text(' · Existing patient',
+                style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+          ]),
         ] else if (_searchedWithNoResult) ...[
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           const Row(children: [
             Icon(Icons.person_add_outlined, size: 14, color: AppColors.textSecondary),
             SizedBox(width: 6),
@@ -6343,124 +6433,58 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                 style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
           ]),
         ],
+        gap,
 
-        const SizedBox(height: 14),
-
-        RichText(text: const TextSpan(
-          style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-          children: [
-            TextSpan(text: 'Full Name'),
-            TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
-          ],
-        )),
-        const SizedBox(height: 5),
+        // Full name
         TextField(
           controller: _nameCtrl,
           keyboardType: TextInputType.name,
           inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[a-zA-Z ]'))],
-          style: const TextStyle(fontSize: 13),
-          decoration: InputDecoration(
-            hintText: 'Enter full name',
-            hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
-            prefixIcon: const Icon(Icons.person_outline, size: 18, color: AppColors.textHint),
-            counterText: '',
-            filled: true,
-            fillColor: AppColors.background,
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: AppColors.divider)),
-            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: AppColors.divider)),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
-                borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-            contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
-          ),
+          textCapitalization: TextCapitalization.words,
+          style: const TextStyle(fontSize: 13.5),
+          decoration: _compactField('Full name', Icons.person_outline, required: true),
         ),
-        const SizedBox(height: 10),
+        gap,
 
         // DOB or Age — same pair as the customer "Add Family Member" form:
         // pick a date (fills Age) or type an age (fills the date).
         Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Expanded(
             flex: 3,
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              RichText(text: const TextSpan(
-                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-                children: [
-                  TextSpan(text: 'DOB or Age'),
-                  TextSpan(text: ' *', style: TextStyle(color: Colors.red)),
-                ],
-              )),
-              const SizedBox(height: 6),
-              Semantics(
-                button: true,
-                label: 'Date of birth',
-                value: _dobCtrl.text,
-                child: GestureDetector(
-                  onTap: _pickDob,
-                  child: Container(
-                    height: 50,
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                    decoration: BoxDecoration(
-                      color: AppColors.background,
-                      border: Border.all(color: AppColors.divider),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(children: [
-                      const Icon(Icons.cake_outlined, size: 18, color: AppColors.textHint),
-                      const SizedBox(width: 8),
-                      Expanded(child: Text(
-                        _dobCtrl.text.isEmpty ? 'DD/MM/YYYY' : _dobCtrl.text,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 13,
-                            color: _dobCtrl.text.isEmpty
-                                ? AppColors.textHint : AppColors.textPrimary),
-                      )),
-                      const Icon(Icons.calendar_month_outlined, size: 18,
-                          color: TechColors.brand),
-                    ]),
+            child: Semantics(
+              button: true,
+              label: 'Date of birth',
+              value: _dobCtrl.text,
+              child: GestureDetector(
+                onTap: _pickDob,
+                child: AbsorbPointer(
+                  child: TextField(
+                    controller: _dobCtrl,
+                    readOnly: true,
+                    style: const TextStyle(fontSize: 13.5),
+                    decoration: _compactField('DOB', Icons.cake_outlined,
+                        required: true,
+                        hint: 'DD/MM/YYYY',
+                        suffix: const Icon(Icons.calendar_month_outlined, size: 18, color: TechColors.brand)),
                   ),
                 ),
               ),
-            ]),
+            ),
           ),
           const SizedBox(width: 10),
           Expanded(
             flex: 2,
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Age', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-              const SizedBox(height: 6),
-              SizedBox(
-                height: 50,
-                child: TextField(
-                  controller: _ageCtrl,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [
-                    FilteringTextInputFormatter.digitsOnly,
-                    LengthLimitingTextInputFormatter(3),
-                  ],
-                  onChanged: _onAgeChanged,
-                  style: const TextStyle(fontSize: 13),
-                  decoration: InputDecoration(
-                    hintText: 'e.g. 25',
-                    hintStyle: const TextStyle(fontSize: 13, color: AppColors.textHint),
-                    prefixIcon: const Icon(Icons.numbers_outlined, size: 18, color: AppColors.textHint),
-                    filled: true,
-                    fillColor: AppColors.background,
-                    contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: AppColors.divider),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5),
-                    ),
-                  ),
-                ),
-              ),
-            ]),
+            child: TextField(
+              controller: _ageCtrl,
+              keyboardType: TextInputType.number,
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+                LengthLimitingTextInputFormatter(3),
+              ],
+              onChanged: _onAgeChanged,
+              style: const TextStyle(fontSize: 13.5),
+              decoration: _compactField('Age', Icons.numbers_outlined, hint: 'e.g. 25'),
+            ),
           ),
         ]),
         // Typed age over 120: say why the date didn't fill.
@@ -6469,36 +6493,45 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
           const Text('Enter an age between 0 and 120',
               style: TextStyle(fontSize: 12, color: TechColors.error)),
         ],
-        const SizedBox(height: 10),
+        gap,
 
-        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Gender',
-              style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-          const SizedBox(height: 6),
-          Wrap(
-            spacing: 8, runSpacing: 6,
-            children: ['Male', 'Female', 'Other'].map((g) => GestureDetector(
-              onTap: () => setState(() => _gender = g),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  color: _gender == g ? AppColors.brandGreen : Colors.white,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                      color: _gender == g ? AppColors.brandGreen : AppColors.divider),
+        // Gender — label and chips on one line.
+        Row(children: [
+          const SizedBox(
+            width: 58,
+            child: Text('Gender', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
+          ),
+          Expanded(
+            child: Wrap(
+              spacing: 6, runSpacing: 6,
+              children: ['Male', 'Female', 'Other'].map((g) => Semantics(
+                button: true,
+                selected: _gender == g,
+                child: GestureDetector(
+                  onTap: () => setState(() => _gender = g),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: _gender == g ? AppColors.brandGreen : Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                          color: _gender == g ? AppColors.brandGreen : AppColors.divider),
+                    ),
+                    child: Text(g, style: TextStyle(
+                        fontSize: 12.5, fontWeight: FontWeight.w600,
+                        color: _gender == g ? Colors.white : AppColors.textSecondary)),
+                  ),
                 ),
-                child: Text(g, style: TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w500,
-                    color: _gender == g ? Colors.white : AppColors.textSecondary)),
-              ),
-            )).toList(),
+              )).toList(),
+            ),
           ),
         ]),
-        const SizedBox(height: 10),
+        gap,
 
+        // Relation
         Container(
-          height: 50,
+          height: 44,
           padding: const EdgeInsets.symmetric(horizontal: 12),
           decoration: BoxDecoration(
             color: AppColors.background,
@@ -6523,16 +6556,18 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
             ),
           ]),
         ),
-        const SizedBox(height: 10),
+        gap,
 
-        _FormField(
-          label: 'Health Condition / Notes',
+        // Health condition — one line, grows while typing.
+        TextField(
           controller: _healthCtrl,
-          hint: 'e.g. Diabetes, Hypertension, Thyroid…',
-          icon: Icons.medical_information_outlined,
-          maxLines: 2,
+          minLines: 1,
+          maxLines: 3,
+          style: const TextStyle(fontSize: 13.5),
+          decoration: _compactField('Health condition / notes', Icons.medical_information_outlined,
+              hint: 'e.g. Diabetes, Hypertension, Thyroid…'),
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 16),
       ]),
     );
   }
@@ -6543,14 +6578,16 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     final filtered = _filteredTests;
     return Column(children: [
       Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
         child: TextField(
           onChanged: (v) => setState(() => _testSearch = v),
           style: const TextStyle(fontSize: 13),
           decoration: InputDecoration(
+            isDense: true,
             hintText: 'Search test or package…',
             hintStyle: const TextStyle(color: AppColors.textHint, fontSize: 13),
             prefixIcon: const Icon(Icons.search_rounded, size: 18, color: AppColors.textHint),
+            prefixIconConstraints: const BoxConstraints(minWidth: 40, minHeight: 40),
             filled: true, fillColor: AppColors.background,
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
                 borderSide: const BorderSide(color: AppColors.divider)),
@@ -6572,35 +6609,20 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
             final t = filtered[i];
             final checked = _selectedTestIds.contains(t['id']);
             final needsDoc = t['docRequired'] == 'yes';
-            return CheckboxListTile(
-              value: checked,
-              onChanged: (v) => setState(() {
-                if (v!) { _selectedTestIds.add(t['id']!); }
-                else     { _selectedTestIds.remove(t['id']); }
+            // Same compact row as the main Add Test list. A test that needs a
+            // prescription gets a short tag; it's uploaded on the Review step
+            // or later from the Prescription section.
+            return _PickTestRow(
+              name: t['name'] ?? '',
+              price: t['price'] ?? '0',
+              isPackage: t['category'] == 'Package',
+              needsDoc: needsDoc,
+              selected: checked,
+              onTap: () => setState(() {
+                final id = t['id'];
+                if (id == null) return;
+                if (!_selectedTestIds.remove(id)) _selectedTestIds.add(id);
               }),
-              activeColor: AppColors.brandGreen,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-              title: Text(t['name'] ?? '',
-                  style: const TextStyle(fontSize: 13, color: AppColors.textPrimary)),
-              subtitle: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if ((t['category'] ?? '').isNotEmpty)
-                    Text(t['category']!,
-                        style: const TextStyle(fontSize: 11, color: AppColors.brandGreen)),
-                  if (needsDoc)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 2),
-                      child: Text('⚠ Requires prescription — mandatory to upload after adding',
-                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFE65100))),
-                    ),
-                ],
-              ),
-              secondary: Text('₹${t['price'] ?? '0'}',
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary)),
-              controlAffinity: ListTileControlAffinity.leading,
             );
           },
         ),
@@ -6679,19 +6701,12 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
     final files = _memberPres[i];
     final nameMissing = _showDoctorNameErrors && isDoctor && _doctorNameCtrls[i].text.trim().isEmpty;
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-      decoration: BoxDecoration(
-        color: TechColors.surfaceMuted,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.divider),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('Referred by',
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
-        const SizedBox(height: 8),
+    // Shown inside the member's review card (no box of its own).
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
+          const Text('Referred by',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
+          const SizedBox(width: 10),
           Expanded(
             child: _ReferralChip(
               label: 'Self',
@@ -6712,7 +6727,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
         ]),
 
         if (isDoctor) ...[
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           TextField(
             controller: _doctorNameCtrls[i],
             maxLength: 150,
@@ -6728,9 +6743,9 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
               prefixIcon: const Icon(Icons.local_hospital_outlined, size: 18, color: AppColors.textHint),
               counterText: '',
               filled: true,
-              fillColor: Colors.white,
+              fillColor: AppColors.background,
               isDense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(10),
@@ -6750,7 +6765,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
               ),
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           Row(children: [
             const Text('Prescription',
                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textSecondary)),
@@ -6768,8 +6783,10 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
           ],
           const SizedBox(height: 8),
           SizedBox(
-            height: 72,
+            height: 60, // 56px tiles + room for the ✕ badge
             child: ListView.separated(
+              padding: const EdgeInsets.only(top: 4, right: 6),
+              clipBehavior: Clip.none,
               scrollDirection: Axis.horizontal,
               itemCount: files.length + (files.length < _maxPresPerMember ? 1 : 0),
               separatorBuilder: (_, __) => const SizedBox(width: 8),
@@ -6783,7 +6800,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                     child: GestureDetector(
                       onTap: _presPicking ? null : () => _showMemberPresSource(i),
                       child: Container(
-                        width: 72,
+                        width: 56,
                         decoration: BoxDecoration(
                           color: TechColors.brandSurface,
                           borderRadius: BorderRadius.circular(10),
@@ -6794,7 +6811,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                                 child: SizedBox(width: 20, height: 20,
                                     child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)))
                             : const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                                Icon(Icons.add_photo_alternate_outlined, size: 22, color: AppColors.brandGreen),
+                                Icon(Icons.add_photo_alternate_outlined, size: 20, color: AppColors.brandGreen),
                                 SizedBox(height: 2),
                                 Text('Add', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
                                     color: AppColors.brandGreen)),
@@ -6807,7 +6824,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                 return Stack(clipBehavior: Clip.none, children: [
                   ClipRRect(
                     borderRadius: BorderRadius.circular(10),
-                    child: Image.memory(f.bytes, width: 72, height: 72, fit: BoxFit.cover),
+                    child: Image.memory(f.bytes, width: 56, height: 56, fit: BoxFit.cover),
                   ),
                   Positioned(
                     top: -6,
@@ -6837,8 +6854,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
                 style: const TextStyle(fontSize: 11, color: AppColors.textHint)),
           ],
         ],
-      ]),
-    );
+      ]);
   }
 
   // ── Step 2: Queue review ──────────────────────────────────────────────────
@@ -6846,13 +6862,13 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
   Widget _buildReviewStep(ScrollController scroll) {
     return SingleChildScrollView(
       controller: scroll,
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
         // Info banner
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          margin: const EdgeInsets.only(bottom: 16),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          margin: const EdgeInsets.only(bottom: 12),
           decoration: BoxDecoration(
             color: AppColors.brandGreenSurface,
             borderRadius: BorderRadius.circular(10),
@@ -6863,7 +6879,7 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
             SizedBox(width: 8),
             Expanded(
               child: Text(
-                'Payment will be collected after submission from the Collect Payment section.',
+                'Payment is collected after submit, in Collect Payment.',
                 style: TextStyle(fontSize: 12, color: AppColors.brandGreen),
               ),
             ),
@@ -6881,60 +6897,59 @@ class _AddVisitMemberSheetState extends State<_AddVisitMemberSheet> {
           final color  = _avatarColor(name);
           final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
 
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                margin: const EdgeInsets.only(bottom: 6),
-                padding: const EdgeInsets.all(14),
+          // One card per member: who, total, test count, then Referred by.
+          return Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: AppColors.divider),
                 ),
-                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   CircleAvatar(
-                    radius: 20,
+                    radius: 17,
                     backgroundColor: color.withValues(alpha: 0.15),
                     child: Text(initial,
-                        style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 14)),
+                        style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 13)),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 10),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Row(children: [
-                      Expanded(child: Text(name,
+                      Expanded(child: Text(
+                          [name, mobile].where((s) => s.isNotEmpty).join(' · '),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
                               color: AppColors.textPrimary))),
+                      const SizedBox(width: 8),
                       Text('₹${_inr(total)}',
                           style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
                               color: AppColors.textPrimary)),
                     ]),
-                    if (mobile.isNotEmpty) ...[
-                      const SizedBox(height: 2),
-                      Text(mobile,
-                          style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                    ],
-                    const SizedBox(height: 6),
-                    Text('${tests.length} test${tests.length == 1 ? '' : 's'} selected',
+                    const SizedBox(height: 2),
+                    Text('${tests.length} test${tests.length == 1 ? '' : 's'}',
                         style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
                   ])),
-                  GestureDetector(
-                    onTap: () => setState(() {
+                  IconButton(
+                    onPressed: () => setState(() {
                       _queuedMembers.removeAt(i);
                       _doctorNameCtrls[i].dispose();
                       _doctorNameCtrls.removeAt(i);
                       _doctorTypes.removeAt(i);
                       _memberPres.removeAt(i);
                     }),
-                    child: const Padding(
-                      padding: EdgeInsets.only(left: 8),
-                      child: Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
-                    ),
+                    tooltip: 'Remove member',
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                    icon: const Icon(Icons.close_rounded, size: 18, color: AppColors.textHint),
                   ),
                 ]),
-              ),
-              _buildReferral(i, name, m['needsDoc'] == true),
-            ],
+                const Divider(height: 18),
+                _buildReferral(i, name, m['needsDoc'] == true),
+                ]),
           );
         }),
 
@@ -7227,5 +7242,237 @@ class _QrPaymentSheetState extends State<_QrPaymentSheet> {
           ),
         );
     }
+  }
+}
+
+// ── Technician reschedule sheet ───────────────────────────────────────────────
+// Lists the technician's own free times for the next few days (GET
+// /api/technicians/reschedule-slots). Pops a _RescheduleChoice, or null.
+
+class _RescheduleChoice {
+  final int availableSlotId;
+  final String label; // "Wed, 18 Nov · 10:00 AM"
+  const _RescheduleChoice(this.availableSlotId, this.label);
+}
+
+class _TechRescheduleSheet extends StatefulWidget {
+  final String customerName;
+  final String currentWhen;
+  const _TechRescheduleSheet({required this.customerName, required this.currentWhen});
+
+  @override
+  State<_TechRescheduleSheet> createState() => _TechRescheduleSheetState();
+}
+
+class _TechRescheduleSheetState extends State<_TechRescheduleSheet> {
+  bool _loading = true;
+  String? _error;
+  List<({String date, List<Map<String, dynamic>> slots})> _days = [];
+  int _dayIndex = 0;
+  int? _slotId;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() { _loading = true; _error = null; });
+    final res = await ApiService.getTechnicianRescheduleSlots();
+    if (!mounted) return;
+    if (res['success'] == true) {
+      final data = (res['data'] as List? ?? []).cast<Map<String, dynamic>>();
+      setState(() {
+        _days = data.map((d) => (
+          date: d['date'] as String,
+          slots: (d['slots'] as List? ?? []).cast<Map<String, dynamic>>(),
+        )).where((d) => d.slots.isNotEmpty).toList();
+        _dayIndex = 0;
+        _slotId = null;
+        _loading = false;
+      });
+    } else {
+      setState(() {
+        _loading = false;
+        _error = AppMessages.serverMessage(res['message'], fallback: 'We couldn\'t load your free times.');
+      });
+    }
+  }
+
+  static const _wd = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  static const _mo = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  DateTime _parse(String ymd) => DateTime.parse(ymd);
+
+  String _dayTop(String ymd) {
+    final d = _parse(ymd);
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final diff = DateTime(d.year, d.month, d.day).difference(today).inDays;
+    if (diff == 0) return 'Today';
+    if (diff == 1) return 'Tomorrow';
+    return _wd[d.weekday - 1];
+  }
+
+  String _dayBottom(String ymd) {
+    final d = _parse(ymd);
+    return '${d.day} ${_mo[d.month]}';
+  }
+
+  String _longDay(String ymd) {
+    final d = _parse(ymd);
+    return '${_wd[d.weekday - 1]}, ${d.day} ${_mo[d.month]}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final day = _days.isEmpty ? null : _days[_dayIndex.clamp(0, _days.length - 1)];
+    final selected = day?.slots.where((s) => (s['available_slot_id'] as num?)?.toInt() == _slotId).firstOrNull;
+
+    Widget body;
+    if (_loading) {
+      body = const Padding(
+        padding: EdgeInsets.symmetric(vertical: 32),
+        child: TechLoadingState(label: 'Loading your free times…'),
+      );
+    } else if (_error != null) {
+      body = Column(mainAxisSize: MainAxisSize.min, children: [
+        TechBanner(message: _error!, tone: TechTone.error),
+        const SizedBox(height: TechSpace.md),
+        TechButton.secondary(onPressed: _load, icon: Icons.refresh_rounded, label: 'Try again'),
+      ]);
+    } else if (day == null) {
+      body = const TechEmptyState(
+        icon: Icons.event_busy_outlined,
+        title: 'No free times',
+        message: 'You have no free times in the next 7 days. Add availability in Schedule, then try again.',
+      );
+    } else {
+      body = Column(crossAxisAlignment: CrossAxisAlignment.stretch, mainAxisSize: MainAxisSize.min, children: [
+        // Day chips
+        SizedBox(
+          height: 56,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: _days.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 8),
+            itemBuilder: (_, i) {
+              final sel = i == _dayIndex;
+              return Semantics(
+                button: true,
+                selected: sel,
+                label: '${_longDay(_days[i].date)}, ${_days[i].slots.length} free',
+                excludeSemantics: true,
+                child: Material(
+                  color: sel ? TechColors.brand : Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: TechRadius.mdAll,
+                    side: BorderSide(color: sel ? TechColors.brand : TechColors.border),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: () => setState(() { _dayIndex = i; _slotId = null; }),
+                    child: SizedBox(
+                      width: 68,
+                      child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                        Text(_dayTop(_days[i].date),
+                            style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600,
+                                color: sel ? Colors.white : TechColors.textSecondary)),
+                        const SizedBox(height: 2),
+                        Text(_dayBottom(_days[i].date),
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800,
+                                color: sel ? Colors.white : TechColors.textPrimary)),
+                      ]),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: TechSpace.md),
+        Text('Free times · ${_longDay(day.date)}', style: TechText.caption),
+        const SizedBox(height: TechSpace.sm),
+        // Time chips
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 220),
+          child: SingleChildScrollView(
+            child: Wrap(spacing: 8, runSpacing: 8, children: [
+              for (final s in day.slots)
+                Builder(builder: (_) {
+                  final id = (s['available_slot_id'] as num).toInt();
+                  final sel = id == _slotId;
+                  return Semantics(
+                    button: true,
+                    selected: sel,
+                    excludeSemantics: true,
+                    label: s['label'] as String? ?? '',
+                    child: Material(
+                      color: sel ? TechColors.brandSurface : Colors.white,
+                      shape: StadiumBorder(side: BorderSide(
+                          color: sel ? TechColors.brand : TechColors.border, width: sel ? 1.5 : 1)),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
+                        onTap: () => setState(() => _slotId = id),
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(minHeight: 40, minWidth: 92),
+                          child: Center(
+                            widthFactor: 1,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 14),
+                              child: Text(s['label'] as String? ?? '',
+                                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                                      color: sel ? TechColors.brand : TechColors.textPrimary)),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+            ]),
+          ),
+        ),
+      ]);
+    }
+
+    return TechThemeScope(
+      child: TechSheetFrame(
+        title: 'Reschedule booking',
+        subtitle: 'Call ${widget.customerName} to agree the new time first. You keep this booking.',
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: const BoxDecoration(color: TechColors.surfaceMuted, borderRadius: TechRadius.mdAll),
+            child: Row(children: [
+              const Icon(Icons.event_outlined, size: 16, color: TechColors.textHint),
+              const SizedBox(width: 6),
+              const Text('Now: ', style: TechText.caption),
+              Expanded(
+                child: Text(widget.currentWhen,
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: TechColors.textPrimary)),
+              ),
+            ]),
+          ),
+          const SizedBox(height: TechSpace.md),
+          body,
+          const SizedBox(height: TechSpace.lg),
+          TechButton(
+            icon: Icons.event_repeat_rounded,
+            label: selected == null
+                ? 'Pick a new time'
+                : 'Move to ${_longDay(day!.date)} · ${selected['label']}',
+            onPressed: selected == null
+                ? null
+                : () => Navigator.pop(context, _RescheduleChoice(
+                      (selected['available_slot_id'] as num).toInt(),
+                      '${_longDay(day!.date)} · ${selected['label']}',
+                    )),
+          ),
+        ]),
+      ),
+    );
   }
 }

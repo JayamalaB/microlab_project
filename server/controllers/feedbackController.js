@@ -30,7 +30,9 @@ exports.submitFeedback = async (req, res) => {
     if (!booking) {
       return res.status(404).json({ success: false, message: 'Booking not found' });
     }
-    const feedbackAllowed = ['completed', 'collected', 'submitted', 'handed_to_lab_pending'];
+    // From sample collected onward ('collected' = older value of sample_collected).
+    const feedbackAllowed = ['sample_collected', 'collected', 'otp_verified', 'submitted',
+      'handed_to_lab_pending', 'handed_to_lab', 'completed'];
     if (!feedbackAllowed.includes(booking.status)) {
       return res.status(400).json({ success: false, message: 'Feedback can only be submitted once the sample has been collected' });
     }

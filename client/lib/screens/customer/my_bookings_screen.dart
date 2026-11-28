@@ -45,7 +45,8 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
   String _dateFilter = 'All Time'; // 'All Time' | 'This Month' | 'Last Month' | 'This Year'
 
   static const _upcomingStatuses = {
-    'Pending', 'Upcoming', 'Confirmed', 'Technician Allocated', 'Technician Arrived', 'In Progress',
+    'Pending', 'Upcoming', 'Confirmed', 'Technician Allocated', 'Technician On the Way',
+    'Technician Arrived', 'Collection In Progress', 'In Progress',
   };
   static const _completedStatuses = {
     'Completed', 'Sample Collected', 'Handed to Lab', 'Handed to Lab Pending',
@@ -103,10 +104,16 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       case 'scheduled':  return 'Upcoming';
       case 'confirmed':  return 'Confirmed';
       case 'assigned':   return 'Technician Allocated';
+      // ip_bookings.status follows each technician step.
+      case 'en_route':             return 'Technician On the Way';
       case 'arrived':              return 'Technician Arrived';
-      case 'collected':            return 'Sample Collected';
+      case 'collection_started':   return 'Collection In Progress';
+      case 'sample_collected':     return 'Sample Collected';
+      case 'collected':            return 'Sample Collected'; // older value
+      case 'otp_verified':         return 'Sample Collected';
       case 'submitted':            return 'Handed to Lab';
       case 'handed_to_lab_pending': return 'Handed to Lab';
+      case 'handed_to_lab':        return 'Handed to Lab';
       case 'completed':            return 'Completed';
       case 'cancelled':  return 'Cancelled';
       default:           return raw.isNotEmpty
@@ -825,7 +832,12 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
   StreamSubscription<bool>? _connectedSub;
   Timer? _pollTimer;
 
-  static const _activeStatuses = {'pending', 'confirmed', 'assigned', 'arrived'};
+  // Compared with b.status (the label, lower-cased): keep refreshing while a
+  // booking is still moving through the technician's steps.
+  static const _activeStatuses = {
+    'pending', 'upcoming', 'confirmed', 'technician allocated', 'technician on the way',
+    'technician arrived', 'collection in progress', 'in progress',
+  };
 
   @override
   void initState() {
@@ -923,7 +935,8 @@ class _PatientBookingsPageState extends State<_PatientBookingsPage>
           : Builder(builder: (_) {
               final filter = widget.initialFilter;
               final displayed = filter == 'Upcoming'
-                  ? _bookings.where((b) => const {'Upcoming','Pending','Confirmed','Technician Allocated','In Progress'}.contains(b.status)).toList()
+                  ? _bookings.where((b) => const {'Upcoming','Pending','Confirmed','Technician Allocated',
+                      'Technician On the Way','Technician Arrived','Collection In Progress','In Progress'}.contains(b.status)).toList()
                   : filter == 'Completed'
                   ? _bookings.where((b) => const {'Completed','Sample Collected','Handed to Lab','Handed to Lab Pending'}.contains(b.status)).toList()
                   : filter == 'Cancelled'
@@ -1280,6 +1293,8 @@ class _BookingCard extends StatelessWidget {
       case 'Handed to Lab':         return AppColors.brandGreen;
       case 'Handed to Lab Pending': return AppColors.brandGreen;
       case 'Technician Arrived':    return AppColors.brandGreen;
+      case 'Technician On the Way': return const Color(0xFF1565C0);
+      case 'Collection In Progress': return const Color(0xFFE65100);
       case 'Confirmed':             return const Color(0xFF1565C0);
       case 'Technician Allocated':  return const Color(0xFF1565C0);
       case 'In Progress':           return const Color(0xFF1565C0);
@@ -1296,6 +1311,8 @@ class _BookingCard extends StatelessWidget {
       case 'Handed to Lab':         return Icons.local_shipping_outlined;
       case 'Handed to Lab Pending': return Icons.local_shipping_outlined;
       case 'Technician Arrived':    return Icons.door_front_door_outlined;
+      case 'Technician On the Way': return Icons.directions_bike_rounded;
+      case 'Collection In Progress': return Icons.science_outlined;
       case 'Confirmed':             return Icons.event_available_outlined;
       case 'Technician Allocated':  return Icons.assignment_ind_outlined;
       case 'In Progress':           return Icons.directions_run_rounded;
@@ -1529,11 +1546,12 @@ class _BookingCard extends StatelessWidget {
                     ],
 
                     // Cancel button — only for pending/scheduled/confirmed/assigned, future dates,
-                    // slot time not yet passed, and before technician starts collection
-                    if ((booking.status == 'Pending' || booking.status == 'Upcoming' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated' || booking.status == 'Technician Arrived') &&
+                    // slot time not yet passed, and before the technician starts the
+                    // journey (the server refuses from en_route on).
+                    if ((booking.status == 'Pending' || booking.status == 'Upcoming' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated') &&
                         !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
                         !_slotHasPassed(booking) &&
-                        !const {'collection_started', 'otp_verified', 'sample_collected',
+                        !const {'en_route', 'arrived', 'collection_started', 'otp_verified', 'sample_collected',
                                  'handed_to_lab', 'handed_to_lab_pending', 'collected', 'completed',
                                  'all_collected', 'cancelled'}
                             .contains(booking.collectionStatus)) ...[
@@ -2008,7 +2026,7 @@ class _BookingDetailSheetState extends State<_BookingDetailSheet>
 
   bool get _canEditTests {
     const blocked = {
-      'en_route', 'arrived', 'collection_started', 'sample_collected',
+      'en_route', 'arrived', 'collection_started', 'sample_collected', 'otp_verified',
       'handed_to_lab', 'handed_to_lab_pending',
     };
     if (b.collectionStatus != null && blocked.contains(b.collectionStatus)) return false;

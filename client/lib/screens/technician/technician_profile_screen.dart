@@ -2,12 +2,17 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:microlab/constants/app_constants.dart';
+import 'package:microlab/services/api_service.dart';
+import 'package:microlab/services/socket_service.dart';
+import 'package:microlab/utils/app_messages.dart';
 import 'package:microlab/theme/app_theme.dart';
 import 'package:microlab/widgets/tech/tech_widgets.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
-String _resolvePhotoUrl(String raw) {
+/// Full URL for a technician photo path (also used by the dashboard header).
+String resolveTechPhotoUrl(String raw) {
   if (raw.isEmpty) return '';
   if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
   final base = AppConstants.serverUrl.replaceAll(RegExp(r'/+$'), '');
@@ -19,12 +24,19 @@ class TechnicianProfileScreen extends StatefulWidget {
   final String mobile;
   final bool embedded;
   final VoidCallback onLogout;
+  /// Bumped by the Dashboard each time the Profile tab is opened, so Today's
+  /// Summary and the profile reload instead of showing old numbers.
+  final int refreshTick;
+  /// Called after the name or photo changes, so the Dashboard header updates.
+  final VoidCallback? onProfileChanged;
 
   const TechnicianProfileScreen({
     super.key,
     required this.mobile,
     required this.onLogout,
     this.embedded = false,
+    this.refreshTick = 0,
+    this.onProfileChanged,
   });
 
   @override
@@ -43,7 +55,8 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
   String _branchName     = '';
   String _photoUrl       = '';
   String _techCity       = '';
-  List<String> _specializations = [];
+  bool _saving     = false;
+  bool _photoBusy  = false;
   List<Map<String, dynamic>> _branches = [];
   bool _branchesLoaded = false;
 
@@ -51,26 +64,48 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
   int _assignedToday  = 0;
   int _completedToday = 0;
   int _pendingToday   = 0;
+  int _rescheduled    = 0;
   int _totalDone      = 0;
+
+  // Summary period (server values → labels).
+  String _period = 'today';
+  static const _periods = {
+    'all':        'All Time',
+    'today':      'Today',
+    'this_week':  'This Week',
+    'last_week':  'Last Week',
+    'this_month': 'This Month',
+    'last_month': 'Last Month',
+  };
+
+  Future<void> _setPeriod(String p) async {
+    if (p == _period) return;
+    setState(() { _period = p; _statsLoading = true; });
+    await _reload();
+  }
 
   late TextEditingController _nameCtrl;
   late TextEditingController _emailCtrl;
-
-  late List<String> _editingSpecs;
-
-  static const _availableSpecs = [
-    'Phlebotomy', 'Diabetes', 'Thyroid', 'General', 'Paediatric',
-    'Cardiology', 'Neurology', 'Oncology', 'Haematology', 'Microbiology',
-  ];
 
   @override
   void initState() {
     super.initState();
     _nameCtrl     = TextEditingController();
     _emailCtrl    = TextEditingController();
-    _editingSpecs = [];
     _loadProfile();
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didUpdateWidget(covariant TechnicianProfileScreen old) {
+    super.didUpdateWidget(old);
+    if (widget.refreshTick != old.refreshTick) _reload();
+  }
+
+  Future<void> _reload() async {
+    final prefs  = await SharedPreferences.getInstance();
+    final techId = prefs.getInt('user_id') ?? 0;
+    if (techId > 0 && mounted) await _loadStats(techId);
   }
 
   @override
@@ -96,12 +131,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
     final code    = prefs.getString('technician_code') ?? '';
     final city    = prefs.getString('tech_city')       ?? '';
     final photo   = prefs.getString('tech_photo')      ?? '';
-    final specStr = prefs.getString('specialization')  ?? '';
     final techId  = prefs.getInt('user_id')            ?? 0;
-
-    final specs = specStr.isNotEmpty
-        ? specStr.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList()
-        : <String>[];
 
     if (mounted) {
       setState(() {
@@ -111,10 +141,8 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
         _branchName     = city;
         _photoUrl       = photo;
         _techCity       = city;
-        _specializations = specs;
         _nameCtrl.text  = name;
         _emailCtrl.text = email;
-        _editingSpecs   = List.from(specs);
       });
     }
 
@@ -128,7 +156,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
       final token = prefs.getString('auth_token') ?? '';
       final res = await http
           .get(
-            Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/profile'),
+            Uri.parse('${AppConstants.serverUrl}/api/technicians/$techId/profile?period=$_period'),
             headers: {'Authorization': 'Bearer $token'},
           )
           .timeout(const Duration(seconds: 8));
@@ -139,18 +167,39 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
         final profile = body['profile'] as Map<String, dynamic>? ?? {};
         final stats   = body['stats']   as Map<String, dynamic>? ?? {};
 
+        // Name / email / photo as saved on the server (the source of truth —
+        // e.g. after an edit on another device). Not while editing.
+        final srvName  = (profile['user_name']  as String? ?? '').trim();
+        final srvEmail = (profile['user_email'] as String? ?? '').trim();
+        final srvPhoto = (profile['tech_photo'] as String? ?? '').trim();
+        if (!_isEditing) {
+          final prefs = await SharedPreferences.getInstance();
+          if (srvName.isNotEmpty) await prefs.setString('user_name', srvName);
+          await prefs.setString('user_email', srvEmail);
+          await prefs.setString('tech_photo', srvPhoto);
+          if (!mounted) return;
+        }
         setState(() {
+          if (!_isEditing) {
+            if (srvName.isNotEmpty) { _name = srvName; _nameCtrl.text = srvName; }
+            _email = srvEmail; _emailCtrl.text = srvEmail;
+            _photoUrl = srvPhoto;
+          }
           if ((profile['branch_name'] as String? ?? '').isNotEmpty) {
             _branchName = profile['branch_name'] as String;
           }
           _assignedToday  = int.tryParse(stats['assigned_today'].toString())  ?? 0;
           _completedToday = int.tryParse(stats['completed_today'].toString()) ?? 0;
           _pendingToday   = int.tryParse(stats['pending_today'].toString())   ?? 0;
+          _rescheduled    = int.tryParse('${stats['rescheduled'] ?? 0}')      ?? 0;
           _totalDone      = int.tryParse(stats['total_done'].toString())      ?? 0;
           _statsLoading   = false;
           _branches       = (body['branches'] as List? ?? []).cast<Map<String, dynamic>>();
           _branchesLoaded = true;
         });
+      } else {
+        // Server error: stop the spinner (last numbers stay).
+        setState(() => _statsLoading = false);
       }
     } catch (_) {
       if (mounted) setState(() => _statsLoading = false);
@@ -181,10 +230,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
         ),
       );
 
-  void _startEdit() {
-    _editingSpecs = List.from(_specializations);
-    setState(() => _isEditing = true);
-  }
+  void _startEdit() => setState(() => _isEditing = true);
 
   void _cancelEdit() {
     _nameCtrl.text = _name;
@@ -205,50 +251,127 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
     if (confirmed == true) widget.onLogout();
   }
 
-  void _save() {
-    final name = _nameCtrl.text.trim();
+  // Saves name + email on the server (ip_users), then locally.
+  Future<void> _save() async {
+    if (_saving) return;
+    final name  = _nameCtrl.text.trim().replaceAll(RegExp(r'\s+'), ' ');
     final email = _emailCtrl.text.trim();
-    setState(() {
-      if (name.isNotEmpty) _name = name;
-      _email = email;
-      _specializations = List.from(_editingSpecs);
-      _isEditing = false;
-    });
-    // TODO: PUT /api/technician/profile
-  }
-
-  void _addSpec(String spec) {
-    if (!_editingSpecs.contains(spec)) {
-      setState(() => _editingSpecs.add(spec));
+    if (name.length < 2) {
+      AppMessages.error(context, 'Enter your full name');
+      return;
+    }
+    setState(() => _saving = true);
+    final res = await ApiService.updateTechnicianProfile(name: name, email: email);
+    if (!mounted) return;
+    if (res['success'] == true) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('user_name', name);
+      await prefs.setString('user_email', email);
+      SocketService.instance.userName = name; // Dashboard "Welcome, …"
+      if (!mounted) return;
+      setState(() {
+        _name = name;
+        _email = email;
+        _nameCtrl.text = name;
+        _emailCtrl.text = email;
+        _isEditing = false;
+        _saving = false;
+      });
+      widget.onProfileChanged?.call();
+      AppMessages.success(context, 'Profile updated');
+    } else {
+      setState(() => _saving = false);
+      AppMessages.error(context, AppMessages.serverMessage(res['message'],
+          fallback: 'We couldn\'t save your profile. Please try again.'));
     }
   }
 
-  void _removeSpec(String spec) => setState(() => _editingSpecs.remove(spec));
-
-  void _showAddSpecDialog() {
-    final remaining =
-        _availableSpecs.where((s) => !_editingSpecs.contains(s)).toList();
-    if (remaining.isEmpty) return;
-    showTechSheet<void>(
+  // ── Profile photo: take / choose / remove ─────────────────────────────────
+  Future<void> _changePhoto() async {
+    if (_photoBusy) return;
+    final choice = await showTechSheet<String>(
       context: context,
-      title: 'Add Specialization',
-      builder: (_) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: remaining
-            .map((s) => ListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-                  shape: const RoundedRectangleBorder(borderRadius: TechRadius.mdAll),
-                  leading: const Icon(Icons.add_circle_outline_rounded,
-                      color: TechColors.brand, size: 22),
-                  title: Text(s, style: TechText.body),
-                  onTap: () {
-                    Navigator.pop(context);
-                    _addSpec(s);
-                  },
-                ))
-            .toList(),
-      ),
+      title: 'Profile photo',
+      builder: (sheetCtx) => Column(mainAxisSize: MainAxisSize.min, children: [
+        TechOptionCard(
+          icon: Icons.camera_alt_outlined,
+          title: 'Take photo',
+          subtitle: 'Use the camera now',
+          onTap: () => Navigator.pop(sheetCtx, 'camera'),
+        ),
+        const SizedBox(height: TechSpace.md),
+        TechOptionCard(
+          icon: Icons.photo_library_outlined,
+          title: 'Choose from gallery',
+          subtitle: 'Pick a photo you already have',
+          onTap: () => Navigator.pop(sheetCtx, 'gallery'),
+        ),
+        if (_photoUrl.isNotEmpty) ...[
+          const SizedBox(height: TechSpace.md),
+          TechOptionCard(
+            icon: Icons.delete_outline_rounded,
+            title: 'Remove photo',
+            subtitle: 'Show your initials instead',
+            onTap: () => Navigator.pop(sheetCtx, 'remove'),
+          ),
+        ],
+      ]),
     );
+    if (choice == null || !mounted) return;
+
+    if (choice == 'remove') {
+      final ok = await showTechConfirm(
+        context,
+        icon: Icons.delete_outline_rounded,
+        title: 'Remove photo?',
+        message: 'Your initials will show instead.',
+        confirmLabel: 'Remove',
+        destructive: true,
+      );
+      if (ok != true || !mounted) return;
+      setState(() => _photoBusy = true);
+      final res = await ApiService.removeTechnicianPhoto();
+      await _applyPhotoResult(res, removed: true);
+      return;
+    }
+
+    XFile? file;
+    try {
+      file = await ImagePicker().pickImage(
+        source: choice == 'camera' ? ImageSource.camera : ImageSource.gallery,
+        preferredCameraDevice: CameraDevice.front,
+        imageQuality: 80,
+        maxWidth: 1024,
+        maxHeight: 1024,
+      );
+    } catch (e) {
+      if (mounted) AppMessages.error(context, 'Couldn\'t open the ${choice == 'camera' ? 'camera' : 'gallery'}.');
+      return;
+    }
+    if (file == null || !mounted) return;
+
+    setState(() => _photoBusy = true);
+    final bytes = await file.readAsBytes();
+    final name  = file.name.toLowerCase().endsWith('.png') ? 'profile.png' : 'profile.jpg';
+    final res   = await ApiService.uploadTechnicianPhoto(bytes, name);
+    await _applyPhotoResult(res);
+  }
+
+  Future<void> _applyPhotoResult(Map<String, dynamic> res, {bool removed = false}) async {
+    if (!mounted) return;
+    if (res['success'] == true) {
+      final url = removed ? '' : (res['tech_photo'] as String? ?? '');
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('tech_photo', url);
+      if (!mounted) return;
+      setState(() { _photoUrl = url; _photoBusy = false; });
+      widget.onProfileChanged?.call();
+      AppMessages.success(context, removed ? 'Photo removed' : 'Photo updated');
+    } else {
+      setState(() => _photoBusy = false);
+      AppMessages.error(context, AppMessages.serverMessage(res['message'],
+          fallback: 'We couldn\'t update your photo. Please try again.'));
+    }
   }
 
   @override
@@ -340,16 +463,46 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
               // ── Avatar row ────────────────────────────────
               Row(
                 children: [
-                  ClipOval(
-                    child: _photoUrl.isNotEmpty
-                        ? Image.network(
-                            _resolvePhotoUrl(_photoUrl),
-                            width: 60,
-                            height: 60,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => _buildInitials(),
-                          )
-                        : _buildInitials(),
+                  // Tap the photo (or its 📷 badge) to take / choose / remove.
+                  Semantics(
+                    button: true,
+                    label: 'Change profile photo',
+                    child: GestureDetector(
+                      onTap: _photoBusy ? null : _changePhoto,
+                      child: Stack(clipBehavior: Clip.none, children: [
+                        ClipOval(
+                          child: _photoBusy
+                              ? Container(
+                                  width: 60, height: 60,
+                                  color: AppColors.brandGreenSurface,
+                                  alignment: Alignment.center,
+                                  child: const SizedBox(width: 22, height: 22,
+                                      child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                                )
+                              : _photoUrl.isNotEmpty
+                                  ? Image.network(
+                                      resolveTechPhotoUrl(_photoUrl),
+                                      width: 60,
+                                      height: 60,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => _buildInitials(),
+                                    )
+                                  : _buildInitials(),
+                        ),
+                        Positioned(
+                          right: -4, bottom: -4,
+                          child: Container(
+                            width: 26, height: 26,
+                            decoration: BoxDecoration(
+                              color: TechColors.brand,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                            ),
+                            child: const Icon(Icons.camera_alt_rounded, size: 13, color: Colors.white),
+                          ),
+                        ),
+                      ]),
+                    ),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
@@ -367,12 +520,8 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                                       fontSize: 16,
                                       fontWeight: FontWeight.w700,
                                       color: TechColors.textPrimary)),
-                              const SizedBox(height: 6),
-                              const TechStatusChip(
-                                label: 'Senior Technician',
-                                icon: Icons.verified_outlined,
-                                tone: TechTone.brand,
-                              ),
+                              const SizedBox(height: 2),
+                              const Text('Tap the photo to change it', style: TechText.caption),
                             ],
                           ),
                   ),
@@ -429,7 +578,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                   children: [
                     Expanded(
                       child: TechButton.secondary(
-                        onPressed: _cancelEdit,
+                        onPressed: _saving ? null : _cancelEdit,
                         label: 'Cancel',
                         compact: true,
                       ),
@@ -437,7 +586,8 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                     const SizedBox(width: TechSpace.md),
                     Expanded(
                       child: TechButton(
-                        onPressed: _save,
+                        onPressed: _saving ? null : _save,
+                        loading: _saving,
                         label: 'Save Changes',
                         compact: true,
                       ),
@@ -464,57 +614,59 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
 
         const SizedBox(height: 24),
 
-        // ── Specializations ──────────────────────────────────
-        Row(
-          children: [
-            const _SectionTitle('Specializations'),
-            const Spacer(),
-            if (_isEditing)
-              Material(
-                color: TechColors.brandSurface,
-                shape: const StadiumBorder(side: BorderSide(color: TechColors.brand)),
-                clipBehavior: Clip.antiAlias,
-                child: InkWell(
-                  onTap: _showAddSpecDialog,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.add_rounded,
-                            size: 18, color: TechColors.brand),
-                        SizedBox(width: 4),
-                        Text('Add',
-                            style: TextStyle(
-                                fontSize: 13,
-                                color: TechColors.brand,
-                                fontWeight: FontWeight.w600)),
-                      ],
+        // ── Summary (period dropdown) ────────────────────────
+        // Counted per job (a family visit is one), cancelled left out.
+        Row(children: [
+          const _SectionTitle('Summary'),
+          const Spacer(),
+          PopupMenuButton<String>(
+            tooltip: 'Summary period',
+            initialValue: _period,
+            onSelected: _setPeriod,
+            position: PopupMenuPosition.under,
+            shape: const RoundedRectangleBorder(borderRadius: TechRadius.mdAll),
+            itemBuilder: (_) => [
+              for (final e in _periods.entries)
+                PopupMenuItem<String>(
+                  value: e.key,
+                  height: 44,
+                  child: Row(children: [
+                    SizedBox(
+                      width: 22,
+                      child: e.key == _period
+                          ? const Icon(Icons.check_rounded, size: 18, color: TechColors.brand)
+                          : null,
                     ),
-                  ),
+                    const SizedBox(width: 6),
+                    Text(e.value,
+                        style: TextStyle(
+                            fontSize: 13.5,
+                            fontWeight: e.key == _period ? FontWeight.w700 : FontWeight.w500,
+                            color: e.key == _period ? TechColors.brand : TechColors.textPrimary)),
+                  ]),
                 ),
+            ],
+            child: Container(
+              constraints: const BoxConstraints(minHeight: 36),
+              padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+              decoration: BoxDecoration(
+                color: TechColors.brandSurface,
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: AppColors.brandGreenLight),
               ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: (_isEditing ? _editingSpecs : _specializations)
-              .map((s) => _SpecChip(
-                    label: s,
-                    onRemove: _isEditing ? () => _removeSpec(s) : null,
-                  ))
-              .toList(),
-        ),
-
-        const SizedBox(height: 24),
-
-        // ── Today's summary ──────────────────────────────────
-        const _SectionTitle("Today's Summary"),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.calendar_month_outlined, size: 15, color: TechColors.brand),
+                const SizedBox(width: 6),
+                Text(_periods[_period] ?? 'Today',
+                    style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: TechColors.brand)),
+                const Icon(Icons.keyboard_arrow_down_rounded, size: 20, color: TechColors.brand),
+              ]),
+            ),
+          ),
+        ]),
         const SizedBox(height: 10),
         if (_statsLoading)
-          const TechLoadingState(label: "Loading today's summary…")
+          const TechLoadingState(label: 'Loading summary…')
         else ...[
           Row(
             children: [
@@ -535,7 +687,11 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                   color: TechColors.info,
                 ),
               ),
-              const SizedBox(width: 10),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
               Expanded(
                 child: _StatCard(
                   label: 'Pending',
@@ -544,25 +700,23 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                   color: TechColors.warning,
                 ),
               ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _StatCard(
+                  label: 'Rescheduled',
+                  value: '$_rescheduled',
+                  icon: Icons.update_rounded,
+                  color: const Color(0xFF1565C0),
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: _StatCard(
-                  label: 'Total Done',
-                  value: '$_totalDone',
-                  icon: Icons.star_outline_rounded,
-                  color: const Color(0xFF6A1B9A),
-                ),
-              ),
-              const SizedBox(width: 10),
-              const Expanded(child: SizedBox()),
-              const SizedBox(width: 10),
-              const Expanded(child: SizedBox()),
-            ],
-          ),
+          Row(children: [
+            const Icon(Icons.star_outline_rounded, size: 16, color: Color(0xFF6A1B9A)),
+            const SizedBox(width: 6),
+            Text('All-time completed: $_totalDone', style: TechText.caption),
+          ]),
         ],
 
         const SizedBox(height: 24),
@@ -720,64 +874,24 @@ class _HDivider extends StatelessWidget {
       const Divider(height: 20, thickness: 1, color: AppColors.divider);
 }
 
-// ─── Specialization chip ──────────────────────────────────────────────────────
-
-class _SpecChip extends StatelessWidget {
-  final String label;
-  final VoidCallback? onRemove;
-  const _SpecChip({required this.label, this.onRemove});
-
-  @override
-  Widget build(BuildContext context) => Container(
-        padding: EdgeInsets.fromLTRB(14, onRemove != null ? 2 : 8, onRemove != null ? 2 : 14, onRemove != null ? 2 : 8),
-        decoration: BoxDecoration(
-          color: TechColors.brandSurface,
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: AppColors.brandGreenLight),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(label,
-                style: const TextStyle(
-                    fontSize: 13,
-                    color: TechColors.brand,
-                    fontWeight: FontWeight.w600)),
-            if (onRemove != null)
-              // 40px tap area around the small ✕.
-              InkResponse(
-                onTap: onRemove,
-                radius: 20,
-                child: SizedBox(
-                  width: 36,
-                  height: 36,
-                  child: Center(
-                    child: Container(
-                      width: 18,
-                      height: 18,
-                      decoration: const BoxDecoration(
-                          color: TechColors.brand, shape: BoxShape.circle),
-                      child: const Icon(Icons.close_rounded,
-                          size: 12, color: Colors.white),
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      );
-}
-
 // ─── Section title ────────────────────────────────────────────────────────────
 
-// One branch this technician works at. Name, default marker, then city with
-// pincode and the full address, each only when it's there.
-class _BranchTile extends StatelessWidget {
+// One branch this technician works at, as an accordion row: name + Default
+// marker + ˅ when closed; tap to show city with pincode and the full address.
+class _BranchTile extends StatefulWidget {
   final Map<String, dynamic> branch;
   const _BranchTile({required this.branch});
 
   @override
+  State<_BranchTile> createState() => _BranchTileState();
+}
+
+class _BranchTileState extends State<_BranchTile> {
+  bool _open = false;
+
+  @override
   Widget build(BuildContext context) {
+    final branch   = widget.branch;
     final name     = branch['name'] as String? ?? '—';
     final isMain   = branch['isDefault'] == true;
     final address  = (branch['address'] as String? ?? '').trim();
@@ -785,52 +899,84 @@ class _BranchTile extends StatelessWidget {
         .map((v) => (v ?? '').toString().trim())
         .where((v) => v.isNotEmpty)
         .join(' - ');
+    final hasDetails = location.isNotEmpty || address.isNotEmpty;
 
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: TechSpace.md),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
+    return Padding(
+      padding: const EdgeInsets.only(bottom: TechSpace.sm),
+      child: Material(
         color: Colors.white,
-        borderRadius: TechRadius.lgAll,
-        border: Border.all(color: TechColors.border),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Icon(Icons.location_on_outlined, size: 18, color: AppColors.brandGreen),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
+        shape: RoundedRectangleBorder(
+          borderRadius: TechRadius.mdAll,
+          side: BorderSide(color: _open ? TechColors.brand : TechColors.border, width: _open ? 1.4 : 1),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          // Header row (always visible)
+          Semantics(
+            button: hasDetails,
+            expanded: hasDetails ? _open : null,
+            child: InkWell(
+              onTap: hasDetails ? () => setState(() => _open = !_open) : null,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 52),
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+                  child: Row(children: [
+                    const Icon(Icons.location_on_outlined, size: 18, color: AppColors.brandGreen),
+                    const SizedBox(width: 10),
                     Expanded(
                       child: Text(name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.textPrimary)),
+                              fontSize: 13.5, fontWeight: FontWeight.w700, color: AppColors.textPrimary)),
                     ),
-                    if (isMain)
+                    if (isMain) ...[
+                      const SizedBox(width: 8),
                       const TechStatusChip(label: 'Default', tone: TechTone.brand),
-                  ],
+                    ],
+                    if (hasDetails)
+                      AnimatedRotation(
+                        turns: _open ? 0.5 : 0,
+                        duration: const Duration(milliseconds: 200),
+                        child: const Padding(
+                          padding: EdgeInsets.all(6),
+                          child: Icon(Icons.keyboard_arrow_down_rounded, size: 24, color: TechColors.textSecondary),
+                        ),
+                      )
+                    else
+                      const SizedBox(width: 8),
+                  ]),
                 ),
-                if (location.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Text(location,
-                      style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-                ],
-                if (address.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(address,
-                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-                ],
-              ],
+              ),
             ),
           ),
-        ],
+          // Details (open only)
+          AnimatedSize(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+            alignment: Alignment.topCenter,
+            child: !_open
+                ? const SizedBox(width: double.infinity)
+                : Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(42, 0, 14, 14),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Divider(height: 1, color: AppColors.divider),
+                      const SizedBox(height: 10),
+                      if (location.isNotEmpty)
+                        Text(location,
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                                color: AppColors.textSecondary)),
+                      if (address.isNotEmpty) ...[
+                        if (location.isNotEmpty) const SizedBox(height: 3),
+                        Text(address,
+                            style: const TextStyle(fontSize: 12.5, color: AppColors.textSecondary, height: 1.35)),
+                      ],
+                    ]),
+                  ),
+          ),
+        ]),
       ),
     );
   }

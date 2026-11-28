@@ -55,10 +55,42 @@ function _generateIntervals(startTime, endTime, durationMinutes) {
   return times;
 }
 
-// ── GET /api/technicians/:technicianId/profile ───────────────────────────────
+// "Completed" for the technician = Handed to Lab. Shared by History
+// (Completed tab) and Profile (Summary) so both show the same numbers.
+//   handed_to_lab, handed_to_lab_pending  handed over (pending = awaiting the lab's OK)
+//   completed, all_collected              finished jobs from older app builds
+//                                         (before the Handed to Lab step)
+// Jobs still in progress (collection_started, sample_collected, otp_verified,
+// collected) are not history yet: they stay on the Dashboard.
+const HISTORY_DONE_STATUSES = ['handed_to_lab', 'handed_to_lab_pending', 'completed', 'all_collected'];
+
+// Summary period → inclusive IST date range "YYYY-MM-DD". Weeks run Mon–Sun.
+// Unknown / missing → today. 'all' → no limit (future dates too: a job the
+// technician moved ahead is still theirs).
+const SUMMARY_PERIODS = ['all', 'today', 'this_week', 'last_week', 'this_month', 'last_month'];
+function _summaryRange(period, now = new Date()) {
+  if (period === 'all') return { from: '2000-01-01', to: '2999-12-31' };
+  const ist = new Date(now.getTime() + (5 * 60 + 30) * 60 * 1000); // read with getUTC*
+  const day = (y, m, d) => new Date(Date.UTC(y, m, d)).toISOString().slice(0, 10);
+  const y = ist.getUTCFullYear(), m = ist.getUTCMonth(), d = ist.getUTCDate();
+  const mondayOffset = (ist.getUTCDay() + 6) % 7; // 0 = Monday
+  switch (period) {
+    case 'this_week':  return { from: day(y, m, d - mondayOffset), to: day(y, m, d) };
+    case 'last_week':  return { from: day(y, m, d - mondayOffset - 7), to: day(y, m, d - mondayOffset - 1) };
+    case 'this_month': return { from: day(y, m, 1), to: day(y, m, d) };
+    case 'last_month': return { from: day(y, m - 1, 1), to: day(y, m, 0) };
+    default:           return { from: day(y, m, d), to: day(y, m, d) };
+  }
+}
+
+exports._summaryRange = _summaryRange; // for tests
+
+// ── GET /api/technicians/:technicianId/profile[?period=…] ────────────────────
 exports.getProfile = async (req, res) => {
   const { technicianId } = req.params;
-  console.log(`\n👤 [GET PROFILE] technician_id=${technicianId}`);
+  const period = SUMMARY_PERIODS.includes(req.query?.period) ? req.query.period : 'today';
+  const { from, to } = _summaryRange(period);
+  console.log(`\n👤 [GET PROFILE] technician_id=${technicianId} summary=${period} ${from}..${to}`);
   try {
     const [[profile]] = await db.execute(
       `SELECT u.user_name, u.user_email, u.user_mobile_no,
@@ -76,18 +108,50 @@ exports.getProfile = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Technician not found' });
     }
 
-    // ✅ FIXED: Added 'collected' to completed_today calculation
+    // Summary for the chosen period — the SAME rules as the History tab, so
+    // the two screens agree:
+    //   • one per patient booking (a family visit with 3 members counts 3,
+    //     like History's cards);
+    //   • by appointment date (collection_date), like History's date filter;
+    //   • Completed = handed over to the lab or later (HISTORY_DONE_STATUSES);
+    //   • cancelled jobs left out of Assigned / Pending.
+    // The *_today names are kept for older app versions; they hold the
+    // chosen period's numbers.
+    const DONE = `(${HISTORY_DONE_STATUSES.map(s => `'${s}'`).join(',')})`;
     const [[stats]] = await db.execute(
       `SELECT
-         COUNT(*) AS assigned_today,
-         SUM(CASE WHEN collection_status IN ('completed','all_collected','collected','handed_to_lab') THEN 1 ELSE 0 END) AS completed_today,
-         SUM(CASE WHEN collection_status NOT IN ('completed','all_collected','collected','handed_to_lab','cancelled') THEN 1 ELSE 0 END) AS pending_today,
-         (SELECT COUNT(*) FROM ip_technician_collection
-          WHERE technician_id = ? AND collection_status IN ('completed','all_collected','collected','handed_to_lab')) AS total_done
-       FROM ip_technician_collection
-       WHERE technician_id = ? AND DATE(collection_date) = CURDATE()`,
-      [technicianId, technicianId]
+         COUNT(CASE WHEN tc.collection_status <> 'cancelled' THEN 1 END) AS assigned_today,
+         COUNT(CASE WHEN tc.collection_status IN ${DONE} THEN 1 END)      AS completed_today,
+         COUNT(CASE WHEN tc.collection_status NOT IN ${DONE}
+                     AND tc.collection_status <> 'cancelled' THEN 1 END) AS pending_today,
+         (SELECT COUNT(*) FROM ip_technician_collection tc2
+           WHERE tc2.technician_id = ? AND tc2.collection_status IN ${DONE}) AS total_done
+       FROM ip_technician_collection tc
+       WHERE tc.technician_id = ? AND DATE(tc.collection_date) BETWEEN ? AND ?`,
+      [technicianId, technicianId, from, to]
     );
+
+    // Rescheduled — every reschedule of this technician's job (by the customer
+    // or by them), by the appointment date it was moved FROM: exactly the
+    // History tab's Rescheduled cards. 0 until
+    // migrations/create_booking_reschedules.sql is run.
+    let rescheduled = 0;
+    try {
+      const [[r]] = await db.execute(
+        `SELECT COUNT(*) AS n FROM ip_booking_reschedules r
+         WHERE r.technician_id = ? AND r.old_date BETWEEN ? AND ?`,
+        [technicianId, from, to]
+      );
+      rescheduled = Number(r?.n ?? 0);
+    } catch (e) {
+      if (e.code !== 'ER_NO_SUCH_TABLE') console.error('[getProfile] rescheduled count failed:', e.message);
+    }
+    if (stats) {
+      stats.rescheduled = rescheduled;
+      stats.period = period;
+      stats.from = from;
+      stats.to = to;
+    }
 
     // Extra detail: the rest of the profile still loads if this fails.
     let branches = [];
@@ -106,13 +170,10 @@ exports.getProfile = async (req, res) => {
 };
 
 // ── GET /api/technicians/:technicianId/history ───────────────────────────────
-exports.getHistory = async (req, res) => {
-  const { technicianId } = req.params;
-  tlog(`[getHistory] START technician_id=${technicianId}`);
-  try {
-    tlog(`[getHistory] running SQL query...`);
-    const [rows] = await db.execute(
-      `(
+// Completed, cancelled and rescheduled jobs for this technician. Every branch
+// returns the same columns; new_date / new_slot_label / rescheduled_at are
+// only filled for rescheduled rows.
+const HISTORY_DONE_OR_CANCELLED_SQL = `(
         SELECT
            tc.collection_id,
            tc.booking_id,
@@ -130,7 +191,11 @@ exports.getHistory = async (req, res) => {
            b.postal_code,
            b.amount_paid,
            p.patient_name,
-           p.patient_mobile
+           p.patient_mobile,
+           NULL AS new_date,
+           NULL AS new_slot_label,
+           NULL AS rescheduled_at,
+           NULL AS rescheduled_by
          FROM ip_technician_collection tc
          JOIN      ip_bookings          b   ON b.booking_id          = tc.booking_id
          LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
@@ -138,11 +203,7 @@ exports.getHistory = async (req, res) => {
          LEFT JOIN ip_slots             s   ON s.slot_id             = COALESCE(ts.slot_id, b.slot_id)
          LEFT JOIN ip_patients          p   ON p.patient_id          = b.patient_id
          WHERE tc.technician_id = ?
-           AND tc.collection_status IN (
-             'completed','all_collected','collected',
-             'handed_to_lab','handed_to_lab_pending','sample_collected','collection_started',
-             'cancelled'
-           )
+           AND tc.collection_status IN (${HISTORY_DONE_STATUSES.map(s => `'${s}'`).join(',')}, 'cancelled')
       )
       UNION ALL
       (
@@ -167,7 +228,11 @@ exports.getHistory = async (req, res) => {
            b.postal_code,
            b.amount_paid,
            p.patient_name,
-           p.patient_mobile
+           p.patient_mobile,
+           NULL AS new_date,
+           NULL AS new_slot_label,
+           NULL AS rescheduled_at,
+           NULL AS rescheduled_by
          FROM ip_bookings b
          LEFT JOIN ip_available_slots   avs ON avs.available_slot_id = b.available_slot_id
          LEFT JOIN ip_technician_slots  ts  ON ts.tech_slot_id       = avs.technician_slot_id
@@ -178,11 +243,66 @@ exports.getHistory = async (req, res) => {
              SELECT 1 FROM ip_technician_collection tc2
              WHERE tc2.booking_id = b.booking_id AND tc2.technician_id = ?
            )
-      )
+      )`;
+
+// Jobs this technician had accepted when the customer rescheduled them
+// (migrations/create_booking_reschedules.sql). Date/slot are the OLD ones —
+// the appointment this technician had — and new_* is where it moved to.
+const HISTORY_RESCHEDULED_SQL = `
+      UNION ALL
+      (
+        SELECT
+           NULL AS collection_id,
+           r.booking_id,
+           b.booking_ref,
+           b.reference_no,
+           'rescheduled' AS collection_status,
+           r.old_date AS collection_date,
+           b.collection_address,
+           r.rescheduled_at AS assigned_at,
+           NULL AS collected_at,
+           r.rescheduled_at AS completed_at,
+           r.old_slot_label AS slot_label,
+           r.old_slot_label AS slot_time_formatted,
+           b.city,
+           b.postal_code,
+           b.amount_paid,
+           p.patient_name,
+           p.patient_mobile,
+           DATE_FORMAT(r.new_date, '%Y-%m-%d') AS new_date,
+           r.new_slot_label,
+           r.rescheduled_at,
+           r.rescheduled_by
+         FROM ip_booking_reschedules r
+         JOIN      ip_bookings b ON b.booking_id = r.booking_id
+         LEFT JOIN ip_patients p ON p.patient_id = b.patient_id
+         WHERE r.technician_id = ?
+      )`;
+
+const HISTORY_TAIL_SQL = `
       ORDER BY COALESCE(completed_at, collected_at, assigned_at) DESC
-      LIMIT 100`,
-      [technicianId, technicianId, technicianId]
-    );
+      LIMIT 500`; // History tab counts these rows; Profile's Summary counts in SQL (no limit)
+
+exports.getHistory = async (req, res) => {
+  const { technicianId } = req.params;
+  tlog(`[getHistory] START technician_id=${technicianId}`);
+  try {
+    tlog(`[getHistory] running SQL query...`);
+    let rows;
+    try {
+      [rows] = await db.execute(
+        HISTORY_DONE_OR_CANCELLED_SQL + HISTORY_RESCHEDULED_SQL + HISTORY_TAIL_SQL,
+        [technicianId, technicianId, technicianId, technicianId]
+      );
+    } catch (e) {
+      // Reschedule table not created yet — same history as before, no tab rows.
+      if (e.code !== 'ER_NO_SUCH_TABLE' && e.code !== 'ER_BAD_FIELD_ERROR') throw e;
+      tlog(`[getHistory] ip_booking_reschedules missing — run migrations/create_booking_reschedules.sql`);
+      [rows] = await db.execute(
+        HISTORY_DONE_OR_CANCELLED_SQL + HISTORY_TAIL_SQL,
+        [technicianId, technicianId, technicianId]
+      );
+    }
     tlog(`[getHistory] OK — ${rows.length} records returned`);
     if (rows.length > 0) tlog(`[getHistory] first row: booking_id=${rows[0].booking_id} status=${rows[0].collection_status} patient=${rows[0].patient_name}`);
     if (rows.length === 0) tlog(`[getHistory] WARNING — 0 rows: check technician_id=${technicianId} has completed/cancelled entries`);
@@ -335,6 +455,382 @@ exports.cancelAssignedBooking = async (req, res) => {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
+
+// ── Technician profile: edit name / email, own photo ─────────────────────────
+// Name and email live on ip_users. Login (authController.verifyOtp) only fills
+// the name while it is still the "user_<mobile>" placeholder and the email
+// while it is empty, so values saved here are not overwritten at next login.
+
+const PROFILE_NAME_RE  = /^[A-Za-z][A-Za-z .'-]{1,99}$/;
+const PROFILE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+// PUT /api/technicians/profile { name, email }
+exports.updateProfile = async (req, res) => {
+  const technicianId = req.user.id;
+  const name  = String(req.body?.name ?? '').trim().replace(/\s+/g, ' ');
+  const email = String(req.body?.email ?? '').trim();
+
+  if (!PROFILE_NAME_RE.test(name)) {
+    return res.status(400).json({ success: false, message: 'Enter your full name (letters only, 2–100 characters)' });
+  }
+  if (email && (email.length > 150 || !PROFILE_EMAIL_RE.test(email))) {
+    return res.status(400).json({ success: false, message: 'Enter a valid email address' });
+  }
+
+  try {
+    const [result] = await db.execute(
+      `UPDATE ip_users u
+       JOIN ip_technicians t ON t.user_id = u.user_id
+       SET u.user_name = ?, u.user_email = ?, u.user_date_modified = NOW()
+       WHERE t.technician_id = ?`,
+      [name, email || null, technicianId]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Technician not found' });
+    }
+    tlog(`[updateProfile] technician_id=${technicianId} name/email updated`);
+    res.json({ success: true, message: 'Profile updated', profile: { user_name: name, user_email: email || null } });
+  } catch (e) {
+    tlog(`[updateProfile] ERROR technician_id=${technicianId} — ${e.message}`);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// POST /api/technicians/profile/photo (multipart "photo", see routes/technicians.js)
+// Saved as a full URL in ip_technicians.tech_photo — the customer app shows
+// that value as-is. Files are named technician_<id>_… so login can tell an
+// uploaded photo from a registry one and keep it.
+exports.uploadProfilePhoto = async (req, res) => {
+  const technicianId = req.user.id;
+  if (!req.file) {
+    return res.status(422).json({ success: false, message: 'No photo uploaded' });
+  }
+  const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
+  const url = `${baseUrl}/uploads/${req.file.filename}`;
+  try {
+    const [[old]] = await db.execute(
+      'SELECT tech_photo FROM ip_technicians WHERE technician_id = ? LIMIT 1',
+      [technicianId]
+    );
+    await db.execute(
+      'UPDATE ip_technicians SET tech_photo = ? WHERE technician_id = ?',
+      [url, technicianId]
+    );
+    _deleteOwnPhotoFile(old?.tech_photo, technicianId);
+    tlog(`[uploadProfilePhoto] technician_id=${technicianId} file=${req.file.filename}`);
+    res.json({ success: true, message: 'Photo updated', tech_photo: url });
+  } catch (e) {
+    _deleteOwnPhotoFile(url, technicianId); // don't leave an orphan file
+    tlog(`[uploadProfilePhoto] ERROR technician_id=${technicianId} — ${e.message}`);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// DELETE /api/technicians/profile/photo — remove the uploaded photo. The
+// registry photo (if any) comes back at the next login.
+exports.removeProfilePhoto = async (req, res) => {
+  const technicianId = req.user.id;
+  try {
+    const [[old]] = await db.execute(
+      'SELECT tech_photo FROM ip_technicians WHERE technician_id = ? LIMIT 1',
+      [technicianId]
+    );
+    await db.execute('UPDATE ip_technicians SET tech_photo = NULL WHERE technician_id = ?', [technicianId]);
+    _deleteOwnPhotoFile(old?.tech_photo, technicianId);
+    tlog(`[removeProfilePhoto] technician_id=${technicianId}`);
+    res.json({ success: true, message: 'Photo removed', tech_photo: null });
+  } catch (e) {
+    tlog(`[removeProfilePhoto] ERROR technician_id=${technicianId} — ${e.message}`);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// Deletes a photo file this technician uploaded earlier (never a registry
+// photo or anyone else's file).
+function _deleteOwnPhotoFile(photoUrl, technicianId) {
+  const m = /\/uploads\/(technician_(\d+)_[A-Za-z0-9_.-]+)$/.exec(String(photoUrl ?? ''));
+  if (!m || Number(m[2]) !== Number(technicianId)) return;
+  fs.unlink(path.join(__dirname, '..', 'uploads', m[1]), () => {});
+}
+
+// ── Technician-initiated reschedule ──────────────────────────────────────────
+// The assigned technician moves a job (agreed with the customer) to one of
+// their OWN free times and keeps it. Unlike the customer's reschedule
+// (bookingController.rescheduleBooking) nothing is re-dispatched:
+//   ip_bookings              new booking_date / available_slot_id,
+//                            reschedule_count + 1, status unchanged ('assigned')
+//   ip_technician_collection row kept, collection_date = new date, reminder /
+//                            late-alert marks cleared so they fire for the new time
+//   ip_available_slots       old time freed, new time taken
+//   ip_booking_reschedules   rescheduled_by = 'technician' (History tab)
+// Only before the journey starts (collection_status = 'assigned'), the same
+// gate as "Can't make it" and the customer reschedule.
+
+const TECH_RESCHEDULE_DAYS = 7; // how far ahead the technician can move a job
+
+function _istToday() {
+  const ist = new Date(Date.now() + (5 * 60 + 30) * 60 * 1000);
+  return {
+    date: ist.toISOString().slice(0, 10),
+    time: `${String(ist.getUTCHours()).padStart(2, '0')}:${String(ist.getUTCMinutes()).padStart(2, '0')}:00`,
+  };
+}
+
+// GET /api/technicians/reschedule-slots — this technician's free times for the
+// next TECH_RESCHEDULE_DAYS days, grouped by date.
+exports.getRescheduleSlots = async (req, res) => {
+  const technicianId = req.user.id;
+  try {
+    const now = _istToday();
+    const [rows] = await db.execute(
+      `SELECT av.available_slot_id,
+              DATE_FORMAT(av.slot_date, '%Y-%m-%d') AS slot_date,
+              TIME_FORMAT(av.slot_time, '%H:%i')    AS time,
+              TIME_FORMAT(av.slot_time, '%h:%i %p') AS label
+       FROM ip_available_slots av
+       JOIN ip_technician_slots ts ON ts.tech_slot_id = av.technician_slot_id
+       WHERE ts.technician_id = ?
+         AND ts.is_available  = 1
+         AND av.is_available  = 1
+         AND ts.booked_count  < ts.max_bookings
+         AND av.slot_date BETWEEN ? AND DATE_ADD(?, INTERVAL ${TECH_RESCHEDULE_DAYS - 1} DAY)
+         AND (av.slot_date > ? OR av.slot_time > ?)
+       ORDER BY av.slot_date, av.slot_time`,
+      [technicianId, now.date, now.date, now.date, now.time]
+    );
+    const byDate = new Map();
+    for (const r of rows) {
+      if (!byDate.has(r.slot_date)) byDate.set(r.slot_date, []);
+      byDate.get(r.slot_date).push({ available_slot_id: r.available_slot_id, time: r.time, label: r.label });
+    }
+    res.json({
+      success: true,
+      days: TECH_RESCHEDULE_DAYS,
+      data: [...byDate].map(([date, slots]) => ({ date, slots })),
+    });
+  } catch (e) {
+    tlog(`[getRescheduleSlots] ERROR technician_id=${technicianId} — ${e.message}`);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// POST /api/technicians/reschedule-booking { bookingId, availableSlotId }
+exports.rescheduleAssignedBooking = async (req, res) => {
+  const technicianId = req.user.id;
+  const bookingId = parseInt(req.body?.bookingId, 10);
+  const availableSlotId = parseInt(req.body?.availableSlotId, 10);
+  if (!bookingId || !availableSlotId) {
+    return res.status(400).json({ success: false, message: 'bookingId and availableSlotId are required' });
+  }
+
+  try {
+    // ── The job must be this technician's and not started yet ───────────────
+    const [[job]] = await db.execute(
+      `SELECT tc.collection_status, b.booking_ref, b.reference_no, b.booking_type,
+              b.visit_group_id, b.reschedule_count, b.available_slot_id AS old_slot_id,
+              DATE_FORMAT(b.booking_date, '%Y-%m-%d') AS old_date,
+              TIME_FORMAT(oav.slot_time, '%h:%i %p')  AS old_slot_label
+       FROM ip_technician_collection tc
+       JOIN ip_bookings b ON b.booking_id = tc.booking_id
+       LEFT JOIN ip_available_slots oav ON oav.available_slot_id = b.available_slot_id
+       WHERE tc.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL
+       LIMIT 1`,
+      [bookingId, technicianId]
+    );
+    if (!job) {
+      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
+    }
+    if (job.collection_status !== 'assigned') {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot reschedule — already ${String(job.collection_status).replace(/_/g, ' ')}`,
+      });
+    }
+    if (!settings.getBool('reschedule_enabled_home', true)) {
+      return res.status(400).json({ success: false, message: 'Rescheduling is turned off' });
+    }
+    const maxCount = parseInt(settings.get('reschedule_max_count_home', '2'), 10);
+    if ((job.reschedule_count ?? 0) >= maxCount) {
+      return res.status(400).json({ success: false, message: `This booking has already been rescheduled ${maxCount} times` });
+    }
+    if (Number(job.old_slot_id) === availableSlotId) {
+      return res.status(400).json({ success: false, message: 'Pick a different time' });
+    }
+
+    // ── The new time must be one of this technician's own free times ────────
+    const now = _istToday();
+    const [[slot]] = await db.execute(
+      `SELECT av.available_slot_id, av.technician_slot_id, ts.slot_id, ts.duration_minutes,
+              DATE_FORMAT(av.slot_date, '%Y-%m-%d') AS slot_date,
+              TIME_FORMAT(av.slot_time, '%H:%i')    AS slot_time,
+              TIME_FORMAT(av.slot_time, '%h:%i %p') AS slot_label
+       FROM ip_available_slots av
+       JOIN ip_technician_slots ts ON ts.tech_slot_id = av.technician_slot_id
+       WHERE av.available_slot_id = ? AND ts.technician_id = ?
+         AND ts.is_available = 1 AND av.is_available = 1 AND ts.booked_count < ts.max_bookings
+         AND (av.slot_date > ? OR (av.slot_date = ? AND av.slot_time > ?))
+         AND av.slot_date <= DATE_ADD(?, INTERVAL ${TECH_RESCHEDULE_DAYS - 1} DAY)
+       LIMIT 1`,
+      [availableSlotId, technicianId, now.date, now.date, now.time, now.date]
+    );
+    if (!slot) {
+      return res.status(409).json({ success: false, message: 'That time is no longer free. Pick another time.' });
+    }
+
+    let allIds = [bookingId];
+    if (job.visit_group_id) {
+      const [siblings] = await db.execute(
+        `SELECT booking_id FROM ip_bookings
+         WHERE visit_group_id = ? AND deleted_at IS NULL AND status != 'cancelled'`,
+        [job.visit_group_id]
+      );
+      if (siblings.length) allIds = siblings.map(s => s.booking_id);
+    }
+    const idList = allIds.map(() => '?').join(',');
+
+    // ── Move it (all or nothing) ─────────────────────────────────────────────
+    const conn = await db.getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // Claim the new time first: if someone took it a moment ago, stop here.
+      const [claimed] = await conn.execute(
+        `UPDATE ip_available_slots SET is_available = 0, updated_at = NOW()
+         WHERE available_slot_id = ? AND is_available = 1`,
+        [availableSlotId]
+      );
+      if (claimed.affectedRows !== 1) {
+        await conn.rollback();
+        return res.status(409).json({ success: false, message: 'That time is no longer free. Pick another time.' });
+      }
+      await conn.execute(
+        'UPDATE ip_technician_slots SET booked_count = booked_count + 1 WHERE tech_slot_id = ?',
+        [slot.technician_slot_id]
+      );
+
+      // Give the old time back (shared by every member of a family visit).
+      if (job.old_slot_id) {
+        await conn.execute(
+          `UPDATE ip_available_slots SET is_available = 1, updated_at = NOW()
+           WHERE available_slot_id = ? AND is_available = 0`,
+          [job.old_slot_id]
+        );
+        const [[oldAv]] = await conn.execute(
+          'SELECT technician_slot_id, lab_slot_id FROM ip_available_slots WHERE available_slot_id = ?',
+          [job.old_slot_id]
+        );
+        if (oldAv?.technician_slot_id) {
+          await conn.execute(
+            'UPDATE ip_technician_slots SET booked_count = GREATEST(0, booked_count - 1) WHERE tech_slot_id = ?',
+            [oldAv.technician_slot_id]
+          );
+        } else if (oldAv?.lab_slot_id) {
+          await conn.execute(
+            'UPDATE ip_lab_slots SET booked_count = GREATEST(0, booked_count - 1) WHERE lab_slot_id = ?',
+            [oldAv.lab_slot_id]
+          );
+        }
+      }
+
+      // Booking: new date + time. Status stays as it is (assigned).
+      await conn.execute(
+        `UPDATE ip_bookings
+         SET booking_date = ?, available_slot_id = ?, lab_slot_id = NULL,
+             reschedule_count = reschedule_count + 1, updated_at = NOW()
+         WHERE booking_id IN (${idList})`,
+        [slot.slot_date, availableSlotId, ...allIds]
+      );
+
+      // The technician keeps the job, on the new date.
+      await conn.execute(
+        `UPDATE ip_technician_collection SET collection_date = ?, updated_at = NOW()
+         WHERE booking_id IN (${idList}) AND technician_id = ?`,
+        [slot.slot_date, ...allIds, technicianId]
+      );
+
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+
+    tlog(`[rescheduleAssignedBooking] technician_id=${technicianId} booking_id=${bookingId} ref=${job.booking_ref} ` +
+      `${job.old_date} ${job.old_slot_label ?? '?'} → ${slot.slot_date} ${slot.slot_label} members=${allIds.length}`);
+
+    // ── Everything below is best effort: the move is already saved ──────────
+
+    // Reminder / late alerts fire again for the new time
+    // (migrations/add_technician_alert_columns.sql — skipped if not run).
+    db.execute(
+      `UPDATE ip_technician_collection
+       SET reminder_sent_at = NULL, late_alert_1_sent_at = NULL, late_alert_2_sent_at = NULL
+       WHERE booking_id IN (${idList})`,
+      allIds
+    ).catch(e => { if (e.code !== 'ER_BAD_FIELD_ERROR') tlog(`[rescheduleAssignedBooking] alert reset failed — ${e.message}`); });
+
+    // History "Rescheduled" record (migrations/create_booking_reschedules.sql).
+    db.execute(
+      `INSERT INTO ip_booking_reschedules
+         (booking_id, technician_id, old_date, old_slot_label, new_date, new_slot_label, rescheduled_by)
+       VALUES ${allIds.map(() => "(?, ?, ?, ?, ?, ?, 'technician')").join(', ')}`,
+      allIds.flatMap(id => [id, technicianId, job.old_date, job.old_slot_label, slot.slot_date, slot.slot_label])
+    ).catch(e => tlog(`[rescheduleAssignedBooking] history record not saved — ${e.code === 'ER_NO_SUCH_TABLE'
+      ? 'run migrations/create_booking_reschedules.sql' : e.message}`));
+
+    // Dispatch sees the technician busy at the new time, not the old one.
+    try {
+      const { moveTechnicianWindow } = require('../socket/bookingSocket');
+      moveTechnicianWindow({
+        technicianId, bookingId, allIds,
+        slotDate: slot.slot_date, slotTime: slot.slot_time,
+        durationMinutes: slot.duration_minutes, slotId: slot.slot_id,
+      });
+    } catch (e) {
+      tlog(`[rescheduleAssignedBooking] dispatch window not moved — ${e.message}`);
+    }
+
+    // Tell the customer.
+    const when = `${_shortDate(slot.slot_date)}, ${slot.slot_label}`;
+    try {
+      const { sendToBookingOwner } = require('../services/customerPush');
+      sendToBookingOwner(bookingId, 'Booking rescheduled',
+        `Your technician moved booking ${job.reference_no ?? job.booking_ref} to ${when}.`,
+        { type: 'booking_rescheduled' }
+      ).catch(() => {});
+    } catch (_) { /* push is optional */ }
+
+    // Client lab server (ReScheduleAppointment).
+    try {
+      const { syncBookingToClient } = require('../services/clientSync');
+      for (const id of allIds) {
+        syncBookingToClient(id, { mobile: req.user.mobile, type: 'technician', action: 'reschedule' })
+          .catch(err => console.error(`[clientSync] technician reschedule sync failed booking_id=${id}:`, err.message));
+      }
+    } catch (_) { /* sync retried by syncRetry */ }
+
+    res.json({
+      success: true,
+      message: `Booking moved to ${when}`,
+      new_date: slot.slot_date,
+      new_slot: slot.slot_label,
+      members_updated: allIds.length,
+    });
+  } catch (e) {
+    tlog(`[rescheduleAssignedBooking] ERROR technician_id=${technicianId} booking_id=${bookingId} — ${e.message}`);
+    console.error('[rescheduleAssignedBooking]', e.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// "2026-11-18" → "Wed, 18 Nov"
+function _shortDate(ymd) {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${days[d.getUTCDay()]}, ${d.getUTCDate()} ${months[d.getUTCMonth()]}`;
+}
 
 // ── GET /api/technicians/:technicianId/active-bookings ───────────────────────
 // Returns today's assigned / en_route / arrived bookings so the dashboard can
@@ -2257,6 +2753,14 @@ exports.verifyBookingOtp = async (req, res) => {
       }
     } catch (e) {
       console.error(`❌ [verifyBookingOtp] sibling cascade failed booking=${bookingId}: ${e.message}`);
+    }
+
+    // ip_bookings.status follows the step too (booking + family visit).
+    try {
+      const { _setVisitBookingStatus } = require('../socket/bookingSocket');
+      if (typeof _setVisitBookingStatus === 'function') _setVisitBookingStatus(Number(bookingId), 'otp_verified');
+    } catch (e) {
+      console.error(`❌ [verifyBookingOtp] booking status not updated booking=${bookingId}: ${e.message}`);
     }
 
     // The ASMX visit sync (TechnicianVisitCompleted) is no longer sent here —

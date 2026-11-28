@@ -27,6 +27,12 @@ class TechnicianBooking {
   final String hospital;
   final String? referenceNo;
   final String? collectionNotes;
+  // History "Rescheduled" rows only: where the customer moved the booking to
+  // (date/timeSlot above are the old appointment this technician had).
+  final DateTime? rescheduledToDate;
+  final String? rescheduledToSlot;
+  final DateTime? rescheduledAt;
+  final String? rescheduledBy; // 'customer' | 'technician'
 
   TechnicianBooking({
     required this.id,
@@ -56,5 +62,9 @@ class TechnicianBooking {
     this.patientLng,
     this.hospital = '',
     this.collectionNotes,
+    this.rescheduledToDate,
+    this.rescheduledToSlot,
+    this.rescheduledAt,
+    this.rescheduledBy,
   });
 }
