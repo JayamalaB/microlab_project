@@ -637,75 +637,87 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   Widget _buildCartBar(BuildContext context) {
     final bottomPad = MediaQuery.of(context).padding.bottom;
 
-    final pill = Container(
-      padding: const EdgeInsets.fromLTRB(CxSpace.md, 10, 10, 10),
-      decoration: BoxDecoration(
-        color: CxColors.brand,
-        borderRadius: CxRadius.lgAll,
-        boxShadow: [
-          BoxShadow(
-            color: CxColors.brand.withValues(alpha: 0.30),
-            blurRadius: 14,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 38, height: 38,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.18),
-              borderRadius: CxRadius.mdAll,
+    // One-line cart bar (~50px): bag + count, "7 items · ₹7,190", View Cart.
+    // Tapping anywhere on it opens the cart.
+    final count = _cart.length;
+    final pill = Material(
+      color: CxColors.brand,
+      borderRadius: CxRadius.lgAll,
+      elevation: 0,
+      shadowColor: Colors.transparent,
+      child: Ink(
+        decoration: BoxDecoration(
+          borderRadius: CxRadius.lgAll,
+          boxShadow: [
+            BoxShadow(
+              color: CxColors.brand.withValues(alpha: 0.30),
+              blurRadius: 12,
+              offset: const Offset(0, 3),
             ),
-            child: Stack(alignment: Alignment.center, children: [
-              const Icon(Icons.shopping_bag_outlined, color: Colors.white, size: 20),
-              Positioned(
-                right: 2, top: 2,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
-                  decoration: const BoxDecoration(color: Colors.white, borderRadius: CxRadius.pill),
-                  child: Text('${_cart.length}',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          color: CxColors.brand, fontSize: 11, fontWeight: FontWeight.w700)),
-                ),
-              ),
-            ]),
-          ),
-          const SizedBox(width: CxSpace.md),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+          ],
+        ),
+        child: InkWell(
+          borderRadius: CxRadius.lgAll,
+          onTap: _showCart,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 7, 7, 7),
+            child: Row(
               children: [
-                Text('₹${_cartTotal.toInt()} total',
-                    style: const TextStyle(
-                        color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
-                Text('${_cart.length} item${_cart.length > 1 ? 's' : ''} added',
-                    style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.85), fontSize: 12)),
+                // Bag with item count
+                SizedBox(
+                  width: 30, height: 30,
+                  child: Stack(clipBehavior: Clip.none, alignment: Alignment.center, children: [
+                    const Icon(Icons.shopping_bag_outlined, color: Colors.white, size: 22),
+                    Positioned(
+                      right: -4, top: -3,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                        decoration: const BoxDecoration(color: Colors.white, borderRadius: CxRadius.pill),
+                        child: Text('$count',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                                color: CxColors.brand, fontSize: 10.5, fontWeight: FontWeight.w800)),
+                      ),
+                    ),
+                  ]),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text.rich(
+                    TextSpan(children: [
+                      TextSpan(
+                        text: '$count item${count == 1 ? '' : 's'}  ·  ',
+                        style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontSize: 13),
+                      ),
+                      TextSpan(
+                        text: '₹${_inrGroup(_cartTotal.toInt())}',
+                        style: const TextStyle(color: Colors.white, fontSize: 15.5, fontWeight: FontWeight.w800),
+                      ),
+                    ]),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  height: 36,
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: CxRadius.mdAll,
+                  ),
+                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                    Text('View Cart',
+                        style: TextStyle(color: CxColors.brand, fontSize: 13.5, fontWeight: FontWeight.w700)),
+                    SizedBox(width: 4),
+                    Icon(Icons.arrow_forward_rounded, size: 17, color: CxColors.brand),
+                  ]),
+                ),
               ],
             ),
           ),
-          FilledButton(
-            onPressed: _showCart,
-            style: FilledButton.styleFrom(
-              backgroundColor: Colors.white,
-              foregroundColor: CxColors.brand,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              minimumSize: const Size(0, 42),
-              shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
-              textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
-            ),
-            child: const Row(mainAxisSize: MainAxisSize.min, children: [
-              Text('View Cart'),
-              SizedBox(width: 4),
-              Icon(Icons.arrow_forward_rounded, size: 18),
-            ]),
-          ),
-        ],
+        ),
       ),
     );
 
@@ -838,7 +850,9 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           shadowColor: CxColors.border,
           backgroundColor: CxColors.page,
           bottom: PreferredSize(
-            preferredSize: const Size.fromHeight(156),
+            // Exactly the content below: 8 + 48 search + 6 + 30 chips + 5 +
+            // 30 chips + 8 = 135. A larger number left an empty band.
+            preferredSize: const Size.fromHeight(135),
             child: Container(
               color: CxColors.page,
               child: Column(
@@ -846,7 +860,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                 children: [
                   // Search + upload
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(CxSpace.gutter, 12, CxSpace.gutter, 0),
+                    padding: const EdgeInsets.fromLTRB(CxSpace.gutter, 8, CxSpace.gutter, 0),
                     child: Row(
                       children: [
                         Expanded(
@@ -915,10 +929,10 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 6),
                   // Group tabs: Offers + General/Men/Women/Kids
                   SizedBox(
-                    height: 34,
+                    height: 30,
                     child: ListView(
                       scrollDirection: Axis.horizontal,
                       padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
@@ -946,10 +960,10 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 5),
                   // Category tabs
                   SizedBox(
-                    height: 34,
+                    height: 30,
                     child: ListView(
                       scrollDirection: Axis.horizontal,
                       padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
@@ -1051,17 +1065,29 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
                         : 'Tests & Packages',
                   ),
                   const SizedBox(height: 10),
-                  ListView.separated(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
+                  // One bordered list with thin dividers (compact rows).
+                  Padding(
                     padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter),
-                    itemCount: _filteredTests.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 10),
-                    itemBuilder: (_, i) => _TestCard(
-                      test: _filteredTests[i],
-                      inCart: _inCart(_filteredTests[i]),
-                      onAdd: () => _toggleCart(_filteredTests[i]),
-                      onTap: () => _showTestDetail(_filteredTests[i]),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: CxRadius.lgAll,
+                        border: Border.all(color: CxColors.border),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        padding: EdgeInsets.zero,
+                        itemCount: _filteredTests.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1, color: CxColors.border),
+                        itemBuilder: (_, i) => _TestCard(
+                          test: _filteredTests[i],
+                          inCart: _inCart(_filteredTests[i]),
+                          onAdd: () => _toggleCart(_filteredTests[i]),
+                          onTap: () => _showTestDetail(_filteredTests[i]),
+                        ),
+                      ),
                     ),
                   ),
                   // Next page on its way (fetched by _onTestsScroll).
@@ -1231,7 +1257,8 @@ class _CategoryTab extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
         decoration: BoxDecoration(
           color: selected ? activeColor : Colors.white,
           borderRadius: CxRadius.pill,
@@ -2197,24 +2224,29 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                           _getCurrentLocation();
                         }
                       },
+                      // Icon beside the label (one ~48px row).
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        child: Column(
+                        padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 8),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(
                               m == 'Home Collection'
                                   ? Icons.home_outlined
                                   : Icons.local_hospital_outlined,
-                              size: 24,
+                              size: 20,
                               color: sel ? Colors.white : CxColors.textSecondary,
                             ),
-                            const SizedBox(height: 6),
-                            Text(m,
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                    color: sel ? Colors.white : CxColors.textPrimary)),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(m,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: sel ? Colors.white : CxColors.textPrimary)),
+                            ),
                           ],
                         ),
                       ),
@@ -2225,7 +2257,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
               }).toList(),
             ),
 
-            const SizedBox(height: 20),
+            const SizedBox(height: 12),
 
             if (_mode == 'Home Collection') ...[
               // ── Saved Addresses quick-select ──────────────────────────────
@@ -2329,7 +2361,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                 const SizedBox(height: CxSpace.md),
               ] else ...[
                 const Text('Select Location Method', style: CxText.label),
-                const SizedBox(height: CxSpace.md),
+                const SizedBox(height: CxSpace.sm),
               ],
 
               // Option 1: GPS Current Location Button
@@ -2346,12 +2378,12 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                 child: InkWell(
                 onTap: _isGeocoding ? null : _getCurrentLocation,
                 child: Container(
-                  padding: const EdgeInsets.all(CxSpace.lg),
+                  padding: const EdgeInsets.all(CxSpace.md),
                   child: Row(
                     children: [
                       Container(
-                        width: 48,
-                        height: 48,
+                        width: 36,
+                        height: 36,
                         decoration: const BoxDecoration(
                           color: CxColors.brandSurface,
                           borderRadius: CxRadius.mdAll,
@@ -2359,7 +2391,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                         child: _isGeocoding && !_manualSelected
                             ? const Center(
                                 child: SizedBox(
-                                  width: 24, height: 24,
+                                  width: 18, height: 18,
                                   child: CircularProgressIndicator(
                                     strokeWidth: 2,
                                     color: AppColors.brandGreen,
@@ -2367,15 +2399,15 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                                 ),
                               )
                             : const Icon(Icons.my_location_rounded,
-                                size: 26, color: CxColors.brand),
+                                size: 20, color: CxColors.brand),
                       ),
-                      const SizedBox(width: 14),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text('Use Current Location', style: CxText.cardTitle),
-                            const SizedBox(height: 4),
+                            const SizedBox(height: 2),
                             Text(
                               _gpsSelected && _gpsAddress != null
                                   ? _gpsAddress!
@@ -2448,8 +2480,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                 },
               ),
 
-              const SizedBox(height: 16),
-              
+              const SizedBox(height: 10),
+
               // Option 2: Manual Address with Pincode
               GestureDetector(
                 onTap: () {
@@ -2459,7 +2491,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                   });
                 },
                 child: Container(
-                  padding: const EdgeInsets.all(CxSpace.lg),
+                  padding: const EdgeInsets.all(CxSpace.md),
                   decoration: BoxDecoration(
                     color: _manualSelected ? CxColors.brandSurface : Colors.white,
                     borderRadius: CxRadius.lgAll,
@@ -2473,14 +2505,14 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                     children: [
                       Row(
                         children: [
-                          const CxIconBadge(icon: Icons.edit_location_rounded, tone: CxTone.info, size: 48),
-                          const SizedBox(width: 14),
+                          const CxIconBadge(icon: Icons.edit_location_rounded, tone: CxTone.info, size: 36),
+                          const SizedBox(width: 12),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 const Text('Enter Address Manually', style: CxText.cardTitle),
-                                const SizedBox(height: 4),
+                                const SizedBox(height: 2),
                                 Text(
                                   _manualSelected && _manualAddress != null
                                       ? _manualAddress!
@@ -2502,9 +2534,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                       
                       // Manual entry form (shown when manual mode is active)
                       if (_manualSelected || _isManualMode) ...[
-                        const SizedBox(height: 16),
-                        const Divider(),
-                        const SizedBox(height: 12),
+                        const Divider(height: 20),
                         
                         // PIN Code (left) + Location (right). Location and
                         // Address below stay disabled while the PIN is
@@ -2520,6 +2550,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                                 style: const TextStyle(fontSize: 14),
                                 decoration: InputDecoration(
                                   hintText: 'Pincode *',
+                                  isDense: true,
+                                  contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
                                   hintStyle: const TextStyle(color: AppColors.textHint),
                                   counterText: '',
                                   prefixIcon: const Icon(Icons.pin_outlined, size: 18, color: AppColors.textHint),
@@ -2539,6 +2571,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                                 style: const TextStyle(fontSize: 14),
                                 decoration: InputDecoration(
                                   hintText: 'Location',
+                                  isDense: true,
+                                  contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
                                   hintStyle: const TextStyle(color: AppColors.textHint),
                                   prefixIcon: const Icon(Icons.location_city_outlined, size: 18, color: AppColors.textHint),
                                   filled: true,
@@ -2558,10 +2592,13 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                         TextField(
                           controller: _addressCtrl,
                           enabled: !_isPincodeLookup,
-                          maxLines: 2,
+                          minLines: 1,
+                          maxLines: 3,
                           style: const TextStyle(fontSize: 14),
                           decoration: InputDecoration(
                             hintText: 'House no, Street, Area (optional)',
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
                             hintStyle: const TextStyle(color: AppColors.textHint),
                             prefixIcon: const Icon(Icons.home_outlined, size: 18, color: AppColors.textHint),
                             filled: true,
@@ -2587,11 +2624,9 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                           ]),
                         ],
                         
-                        // Detected area result
-                        if (_detectedArea != null && _detectedArea != 'Not found' && _manualSelected) ...[
-                          const SizedBox(height: CxSpace.sm),
-                          CxBanner(tone: CxTone.success, message: 'Detected: $_detectedArea'),
-                        ] else if (_detectedArea == 'Not found') ...[
+                        // The detected area already shows (green) under the
+                        // card title — only "not found" needs a message here.
+                        if (_detectedArea == 'Not found') ...[
                           const SizedBox(height: CxSpace.sm),
                           const CxBanner(
                             tone: CxTone.warning,
@@ -2632,6 +2667,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                     style: const TextStyle(fontSize: 14),
                     decoration: InputDecoration(
                       hintText: 'Pincode',
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
                       hintStyle: const TextStyle(color: AppColors.textHint),
                       counterText: '',
                       prefixIcon: const Icon(Icons.pin_outlined, size: 18, color: AppColors.textHint),
@@ -2650,6 +2687,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                     style: const TextStyle(fontSize: 14),
                     decoration: InputDecoration(
                       hintText: 'City',
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
                       hintStyle: const TextStyle(color: AppColors.textHint),
                       prefixIcon: const Icon(Icons.location_city_outlined, size: 18, color: AppColors.textHint),
                       filled: true,
@@ -2674,7 +2713,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                       style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
                 ]),
               ],
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               RichText(
                 text: const TextSpan(
                   text: 'Select Branch',
@@ -2723,7 +2762,8 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _branchError ? const Color(0xFFD32F2F) : AppColors.divider)),
                     enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: _branchError ? const Color(0xFFD32F2F) : AppColors.divider)),
                     focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 12),
                   ),
                   style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
                   dropdownColor: AppColors.white,
@@ -2766,7 +2806,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
               ],
             ],
 
-            const SizedBox(height: CxSpace.xxl),
+            const SizedBox(height: CxSpace.lg),
 
             CxButton(
               onPressed: _apply,
@@ -2798,23 +2838,21 @@ class _TestCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Tapping the card adds / removes the test (same as before).
+    // A compact row inside the bordered list. Tapping it adds / removes the
+    // test (same as before).
+    final meta = [
+      if (test.reportStatus.trim().isNotEmpty) 'Report in ${formatReportTat(test.reportStatus)}',
+      if (test.category.trim().isNotEmpty) test.category,
+    ].join(' · ');
     return Semantics(
       button: true,
       selected: inCart,
       child: Material(
       color: inCart ? CxColors.brandSurface : Colors.white,
-      shape: RoundedRectangleBorder(
-        borderRadius: CxRadius.lgAll,
-        side: BorderSide(
-            color: inCart ? CxColors.brand : CxColors.border,
-            width: inCart ? 1.5 : 1),
-      ),
-      clipBehavior: Clip.antiAlias,
       child: InkWell(
       onTap: onAdd,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(CxSpace.md, CxSpace.md, CxSpace.lg, CxSpace.md),
+        padding: const EdgeInsets.fromLTRB(CxSpace.md, 10, CxSpace.lg, 10),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
@@ -2833,75 +2871,50 @@ class _TestCard extends StatelessWidget {
               ),
             ),
             const SizedBox(width: CxSpace.md),
-            // Content
+            // Content: name, then one details line.
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 4,
-                    children: [
-                      CxChip(
-                        label: test.type == 'package' ? 'Package' : 'Test',
-                        icon: test.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
-                        tone: test.type == 'package' ? CxTone.brand : CxTone.info,
-                      ),
-                      if (test.hasOffer)
-                        CxChip(
-                          label: '${(test.offerPercent ?? 0).toInt()}% OFF',
-                          tone: CxTone.offer,
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Text(test.name,
-                      style: CxText.cardTitle),
-                  const SizedBox(height: 4),
-                  Wrap(
-                    spacing: 10,
-                    runSpacing: 2,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      Row(mainAxisSize: MainAxisSize.min, children: [
-                        const Icon(Icons.schedule_outlined,
-                            size: 14, color: CxColors.textHint),
-                        const SizedBox(width: 3),
-                        Text(test.reportStatus, style: CxText.caption),
+                  Text(test.name, style: CxText.cardTitle),
+                  if (meta.isNotEmpty || test.docRequired) ...[
+                    const SizedBox(height: 3),
+                    Text.rich(
+                      TextSpan(children: [
+                        if (meta.isNotEmpty) TextSpan(text: meta),
+                        if (test.docRequired)
+                          TextSpan(
+                            text: '${meta.isNotEmpty ? ' · ' : ''}⚠ Rx',
+                            style: const TextStyle(fontWeight: FontWeight.w700, color: CxColors.warning),
+                          ),
                       ]),
-                      Row(mainAxisSize: MainAxisSize.min, children: [
-                        const Icon(Icons.category_outlined,
-                            size: 14, color: CxColors.textHint),
-                        const SizedBox(width: 3),
-                        Text(test.category, style: CxText.caption),
-                      ]),
-                      if (test.docRequired)
-                        const Row(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(Icons.description_outlined,
-                              size: 14, color: CxColors.warning),
-                          SizedBox(width: 3),
-                          Text('Rx',
-                              style: TextStyle(
-                                  fontSize: 12, fontWeight: FontWeight.w600, color: CxColors.warning)),
-                        ]),
-                    ],
-                  ),
+                      style: CxText.caption,
+                    ),
+                  ],
                 ],
               ),
             ),
-            const SizedBox(width: CxSpace.md),
-            // Price
+            const SizedBox(width: CxSpace.sm),
+            // Price, with Package / offer tags under it.
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text('₹${test.finalPrice.toInt()}',
-                    style: CxText.price),
+                Text('₹${test.finalPrice.toInt()}', style: CxText.price),
                 if (test.hasOffer)
                   Text('₹${test.originalPrice.toInt()}',
                       style: const TextStyle(
                           fontSize: 12,
                           color: CxColors.textHint,
                           decoration: TextDecoration.lineThrough)),
+                if (test.type == 'package' || test.hasOffer) ...[
+                  const SizedBox(height: 3),
+                  Wrap(spacing: 4, runSpacing: 4, alignment: WrapAlignment.end, children: [
+                    if (test.type == 'package')
+                      const _MiniTag(label: 'Package', color: CxColors.brand),
+                    if (test.hasOffer)
+                      _MiniTag(label: '${(test.offerPercent ?? 0).toInt()}% OFF', color: const Color(0xFFE65100)),
+                  ]),
+                ],
               ],
             ),
           ],
@@ -2911,6 +2924,49 @@ class _TestCard extends StatelessWidget {
       ),
     );
   }
+}
+
+// Small coloured tag (Package / % OFF) beside a test's price.
+class _MiniTag extends StatelessWidget {
+  final String label;
+  final Color color;
+  const _MiniTag({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Text(label,
+            style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700, color: color)),
+      );
+}
+
+/// 7190 → "7,190", 123456 → "1,23,456" (Indian grouping).
+String _inrGroup(int n) {
+  final neg = n < 0;
+  final s = n.abs().toString();
+  if (s.length <= 3) return '${neg ? '-' : ''}$s';
+  final last3 = s.substring(s.length - 3);
+  var rest = s.substring(0, s.length - 3);
+  final parts = <String>[];
+  while (rest.length > 2) {
+    parts.insert(0, rest.substring(rest.length - 2));
+    rest = rest.substring(0, rest.length - 2);
+  }
+  if (rest.isNotEmpty) parts.insert(0, rest);
+  return '${neg ? '-' : ''}${parts.join(',')},$last3';
+}
+
+/// "24" (hours) → "1 day", "6" → "6 hours"; anything else as it is.
+String formatReportTat(String raw) {
+  final hours = int.tryParse(raw.trim());
+  if (hours == null) return raw.trim();
+  if (hours < 24) return '$hours hour${hours == 1 ? '' : 's'}';
+  final days = hours ~/ 24;
+  return '$days day${days == 1 ? '' : 's'}';
 }
 
 // ─── Section Header ───────────────────────────────────────────────────────────
@@ -2942,13 +2998,7 @@ class _TestDetailSheet extends StatelessWidget {
     required this.onToggleCart,
   });
 
-  String _formatTat(String raw) {
-    final hours = int.tryParse(raw);
-    if (hours == null) return raw;
-    if (hours < 24) return '$hours hour${hours == 1 ? '' : 's'}';
-    final days = hours ~/ 24;
-    return '$days day${days == 1 ? '' : 's'}';
-  }
+  String _formatTat(String raw) => formatReportTat(raw);
 
   @override
   Widget build(BuildContext context) {
@@ -3394,7 +3444,9 @@ class _CartSheetState extends State<_CartSheet> {
                 SizedBox(height: MediaQuery.of(context).padding.bottom + CxSpace.lg),
               ],
             )
+          // Height follows the items (small for 1–2), up to 75% then scrolls.
           : Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
                 const CxSheetHandleBar(),
                 Padding(
@@ -3410,50 +3462,55 @@ class _CartSheetState extends State<_CartSheet> {
                   ),
                 ),
                 const Divider(height: 1),
-                Expanded(
-                  child: ListView.separated(
+                Flexible(
+                  child: Padding(
                     padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, CxSpace.md),
-                    itemCount: cart.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: CxSpace.sm),
-                    itemBuilder: (_, i) {
-                      final t = cart[i];
-                      return Container(
-                        padding: const EdgeInsets.fromLTRB(CxSpace.md, CxSpace.md, 4, CxSpace.md),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: CxRadius.lgAll,
-                          border: Border.all(color: CxColors.border),
-                        ),
-                        child: Row(
-                          children: [
-                            CxIconBadge(
-                              icon: t.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
-                              tone: t.type == 'package' ? CxTone.brand : CxTone.info,
-                              size: 40,
-                            ),
-                            const SizedBox(width: CxSpace.md),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(t.name, style: CxText.cardTitle),
-                                  const SizedBox(height: 2),
-                                  Text(t.category, style: CxText.caption),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: CxRadius.lgAll,
+                        border: Border.all(color: CxColors.border),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        padding: EdgeInsets.zero,
+                        itemCount: cart.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1, color: CxColors.border),
+                        itemBuilder: (_, i) {
+                          final t = cart[i];
+                          final isPackage = t.type == 'package';
+                          return Padding(
+                            padding: const EdgeInsets.fromLTRB(CxSpace.md, 8, 4, 8),
+                            child: Row(
+                              children: [
+                                if (isPackage) ...[
+                                  const Icon(Icons.inventory_2_outlined, size: 18, color: CxColors.brand),
+                                  const SizedBox(width: 8),
                                 ],
-                              ),
+                                Expanded(
+                                  child: Text.rich(
+                                    TextSpan(children: [
+                                      TextSpan(text: t.name, style: CxText.cardTitle),
+                                      if (t.category.trim().isNotEmpty)
+                                        TextSpan(text: ' · ${t.category}', style: CxText.caption),
+                                    ]),
+                                  ),
+                                ),
+                                const SizedBox(width: CxSpace.sm),
+                                Text('₹${t.finalPrice.toInt()}', style: CxText.price),
+                                CxIconButton(
+                                  icon: Icons.delete_outline_rounded,
+                                  tooltip: 'Remove ${t.name}',
+                                  color: CxColors.error,
+                                  onPressed: () => _remove(t),
+                                ),
+                              ],
                             ),
-                            const SizedBox(width: CxSpace.sm),
-                            Text('₹${t.finalPrice.toInt()}', style: CxText.price),
-                            CxIconButton(
-                              icon: Icons.delete_outline_rounded,
-                              tooltip: 'Remove ${t.name}',
-                              color: CxColors.error,
-                              onPressed: () => _remove(t),
-                            ),
-                          ],
-                        ),
-                      );
-                    },
+                          );
+                        },
+                      ),
+                    ),
                   ),
                 ),
                 Container(

@@ -110,21 +110,11 @@ class ProfileScreen extends StatelessWidget {
     );
 
     final body = ListView(
-      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.xl, CxSpace.gutter, 80),
+      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, 12, CxSpace.gutter, 80),
       children: [
-        // ── Account Details ───────────────────────────────────────────────────
-        Row(
-          children: [
-            const Text('Account Details', style: CxText.sectionTitle),
-            const Spacer(),
-            if (self != null && !self.isReadOnly)
-              _EditButton(onTap: () => onEditMember(self)),
-          ],
-        ),
-        const SizedBox(height: CxSpace.sm),
-
+        // ── Account Details (Edit sits in the card's corner) ──────────────────
         Container(
-          padding: const EdgeInsets.all(CxSpace.lg),
+          padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: CxRadius.lgAll,
@@ -136,16 +126,16 @@ class ProfileScreen extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  _Avatar(member: self),
-                  const SizedBox(width: 14),
+                  _Avatar(member: self, size: 48),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(self?.name ?? accountName ?? mobile,
-                            style: CxText.pageTitle.copyWith(fontSize: 18)),
+                            style: CxText.pageTitle.copyWith(fontSize: 17)),
                         if (self != null) ...[
-                          const SizedBox(height: 3),
+                          const SizedBox(height: 2),
                           Text(
                             [
                               if (self.relation != null) self.relation,
@@ -157,6 +147,8 @@ class ProfileScreen extends StatelessWidget {
                       ],
                     ),
                   ),
+                  if (self != null && !self.isReadOnly)
+                    _EditButton(onTap: () => onEditMember(self)),
                 ],
               ),
               const _HDivider(),
@@ -183,39 +175,34 @@ class ProfileScreen extends StatelessWidget {
           ),
         ),
 
-        const SizedBox(height: 24),
+        const SizedBox(height: 12),
 
-        // ── Menu tiles ────────────────────────────────────────────────────────
+        // ── Menu tiles (labels say what they are — no subtitles) ──────────────
         _MenuSection(
           tiles: [
             _MenuTile(
               icon: Icons.people_outline_rounded,
               label: 'Family Members',
-              subtitle: 'Manage and Add Family Members',
               onTap: onFamilyMembers ?? onAddMember,
             ),
             _MenuTile(
               icon: Icons.location_on_outlined,
               label: 'Saved Addresses',
-              subtitle: 'Edit, Add, and Manage Addresses',
               onTap: onSavedAddresses,
             ),
             _MenuTile(
               icon: Icons.receipt_long_outlined,
               label: 'Booking History',
-              subtitle: 'View Order History and Transactions',
               onTap: onBookingHistory,
             ),
             _MenuTile(
               icon: Icons.folder_outlined,
               label: 'Health Records',
-              subtitle: 'Download and Share Reports',
               onTap: onHealthRecords,
             ),
             _MenuTile(
               icon: Icons.support_agent_outlined,
               label: 'Help & Support',
-              subtitle: 'Get Assistance & Resolve Queries',
               onTap: onHelpSupport,
             ),
           ],
@@ -242,7 +229,7 @@ class ProfileScreen extends StatelessWidget {
           ],
         ),
 
-        const SizedBox(height: 20),
+        const SizedBox(height: 14),
         FutureBuilder<PackageInfo>(
           future: PackageInfo.fromPlatform(),
           builder: (_, snap) {
@@ -319,14 +306,12 @@ class _MenuSection extends StatelessWidget {
 class _MenuTile extends StatelessWidget {
   final IconData icon;
   final String label;
-  final String? subtitle;
   final VoidCallback? onTap;
   final bool destructive;
 
   const _MenuTile({
     required this.icon,
     required this.label,
-    this.subtitle,
     this.onTap,
     this.destructive = false,
   });
@@ -340,36 +325,26 @@ class _MenuTile extends StatelessWidget {
       onTap: onTap,
       borderRadius: CxRadius.lgAll,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         child: Row(
           children: [
             Container(
-              width: 36,
-              height: 36,
+              width: 32,
+              height: 32,
               decoration: BoxDecoration(
                 color: destructive
                     ? CxColors.error.withValues(alpha: 0.08)
                     : AppColors.brandGreenSurface,
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Icon(icon, size: 20, color: iconColor),
+              child: Icon(icon, size: 18, color: iconColor),
             ),
-            const SizedBox(width: 14),
+            const SizedBox(width: 12),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(label,
-                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: color)),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 2),
-                    Text(subtitle!,
-                        style: const TextStyle(fontSize: 12, color: CxColors.textHint)),
-                  ],
-                ],
-              ),
+              child: Text(label,
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: color)),
             ),
-            Icon(Icons.chevron_right_rounded, size: 20, color: CxColors.textHint),
+            const Icon(Icons.chevron_right_rounded, size: 20, color: CxColors.textHint),
           ],
         ),
       ),
@@ -381,25 +356,26 @@ class _MenuTile extends StatelessWidget {
 
 class _Avatar extends StatelessWidget {
   final MemberModel? member;
-  const _Avatar({this.member});
+  final double size;
+  const _Avatar({this.member, this.size = 60});
 
   @override
   Widget build(BuildContext context) {
     if (member?.photoBytes != null) {
-      return CircleAvatar(radius: 30, backgroundImage: MemoryImage(member!.photoBytes!));
+      return CircleAvatar(radius: size / 2, backgroundImage: MemoryImage(member!.photoBytes!));
     }
     if (member?.photoUrl != null && member!.photoUrl!.isNotEmpty) {
-      return CircleAvatar(radius: 30, backgroundImage: NetworkImage(member!.photoUrl!));
+      return CircleAvatar(radius: size / 2, backgroundImage: NetworkImage(member!.photoUrl!));
     }
     final initials = member?.name.isNotEmpty == true
         ? member!.name.trim().split(' ').where((w) => w.isNotEmpty).take(2).map((w) => w[0]).join()
         : '?';
     return Container(
-      width: 60, height: 60,
+      width: size, height: size,
       decoration: const BoxDecoration(color: AppColors.brandGreenSurface, shape: BoxShape.circle),
       child: Center(
         child: Text(initials.toUpperCase(),
-            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: AppColors.brandGreen)),
+            style: TextStyle(fontSize: size / 3, fontWeight: FontWeight.w700, color: AppColors.brandGreen)),
       ),
     );
   }
@@ -412,16 +388,11 @@ class _EditButton extends StatelessWidget {
   const _EditButton({required this.onTap});
 
   @override
-  Widget build(BuildContext context) => TextButton.icon(
+  // A pencil in the account card's corner.
+  Widget build(BuildContext context) => IconButton(
         onPressed: onTap,
-        icon: const Icon(Icons.edit_outlined, size: 18),
-        label: const Text('Edit'),
-        style: TextButton.styleFrom(
-          foregroundColor: CxColors.brand,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          minimumSize: const Size(48, 40),
-          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-        ),
+        tooltip: 'Edit profile',
+        icon: const Icon(Icons.edit_outlined, size: 20, color: CxColors.brand),
       );
 }
 
@@ -453,7 +424,7 @@ class _HDivider extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      const Divider(height: 24, thickness: 1, color: CxColors.border);
+      const Divider(height: 18, thickness: 1, color: CxColors.border);
 }
 
 // ─── Family Members Screen ────────────────────────────────────────────────────

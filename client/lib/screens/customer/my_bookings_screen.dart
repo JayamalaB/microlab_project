@@ -104,6 +104,7 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       case 'scheduled':  return 'Upcoming';
       case 'confirmed':  return 'Confirmed';
       case 'assigned':   return 'Technician Allocated';
+      case 'technician_assigned': return 'Technician Allocated'; // admin panel value
       // ip_bookings.status follows each technician step.
       case 'en_route':             return 'Technician On the Way';
       case 'arrived':              return 'Technician Arrived';
@@ -116,9 +117,12 @@ class _MyBookingsScreenState extends State<MyBookingsScreen> with WidgetsBinding
       case 'handed_to_lab':        return 'Handed to Lab';
       case 'completed':            return 'Completed';
       case 'cancelled':  return 'Cancelled';
-      default:           return raw.isNotEmpty
-          ? raw[0].toUpperCase() + raw.substring(1)
-          : 'Unknown';
+      // Unknown value: "some_value" -> "Some Value".
+      default:
+        final words = raw.split('_').where((w) => w.isNotEmpty);
+        return words.isEmpty
+            ? 'Unknown'
+            : words.map((w) => w[0].toUpperCase() + w.substring(1)).join(' ');
     }
   }
 
@@ -1325,8 +1329,29 @@ class _BookingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final sc = _statusColor(booking.status);
+    final isHome = booking.mode == 'Home Collection';
+    final today = DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
+    final openStatus = const {'Pending', 'Upcoming', 'Confirmed', 'Technician Allocated'}
+        .contains(booking.status);
+    final isDone = const {'Completed', 'Sample Collected', 'Handed to Lab', 'Handed to Lab Pending', 'collected'}
+        .contains(booking.status);
+    final showTrack = isHome && booking.status != 'Cancelled';
+    final canReschedule = booking.canReschedule &&
+        openStatus &&
+        !booking.date.isBefore(today) &&
+        !_slotHasPassed(booking) &&
+        (booking.collectionStatus == null || booking.collectionStatus == 'assigned');
+    // Cancel: before the technician starts the journey (the server refuses
+    // from en_route on).
+    final canCancel = openStatus &&
+        !booking.date.isBefore(today) &&
+        !_slotHasPassed(booking) &&
+        !const {'en_route', 'arrived', 'collection_started', 'otp_verified', 'sample_collected',
+                'handed_to_lab', 'handed_to_lab_pending', 'collected', 'completed',
+                'all_collected', 'cancelled'}
+            .contains(booking.collectionStatus);
     return Padding(
-      padding: const EdgeInsets.only(bottom: CxSpace.md),
+      padding: const EdgeInsets.only(bottom: 10),
       child: DecoratedBox(
         decoration: const BoxDecoration(
           borderRadius: CxRadius.lgAll,
@@ -1346,11 +1371,11 @@ class _BookingCard extends StatelessWidget {
               // Status strip at top
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: CxSpace.lg, vertical: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
                 color: sc.withValues(alpha: 0.08),
                 child: Row(
                   children: [
-                    Icon(_statusIcon(booking.status), size: 17, color: sc),
+                    Icon(_statusIcon(booking.status), size: 16, color: sc),
                     const SizedBox(width: 6),
                     // Expanded (not Flexible + Spacer) so the reference
                     // number sits right in the corner.
@@ -1368,46 +1393,51 @@ class _BookingCard extends StatelessWidget {
               ),
 
               Padding(
-                padding: const EdgeInsets.all(CxSpace.lg),
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Customer + mode
+                    // Customer + small mode icon (home / lab)
                     Row(
                       children: [
                         Expanded(
-                          child: Text(booking.member.name, style: CxText.cardTitle),
+                          child: Text(booking.member.name,
+                              style: CxText.cardTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
                         ),
                         const SizedBox(width: CxSpace.sm),
-                        CxChip(
-                          label: booking.mode,
-                          icon: booking.mode == 'Home Collection' ? Icons.home_outlined : Icons.local_hospital_outlined,
-                          tone: CxTone.brand,
+                        Tooltip(
+                          message: booking.mode,
+                          child: Icon(
+                            isHome ? Icons.home_outlined : Icons.local_hospital_outlined,
+                            size: 18,
+                            color: AppColors.brandGreen,
+                            semanticLabel: booking.mode,
+                          ),
                         ),
                       ],
                     ),
 
-                    const SizedBox(height: CxSpace.md),
+                    const SizedBox(height: 4),
 
-                    // Date + time
+                    // Date + time on one line
                     Wrap(
-                      spacing: 14,
-                      runSpacing: 4,
+                      spacing: 12,
+                      runSpacing: 2,
                       children: [
                         Row(mainAxisSize: MainAxisSize.min, children: [
-                          const Icon(Icons.event_outlined, size: 16, color: CxColors.textHint),
-                          const SizedBox(width: 5),
+                          const Icon(Icons.event_outlined, size: 15, color: CxColors.textHint),
+                          const SizedBox(width: 4),
                           Text(_formatDate(booking.date), style: CxText.bodySecondary),
                         ]),
                         Row(mainAxisSize: MainAxisSize.min, children: [
-                          const Icon(Icons.schedule_outlined, size: 16, color: CxColors.textHint),
-                          const SizedBox(width: 5),
+                          const Icon(Icons.schedule_outlined, size: 15, color: CxColors.textHint),
+                          const SizedBox(width: 4),
                           Text(booking.timeSlot, style: CxText.bodySecondary),
                         ]),
                       ],
                     ),
 
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 8),
 
                     // Tests list (max 2 shown + count)
                     Wrap(
@@ -1423,15 +1453,15 @@ class _BookingCard extends StatelessWidget {
                       ],
                     ),
 
-                    const SizedBox(height: CxSpace.md),
+                    const SizedBox(height: 10),
                     const Divider(height: 1),
-                    const SizedBox(height: CxSpace.md),
+                    const SizedBox(height: 8),
 
-                    // Amount row
+                    // Amount · Track · View details on one row
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Column(
+                        Expanded(
+                          child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text('Paid: ₹${booking.paidAmount.toInt()}',
@@ -1462,37 +1492,34 @@ class _BookingCard extends StatelessWidget {
                               );
                               }),
                           ],
+                          ),
                         ),
+                        // Track pill — home collection, not cancelled
+                        if (showTrack) ...[
+                          const SizedBox(width: 8),
+                          _TrackPill(
+                            onTap: () => Navigator.push(context,
+                                MaterialPageRoute(
+                                    builder: (_) => OrderDetailsScreen(booking: booking))),
+                          ),
+                        ],
+                        const SizedBox(width: 10),
                         const Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text('View details',
+                            Text('View',
                                 style: TextStyle(
                                     fontSize: 13, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
-                            SizedBox(width: 2),
                             Icon(Icons.chevron_right_rounded,
-                                size: 20, color: AppColors.brandGreen),
+                                size: 18, color: AppColors.brandGreen),
                           ],
                         ),
                       ],
                     ),
 
-                    // Track Order button — home collection, not cancelled/unknown
-                    if (booking.mode == 'Home Collection' &&
-                        booking.status != 'Cancelled') ...[
-                      const SizedBox(height: 10),
-                      _CardAction(
-                        icon: Icons.radar_rounded,
-                        label: 'Track Order',
-                        tone: CxTone.brand,
-                        onTap: () => Navigator.push(context,
-                            MaterialPageRoute(
-                                builder: (_) => OrderDetailsScreen(booking: booking))),
-                      ),
-                    ],
-
-                    // Feedback button for completed or sample-collected bookings
-                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'Handed to Lab Pending' || booking.status == 'collected') && booking.rating == null) ...[
-                      const SizedBox(height: 10),
+                    // Rate (done, not yet rated) — compact 38px action
+                    if (isDone && booking.rating == null) ...[
+                      const SizedBox(height: 8),
                       _CardAction(
                         icon: Icons.star_border_rounded,
                         label: 'Rate your experience',
@@ -1501,11 +1528,11 @@ class _BookingCard extends StatelessWidget {
                       ),
                     ],
 
-                    // Show existing rating
-                    if ((booking.status == 'Completed' || booking.status == 'Sample Collected' || booking.status == 'Handed to Lab' || booking.status == 'Handed to Lab Pending' || booking.status == 'collected') && booking.rating != null) ...[
-                      const SizedBox(height: 10),
+                    // Existing rating
+                    if (isDone && booking.rating != null) ...[
+                      const SizedBox(height: 8),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                         decoration: const BoxDecoration(
                           color: CxColors.brandSurface,
                           borderRadius: CxRadius.mdAll,
@@ -1518,7 +1545,7 @@ class _BookingCard extends StatelessWidget {
                           children: [
                             ...List.generate(5, (i) => Icon(
                               i < (booking.rating ?? 0) ? Icons.star_rounded : Icons.star_border_rounded,
-                              size: 20,
+                              size: 18,
                               color: i < (booking.rating ?? 0) ? const Color(0xFFFFB300) : AppColors.divider,
                             )),
                             const SizedBox(width: 8),
@@ -1530,39 +1557,34 @@ class _BookingCard extends StatelessWidget {
                       ),
                     ],
 
-                    // Reschedule button
-                    if (booking.canReschedule &&
-                        (booking.status == 'Pending' || booking.status == 'Upcoming' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated') &&
-                        !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
-                        !_slotHasPassed(booking) &&
-                        (booking.collectionStatus == null || booking.collectionStatus == 'assigned')) ...[
-                      const SizedBox(height: 10),
-                      _CardAction(
-                        icon: Icons.edit_calendar_outlined,
-                        label: 'Reschedule',
-                        tone: CxTone.info,
-                        onTap: () => _showRescheduleSheet(context, booking, onCancelled),
+                    // Reschedule + Cancel side by side (each only when allowed)
+                    if (canReschedule || canCancel) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          if (canReschedule)
+                            Expanded(
+                              child: _CardAction(
+                                icon: Icons.edit_calendar_outlined,
+                                label: 'Reschedule',
+                                tone: CxTone.info,
+                                onTap: () => _showRescheduleSheet(context, booking, onCancelled),
+                              ),
+                            ),
+                          if (canReschedule && canCancel) const SizedBox(width: 8),
+                          if (canCancel)
+                            Expanded(
+                              child: _CardAction(
+                                icon: Icons.cancel_outlined,
+                                label: 'Cancel',
+                                tone: CxTone.error,
+                                onTap: () => _showCancelSheet(context, booking, chargeApplies, onCancelled),
+                              ),
+                            ),
+                        ],
                       ),
                     ],
 
-                    // Cancel button — only for pending/scheduled/confirmed/assigned, future dates,
-                    // slot time not yet passed, and before the technician starts the
-                    // journey (the server refuses from en_route on).
-                    if ((booking.status == 'Pending' || booking.status == 'Upcoming' || booking.status == 'Confirmed' || booking.status == 'Technician Allocated') &&
-                        !booking.date.isBefore(DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day)) &&
-                        !_slotHasPassed(booking) &&
-                        !const {'en_route', 'arrived', 'collection_started', 'otp_verified', 'sample_collected',
-                                 'handed_to_lab', 'handed_to_lab_pending', 'collected', 'completed',
-                                 'all_collected', 'cancelled'}
-                            .contains(booking.collectionStatus)) ...[
-                      const SizedBox(height: 10),
-                      _CardAction(
-                        icon: Icons.cancel_outlined,
-                        label: 'Cancel Booking',
-                        tone: CxTone.error,
-                        onTap: () => _showCancelSheet(context, booking, chargeApplies, onCancelled),
-                      ),
-                    ],
 
                   ],
                 ),
@@ -1576,8 +1598,38 @@ class _BookingCard extends StatelessWidget {
   }
 }
 
-// A full-width tinted action inside a booking card (rate, reschedule,
-// cancel) — 44px tall with a ripple.
+// Small "◎ Track" pill on the booking card's amount row.
+class _TrackPill extends StatelessWidget {
+  final VoidCallback onTap;
+  const _TrackPill({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: CxTone.brand.surface,
+        borderRadius: CxRadius.pill,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Semantics(
+            button: true,
+            label: 'Track order',
+            excludeSemantics: true,
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.radar_rounded, size: 16, color: AppColors.brandGreen),
+                SizedBox(width: 5),
+                Text('Track',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.brandGreen)),
+              ]),
+            ),
+          ),
+        ),
+      );
+}
+
+// A tinted action inside a booking card (rate, reschedule, cancel) —
+// 38px tall with a ripple.
 class _CardAction extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -1593,13 +1645,13 @@ class _CardAction extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           child: SizedBox(
-            height: 44,
+            height: 38,
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon, size: 18, color: tone.color),
+                Icon(icon, size: 17, color: tone.color),
                 const SizedBox(width: 6),
-                Text(label, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: tone.color)),
+                Text(label, style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: tone.color)),
               ],
             ),
           ),

@@ -416,11 +416,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     final days = List.generate(3, (i) => today.add(Duration(days: i)));
 
     return SizedBox(
-      height: 72,
+      height: 56,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: days.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 10),
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
         itemBuilder: (_, i) {
           final d     = days[i];
           final isSel = _selectedDate != null &&
@@ -457,9 +457,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(dayAbbr[d.weekday - 1],
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500,
                         color: isSel ? Colors.white70 : CxColors.textSecondary)),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 2),
                   Text(sub,
                     style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
                         color: isSel ? Colors.white : CxColors.textPrimary)),
@@ -475,11 +475,12 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   // ── Time grid ─────────────────────────────────────────────
   Widget _buildTimeGrid() {
     if (_selectedDate == null) {
-      return const CxBanner(
-        tone: CxTone.neutral,
-        icon: Icons.event_outlined,
-        message: 'Please select a date first',
-      );
+      // A quiet hint, not a box.
+      return const Row(children: [
+        Icon(Icons.touch_app_outlined, size: 15, color: CxColors.textHint),
+        SizedBox(width: 6),
+        Text('Select a date to see available times', style: CxText.caption),
+      ]);
     }
     if (_loadingSlots) return const CxLoading(label: 'Finding available slots…');
     if (_slotsError.isNotEmpty) return CxBanner(tone: CxTone.error, message: _slotsError);
@@ -1191,23 +1192,21 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             child: Column(
               children: [
                 ...widget.cart.map((t) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  padding: const EdgeInsets.symmetric(vertical: 4),
                   child: Row(
                     children: [
-                      CxIconBadge(
-                        icon: t.type == 'package' ? Icons.inventory_2_outlined : Icons.science_outlined,
-                        tone: t.type == 'package' ? CxTone.brand : CxTone.info,
-                        size: 34,
-                      ),
-                      const SizedBox(width: CxSpace.md),
+                      if (t.type == 'package') ...[
+                        const Icon(Icons.inventory_2_outlined, size: 18, color: CxColors.brand),
+                        const SizedBox(width: 8),
+                      ],
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(t.name, style: CxText.body.copyWith(fontWeight: FontWeight.w600)),
                             if (t.docRequired)
-                              const Text('Prescription required',
-                                  style: TextStyle(fontSize: 12, color: CxColors.warning, fontWeight: FontWeight.w500)),
+                              const Text('⚠ Prescription required',
+                                  style: TextStyle(fontSize: 12, color: CxColors.warning, fontWeight: FontWeight.w600)),
                           ],
                         ),
                       ),
@@ -1234,7 +1233,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     label: const Text('Edit'),
                     style: TextButton.styleFrom(
                       foregroundColor: CxColors.brand,
-                      minimumSize: const Size(48, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(48, 36),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                     ),
                   )
@@ -1244,15 +1245,18 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               children: [
                 if (widget.mode == 'Home Collection') ...[
                   if (_address != null && _address!.isNotEmpty)
-                    _InfoLine(Icons.home_outlined, _address!),
-                  Row(children: [
-                    if (_pincode != null)
-                      Expanded(child: _InfoLine(Icons.pin_outlined, _pincode!)),
-                    if (_pincode != null && _city != null)
-                      const SizedBox(width: 12),
-                    if (_city != null)
-                      Expanded(child: _InfoLine(Icons.location_city_outlined, _city!)),
-                  ]),
+                    _InfoLine(Icons.location_on_outlined, _address!),
+                  // Pincode / city only when the address doesn't already say them.
+                  if ((_pincode != null && !(_address ?? '').contains(_pincode!)) ||
+                      (_city != null && !(_address ?? '').toLowerCase().contains(_city!.toLowerCase())))
+                    Row(children: [
+                      if (_pincode != null)
+                        Expanded(child: _InfoLine(Icons.pin_outlined, _pincode!)),
+                      if (_pincode != null && _city != null)
+                        const SizedBox(width: 12),
+                      if (_city != null)
+                        Expanded(child: _InfoLine(Icons.location_city_outlined, _city!)),
+                    ]),
                   if (_lat == null) ...[
                     const SizedBox(height: CxSpace.sm),
                     const CxBanner(
@@ -1490,17 +1494,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           ],
 
           // ── Additional Details (Doctor / Self + Notes) ───
-          const SizedBox(height: CxSpace.sm),
+          // (the card above already left the gap — no second one here)
           _SectionCard(
             title: 'Additional Details',
             icon: Icons.edit_note_outlined,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Self / Doctor toggle
-                Text('Referred by', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
-                const SizedBox(height: 8),
+                // Self / Doctor toggle — label and chips on one line
                 Row(children: [
+                  Text('Referred by', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
+                  const SizedBox(width: 12),
                   _DoctorTypeChip(
                     label: 'Self',
                     icon: Icons.person_outline_rounded,
@@ -1518,6 +1522,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     onTap: () => setState(() => _doctorType = 'doctor'),
                   ),
                 ]),
+
 
                 // Doctor name + optional prescription (only when Doctor chosen)
                 if (_isDoctor) ...[
@@ -1599,20 +1604,27 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     ),
                 ],
 
-                // Notes
-                const SizedBox(height: CxSpace.md),
-                Text('Notes', style: CxText.bodySecondary.copyWith(fontWeight: FontWeight.w600)),
-                const SizedBox(height: 6),
-                TextField(
-                  controller: _notesController,
-                  maxLines: 2,
-                  maxLength: 300,
-                  textInputAction: TextInputAction.done,
-                  textCapitalization: TextCapitalization.sentences,
-                  style: CxText.body,
-                  decoration: const InputDecoration(
-                    hintText: 'Any special instructions (optional)',
-                    counterStyle: CxText.caption,
+                // Notes — one line, grows while typing; the counter only
+                // shows near the 300-character limit.
+                const SizedBox(height: 10),
+                ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: _notesController,
+                  builder: (_, value, __) => TextField(
+                    controller: _notesController,
+                    minLines: 1,
+                    maxLines: 4,
+                    maxLength: 300,
+                    textInputAction: TextInputAction.done,
+                    textCapitalization: TextCapitalization.sentences,
+                    style: CxText.body,
+                    decoration: InputDecoration(
+                      hintText: 'Notes — any special instructions (optional)',
+                      prefixIcon: const Icon(Icons.notes_rounded, size: 18, color: CxColors.textHint),
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+                      counterText: value.text.length >= 250 ? null : '',
+                      counterStyle: CxText.caption,
+                    ),
                   ),
                 ),
               ],
@@ -1625,16 +1637,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             _SectionCard(
               title: 'Family Members (Same Visit)',
               icon: Icons.group_outlined,
+              trailing: _AddPill(label: 'Add', onTap: _showAddMemberSheet),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (_familyMembers.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.only(bottom: 12),
-                      child: Text(
-                        'Add family members to share this home collection visit — single service charge applies.',
-                        style: CxText.bodySecondary,
-                      ),
+                    const Text(
+                      'Share this visit — one service charge for everyone.',
+                      style: CxText.caption,
                     ),
                   ..._familyMembers.map((m) => Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1753,13 +1763,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       ),
                     ],
                   )),
-                  const SizedBox(height: 4),
-                  CxButton.secondary(
-                    onPressed: _showAddMemberSheet,
-                    icon: Icons.person_add_outlined,
-                    label: 'Add Family Member',
-                    compact: true,
-                  ),
                 ],
               ),
             ),
@@ -1783,7 +1786,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       : _fareAmount != null
                         ? _BillRow('Service Charge', '₹${_fareAmount!.toInt()}')
                         : const _BillRow('Service Charge', 'N/A', sub: true),
-                const Divider(height: 24),
+                const Divider(height: 16),
                 _BillRow('Grand Total', '₹${_grandTotal.toInt()}', bold: true),
                 const SizedBox(height: CxSpace.sm),
                 // The amount the customer acts on, set apart.
@@ -2038,7 +2041,7 @@ class _PaymentOptionCompact extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
             child: Row(
               children: [
                 Icon(
@@ -2046,20 +2049,19 @@ class _PaymentOptionCompact extends StatelessWidget {
                   color: !enabled ? CxColors.border : selected ? accentColor : CxColors.textHint,
                   size: 20,
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 8),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(title,
                           style: TextStyle(
-                              fontSize: 14,
+                              fontSize: 13.5,
                               fontWeight: FontWeight.w700,
                               color: !enabled ? CxColors.textHint : CxColors.textPrimary)),
-                      const SizedBox(height: 2),
                       Text(amount,
                           style: TextStyle(
-                              fontSize: 15,
+                              fontSize: 14.5,
                               fontWeight: FontWeight.w800,
                               color: !enabled ? CxColors.textHint : accentColor)),
                     ],
@@ -2074,6 +2076,41 @@ class _PaymentOptionCompact extends StatelessWidget {
       ),
     );
   }
+}
+
+// ─── Small "+ Add" pill for a section header ─────────────────────────────────
+
+class _AddPill extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  const _AddPill({required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+        button: true,
+        label: 'Add family member',
+        excludeSemantics: true,
+        child: Material(
+          color: CxColors.brandSurface,
+          shape: const StadiumBorder(side: BorderSide(color: CxColors.brand)),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: onTap,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 34),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.person_add_alt_1_outlined, size: 16, color: CxColors.brand),
+                  const SizedBox(width: 4),
+                  Text(label,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: CxColors.brand)),
+                ]),
+              ),
+            ),
+          ),
+        ),
+      );
 }
 
 // ─── Doctor type toggle chip ──────────────────────────────────────────────────
@@ -2091,7 +2128,7 @@ class _DoctorTypeChip extends StatelessWidget {
     onTap: onTap,
     child: AnimatedContainer(
       duration: const Duration(milliseconds: 160),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       decoration: BoxDecoration(
         color: selected ? CxColors.brandSurface : Colors.white,
         borderRadius: CxRadius.lgAll,
@@ -2585,8 +2622,11 @@ class _SectionCard extends StatelessWidget {
   const _SectionCard({required this.title, required this.icon, required this.child, this.required = false, this.trailing});
 
   @override
+  // Compact card: 14px padding, 28px icon, 8px under the title. The title
+  // takes all the free space (the old Flexible + Spacer split it in half,
+  // cutting "Home Collection" to "Home Collec…").
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(CxSpace.lg),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: CxRadius.lgAll,
@@ -2597,14 +2637,22 @@ class _SectionCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(children: [
-              CxIconBadge(icon: icon, size: 34),
-              const SizedBox(width: CxSpace.md),
-              Flexible(child: Text(title, style: CxText.sectionTitle, overflow: TextOverflow.ellipsis)),
-              if (required)
-                const Text(' *', style: TextStyle(color: CxColors.error, fontSize: 16, fontWeight: FontWeight.w700)),
-              if (trailing != null) ...[const Spacer(), trailing!],
+              CxIconBadge(icon: icon, size: 28),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text.rich(
+                  TextSpan(text: title, children: [
+                    if (required)
+                      const TextSpan(text: ' *', style: TextStyle(color: CxColors.error, fontWeight: FontWeight.w700)),
+                  ]),
+                  style: CxText.sectionTitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (trailing != null) trailing!,
             ]),
-            const SizedBox(height: CxSpace.md),
+            const SizedBox(height: 8),
             child,
           ],
         ),
@@ -3241,7 +3289,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
               ),
             ]),
           ),
-          const SizedBox(height: CxSpace.md),
+          const SizedBox(height: CxSpace.sm),
           const Divider(height: 1),
           // Body
           Expanded(child: _step == 0
@@ -3433,70 +3481,94 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
     }
 
     // ── Patient list ─────────────────────────────────────────
-    return ListView.separated(
+    // One bordered list of compact rows, then a small "Add new member" link.
+    return ListView(
       controller: scroll,
-      padding: const EdgeInsets.symmetric(horizontal: CxSpace.gutter, vertical: CxSpace.md),
-      itemCount: _patients.length + 1, // +1 for "Add New Member" tile
-      separatorBuilder: (_, __) => const SizedBox(height: 10),
-      itemBuilder: (_, i) {
-        // Last item: Add New Member
-        if (i == _patients.length) {
-          return CxButton.secondary(
+      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, 10, CxSpace.gutter, CxSpace.md),
+      children: [
+        if (_patients.isNotEmpty)
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: CxRadius.lgAll,
+              border: Border.all(color: CxColors.border),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Column(children: [
+              for (var i = 0; i < _patients.length; i++) ...[
+                if (i > 0) const Divider(height: 1, color: CxColors.border),
+                _memberRow(_patients[i]),
+              ],
+            ]),
+          ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
             onPressed: () => setState(() => _showNewMemberForm = true),
-            icon: Icons.person_add_outlined,
-            label: 'Add New Member',
-          );
-        }
-        final p = _patients[i];
-        final isSel = _selected?.patientId == p.patientId;
-        return Semantics(
-          button: true,
-          selected: isSel,
-          child: Material(
-          color: isSel ? CxColors.brandSurface : Colors.white,
-          shape: RoundedRectangleBorder(
-            borderRadius: CxRadius.lgAll,
-            side: BorderSide(
-              color: isSel ? CxColors.brand : CxColors.border,
-              width: isSel ? 1.5 : 1,
+            icon: const Icon(Icons.person_add_alt_1_outlined, size: 18),
+            label: const Text('Add new member'),
+            style: TextButton.styleFrom(
+              foregroundColor: CxColors.brand,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(48, 44),
+              textStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700),
             ),
           ),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
+        ),
+      ],
+    );
+  }
+
+  // One family member row (~48px): avatar, name · relation, radio.
+  Widget _memberRow(PatientModel p) {
+    final isSel = _selected?.patientId == p.patientId;
+    final name = p.name;
+    final relation = p.relation;
+    return Semantics(
+      button: true,
+      selected: isSel,
+      child: Material(
+        color: isSel ? CxColors.brandSurface : Colors.white,
+        child: InkWell(
           onTap: () => setState(() => _selected = p),
           child: Padding(
-            padding: const EdgeInsets.all(CxSpace.md),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(children: [
               Container(
-                width: 40, height: 40,
+                width: 32, height: 32,
                 decoration: BoxDecoration(
                   color: isSel ? AppColors.brandGreen : AppColors.brandGreenSurface,
                   shape: BoxShape.circle,
                 ),
                 child: Center(child: Text(
-                  p.name.isNotEmpty ? p.name[0].toUpperCase() : '?',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
+                  name.isNotEmpty ? name[0].toUpperCase() : '?',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
                       color: isSel ? Colors.white : AppColors.brandGreen),
                 )),
               ),
-              const SizedBox(width: 12),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(p.name,
-                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
-                if (p.relation != null && p.relation!.isNotEmpty)
-                  Text(p.relation!,
-                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary)),
-              ])),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text.rich(
+                  TextSpan(children: [
+                    TextSpan(text: name,
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.textPrimary)),
+                    if (relation != null && relation.isNotEmpty)
+                      TextSpan(text: ' · $relation',
+                          style: const TextStyle(fontSize: 12.5, color: AppColors.textSecondary)),
+                  ]),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
               Icon(
                 isSel ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
                 color: isSel ? CxColors.brand : CxColors.textHint,
+                size: 22,
               ),
             ]),
           ),
-          ),
-          ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -3529,7 +3601,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
         onNotification: _pager.onScroll,
         child: ListView.separated(
           controller: scroll,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           itemCount: tests.length + extraRow,
           separatorBuilder: (_, __) => const Divider(height: 1),
           itemBuilder: (_, i) {
@@ -3557,7 +3629,7 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
 
     return Column(children: [
       Padding(
-        padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, 2),
+        padding: const EdgeInsets.fromLTRB(CxSpace.gutter, 10, CxSpace.gutter, 2),
         child: TextField(
           controller: _testSearchCtrl,
           textInputAction: TextInputAction.search,
@@ -3565,6 +3637,9 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
           decoration: const InputDecoration(
             hintText: 'Search tests & packages…',
             prefixIcon: Icon(Icons.search_rounded, size: 20, color: CxColors.textHint),
+            prefixIconConstraints: BoxConstraints(minWidth: 40, minHeight: 40),
+            isDense: true,
+            contentPadding: EdgeInsets.symmetric(vertical: 12),
           ),
         ),
       ),
@@ -3584,28 +3659,54 @@ class _AddMemberSheetState extends State<_AddMemberSheet> {
     ]);
   }
 
+  // Compact pick row (~44px): checkbox, name (+ Package tag), price.
   Widget _buildTestTile(TestModel t) {
     final checked = _selectedTests.containsKey(t.id);
-    return CheckboxListTile(
-      value: checked,
-      onChanged: (v) => setState(() {
-        if (v == true) {
-          _selectedTests[t.id] = t;
-        } else {
-          _selectedTests.remove(t.id);
-        }
-      }),
-      activeColor: AppColors.brandGreen,
-      tileColor: checked ? CxColors.brandSurface : null,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-      title: Text(t.name,
-          style: CxText.body.copyWith(fontWeight: FontWeight.w600)),
-      subtitle: t.type == 'package'
-          ? const Text('Package', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.brandGreen))
-          : null,
-      secondary: Text('₹${t.finalPrice.toInt()}',
-          style: CxText.body.copyWith(fontWeight: FontWeight.w700)),
-      controlAffinity: ListTileControlAffinity.leading,
+    void toggle() => setState(() {
+          if (checked) {
+            _selectedTests.remove(t.id);
+          } else {
+            _selectedTests[t.id] = t;
+          }
+        });
+    return Semantics(
+      button: true,
+      selected: checked,
+      child: Material(
+        color: checked ? CxColors.brandSurface : Colors.white,
+        child: InkWell(
+          onTap: toggle,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 44),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(0, 4, 4, 4),
+              child: Row(children: [
+                SizedBox(
+                  width: 40,
+                  child: Checkbox(
+                    value: checked,
+                    onChanged: (_) => toggle(),
+                    activeColor: AppColors.brandGreen,
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(t.name, style: CxText.body.copyWith(fontWeight: FontWeight.w600, height: 1.3)),
+                    if (t.type == 'package')
+                      const Text('Package',
+                          style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+                  ]),
+                ),
+                const SizedBox(width: 8),
+                Text('₹${t.finalPrice.toInt()}',
+                    style: CxText.body.copyWith(fontWeight: FontWeight.w700)),
+              ]),
+            ),
+          ),
+        ),
+      ),
     );
   }
 

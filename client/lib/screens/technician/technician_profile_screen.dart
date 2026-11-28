@@ -380,7 +380,7 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
 
     final header = Container(
       color: AppColors.brandGreen,
-      padding: EdgeInsets.fromLTRB(16, topPad + 16, 8, 14),
+      padding: EdgeInsets.fromLTRB(16, topPad + 12, 8, 12),
       child: Row(
         children: [
           const Text('Profile',
@@ -417,37 +417,11 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
       },
       color: AppColors.brandGreen,
       child: ListView(
-      padding: const EdgeInsets.fromLTRB(16, 20, 16, 80),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 80),
       children: [
-        // ── Profile card ─────────────────────────────────────
-        Row(
-          children: [
-            const Text('Profile Details',
-                style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textPrimary)),
-            const Spacer(),
-            if (!_isEditing)
-              TextButton.icon(
-                onPressed: _startEdit,
-                icon: const Icon(Icons.edit_outlined, size: 18),
-                label: const Text('Edit'),
-                style: TextButton.styleFrom(
-                  foregroundColor: TechColors.brand,
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 8),
-                  minimumSize: const Size(48, TechSize.minTouch),
-                  textStyle: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w600),
-                ),
-              ),
-          ],
-        ),
-        const SizedBox(height: 10),
-
+        // ── Profile card (✎ Edit sits in its top-right corner) ──────────
         Container(
-          padding: const EdgeInsets.all(TechSpace.lg),
+          padding: const EdgeInsets.fromLTRB(TechSpace.lg, 12, 6, TechSpace.lg),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: TechRadius.lgAll,
@@ -525,6 +499,14 @@ class _TechnicianProfileScreenState extends State<TechnicianProfileScreen> with 
                             ],
                           ),
                   ),
+                  if (!_isEditing)
+                    IconButton(
+                      onPressed: _startEdit,
+                      tooltip: 'Edit profile',
+                      icon: const Icon(Icons.edit_outlined, size: 20, color: TechColors.brand),
+                    )
+                  else
+                    const SizedBox(width: 10),
                 ],
               ),
               const Divider(height: 24, color: AppColors.divider),

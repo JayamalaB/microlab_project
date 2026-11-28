@@ -376,7 +376,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
         child: ListView(
           controller: _scrollController,
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-          padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.xl, CxSpace.gutter, 100),
+          padding: const EdgeInsets.fromLTRB(CxSpace.gutter, 12, CxSpace.gutter, 100),
           children: [
             // ── Photo Picker ──────────────────────────────
             _PhotoPickerWidget(
@@ -387,10 +387,10 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
               onTap: _showImageSourceSheet,
             ),
 
-            const SizedBox(height: 24),
+            const SizedBox(height: 12),
 
             // ── Mandatory ─────────────────────────────────
-            _SectionHeader(label: 'Required Information'),
+            _SectionHeader(label: 'Required'),
             _FormCard(children: [
               _FieldLabel(label: 'Full Name', required: true),
               _AppTextField(
@@ -403,7 +403,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                     : null,
               ),
 
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               _FieldLabel(label: 'Mobile Number', required: true),
               _AppTextField(
                 controller: _mobileController,
@@ -422,7 +422,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                 },
               ),
 
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -441,8 +441,11 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                             border: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.border)),
                             enabledBorder: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.border)),
                             focusedBorder: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.brand, width: 1.5)),
-                            contentPadding: EdgeInsets.symmetric(vertical: 15),
+                            isDense: true,
+                            prefixIconConstraints: BoxConstraints(minWidth: 40, minHeight: 40),
+                            contentPadding: EdgeInsets.fromLTRB(0, 12, 10, 12),
                           ),
+                          isDense: true,
                           style: const TextStyle(fontSize: 13, color: AppColors.textPrimary),
                           dropdownColor: AppColors.white,
                           borderRadius: BorderRadius.circular(12),
@@ -468,8 +471,11 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                             border: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.border)),
                             enabledBorder: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.border)),
                             focusedBorder: OutlineInputBorder(borderRadius: CxRadius.mdAll, borderSide: BorderSide(color: CxColors.brand, width: 1.5)),
-                            contentPadding: EdgeInsets.symmetric(vertical: 15),
+                            isDense: true,
+                            prefixIconConstraints: BoxConstraints(minWidth: 40, minHeight: 40),
+                            contentPadding: EdgeInsets.fromLTRB(0, 12, 10, 12),
                           ),
+                          isDense: true,
                           style: const TextStyle(fontSize: 13, color: AppColors.textPrimary),
                           dropdownColor: AppColors.white,
                           borderRadius: BorderRadius.circular(12),
@@ -482,7 +488,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                 ],
               ),
 
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               _FieldLabel(label: 'City / Location', required: true),
               _AppTextField(
                 controller: _locationController,
@@ -494,19 +500,20 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                     : null,
               ),
 
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               _FieldLabel(label: 'Full Address', required: true),
               _AppTextField(
                 controller: _addressController,
                 hint: 'House no, Street, Area, Pincode',
                 icon: Icons.home_outlined,
+                minLines: 1,
                 maxLines: 3,
                 validator: (v) => (v == null || v.trim().isEmpty)
                     ? 'Address is required'
                     : null,
               ),
 
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -515,7 +522,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _FieldLabel(label: 'DOB or Age', required: true),
+                        _FieldLabel(label: 'DOB', required: true),
                         Semantics(
                           button: true,
                           label: 'Date of birth',
@@ -530,7 +537,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                             child: InkWell(
                               onTap: _pickDate,
                               child: Container(
-                                height: CxSize.minTouch + 2,
+                                height: 44,
                                 padding: const EdgeInsets.symmetric(horizontal: 12),
                                 child: Row(
                                   children: [
@@ -580,7 +587,7 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
             const SizedBox(height: 16),
 
             // ── Optional ──────────────────────────────────
-            _SectionHeader(label: 'Optional Information'),
+            _SectionHeader(label: 'Optional'),
             _FormCard(children: [
               _FieldLabel(label: 'Email Address'),
               _AppTextField(
@@ -598,24 +605,25 @@ class _AddMemberScreenState extends State<AddMemberScreen> {
                 },
               ),
 
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               _FieldLabel(label: 'Health Condition / Notes'),
               _AppTextField(
                 controller: _healthController,
                 hint: 'e.g. Diabetes, Hypertension, Thyroid…',
                 icon: Icons.medical_information_outlined,
-                maxLines: 2,
+                minLines: 1,
+                maxLines: 3,
               ),
             ]),
 
-            const SizedBox(height: 24),
+            const SizedBox(height: 12),
           ],
         ),
       ),
 
       bottomNavigationBar: Container(
         padding: EdgeInsets.fromLTRB(
-            CxSpace.gutter, CxSpace.md, CxSpace.gutter, MediaQuery.of(context).padding.bottom + CxSpace.md),
+            CxSpace.gutter, 10, CxSpace.gutter, MediaQuery.of(context).padding.bottom + 10),
         decoration: const BoxDecoration(
           color: AppColors.white,
           border: Border(top: BorderSide(color: CxColors.border)),
@@ -660,8 +668,8 @@ class _PhotoPickerWidget extends StatelessWidget {
               children: [
                 // Avatar circle
                 Container(
-                  width: 100,
-                  height: 100,
+                  width: 80,
+                  height: 80,
                   decoration: BoxDecoration(
                     color: AppColors.brandGreenSurface,
                     shape: BoxShape.circle,
@@ -679,8 +687,8 @@ class _PhotoPickerWidget extends StatelessWidget {
 
                 // Camera badge
                 Container(
-                  width: 32,
-                  height: 32,
+                  width: 28,
+                  height: 28,
                   decoration: BoxDecoration(
                     color: AppColors.brandGreen,
                     shape: BoxShape.circle,
@@ -704,7 +712,7 @@ class _PhotoPickerWidget extends StatelessWidget {
             ),
           ),
 
-          const SizedBox(height: 10),
+          const SizedBox(height: 6),
 
           // Label
           Text(
@@ -746,11 +754,11 @@ class _PhotoPickerWidget extends StatelessWidget {
   Widget _buildImage() {
     final bytes = imageBytes ?? existingBytes;
     if (bytes != null && bytes.isNotEmpty) {
-      return Image.memory(bytes, fit: BoxFit.cover, width: 100, height: 100,
+      return Image.memory(bytes, fit: BoxFit.cover, width: 80, height: 80,
           errorBuilder: (_, __, ___) => _placeholder());
     }
     if (existingPhotoUrl != null && existingPhotoUrl!.isNotEmpty) {
-      return Image.network(existingPhotoUrl!, fit: BoxFit.cover, width: 100, height: 100,
+      return Image.network(existingPhotoUrl!, fit: BoxFit.cover, width: 80, height: 80,
           errorBuilder: (_, __, ___) => _placeholder());
     }
     return _placeholder();
@@ -758,7 +766,7 @@ class _PhotoPickerWidget extends StatelessWidget {
 
   Widget _placeholder() {
     return const Center(
-      child: Icon(Icons.person_outline, size: 42, color: AppColors.brandGreen),
+      child: Icon(Icons.person_outline, size: 34, color: AppColors.brandGreen),
     );
   }
 }
@@ -835,8 +843,13 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: CxSpace.sm, left: 2),
-        child: Text(label, style: CxText.sectionTitle),
+        padding: const EdgeInsets.only(bottom: 6, left: 2),
+        child: Text(label.toUpperCase(),
+            style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.6,
+                color: CxColors.textSecondary)),
       );
 }
 
@@ -846,7 +859,7 @@ class _FormCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.all(CxSpace.lg),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: AppColors.white,
           borderRadius: CxRadius.lgAll,
@@ -865,7 +878,7 @@ class _FieldLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.only(bottom: 4),
         child: RichText(
           text: TextSpan(
             text: label,
@@ -889,6 +902,7 @@ class _AppTextField extends StatelessWidget {
   final TextInputType keyboardType;
   final int? maxLength;
   final int maxLines;
+  final int? minLines;
   final List<TextInputFormatter>? inputFormatters;
   final String? Function(String?)? validator;
   final String? prefix;
@@ -901,6 +915,7 @@ class _AppTextField extends StatelessWidget {
     this.keyboardType = TextInputType.text,
     this.maxLength,
     this.maxLines = 1,
+    this.minLines,
     this.inputFormatters,
     this.validator,
     this.prefix,
@@ -913,6 +928,7 @@ class _AppTextField extends StatelessWidget {
         keyboardType: keyboardType,
         maxLength: maxLength,
         maxLines: maxLines,
+        minLines: minLines,
         inputFormatters: inputFormatters,
         validator: validator,
         onChanged: onChanged,
@@ -922,6 +938,7 @@ class _AppTextField extends StatelessWidget {
           hintStyle:
               const TextStyle(fontSize: 14, color: AppColors.textHint),
           prefixIcon: Icon(icon, size: 18, color: AppColors.textHint),
+          prefixIconConstraints: const BoxConstraints(minWidth: 40, minHeight: 40),
           prefixText: prefix,
           isDense: true,
           prefixStyle: const TextStyle(
@@ -956,8 +973,7 @@ class _AppTextField extends StatelessWidget {
             borderSide:
                 BorderSide(color: CxColors.error, width: 1.5),
           ),
-          contentPadding: EdgeInsets.symmetric(
-              vertical: maxLines > 1 ? 14 : 15, horizontal: 14),
+          contentPadding: const EdgeInsets.fromLTRB(0, 12, 12, 12),
         ),
       );
 }
