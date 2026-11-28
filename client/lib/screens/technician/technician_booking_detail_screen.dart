@@ -786,16 +786,22 @@ class _TechnicianBookingDetailScreenState
 
   // Maps the server's collection_status value to the journey step label used
   // by _journeySteps / _currentStatus.
-  static String _mapCollectionStatus(String? cs) {
+  // Returns null for a value it doesn't know, so the caller keeps the step
+  // it has (a refresh never moves the journey back to Confirmed).
+  static String? _mapCollectionStatus(String? cs) {
     switch (cs) {
+      case 'assigned':          return 'Confirmed';
       case 'en_route':          return 'Journey Started';
       case 'arrived':           return 'Destination Reached';
       case 'collection_started':return 'Collection Started';
-      case 'sample_collected':  return 'Sample Collected';
+      case 'sample_collected':
+      case 'collected':         return 'Sample Collected'; // older value
       case 'otp_verified':      return 'OTP Verified';
       case 'handed_to_lab':
-      case 'handed_to_lab_pending': return 'Handed to Lab';
-      default:                  return 'Confirmed';
+      case 'handed_to_lab_pending':
+      case 'completed':
+      case 'all_collected':     return 'Handed to Lab';
+      default:                  return null;
     }
   }
 
@@ -814,7 +820,7 @@ class _TechnicianBookingDetailScreenState
           ApiService.fetchBookingStatus(bookingId).then((data) {
             if (!mounted || data == null) return;
             final mapped = _mapCollectionStatus(data['collection_status'] as String?);
-            setState(() => _currentStatus = mapped);
+            if (mapped != null) setState(() => _currentStatus = mapped);
           }),
       ]);
     } finally {
