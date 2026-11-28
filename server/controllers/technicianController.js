@@ -1058,6 +1058,9 @@ exports.saveSlots = async (req, res) => {
         [technicianId, todayIST]
       );
 
+      // Booked slots whose duration could not change (returned to the app).
+      const keptDurations = [];
+
       for (const row of existing) {
         const key         = slotKey(row.slot_date, row.slot_id);
         const isWanted    = wanted.has(key);
@@ -1080,6 +1083,17 @@ exports.saveSlots = async (req, res) => {
               [row.tech_slot_id]
             );
           } else {
+            const savedDur  = Number(row.duration_minutes) || null;
+            const wantedDur = wanted.get(key);
+            if (!savedDur && wantedDur) {
+              // Booked slot saved earlier with no duration (so no times):
+              // take the duration now and create its times below.
+              await _setBookedSlotDuration(connection, row, wantedDur);
+            } else if (savedDur && wantedDur && savedDur !== wantedDur) {
+              // Booked times can't move — the old duration stays; the app is told.
+              keptDurations.push({ date: row.slot_date, slotId: row.slot_id, durationMinutes: savedDur });
+              console.log(`   slot_id=${row.slot_id} date=${row.slot_date} has bookings — duration kept at ${savedDur}min (asked ${wantedDur}min)`);
+            }
             await _restoreFreeTimes(connection, row);
             wanted.delete(key);
           }
@@ -1150,7 +1164,7 @@ exports.saveSlots = async (req, res) => {
       await connection.commit();
       const total = slots.reduce((s, d) => s + (d.slot_ids?.length ?? 0), 0);
       console.log(`✅ Slots saved — ${slots.length} day(s), ${total} slot entries, ${totalIntervals} intervals`);
-      res.json({ success: true, message: 'Slots saved' });
+      res.json({ success: true, message: 'Slots saved', keptDurations });
     } catch (e) {
       await connection.rollback();
       throw e;
@@ -1172,6 +1186,27 @@ async function _saveSlotBranches(connection, techSlotId, branchIds) {
     `INSERT INTO ip_technician_slot_branches (tech_slot_id, branch_id) VALUES ${branchIds.map(() => '(?, ?)').join(', ')}`,
     branchIds.flatMap(b => [techSlotId, b])
   );
+}
+
+// A booked slot that was saved with no duration gets one: duration_minutes
+// is stored and max_bookings becomes the number of times (never below what
+// is already booked). _restoreFreeTimes then creates the times. Mutates
+// row.duration_minutes so that call sees the new duration.
+async function _setBookedSlotDuration(connection, row, durationMinutes) {
+  const [[slotDef]] = await connection.query(
+    'SELECT slot_start, slot_end FROM ip_slots WHERE slot_id = ?',
+    [row.slot_id]
+  );
+  if (!slotDef) return;
+  const times = _generateIntervals(slotDef.slot_start, slotDef.slot_end, durationMinutes);
+  await connection.query(
+    `UPDATE ip_technician_slots
+     SET duration_minutes = ?, max_bookings = GREATEST(?, booked_count)
+     WHERE tech_slot_id = ?`,
+    [durationMinutes, times.length || 1, row.tech_slot_id]
+  );
+  row.duration_minutes = durationMinutes;
+  console.log(`   slot_id=${row.slot_id} date=${row.slot_date} had bookings but no duration — now ${durationMinutes}min, ${times.length} times`);
 }
 
 // Puts back the free times of a booked slot the technician ticked again after
@@ -2540,6 +2575,265 @@ exports.getBookingFamily = async (req, res) => {
   }
 };
 
+// ═════════════════════════════════════════════════════════════════════════════
+//  Collection OTP — shared by the technician app and the admin portal
+// ═════════════════════════════════════════════════════════════════════════════
+// The technician app calls /api/technicians/booking-otp/* (JWT, own booking).
+// The admin portal calls /api/bookings/:bookingId/collection-otp/* (HMAC,
+// adminAuth) for the booking's assigned technician. Both go through the two
+// functions below, so the rules (expiry, attempts, no-payment reason, family
+// visit cascade, status updates) are exactly the same.
+//
+// Each returns { status, body } — the caller sends it as the HTTP response.
+// The OTP itself is never returned or logged.
+
+function _maskMobile(mobile) {
+  return mobile.length >= 10 ? `${mobile.slice(0, 3)}****${mobile.slice(7)}` : '****';
+}
+
+// Makes a 4-digit OTP, stores it on the technician's ip_technician_collection
+// row (expiry OTP_EXPIRY_MINUTES, attempts reset) and SMSes it. The SMS goes
+// to the booking creator's login number (the person with the technician),
+// falling back to the patient's own number.
+async function issueCollectionOtp(bookingId, technicianId, tag = 'GENERATE') {
+  const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES ?? '10');
+
+  otpLog(`[${tag}] ── START ── booking_id=${bookingId} tech_id=${technicianId}`);
+
+  const [[row]] = await db.execute(
+    `SELECT COALESCE(u.user_mobile_no, p.patient_mobile) AS patient_mobile,
+            p.patient_name,
+            p.patient_mobile   AS raw_patient_mobile,
+            b.created_by,
+            u.user_id          AS creator_user_id,
+            u.user_mobile_no   AS creator_mobile
+     FROM ip_technician_collection tc
+     JOIN ip_bookings b ON b.booking_id = tc.booking_id
+     JOIN ip_patients p ON p.patient_id = b.patient_id
+     LEFT JOIN ip_users u ON u.user_id = b.created_by
+     WHERE tc.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL LIMIT 1`,
+    [bookingId, technicianId]
+  );
+
+  if (!row) {
+    otpLog(`[${tag}] ❌ LOOKUP FAILED — no row found for booking_id=${bookingId} tech_id=${technicianId} (booking missing, not assigned, or deleted)`);
+    return { status: 404, body: { success: false, code: 'ASSIGNMENT_NOT_FOUND', message: 'Booking not found or not assigned to you' } };
+  }
+
+  otpLog(`[${tag}] DB lookup OK — raw_patient_mobile=${row.raw_patient_mobile ?? 'NULL'} created_by=${row.created_by ?? 'NULL'} creator_user_id=${row.creator_user_id ?? 'NULL'} creator_mobile=${row.creator_mobile ?? 'NULL'} resolved_mobile=${row.patient_mobile ?? 'NULL'}`);
+
+  if (!row.patient_mobile) {
+    otpLog(`[${tag}] ⚠️  resolved mobile is NULL — SMS will not be sent (patient_mobile and creator_mobile are both NULL)`);
+  }
+
+  const otp = Math.floor(1000 + Math.random() * 9000).toString();
+
+  const [updateRes] = await db.execute(
+    `UPDATE ip_technician_collection
+     SET collection_otp = ?, collection_otp_expiry = DATE_ADD(NOW(), INTERVAL ? MINUTE), otp_attempts = 0
+     WHERE booking_id = ? AND technician_id = ?`,
+    [otp, expiryMinutes, bookingId, technicianId]
+  );
+  otpLog(`[${tag}] OTP stored in DB — affected_rows=${updateRes.affectedRows} expiry=${expiryMinutes}min`);
+
+  if (updateRes.affectedRows === 0) {
+    otpLog(`[${tag}] ⚠️  OTP UPDATE hit 0 rows — ip_technician_collection row may be missing for booking_id=${bookingId} tech_id=${technicianId}`);
+  }
+
+  // Send SMS — non-fatal: OTP is stored even if SMS fails
+  const targetMobile = row.patient_mobile ?? '';
+  otpLog(`[${tag}] SMS target — mobile="${targetMobile}" api_key_set=${!!process.env.PING4SMS_API_KEY} sender_set=${!!process.env.PING4SMS_SENDER_ID} template_id=${process.env.PING4SMS_BOOKING_OTP_TEMPLATE_ID ?? 'NOT SET'}`);
+  try {
+    const smsRes = await sms.sendBookingOtp(targetMobile, otp);
+    otpLog(`[${tag}] ✅ SMS sent — mobile=${targetMobile} response="${smsRes}"`);
+  } catch (smsErr) {
+    otpLog(`[${tag}] ❌ SMS FAILED — mobile=${targetMobile} error="${smsErr.message}"`);
+  }
+
+  const maskedMobile = _maskMobile(targetMobile);
+  otpLog(`[${tag}] ── DONE ── success=true maskedMobile=${maskedMobile}`);
+  return { status: 200, body: { success: true, maskedMobile } };
+}
+
+// Checks the OTP against the technician's row. On success: collection_status
+// = 'otp_verified' (ip_technician_collection + ip_patient_bookings, whole
+// family visit), ip_bookings.status follows, OTP fields cleared, and the
+// technician app + customer are told over the socket.
+// verifiedBy: 'technician' or 'admin (<name>)' — written to the OTP log.
+async function verifyCollectionOtp({ bookingId, technicianId, otp, noPaymentReason, verifiedBy = 'technician' }) {
+  const maxAttempts = parseInt(process.env.OTP_MAX_ATTEMPTS ?? '3');
+
+  const [[row]] = await db.execute(
+    `SELECT collection_otp, otp_attempts,
+            (collection_otp_expiry IS NULL OR collection_otp_expiry < NOW()) AS is_expired
+     FROM ip_technician_collection
+     WHERE booking_id = ? AND technician_id = ?`,
+    [bookingId, technicianId]
+  );
+
+  if (!row) {
+    return { status: 404, body: { success: false, code: 'ASSIGNMENT_NOT_FOUND', message: 'Assignment not found' } };
+  }
+
+  if (!row.collection_otp) {
+    return { status: 400, body: { success: false, code: 'OTP_NOT_GENERATED', message: 'No OTP generated. Please generate OTP first.' } };
+  }
+
+  if (row.otp_attempts >= maxAttempts) {
+    return { status: 429, body: { success: false, code: 'TOO_MANY_ATTEMPTS', message: 'Too many failed attempts. Please resend OTP.', attemptsExhausted: true } };
+  }
+
+  if (row.is_expired) {
+    return { status: 400, body: { success: false, code: 'OTP_EXPIRED', message: 'OTP has expired. Please resend OTP.', expired: true } };
+  }
+
+  if (row.collection_otp !== otp.toString()) {
+    await db.execute(
+      `UPDATE ip_technician_collection SET otp_attempts = otp_attempts + 1 WHERE booking_id = ? AND technician_id = ?`,
+      [bookingId, technicianId]
+    );
+    const remaining = maxAttempts - (row.otp_attempts + 1);
+    otpLog(`[VERIFY] ❌ wrong OTP — booking_id=${bookingId} by=${verifiedBy} attempts_left=${Math.max(remaining, 0)}`);
+    // 400, not 401: a wrong code is bad input. The app treats any 401 as
+    // "signed out on another device" and logs the technician out.
+    return {
+      status: 400,
+      body: {
+        success: false,
+        code: remaining > 0 ? 'OTP_INVALID' : 'TOO_MANY_ATTEMPTS',
+        message: remaining > 0
+          ? `Incorrect OTP. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+          : 'Too many failed attempts. Please resend OTP.',
+        attemptsRemaining: Math.max(remaining, 0),
+        attemptsExhausted: remaining <= 0,
+      },
+    };
+  }
+
+  // Nothing paid toward the visit yet (and something is due): the OTP may
+  // still be verified, but only with a reason — saved like a partial-payment
+  // reason (ip_bookings.partial_payment_reason, sent to the ASMX at Handed
+  // to Lab). Checked before the OTP is used up, so the reason can be added
+  // and the same OTP tried again.
+  const reasonText = String(noPaymentReason ?? '').trim().slice(0, 255);
+  const [[visitPay]] = await db.execute(
+    `SELECT COALESCE(SUM(b.amount_paid), 0) AS paid, COALESCE(SUM(b.amount_due), 0) AS due
+     FROM ip_bookings b
+     JOIN ip_bookings p ON p.booking_id = ?
+     WHERE b.deleted_at IS NULL AND b.status != 'cancelled'
+       AND (b.booking_id = p.booking_id
+            OR (p.visit_group_id IS NOT NULL AND b.visit_group_id = p.visit_group_id))`,
+    [bookingId]
+  );
+  const nothingPaid = Number(visitPay?.paid ?? 0) <= 0 && Number(visitPay?.due ?? 0) > 0;
+  if (nothingPaid && !reasonText) {
+    return {
+      status: 400,
+      body: {
+        success: false, code: 'NO_PAYMENT_REASON_REQUIRED',
+        message: 'No payment has been collected. Please enter the reason to verify the OTP.',
+      },
+    };
+  }
+
+  // OTP correct — update status and clear OTP fields
+  await db.execute(
+    `UPDATE ip_technician_collection
+     SET collection_status     = 'otp_verified',
+         collection_otp        = NULL,
+         collection_otp_expiry = NULL,
+         otp_attempts          = 0,
+         otp_verified_at       = NOW()
+     WHERE booking_id = ? AND technician_id = ?`,
+    [bookingId, technicianId]
+  );
+
+  // Mirror into ip_patient_bookings — wrapped defensively so a failure
+  // here never turns an already-successful OTP verification into an
+  // error response.
+  try {
+    await db.execute(
+      `UPDATE ip_patient_bookings SET collection_status = 'otp_verified' WHERE booking_id = ?`,
+      [bookingId]
+    );
+  } catch (e) {
+    console.error(`❌ [verifyBookingOtp] ip_patient_bookings mirror failed booking=${bookingId}: ${e.message}`);
+  }
+
+  // Cascade otp_verified to sibling bookings in the same visit group
+  try {
+    const [[vgRow]] = await db.execute(
+      'SELECT visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
+      [bookingId]
+    );
+    if (vgRow?.visit_group_id) {
+      await db.execute(
+        `UPDATE ip_technician_collection tc
+         JOIN ip_bookings b ON b.booking_id = tc.booking_id
+         SET tc.collection_status = 'otp_verified',
+             tc.otp_verified_at   = NOW(),
+             tc.updated_at        = NOW()
+         WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+        [vgRow.visit_group_id, bookingId]
+      );
+      await db.execute(
+        `UPDATE ip_patient_bookings pb
+         JOIN ip_bookings b ON b.booking_id = pb.booking_id
+         SET pb.collection_status = 'otp_verified'
+         WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
+        [vgRow.visit_group_id, bookingId]
+      );
+    }
+  } catch (e) {
+    console.error(`❌ [verifyBookingOtp] sibling cascade failed booking=${bookingId}: ${e.message}`);
+  }
+
+  // ip_bookings.status follows the step too (booking + family visit), and
+  // the technician app / customer are told it's done.
+  try {
+    const bookingSocket = require('../socket/bookingSocket');
+    if (typeof bookingSocket._setVisitBookingStatus === 'function') {
+      bookingSocket._setVisitBookingStatus(Number(bookingId), 'otp_verified');
+    }
+    if (typeof bookingSocket.emitCollectionOtpVerified === 'function') {
+      bookingSocket.emitCollectionOtpVerified(Number(bookingId), technicianId, verifiedBy);
+    }
+  } catch (e) {
+    console.error(`❌ [verifyBookingOtp] booking status / socket not updated booking=${bookingId}: ${e.message}`);
+  }
+
+  // The ASMX visit sync (TechnicianVisitCompleted) is not sent here — it is
+  // sent at the Handed to Lab step instead, together with the handover
+  // branch and received-by name (socket/bookingSocket.js, 'handed_to_lab' →
+  // syncVisitCompletionToClient).
+
+  if (nothingPaid) {
+    try {
+      await savePartialReason(bookingId, reasonText);
+      tlog(`[OTP_WITHOUT_PAYMENT] technician_id=${technicianId} booking_id=${bookingId} by=${verifiedBy} reason="${reasonText}"`);
+    } catch (reasonErr) {
+      console.error(`⚠️  verifyBookingOtp — no-payment reason not saved booking_id=${bookingId}: ${reasonErr.message}`);
+    }
+  }
+
+  otpLog(`[VERIFY] ✅ OTP verified — booking_id=${bookingId} technician_id=${technicianId} verified_by=${verifiedBy}`);
+  console.log(`✅ verifyBookingOtp — booking_id=${bookingId} OTP verified (technician_id=${technicianId}, by ${verifiedBy})`);
+  return { status: 200, body: { success: true } };
+}
+
+// True while the last OTP was sent less than 60 seconds ago.
+async function _otpResendTooSoon(bookingId, technicianId) {
+  const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES ?? '10');
+  const [[cooldownRow]] = await db.execute(
+    `SELECT 1 FROM ip_technician_collection
+     WHERE booking_id = ? AND technician_id = ?
+       AND collection_otp IS NOT NULL
+       AND TIMESTAMPDIFF(SECOND, NOW(), collection_otp_expiry) > ?`,
+    [bookingId, technicianId, (expiryMinutes - 1) * 60]
+  );
+  return !!cooldownRow;
+}
+
 // ── POST /api/technicians/booking-otp/generate ───────────────────────────────
 // Generates a 4-digit OTP, stores it in ip_technician_collection, and sends it
 // to the patient's registered mobile number via the booking OTP SMS template.
@@ -2551,73 +2845,9 @@ exports.generateBookingOtp = async (req, res) => {
     return res.status(400).json({ success: false, message: 'bookingId is required' });
   }
 
-  const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES ?? '10');
-
-  otpLog(`[GENERATE] ── START ── booking_id=${bookingId} tech_id=${technicianId}`);
-
   try {
-    // Verify assignment and fetch OTP recipient mobile.
-    // If the booking was created by a logged-in account owner (family head), send to their
-    // registered login number (ip_users.user_mobile_no) so the person physically present
-    // with the technician receives the OTP — not the patient the test is booked for.
-    // Falls back to ip_patients.patient_mobile for self-bookings and cases where
-    // created_by is null or does not match any ip_users row.
-    const [[row]] = await db.execute(
-      `SELECT COALESCE(u.user_mobile_no, p.patient_mobile) AS patient_mobile,
-              p.patient_name,
-              p.patient_mobile   AS raw_patient_mobile,
-              b.created_by,
-              u.user_id          AS creator_user_id,
-              u.user_mobile_no   AS creator_mobile
-       FROM ip_technician_collection tc
-       JOIN ip_bookings b ON b.booking_id = tc.booking_id
-       JOIN ip_patients p ON p.patient_id = b.patient_id
-       LEFT JOIN ip_users u ON u.user_id = b.created_by
-       WHERE tc.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL LIMIT 1`,
-      [bookingId, technicianId]
-    );
-
-    if (!row) {
-      otpLog(`[GENERATE] ❌ LOOKUP FAILED — no row found for booking_id=${bookingId} tech_id=${technicianId} (booking missing, not assigned, or deleted)`);
-      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
-    }
-
-    otpLog(`[GENERATE] DB lookup OK — patient_name="${row.patient_name}" raw_patient_mobile=${row.raw_patient_mobile ?? 'NULL'} created_by=${row.created_by ?? 'NULL'} creator_user_id=${row.creator_user_id ?? 'NULL'} creator_mobile=${row.creator_mobile ?? 'NULL'} resolved_mobile=${row.patient_mobile ?? 'NULL'}`);
-
-    if (!row.patient_mobile) {
-      otpLog(`[GENERATE] ⚠️  resolved mobile is NULL — SMS will not be sent (patient_mobile and creator_mobile are both NULL)`);
-    }
-
-    const otp = Math.floor(1000 + Math.random() * 9000).toString();
-
-    const [updateRes] = await db.execute(
-      `UPDATE ip_technician_collection
-       SET collection_otp = ?, collection_otp_expiry = DATE_ADD(NOW(), INTERVAL ? MINUTE), otp_attempts = 0
-       WHERE booking_id = ? AND technician_id = ?`,
-      [otp, expiryMinutes, bookingId, technicianId]
-    );
-    otpLog(`[GENERATE] OTP stored in DB — affected_rows=${updateRes.affectedRows} expiry=${expiryMinutes}min`);
-
-    if (updateRes.affectedRows === 0) {
-      otpLog(`[GENERATE] ⚠️  OTP UPDATE hit 0 rows — ip_technician_collection row may be missing for booking_id=${bookingId} tech_id=${technicianId}`);
-    }
-
-    // Send SMS — non-fatal: OTP is stored even if SMS fails
-    const targetMobile = row.patient_mobile ?? '';
-    otpLog(`[GENERATE] SMS target — mobile="${targetMobile}" api_key_set=${!!process.env.PING4SMS_API_KEY} sender_set=${!!process.env.PING4SMS_SENDER_ID} template_id=${process.env.PING4SMS_BOOKING_OTP_TEMPLATE_ID ?? 'NOT SET'}`);
-    try {
-      const smsRes = await sms.sendBookingOtp(targetMobile, otp);
-      otpLog(`[GENERATE] ✅ SMS sent — mobile=${targetMobile} response="${smsRes}"`);
-    } catch (smsErr) {
-      otpLog(`[GENERATE] ❌ SMS FAILED — mobile=${targetMobile} error="${smsErr.message}"`);
-    }
-
-    const maskedMobile = targetMobile.length >= 10
-      ? `${targetMobile.slice(0, 3)}****${targetMobile.slice(7)}`
-      : '****';
-
-    otpLog(`[GENERATE] ── DONE ── success=true maskedMobile=${maskedMobile}`);
-    res.json({ success: true, maskedMobile });
+    const { status, body } = await issueCollectionOtp(bookingId, technicianId, 'GENERATE');
+    res.status(status).json(body);
   } catch (err) {
     otpLog(`[GENERATE] ❌ SERVER ERROR — ${err.message}`);
     console.error('❌ generateBookingOtp FAILED:', err.message);
@@ -2636,149 +2866,11 @@ exports.verifyBookingOtp = async (req, res) => {
     return res.status(400).json({ success: false, message: 'bookingId and otp are required' });
   }
 
-  const maxAttempts = parseInt(process.env.OTP_MAX_ATTEMPTS ?? '3');
-
   try {
-    const [[row]] = await db.execute(
-      `SELECT collection_otp, otp_attempts,
-              (collection_otp_expiry IS NULL OR collection_otp_expiry < NOW()) AS is_expired
-       FROM ip_technician_collection
-       WHERE booking_id = ? AND technician_id = ?`,
-      [bookingId, technicianId]
-    );
-
-    if (!row) {
-      return res.status(404).json({ success: false, message: 'Assignment not found' });
-    }
-
-    if (!row.collection_otp) {
-      return res.status(400).json({ success: false, message: 'No OTP generated. Please generate OTP first.' });
-    }
-
-    if (row.otp_attempts >= maxAttempts) {
-      return res.status(429).json({ success: false, message: 'Too many failed attempts. Please resend OTP.', attemptsExhausted: true });
-    }
-
-    if (row.is_expired) {
-      return res.status(400).json({ success: false, message: 'OTP has expired. Please resend OTP.', expired: true });
-    }
-
-    if (row.collection_otp !== otp.toString()) {
-      await db.execute(
-        `UPDATE ip_technician_collection SET otp_attempts = otp_attempts + 1 WHERE booking_id = ? AND technician_id = ?`,
-        [bookingId, technicianId]
-      );
-      const remaining = maxAttempts - (row.otp_attempts + 1);
-      // 400, not 401: a wrong code is bad input. The app treats any 401 as
-      // "signed out on another device" and logs the technician out.
-      return res.status(400).json({
-        success: false,
-        message: remaining > 0
-          ? `Incorrect OTP. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
-          : 'Too many failed attempts. Please resend OTP.',
-        attemptsExhausted: remaining <= 0,
-      });
-    }
-
-    // Nothing paid toward the visit yet (and something is due): the OTP may
-    // still be verified, but only with a reason — saved like a partial-payment
-    // reason (ip_bookings.partial_payment_reason, sent to the ASMX at Handed
-    // to Lab). Checked before the OTP is used up, so the technician can add
-    // the reason and try again with the same OTP.
-    const reasonText = String(noPaymentReason ?? '').trim().slice(0, 255);
-    const [[visitPay]] = await db.execute(
-      `SELECT COALESCE(SUM(b.amount_paid), 0) AS paid, COALESCE(SUM(b.amount_due), 0) AS due
-       FROM ip_bookings b
-       JOIN ip_bookings p ON p.booking_id = ?
-       WHERE b.deleted_at IS NULL AND b.status != 'cancelled'
-         AND (b.booking_id = p.booking_id
-              OR (p.visit_group_id IS NOT NULL AND b.visit_group_id = p.visit_group_id))`,
-      [bookingId]
-    );
-    const nothingPaid = Number(visitPay?.paid ?? 0) <= 0 && Number(visitPay?.due ?? 0) > 0;
-    if (nothingPaid && !reasonText) {
-      return res.status(400).json({
-        success: false, code: 'NO_PAYMENT_REASON_REQUIRED',
-        message: 'No payment has been collected. Please enter the reason to verify the OTP.',
-      });
-    }
-
-    // OTP correct — update status and clear OTP fields
-    await db.execute(
-      `UPDATE ip_technician_collection
-       SET collection_status     = 'otp_verified',
-           collection_otp        = NULL,
-           collection_otp_expiry = NULL,
-           otp_attempts          = 0,
-           otp_verified_at       = NOW()
-       WHERE booking_id = ? AND technician_id = ?`,
-      [bookingId, technicianId]
-    );
-
-    // Mirror into ip_patient_bookings — wrapped defensively so a failure
-    // here never turns an already-successful OTP verification into an
-    // error response.
-    try {
-      await db.execute(
-        `UPDATE ip_patient_bookings SET collection_status = 'otp_verified' WHERE booking_id = ?`,
-        [bookingId]
-      );
-    } catch (e) {
-      console.error(`❌ [verifyBookingOtp] ip_patient_bookings mirror failed booking=${bookingId}: ${e.message}`);
-    }
-
-    // Cascade otp_verified to sibling bookings in the same visit group
-    try {
-      const [[vgRow]] = await db.execute(
-        'SELECT visit_group_id FROM ip_bookings WHERE booking_id = ? LIMIT 1',
-        [bookingId]
-      );
-      if (vgRow?.visit_group_id) {
-        await db.execute(
-          `UPDATE ip_technician_collection tc
-           JOIN ip_bookings b ON b.booking_id = tc.booking_id
-           SET tc.collection_status = 'otp_verified',
-               tc.otp_verified_at   = NOW(),
-               tc.updated_at        = NOW()
-           WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
-          [vgRow.visit_group_id, bookingId]
-        );
-        await db.execute(
-          `UPDATE ip_patient_bookings pb
-           JOIN ip_bookings b ON b.booking_id = pb.booking_id
-           SET pb.collection_status = 'otp_verified'
-           WHERE b.visit_group_id = ? AND b.booking_id != ? AND b.deleted_at IS NULL`,
-          [vgRow.visit_group_id, bookingId]
-        );
-      }
-    } catch (e) {
-      console.error(`❌ [verifyBookingOtp] sibling cascade failed booking=${bookingId}: ${e.message}`);
-    }
-
-    // ip_bookings.status follows the step too (booking + family visit).
-    try {
-      const { _setVisitBookingStatus } = require('../socket/bookingSocket');
-      if (typeof _setVisitBookingStatus === 'function') _setVisitBookingStatus(Number(bookingId), 'otp_verified');
-    } catch (e) {
-      console.error(`❌ [verifyBookingOtp] booking status not updated booking=${bookingId}: ${e.message}`);
-    }
-
-    // The ASMX visit sync (TechnicianVisitCompleted) is no longer sent here —
-    // it is sent at the Handed to Lab step instead, together with the
-    // handover branch and received-by name (socket/bookingSocket.js,
-    // 'handed_to_lab' → syncVisitCompletionToClient).
-
-    if (nothingPaid) {
-      try {
-        await savePartialReason(bookingId, reasonText);
-        tlog(`[OTP_WITHOUT_PAYMENT] technician_id=${technicianId} booking_id=${bookingId} reason="${reasonText}"`);
-      } catch (reasonErr) {
-        console.error(`⚠️  verifyBookingOtp — no-payment reason not saved booking_id=${bookingId}: ${reasonErr.message}`);
-      }
-    }
-
-    console.log(`✅ verifyBookingOtp — booking_id=${bookingId} OTP verified by technician_id=${technicianId}`);
-    res.json({ success: true });
+    const { status, body } = await verifyCollectionOtp({
+      bookingId, technicianId, otp, noPaymentReason, verifiedBy: 'technician',
+    });
+    res.status(status).json(body);
   } catch (err) {
     console.error('❌ verifyBookingOtp FAILED:', err.code, err.message);
     res.status(500).json({ success: false, message: 'Server error', detail: err.message });
@@ -2795,72 +2887,135 @@ exports.resendBookingOtp = async (req, res) => {
     return res.status(400).json({ success: false, message: 'bookingId is required' });
   }
 
-  const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES ?? '10');
-
-  otpLog(`[RESEND] ── START ── booking_id=${bookingId} tech_id=${technicianId}`);
+  otpLog(`[RESEND] ── request ── booking_id=${bookingId} tech_id=${technicianId}`);
 
   try {
-    // Check cooldown: if OTP remaining time > (expiryMinutes - 1) minutes, resend too soon
-    const [[cooldownRow]] = await db.execute(
-      `SELECT 1 FROM ip_technician_collection
-       WHERE booking_id = ? AND technician_id = ?
-         AND collection_otp IS NOT NULL
-         AND TIMESTAMPDIFF(SECOND, NOW(), collection_otp_expiry) > ?`,
-      [bookingId, technicianId, (expiryMinutes - 1) * 60]
-    );
-
-    if (cooldownRow) {
+    if (await _otpResendTooSoon(bookingId, technicianId)) {
       otpLog(`[RESEND] ⏱  cooldown active — too soon to resend for booking_id=${bookingId}`);
-      return res.status(429).json({ success: false, message: 'Please wait 60 seconds before resending OTP.' });
+      return res.status(429).json({ success: false, code: 'RESEND_COOLDOWN', message: 'Please wait 60 seconds before resending OTP.' });
     }
-
-    // Fetch OTP recipient mobile — same logic as generateBookingOtp:
-    // prefer the booking creator's login number over the patient's number.
-    const [[row]] = await db.execute(
-      `SELECT COALESCE(u.user_mobile_no, p.patient_mobile) AS patient_mobile,
-              p.patient_mobile   AS raw_patient_mobile,
-              b.created_by,
-              u.user_id          AS creator_user_id,
-              u.user_mobile_no   AS creator_mobile
-       FROM ip_technician_collection tc
-       JOIN ip_bookings b ON b.booking_id = tc.booking_id
-       JOIN ip_patients p ON p.patient_id = b.patient_id
-       LEFT JOIN ip_users u ON u.user_id = b.created_by
-       WHERE tc.booking_id = ? AND tc.technician_id = ? AND b.deleted_at IS NULL LIMIT 1`,
-      [bookingId, technicianId]
-    );
-
-    if (!row) {
-      otpLog(`[RESEND] ❌ LOOKUP FAILED — no row found for booking_id=${bookingId} tech_id=${technicianId}`);
-      return res.status(404).json({ success: false, message: 'Booking not found or not assigned to you' });
-    }
-
-    otpLog(`[RESEND] DB lookup OK — raw_patient_mobile=${row.raw_patient_mobile ?? 'NULL'} created_by=${row.created_by ?? 'NULL'} creator_user_id=${row.creator_user_id ?? 'NULL'} creator_mobile=${row.creator_mobile ?? 'NULL'} resolved_mobile=${row.patient_mobile ?? 'NULL'}`);
-
-    const otp = Math.floor(1000 + Math.random() * 9000).toString();
-
-    const [updateRes] = await db.execute(
-      `UPDATE ip_technician_collection
-       SET collection_otp = ?, collection_otp_expiry = DATE_ADD(NOW(), INTERVAL ? MINUTE), otp_attempts = 0
-       WHERE booking_id = ? AND technician_id = ?`,
-      [otp, expiryMinutes, bookingId, technicianId]
-    );
-    otpLog(`[RESEND] OTP stored in DB — affected_rows=${updateRes.affectedRows}`);
-
-    const targetMobile = row.patient_mobile ?? '';
-    otpLog(`[RESEND] SMS target — mobile="${targetMobile}" template_id=${process.env.PING4SMS_BOOKING_OTP_TEMPLATE_ID ?? 'NOT SET'}`);
-    try {
-      const smsRes = await sms.sendBookingOtp(targetMobile, otp);
-      otpLog(`[RESEND] ✅ SMS sent — mobile=${targetMobile} response="${smsRes}"`);
-    } catch (smsErr) {
-      otpLog(`[RESEND] ❌ SMS FAILED — mobile=${targetMobile} error="${smsErr.message}"`);
-    }
-
-    otpLog(`[RESEND] ── DONE ── success=true`);
-    res.json({ success: true });
+    const { status, body } = await issueCollectionOtp(bookingId, technicianId, 'RESEND');
+    res.status(status).json(body);
   } catch (err) {
     otpLog(`[RESEND] ❌ SERVER ERROR — ${err.message}`);
     console.error('❌ resendBookingOtp FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Admin portal — collection OTP (HMAC, adminAuth; see routes/bookings.js)
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Technician steps where the collection OTP can be sent / verified.
+const ADMIN_OTP_STAGES = new Set(['arrived', 'collection_started', 'sample_collected', 'collected']);
+// Steps that mean the OTP is already done.
+const ADMIN_OTP_DONE = new Set(['otp_verified', 'handed_to_lab_pending', 'handed_to_lab', 'completed', 'all_collected']);
+
+// Finds the booking's assigned technician and checks the booking is at a
+// step where the collection OTP applies. Returns { technicianId } or
+// { error: { status, body } }.
+async function _adminOtpTarget(bookingId) {
+  const [[row]] = await db.execute(
+    `SELECT b.booking_id, b.status AS booking_status,
+            tc.technician_id, tc.collection_status
+     FROM ip_bookings b
+     LEFT JOIN ip_technician_collection tc
+            ON tc.booking_id = b.booking_id AND tc.collection_status <> 'cancelled'
+     WHERE b.booking_id = ? AND b.deleted_at IS NULL
+     ORDER BY tc.collection_id DESC
+     LIMIT 1`,
+    [bookingId]
+  );
+
+  if (!row) {
+    return { error: { status: 404, body: { success: false, code: 'BOOKING_NOT_FOUND', message: 'Booking not found' } } };
+  }
+  if (row.booking_status === 'cancelled') {
+    return { error: { status: 409, body: { success: false, code: 'CANCELLED', message: 'This booking is cancelled' } } };
+  }
+  if (!row.technician_id) {
+    return { error: { status: 404, body: { success: false, code: 'NO_TECHNICIAN', message: 'No technician is assigned to this booking' } } };
+  }
+  if (ADMIN_OTP_DONE.has(row.collection_status)) {
+    return { error: { status: 409, body: { success: false, code: 'ALREADY_VERIFIED', message: 'The collection OTP is already verified for this booking' } } };
+  }
+  if (!ADMIN_OTP_STAGES.has(row.collection_status)) {
+    return {
+      error: {
+        status: 409,
+        body: {
+          success: false, code: 'WRONG_STAGE',
+          message: `The technician has not reached the customer yet (current step: ${row.collection_status}). The OTP can be used from Arrived onwards.`,
+          currentStep: row.collection_status,
+        },
+      },
+    };
+  }
+  return { technicianId: row.technician_id };
+}
+
+// ── POST /api/bookings/:bookingId/collection-otp/send ────────────────────────
+// Admin sends (or resends) the collection OTP to the customer. The
+// technician still enters it in the app as usual. 60-second cooldown.
+exports.adminSendCollectionOtp = async (req, res) => {
+  const bookingId = parseInt(req.params.bookingId, 10);
+  console.log(`\n🔐 [ADMIN-OTP-SEND] ── incoming ── bookingId=${bookingId || 'INVALID'}  ip=${req.ip}`);
+  if (!bookingId) {
+    return res.status(400).json({ success: false, code: 'INVALID_BOOKING_ID', message: 'Invalid bookingId' });
+  }
+
+  try {
+    const target = await _adminOtpTarget(bookingId);
+    if (target.error) {
+      otpLog(`[ADMIN_SEND] refused — booking_id=${bookingId} code=${target.error.body.code}`);
+      return res.status(target.error.status).json(target.error.body);
+    }
+    if (await _otpResendTooSoon(bookingId, target.technicianId)) {
+      otpLog(`[ADMIN_SEND] ⏱  cooldown active — booking_id=${bookingId}`);
+      return res.status(429).json({ success: false, code: 'RESEND_COOLDOWN', message: 'Please wait 60 seconds before resending OTP.' });
+    }
+    const { status, body } = await issueCollectionOtp(bookingId, target.technicianId, 'ADMIN_SEND');
+    res.status(status).json(body);
+  } catch (err) {
+    otpLog(`[ADMIN_SEND] ❌ SERVER ERROR — ${err.message}`);
+    console.error('❌ adminSendCollectionOtp FAILED:', err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+// ── POST /api/bookings/:bookingId/collection-otp/verify ──────────────────────
+// Admin verifies the OTP the customer shared, on behalf of the assigned
+// technician. Body: { otp, noPaymentReason?, verifiedBy? }.
+exports.adminVerifyCollectionOtp = async (req, res) => {
+  const bookingId = parseInt(req.params.bookingId, 10);
+  const { otp, noPaymentReason } = req.body ?? {};
+  const adminName = String(req.body?.verifiedBy ?? '').trim().slice(0, 100) || 'unknown';
+  console.log(`\n🔐 [ADMIN-OTP-VERIFY] ── incoming ── bookingId=${bookingId || 'INVALID'}  by=${adminName}  ip=${req.ip}`);
+  if (!bookingId) {
+    return res.status(400).json({ success: false, code: 'INVALID_BOOKING_ID', message: 'Invalid bookingId' });
+  }
+  if (!otp || !/^\d{4}$/.test(String(otp))) {
+    return res.status(400).json({ success: false, code: 'OTP_REQUIRED', message: 'A 4-digit otp is required' });
+  }
+
+  try {
+    const target = await _adminOtpTarget(bookingId);
+    if (target.error) {
+      otpLog(`[ADMIN_VERIFY] refused — booking_id=${bookingId} code=${target.error.body.code}`);
+      return res.status(target.error.status).json(target.error.body);
+    }
+    const { status, body } = await verifyCollectionOtp({
+      bookingId,
+      technicianId: target.technicianId,
+      otp: String(otp),
+      noPaymentReason,
+      verifiedBy: `admin (${adminName})`,
+    });
+    res.status(status).json(body);
+  } catch (err) {
+    otpLog(`[ADMIN_VERIFY] ❌ SERVER ERROR — ${err.message}`);
+    console.error('❌ adminVerifyCollectionOtp FAILED:', err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };

@@ -286,6 +286,8 @@ class _TechnicianBookingDetailScreenState
   final List<FocusNode> _otpFocusNodes =
       List.generate(4, (_) => FocusNode());
   bool _isVerifyingOtp  = false;
+  bool _otpDialogOpen   = false;
+  StreamSubscription<OtpVerifiedEvent>? _otpVerifiedSub;
   // Why nothing was paid, when the technician verifies the OTP without any
   // payment toward the visit — sent with the OTP and saved by the server like
   // a partial-payment reason.
@@ -423,6 +425,9 @@ class _TechnicianBookingDetailScreenState
       _patientDocRequired[widget.booking.patientId!] = _docRequired;
     }
     WidgetsBinding.instance.addObserver(this);
+    // The admin portal can verify the collection OTP for the technician —
+    // move this screen on (and close the OTP dialog) when that happens.
+    _otpVerifiedSub = SocketService.instance.onOtpVerified.listen(_onOtpVerifiedElsewhere);
     _loadItems();
     _loadDocs();
     _loadCollectionProof();
@@ -1028,6 +1033,7 @@ class _TechnicianBookingDetailScreenState
 
   @override
   void dispose() {
+    _otpVerifiedSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     clearRazorpay();
     for (final c in _otpControllers) c.dispose();
@@ -1482,6 +1488,22 @@ void _resumeJourney() {
     return reason;
   }
 
+  // Admin verified the OTP (or another device did): mark this booking OTP
+  // Verified, close the OTP dialog if it's open, and tell the technician.
+  void _onOtpVerifiedElsewhere(OtpVerifiedEvent e) {
+    final bookingId = int.tryParse(widget.booking.id) ?? 0;
+    if (!mounted || e.bookingId != bookingId) return;
+    if (_currentStatus == 'OTP Verified' || _isCompleted) return;
+    if (!e.byAdmin) return; // this app's own verify is handled in _verifyOtp
+    setState(() { _currentStatus = 'OTP Verified'; _isVerifyingOtp = false; });
+    if (_otpDialogOpen) {
+      _otpDialogOpen = false;
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+    AppMessages.success(context, 'OTP verified by admin — tap "Hand Over to Lab" to complete',
+        duration: const Duration(seconds: 4));
+  }
+
   Future<void> _showOtpDialog() async {
     for (final c in _otpControllers) { c.clear(); }
     setState(() { _otpError = false; _otpErrorText = 'Invalid OTP. Please try again.'; });
@@ -1502,6 +1524,9 @@ void _resumeJourney() {
         widget.booking.customerPhone.replaceRange(3, 7, '****');
 
     if (!mounted) return;
+    // The OTP may already have been verified by admin while it was sending.
+    if (_currentStatus == 'OTP Verified') return;
+    _otpDialogOpen = true;
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -1618,7 +1643,7 @@ void _resumeJourney() {
           ],
         ),
       ),
-    );
+    ).whenComplete(() => _otpDialogOpen = false);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _otpFocusNodes[0].requestFocus();

@@ -145,6 +145,14 @@ class SlotNoAvailability {
       );
 }
 
+// 'collection_otp_verified' — verifiedBy is 'technician' or 'admin'.
+class OtpVerifiedEvent {
+  final int bookingId;
+  final String verifiedBy;
+  const OtpVerifiedEvent(this.bookingId, this.verifiedBy);
+  bool get byAdmin => verifiedBy == 'admin';
+}
+
 class BookingAcceptedEvent {
   final int bookingId;
   final int technicianId;
@@ -392,6 +400,7 @@ class SocketService {
   final _collectionCompletedCtrl  = StreamController<int>.broadcast();
   final _collectionStartedCtrl    = StreamController<int>.broadcast();
   final _sampleCollectedCtrl      = StreamController<int>.broadcast();
+  final _otpVerifiedCtrl          = StreamController<OtpVerifiedEvent>.broadcast();
   final _handedToLabCtrl          = StreamController<int>.broadcast();
   final _sampleReceivedCtrl       = StreamController<int>.broadcast();
   final _testInProgressCtrl       = StreamController<int>.broadcast();
@@ -415,6 +424,7 @@ class SocketService {
   Stream<int>                  get onCollectionCompleted  => _collectionCompletedCtrl.stream;
   Stream<int>                  get onCollectionStarted    => _collectionStartedCtrl.stream;
   Stream<int>                  get onSampleCollected      => _sampleCollectedCtrl.stream;
+  Stream<OtpVerifiedEvent>     get onOtpVerified          => _otpVerifiedCtrl.stream;
   Stream<int>                  get onHandedToLab          => _handedToLabCtrl.stream;
   Stream<int>                  get onSampleReceived       => _sampleReceivedCtrl.stream;
   Stream<int>                  get onTestInProgress       => _testInProgressCtrl.stream;
@@ -696,6 +706,17 @@ class SocketService {
       final id = _parseId((data as Map)['bookingId']);
       _log('EVENT', 'sample_collected  id=$id');
       _sampleCollectedCtrl.add(id);
+    });
+
+    // Collection OTP verified — by this app or by the admin portal on the
+    // technician's behalf. The booking screen moves on without a refresh.
+    _socket!.on('collection_otp_verified', (data) {
+      try {
+        final map = Map<String, dynamic>.from(data as Map);
+        final id  = _parseId(map['bookingId']);
+        _log('EVENT', 'collection_otp_verified  id=$id by=${map['verifiedBy']}');
+        _otpVerifiedCtrl.add(OtpVerifiedEvent(id, map['verifiedBy']?.toString() ?? 'technician'));
+      } catch (e) { _log('ERROR', 'collection_otp_verified: $e'); }
     });
 
     _socket!.on('handed_to_lab', (data) {
@@ -1046,6 +1067,7 @@ class SocketService {
     _collectionCompletedCtrl.close();
     _collectionStartedCtrl.close();
     _sampleCollectedCtrl.close();
+    _otpVerifiedCtrl.close();
     _handedToLabCtrl.close();
     _sampleReceivedCtrl.close();
     _testInProgressCtrl.close();

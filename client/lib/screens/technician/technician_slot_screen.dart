@@ -435,6 +435,22 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
       if (!mounted) return;
 
       if (res.statusCode == 200) {
+        // A slot that already has bookings keeps its duration (its booked
+        // times can't move) — show the duration it really has.
+        final kept = <String>[];
+        try {
+          final body = jsonDecode(res.body) as Map<String, dynamic>;
+          for (final e in (body['keptDurations'] as List<dynamic>? ?? const [])) {
+            final m = e as Map<String, dynamic>;
+            final k = (m['date'] as String).substring(0, 10);
+            final slotId = (m['slotId'] as num).toInt();
+            final dur = (m['durationMinutes'] as num).toInt();
+            _selectedDurations[k]?[slotId] = dur;
+            final slot = _masterSlots.firstWhere((s) => s['slot_id'] == slotId,
+                orElse: () => {'slot_label': 'Slot $slotId'});
+            kept.add('${slot['slot_label']} kept at $dur min');
+          }
+        } catch (_) {}
         setState(() {
           _savedSlots.clear();
           _savedDurations.clear();
@@ -448,8 +464,14 @@ class _TechnicianSlotScreenState extends State<TechnicianSlotScreen> with Widget
             };
           }
         });
-        AppMessages.success(context, 'Availability saved — patients can now book your slots',
-            duration: const Duration(seconds: 3));
+        if (kept.isEmpty) {
+          AppMessages.success(context, 'Availability saved — patients can now book your slots',
+              duration: const Duration(seconds: 3));
+        } else {
+          AppMessages.success(context,
+              'Availability saved. Has bookings, so the duration can\'t change: ${kept.join(', ')}',
+              duration: const Duration(seconds: 5));
+        }
       } else {
         AppMessages.error(context, 'Failed to save. Try again.');
       }

@@ -149,7 +149,11 @@ describe('POST /api/technicians/booking-otp/verify', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(db.execute).toHaveBeenCalledTimes(6); // auth check + the 5 above
+    // auth check + the 5 above + ip_bookings.status → otp_verified
+    expect(db.execute).toHaveBeenCalledTimes(7);
+    const statusCall = db.execute.mock.calls[6];
+    expect(statusCall[0]).toMatch(/UPDATE ip_bookings b/);
+    expect(statusCall[1].slice(0, 2)).toEqual([900, 'otp_verified']);
     expect(clientSync.syncVisitCompletionToClient).not.toHaveBeenCalled();
   });
 
@@ -171,7 +175,8 @@ describe('POST /api/technicians/booking-otp/verify', () => {
 
     expect(res.status).toBe(200);
     // auth check + 7 controller calls (incl. the visit payment check)
-    expect(db.execute).toHaveBeenCalledTimes(8);
+    // + ip_bookings.status → otp_verified for the visit
+    expect(db.execute).toHaveBeenCalledTimes(9);
     expect(db.execute.mock.calls[6][0]).toMatch(/ip_technician_collection tc/);
     expect(db.execute.mock.calls[6][1]).toEqual(['VG123', 900]);
     expect(db.execute.mock.calls[7][0]).toMatch(/ip_patient_bookings pb/);

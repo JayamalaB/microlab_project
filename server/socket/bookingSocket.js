@@ -3648,8 +3648,26 @@ module.exports.emitForceLogout = function(userId, role) {
 function _userSocketKeysOf(userId) {
   return userSessions.ROLES.map(r => _userSocketKey(userId, r));
 }
+// Exported again here: `module.exports = function bookingSocket` above
+// replaces the export object, so the earlier assignment (next to the
+// function) is lost. Without this, the OTP verify never moved
+// ip_bookings.status to otp_verified.
+module.exports._setVisitBookingStatus = _setVisitBookingStatus;
+
+// Collection OTP verified (by the technician app or the admin portal):
+// tells the assigned technician's app and the customer (booking room), so
+// the technician's screen moves on without a refresh.
+module.exports.emitCollectionOtpVerified = function (bookingId, technicianId, verifiedBy) {
+  if (!_io) return;
+  const payload = { bookingId: Number(bookingId), verifiedBy: String(verifiedBy ?? '').startsWith('admin') ? 'admin' : 'technician' };
+  const tech = onlineTechnicians.get(Number(technicianId)) ?? onlineTechnicians.get(String(technicianId));
+  if (tech?.socketId) _io.to(tech.socketId).emit('collection_otp_verified', payload);
+  _io.to(String(bookingId)).emit('collection_otp_verified', payload);
+  clog(`[collection_otp_verified] booking=${bookingId} technician=${technicianId} by=${payload.verifiedBy} techSocket=${tech?.socketId ? 'yes' : 'offline'}`);
+};
+
 module.exports.freeTechnician = _freeTechnician;
-module.exports.stopDispatch = (bookingId) => (_io ? _stopDispatch(_io, bookingId) : false);
+module.exports.stopDispatch =(bookingId) => (_io ? _stopDispatch(_io, bookingId) : false);
 module.exports.forceTechnicianOffline = _forceTechnicianOffline;
 module.exports.markTechnicianOfflineStale = _markTechnicianOfflineStale;
 

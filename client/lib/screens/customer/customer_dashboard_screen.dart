@@ -77,6 +77,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   double? _lng;
   // Silently auto-detected from pincode — patient never sees or selects this.
   BranchModel? _selectedBranch;
+  // Saved address in use (ticked in the location sheet), and whether it was
+  // put in automatically on open — that one is confirmed at Proceed.
+  AddressModel? _savedAddressInUse;
+  bool _addressAutoApplied = false;
+  bool _addressConfirmed   = false;
   bool _branchDetecting = false;
   int  _branchLookupId  = 0;
   // Real patientId from auth session — falls back to 1 if socket not yet connected
@@ -154,6 +159,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         final pinMatch = RegExp(r'\b(\d{6})\b').firstMatch(memberAddr);
         if (pinMatch != null) _pincode = pinMatch.group(1);
       }
+    }
+    // Still no location for a home collection: use the customer's saved
+    // address (Default first) — confirmed when they tap Proceed.
+    if ((_address == null || _address!.isEmpty) && _mode == 'Home Collection') {
+      _useSavedAddressOnOpen();
     }
     _searchController.addListener(() {
       if (_searchController.text == _searchQuery) return;
@@ -413,12 +423,68 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     }
   }
 
+  // ── Saved address on open ────────────────────────────────
+  Future<void> _useSavedAddressOnOpen() async {
+    final list = await ApiService.getAddresses();
+    if (!mounted || list.isEmpty) return;
+    // The customer may have set a location while this was loading.
+    if ((_address?.isNotEmpty ?? false) || _mode != 'Home Collection') return;
+    final addr = list.firstWhere((a) => a.isDefault, orElse: () => list.first);
+    debugPrint('\n🏠 [SAVED ADDRESS] using "${addr.label}" (default=${addr.isDefault}) — confirm at Proceed');
+    _applySavedAddress(addr);
+    setState(() { _addressAutoApplied = true; _addressConfirmed = false; });
+  }
+
+  // Same as tapping a saved address in the location sheet.
+  void _applySavedAddress(AddressModel addr) {
+    final pin = (addr.pincode ?? '').trim();
+    setState(() {
+      _savedAddressInUse = addr;
+      _address = addr.fullAddress;
+      if (addr.city != null && addr.city!.isNotEmpty) _city = addr.city;
+      if (addr.lat != null && addr.lng != null) { _lat = addr.lat; _lng = addr.lng; }
+      _pincode = pin.isNotEmpty ? pin : null;
+      _selectedBranch = null;
+    });
+    if (pin.length == 6) {
+      _autoDetectBranch(pin, place: _city);
+    } else {
+      _tryExtractPincodeFromAddress(addr.fullAddress);
+    }
+  }
+
+  // Proceed with an address that was put in automatically: ask first.
+  void _confirmAddressThenCheckout() {
+    final addr = _savedAddressInUse;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) => _AddressConfirmSheet(
+        label:     addr?.label ?? 'Address',
+        isDefault: addr?.isDefault ?? false,
+        address:   _address ?? '',
+        cityPin:   [if (_city?.isNotEmpty ?? false) _city!, if (_pincode?.isNotEmpty ?? false) _pincode!].join(' · '),
+        onConfirm: () {
+          Navigator.pop(sheetCtx);
+          setState(() => _addressConfirmed = true);
+          _navigateToCheckout();
+        },
+        onChange: () {
+          Navigator.pop(sheetCtx);
+          _showLocationSheet();
+        },
+      ),
+    );
+  }
+
   void _showLocationSheet() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => _LocationSheet(
+        selectedSavedAddressId: _savedAddressInUse?.id,
+        onSavedAddressPicked: (a) => setState(() => _savedAddressInUse = a),
         mode: _mode,
         modes: _modes,
         branches: _branches,
@@ -478,7 +544,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
         // GPS / manual address — try to extract pincode from the address string.
         onAddressChanged: (a) {
           debugPrint('\n🏠 [ADDRESS SET] "$a"');
-          setState(() => _address = a);
+          setState(() {
+            _address = a;
+            // GPS / typed address: no saved address in use any more.
+            if (a != _savedAddressInUse?.fullAddress) _savedAddressInUse = null;
+          });
           if (a != null && a.isNotEmpty &&
               _pincode == null && _mode == 'Home Collection') {
             debugPrint('   → no pincode yet — scanning address for 6-digit code');
@@ -490,7 +560,11 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
           setState(() { _lat = lat; _lng = lng; });
         },
       ),
-    );
+    ).whenComplete(() {
+      // The customer has looked at the location and closed the sheet with
+      // one set — no need to ask again at Proceed.
+      if (mounted && (_address?.isNotEmpty ?? false)) _addressConfirmed = true;
+    });
   }
 
   // Recommended packages for whatever's in the cart right now, mapped to the
@@ -527,6 +601,12 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   }
 
   void _navigateToCheckout() {
+    // Saved address put in automatically on open: confirm it once first.
+    if (_mode == 'Home Collection' && _addressAutoApplied && !_addressConfirmed &&
+        (_address?.isNotEmpty ?? false)) {
+      _confirmAddressThenCheckout();
+      return;
+    }
     // Guard: branch detection still in flight — don't proceed with null branchId
     if (_branchDetecting && _mode == 'Home Collection') {
       debugPrint('🛑 [CHECKOUT BLOCKED] branch detection still running — showing wait message');
@@ -573,6 +653,9 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
               _lat            = null;
               _lng            = null;
               _selectedBranch = null;
+              _savedAddressInUse  = null;
+              _addressAutoApplied = false;
+              _addressConfirmed   = false;
             });
           },
         ),
@@ -1426,6 +1509,120 @@ class _LocationBar extends StatelessWidget {
 
 // ─── Location Sheet ───────────────────────────────────────────────────────────
 
+// ─── Address confirmation (at Proceed) ───────────────────────────────────────
+// Shown when the saved address was put in automatically on open: the
+// customer confirms it, or changes it in the location sheet.
+class _AddressConfirmSheet extends StatelessWidget {
+  final String label;
+  final bool isDefault;
+  final String address;
+  final String cityPin;
+  final VoidCallback onConfirm;
+  final VoidCallback onChange;
+  const _AddressConfirmSheet({
+    required this.label,
+    required this.isDefault,
+    required this.address,
+    required this.cityPin,
+    required this.onConfirm,
+    required this.onChange,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isHome = label.toLowerCase() == 'home';
+    return Container(
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      padding: EdgeInsets.fromLTRB(
+          CxSpace.lg, 10, CxSpace.lg, MediaQuery.of(context).padding.bottom + CxSpace.lg),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 40, height: 4,
+              decoration: const BoxDecoration(color: CxColors.border, borderRadius: CxRadius.pill),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(children: [
+            const Icon(Icons.location_on_outlined, size: 20, color: CxColors.brand),
+            const SizedBox(width: 8),
+            const Expanded(child: Text('Collect samples here?', style: CxText.sectionTitle)),
+            CxIconButton(
+              icon: Icons.close_rounded,
+              tooltip: 'Close',
+              onPressed: () => Navigator.pop(context),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          const Text('The technician will come to this address.', style: CxText.bodySecondary),
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: CxColors.brandSurface,
+              borderRadius: CxRadius.lgAll,
+              border: Border.all(color: CxColors.brand),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(isHome ? Icons.home_outlined : Icons.place_outlined, size: 22, color: CxColors.brand),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(children: [
+                        Flexible(child: Text(label, style: CxText.cardTitle, overflow: TextOverflow.ellipsis)),
+                        if (isDefault) ...[
+                          const SizedBox(width: 6),
+                          const CxChip(label: 'Default', tone: CxTone.brand),
+                        ],
+                      ]),
+                      const SizedBox(height: 4),
+                      Text(address, style: CxText.bodySecondary, maxLines: 3, overflow: TextOverflow.ellipsis),
+                      if (cityPin.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(cityPin, style: CxText.caption),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: CxSpace.lg),
+          Row(children: [
+            Expanded(
+              child: CxButton.secondary(
+                onPressed: onChange,
+                icon: Icons.edit_location_alt_outlined,
+                label: 'Change',
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              flex: 2,
+              child: CxButton(
+                onPressed: onConfirm,
+                icon: Icons.check_rounded,
+                label: 'Yes, collect here',
+              ),
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+}
+
 class _LocationSheet extends StatefulWidget {
   final String mode;
   final List<String> modes;
@@ -1440,6 +1637,9 @@ class _LocationSheet extends StatefulWidget {
   final ValueChanged<String?> onCityChanged;
   final ValueChanged<String?> onAddressChanged;
   final void Function(double? lat, double? lng)? onLatLngChanged;
+  // The saved address in use (shown ticked), and a tap on one.
+  final int? selectedSavedAddressId;
+  final ValueChanged<AddressModel>? onSavedAddressPicked;
 
   const _LocationSheet({
     required this.mode,
@@ -1455,6 +1655,8 @@ class _LocationSheet extends StatefulWidget {
     required this.onCityChanged,
     required this.onAddressChanged,
     this.onLatLngChanged,
+    this.selectedSavedAddressId,
+    this.onSavedAddressPicked,
   });
 
   @override
@@ -1550,7 +1752,9 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
     _cityCtrl.text    = widget.city    ?? '';
 
     // Restore previously entered address so user sees it when going back
-    if (widget.address != null && widget.address!.isNotEmpty) {
+    // (a saved address in use is shown ticked in the list instead).
+    if (widget.selectedSavedAddressId == null &&
+        widget.address != null && widget.address!.isNotEmpty) {
       _addressCtrl.text = widget.address!;
       _manualAddress    = widget.address;
       _manualSelected   = true;
@@ -1563,7 +1767,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
 
     if (_mode == 'Lab Test') {
       WidgetsBinding.instance.addPostFrameCallback((_) => _loadBranches());
-    } else if (!_manualSelected) {
+    } else if (!_manualSelected && widget.selectedSavedAddressId == null) {
       // Home Collection with no location chosen yet: check that location is
       // on and permission is given straight away, instead of waiting for
       // the "Use Current Location" tap.
@@ -1571,7 +1775,16 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
     }
     // Load saved addresses for Home Collection quick-select.
     ApiService.getAddresses().then((list) {
-      if (mounted) setState(() => _savedAddresses = list);
+      if (!mounted) return;
+      setState(() {
+        _savedAddresses = list;
+        final inUse = widget.selectedSavedAddressId;
+        if (inUse != null) {
+          for (final a in list) {
+            if (a.id == inUse) _selectedSavedAddress = a;
+          }
+        }
+      });
     });
 
     // React when the customer switches location on (from settings, the
@@ -2283,6 +2496,7 @@ class _LocationSheetState extends State<_LocationSheet> with WidgetsBindingObser
                             _manualSelected = false;
                             _isManualMode  = false;
                           });
+                          widget.onSavedAddressPicked?.call(addr);
                           widget.onAddressChanged(addr.fullAddress);
                           if (addr.pincode != null && addr.pincode!.isNotEmpty) {
                             widget.onPincodeChanged(addr.pincode);

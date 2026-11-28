@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const bookingController = require('../controllers/bookingController');
+const technicianController = require('../controllers/technicianController');
 const auth        = require('../middleware/auth');
 const adminAuth   = require('../middleware/adminAuth');
 const adminSecret    = require('../middleware/adminSecret');
@@ -93,5 +94,11 @@ router.post('/admin', adminAuth, bookingController.createAdminBooking);
 // POST /api/bookings/:bookingId/dispatch — trigger dispatch from admin portal
 // Secured by HMAC-SHA256 shared secret (adminAuth middleware), not JWT
 router.post('/:bookingId/dispatch', adminAuth, bookingController.dispatchBooking);
+
+// Collection OTP from the admin portal — same HMAC (adminAuth) as dispatch.
+// send: SMS the OTP to the customer (the technician enters it in the app).
+// verify: admin enters the OTP the customer shared, for the assigned technician.
+router.post('/:bookingId/collection-otp/send',   adminAuth, technicianController.adminSendCollectionOtp);
+router.post('/:bookingId/collection-otp/verify', adminAuth, technicianController.adminVerifyCollectionOtp);
 
 module.exports = router;
