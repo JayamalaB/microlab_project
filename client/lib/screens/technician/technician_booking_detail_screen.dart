@@ -779,22 +779,38 @@ class _TechnicianBookingDetailScreenState
     }
   }
 
-  // Manual "Reload" — re-pulls payment status (this booking + any family
-  // members added this visit) from the server so a payment the patient just
-  // made on their own phone shows up without leaving/reopening the screen.
-  // Deliberately does NOT touch _currentStatus/docs/session-collected-amount —
-  // only the server-sourced payment fields that _paymentInitiated/
-  // _visitPaymentStarted read, so the technician's in-progress journey state
-  // is never reset by a reload.
+  // Maps the server's collection_status value to the journey step label used
+  // by _journeySteps / _currentStatus.
+  static String _mapCollectionStatus(String? cs) {
+    switch (cs) {
+      case 'en_route':          return 'Journey Started';
+      case 'arrived':           return 'Destination Reached';
+      case 'collection_started':return 'Collection Started';
+      case 'sample_collected':  return 'Sample Collected';
+      case 'otp_verified':      return 'OTP Verified';
+      case 'handed_to_lab':
+      case 'handed_to_lab_pending': return 'Handed to Lab';
+      default:                  return 'Confirmed';
+    }
+  }
+
   Future<void> _reloadBookingData() async {
     if (_isReloading) return;
     setState(() => _isReloading = true);
     try {
+      final bookingId = int.tryParse(widget.booking.id) ?? 0;
       await Future.wait([
         _refreshPaymentInfo(),
         _loadLinkedPatients(),
         _loadItems(),
         _loadAdditionalCharges(),
+        // Fetch live journey status from DB
+        if (bookingId > 0)
+          ApiService.fetchBookingStatus(bookingId).then((data) {
+            if (!mounted || data == null) return;
+            final mapped = _mapCollectionStatus(data['collection_status'] as String?);
+            setState(() => _currentStatus = mapped);
+          }),
       ]);
     } finally {
       if (mounted) setState(() => _isReloading = false);
@@ -3537,7 +3553,22 @@ void _resumeJourney() {
           ],
         ),
         actions: [
-          // Reload is pull-down on the page (RefreshIndicator below).
+          // Refresh button — fetches live journey status + payment info from DB
+          _isReloading
+              ? const Padding(
+                  padding: EdgeInsets.only(right: 14),
+                  child: Center(
+                    child: SizedBox(
+                      width: 18, height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70),
+                    ),
+                  ),
+                )
+              : IconButton(
+                  icon: const Icon(Icons.refresh_rounded, color: Colors.white),
+                  tooltip: 'Refresh',
+                  onPressed: _reloadBookingData,
+                ),
           if (widget.booking.customerPhone.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.phone_outlined, color: Colors.white),
