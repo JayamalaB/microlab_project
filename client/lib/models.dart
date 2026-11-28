@@ -253,9 +253,10 @@ class AddressModel {
         fullAddress: j['full_address']?.toString() ?? '',
         pincode:     j['pincode']?.toString(),
         city:        j['city']?.toString(),
-        lat:         (j['lat'] as num?)?.toDouble(),
-        lng:         (j['lng'] as num?)?.toDouble(),
-        isDefault:   j['is_default'] == 1 || j['is_default'] == true,
+        // DECIMAL columns come back as text ("11.00890000") — parse either.
+        lat:         double.tryParse(j['lat']?.toString() ?? ''),
+        lng:         double.tryParse(j['lng']?.toString() ?? ''),
+        isDefault:   j['is_default'] == 1 || j['is_default'] == true || j['is_default'] == '1',
       );
 
   AddressModel copyWith({

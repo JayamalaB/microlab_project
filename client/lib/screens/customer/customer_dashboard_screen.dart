@@ -14,6 +14,7 @@ import 'package:microlab/services/api_service.dart';
 import 'package:microlab/services/notification_service.dart';
 import 'package:microlab/constants/app_constants.dart';
 import 'package:microlab/utils/app_messages.dart';
+import 'package:microlab/utils/geocode.dart';
 import 'package:microlab/widgets/customer/cx_widgets.dart';
 import '../shared/location_picker_screen.dart';
 import 'customer_home_screen.dart';
@@ -82,6 +83,7 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   AddressModel? _savedAddressInUse;
   bool _addressAutoApplied = false;
   bool _addressConfirmed   = false;
+  bool _pointLookup        = false; // finding a saved address's map point
   bool _branchDetecting = false;
   int  _branchLookupId  = 0;
   // Real patientId from auth session — falls back to 1 if socket not yet connected
@@ -442,7 +444,9 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       _savedAddressInUse = addr;
       _address = addr.fullAddress;
       if (addr.city != null && addr.city!.isNotEmpty) _city = addr.city;
-      if (addr.lat != null && addr.lng != null) { _lat = addr.lat; _lng = addr.lng; }
+      // Its own point only — never one left over from an earlier choice.
+      _lat = addr.lat;
+      _lng = addr.lng;
       _pincode = pin.isNotEmpty ? pin : null;
       _selectedBranch = null;
     });
@@ -451,6 +455,40 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
     } else {
       _tryExtractPincodeFromAddress(addr.fullAddress);
     }
+    _fillMissingPoint(addr);
+  }
+
+  // A saved address with no map point (saved before the point was
+  // collected): find it from the address / pincode, use it, and save it
+  // back so this happens once. Home Collection needs the point to price
+  // the service charge and to book.
+  Future<void> _fillMissingPoint(AddressModel addr) async {
+    if (addr.lat != null && addr.lng != null) return;
+    setState(() => _pointLookup = true);
+    final p = await geocodeAddress(address: addr.fullAddress, pincode: addr.pincode, city: addr.city);
+    if (!mounted) return;
+    setState(() => _pointLookup = false);
+    if (p == null) {
+      debugPrint('🗺  [SAVED ADDRESS] no map point found for "${addr.label}"');
+      return;
+    }
+    // The customer moved on to another location meanwhile.
+    if (_savedAddressInUse?.id != addr.id) return;
+    debugPrint('🗺  [SAVED ADDRESS] map point found for "${addr.label}" — saved back');
+    setState(() {
+      _lat = p.lat;
+      _lng = p.lng;
+      _savedAddressInUse = addr.copyWith(lat: p.lat, lng: p.lng);
+    });
+    ApiService.updateAddress(addr.id, {
+      'label':        addr.label,
+      'full_address': addr.fullAddress,
+      if (addr.pincode != null) 'pincode': addr.pincode,
+      if (addr.city != null) 'city': addr.city,
+      'lat':          p.lat,
+      'lng':          p.lng,
+      'is_default':   addr.isDefault,
+    });
   }
 
   // Proceed with an address that was put in automatically: ask first.
@@ -484,7 +522,15 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
       backgroundColor: Colors.transparent,
       builder: (_) => _LocationSheet(
         selectedSavedAddressId: _savedAddressInUse?.id,
-        onSavedAddressPicked: (a) => setState(() => _savedAddressInUse = a),
+        onSavedAddressPicked: (a) {
+          setState(() {
+            _savedAddressInUse = a;
+            // The sheet sends the address's own point next (when it has one).
+            _lat = null;
+            _lng = null;
+          });
+          _fillMissingPoint(a);
+        },
         mode: _mode,
         modes: _modes,
         branches: _branches,
@@ -601,6 +647,17 @@ class _CustomerDashboardScreenState extends State<CustomerDashboardScreen> {
   }
 
   void _navigateToCheckout() {
+    // Home Collection needs the address's point on the map (service charge,
+    // booking) — say so here, not at Confirm Booking.
+    if (_mode == 'Home Collection' && (_lat == null || _lng == null)) {
+      if (_pointLookup) {
+        AppMessages.info(context, 'Finding your address on the map... please wait a moment');
+        return;
+      }
+      AppMessages.error(context, 'We couldn\'t place this address on the map — please choose your location');
+      _showLocationSheet();
+      return;
+    }
     // Saved address put in automatically on open: confirm it once first.
     if (_mode == 'Home Collection' && _addressAutoApplied && !_addressConfirmed &&
         (_address?.isNotEmpty ?? false)) {

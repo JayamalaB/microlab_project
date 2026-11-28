@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:microlab/models.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:microlab/services/api_service.dart';
 import 'package:microlab/theme/app_theme.dart';
+import 'package:microlab/utils/geocode.dart';
 import 'package:microlab/widgets/customer/cx_widgets.dart';
+import 'package:microlab/screens/shared/location_picker_screen.dart';
 
 class SavedAddressesScreen extends StatefulWidget {
   /// When non-null, the screen shows a "Use this address" button on each card.
@@ -320,6 +323,22 @@ class _AddressSheetState extends State<_AddressSheet> {
   late bool _isDefault;
   static const _labels = ['Home', 'Work', 'Other'];
 
+  // The address's point on the map — needed for Home Collection (service
+  // charge distance, dispatch). From GPS, the map, or looked up on Save.
+  double? _lat;
+  double? _lng;
+  String? _locSource;        // 'gps' | 'map' | 'pincode' — set in this sheet
+  bool _locating = false;    // GPS fix in progress
+  bool _saving   = false;    // address lookup on Save
+  String? _locError;
+
+  // Pincode lookup as it is typed (like "Enter Address Manually").
+  bool _pinLookup = false;
+  String? _pinArea;          // "Peelamedu, Coimbatore, Tamil Nadu"
+  String? _pinError;
+  String _lastPin = '';
+  int _pinLookupId = 0;
+
   @override
   void initState() {
     super.initState();
@@ -329,24 +348,127 @@ class _AddressSheetState extends State<_AddressSheet> {
     _addressCtrl = TextEditingController(text: e?.fullAddress ?? '');
     _pincodeCtrl = TextEditingController(text: e?.pincode ?? '');
     _cityCtrl    = TextEditingController(text: e?.city ?? '');
+    _lat = e?.lat;
+    _lng = e?.lng;
+    // An edited address keeps its point until its pincode is changed.
+    _lastPin = _pincodeCtrl.text.trim();
+    _pincodeCtrl.addListener(_onPincodeChanged);
+  }
+
+  void _onPincodeChanged() {
+    final pin = _pincodeCtrl.text.trim();
+    if (pin == _lastPin) return;
+    _lastPin = pin;
+    if (pin.length != 6) {
+      _pinLookupId++; // drop any lookup still running for the old pincode
+      if (_pinArea != null || _pinError != null || _pinLookup) {
+        setState(() { _pinArea = null; _pinError = null; _pinLookup = false; });
+      }
+      return;
+    }
+    _lookupPincode(pin);
+  }
+
+  Future<void> _lookupPincode(String pin) async {
+    final id = ++_pinLookupId;
+    setState(() { _pinLookup = true; _pinArea = null; _pinError = null; });
+    final info = await lookupPincode(pin);
+    if (!mounted || id != _pinLookupId) return; // pincode changed meanwhile
+    setState(() {
+      _pinLookup = false;
+      if (info == null) {
+        _pinError = 'Pincode not found — check it or pick the place on the map.';
+        return;
+      }
+      _pinArea = [info.area, info.district, info.state].whereType<String>().join(', ');
+      if (_cityCtrl.text.trim().isEmpty && info.district != null) _cityCtrl.text = info.district!;
+      // An exact point from GPS or the map is kept; otherwise the pincode's.
+      if (info.point != null && _locSource != 'gps' && _locSource != 'map') {
+        _lat = info.point!.lat;
+        _lng = info.point!.lng;
+        _locSource = 'pincode';
+        _locError = null;
+      }
+    });
+  }
+
+  Future<void> _useCurrentLocation() async {
+    setState(() { _locating = true; _locError = null; });
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        setState(() => _locError = 'Turn on location, or pick the place on the map.');
+        return;
+      }
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) perm = await Geolocator.requestPermission();
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+        setState(() => _locError = 'Location access is off. Pick the place on the map instead.');
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      ).timeout(const Duration(seconds: 15));
+      if (!mounted) return;
+      setState(() { _lat = pos.latitude; _lng = pos.longitude; _locSource = 'gps'; });
+    } catch (_) {
+      if (mounted) setState(() => _locError = 'Couldn\'t get your location. Try again or pick it on the map.');
+    } finally {
+      if (mounted) setState(() => _locating = false);
+    }
+  }
+
+  Future<void> _pickOnMap() async {
+    setState(() => _locError = null);
+    final picked = await Navigator.push<PickedLocation>(
+      context,
+      MaterialPageRoute(builder: (_) => const LocationPickerScreen()),
+    );
+    if (picked == null || !mounted) return;
+    setState(() { _lat = picked.lat; _lng = picked.lng; _locSource = 'map'; });
   }
 
   @override
   void dispose() {
+    _pincodeCtrl.removeListener(_onPincodeChanged);
     _addressCtrl.dispose();
     _pincodeCtrl.dispose();
     _cityCtrl.dispose();
     super.dispose();
   }
 
-  void _save() {
+  Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
+    final address = _addressCtrl.text.trim();
+    final pincode = _pincodeCtrl.text.trim();
+    final city    = _cityCtrl.text.trim();
+
+    // No point picked here: look it up from the address — also when an
+    // edited address or pincode no longer matches its old point.
+    final e = widget.editing;
+    final textChanged = e != null && (e.fullAddress.trim() != address || (e.pincode ?? '') != pincode);
+    var lat = _lat, lng = _lng;
+    if (_locSource == null && (lat == null || lng == null || textChanged)) {
+      setState(() { _saving = true; _locError = null; });
+      final point = await geocodeAddress(address: address, pincode: pincode, city: city);
+      if (!mounted) return;
+      setState(() => _saving = false);
+      if (point == null) {
+        setState(() => _locError =
+            'We couldn\'t find this address on the map. Use current location or pick it on the map.');
+        return;
+      }
+      lat = point.lat;
+      lng = point.lng;
+    }
+
     final result = AddressModel(
-      id: widget.editing?.id ?? 0,
+      id: e?.id ?? 0,
       label: _label,
-      fullAddress: _addressCtrl.text.trim(),
-      pincode: _pincodeCtrl.text.trim().isEmpty ? null : _pincodeCtrl.text.trim(),
-      city: _cityCtrl.text.trim().isEmpty ? null : _cityCtrl.text.trim(),
+      fullAddress: address,
+      pincode: pincode.isEmpty ? null : pincode,
+      city: city.isEmpty ? null : city,
+      lat: lat,
+      lng: lng,
       isDefault: _isDefault,
     );
     Navigator.pop(context, result);
@@ -417,13 +539,14 @@ class _AddressSheetState extends State<_AddressSheet> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Pincode', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: CxColors.textSecondary)),
+                          const Text('Pincode *', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: CxColors.textSecondary)),
                           const SizedBox(height: 6),
                           TextFormField(
                             controller: _pincodeCtrl,
                             keyboardType: TextInputType.number,
                             inputFormatters: [FilteringTextInputFormatter.digitsOnly, LengthLimitingTextInputFormatter(6)],
                             decoration: _inputDeco('600001'),
+                            validator: (v) => (v == null || v.trim().length != 6) ? 'Enter the 6-digit pincode' : null,
                           ),
                         ],
                       ),
@@ -446,7 +569,84 @@ class _AddressSheetState extends State<_AddressSheet> {
                     ),
                   ],
                 ),
+                // What the pincode resolved to (looked up on the 6th digit).
+                if (_pinLookup)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: Row(children: [
+                      SizedBox(width: 14, height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen)),
+                      SizedBox(width: 8),
+                      Text('Finding pincode…', style: CxText.caption),
+                    ]),
+                  )
+                else if (_pinArea != null && _pinArea!.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Icon(Icons.location_on_outlined, size: 15, color: AppColors.brandGreen),
+                      const SizedBox(width: 4),
+                      Expanded(child: Text(_pinArea!,
+                          style: const TextStyle(fontSize: 12, color: CxColors.textSecondary, fontWeight: FontWeight.w600))),
+                    ]),
+                  )
+                else if (_pinError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Icon(Icons.error_outline_rounded, size: 15, color: CxColors.error),
+                      const SizedBox(width: 4),
+                      Expanded(child: Text(_pinError!, style: const TextStyle(fontSize: 12, color: CxColors.error))),
+                    ]),
+                  ),
                 const SizedBox(height: 16),
+
+                // Location on map — exact point from GPS or the map; when
+                // neither is used it is looked up from the address on Save.
+                const Text('Location on map', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: CxColors.textSecondary)),
+                const SizedBox(height: 6),
+                Row(children: [
+                  Expanded(
+                    child: _LocButton(
+                      icon: Icons.my_location_rounded,
+                      label: 'Current location',
+                      busy: _locating,
+                      selected: _locSource == 'gps',
+                      onTap: (_locating || _saving) ? null : _useCurrentLocation,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _LocButton(
+                      icon: Icons.map_outlined,
+                      label: 'Pick on map',
+                      selected: _locSource == 'map',
+                      onTap: (_locating || _saving) ? null : _pickOnMap,
+                    ),
+                  ),
+                ]),
+                const SizedBox(height: 6),
+                if (_locError != null)
+                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Icon(Icons.error_outline_rounded, size: 15, color: CxColors.error),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(_locError!, style: const TextStyle(fontSize: 12, color: CxColors.error))),
+                  ])
+                else if (_locSource != null)
+                  Row(children: [
+                    const Icon(Icons.check_circle_rounded, size: 15, color: AppColors.brandGreen),
+                    const SizedBox(width: 6),
+                    Text(
+                        _locSource == 'gps' ? 'Location set from your current position'
+                            : _locSource == 'map' ? 'Location set on the map'
+                            : 'Location found from pincode',
+                        style: const TextStyle(fontSize: 12, color: AppColors.brandGreen, fontWeight: FontWeight.w600)),
+                  ])
+                else if (_lat != null && _lng != null)
+                  const Text('Location saved. Tap above to change it.', style: CxText.caption)
+                else
+                  const Text('Found from the pincode, or set it exactly with the buttons above.', style: CxText.caption),
+                const SizedBox(height: 12),
 
                 // Default toggle
                 InkWell(
@@ -473,7 +673,7 @@ class _AddressSheetState extends State<_AddressSheet> {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: _save,
+                    onPressed: (_saving || _locating || _pinLookup) ? null : _save,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.brandGreen,
                       foregroundColor: Colors.white,
@@ -481,7 +681,10 @@ class _AddressSheetState extends State<_AddressSheet> {
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
                     ),
-                    child: Text(widget.editing == null ? 'Save Address' : 'Update Address'),
+                    child: _saving
+                        ? const SizedBox(width: 20, height: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                        : Text(widget.editing == null ? 'Save Address' : 'Update Address'),
                   ),
                 ),
               ],
@@ -503,5 +706,49 @@ class _AddressSheetState extends State<_AddressSheet> {
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: AppColors.brandGreen, width: 1.5)),
         errorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: CxColors.error)),
         focusedErrorBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: CxColors.error, width: 1.5)),
+      );
+}
+
+// "Current location" / "Pick on map" button in the Add Address sheet.
+class _LocButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool busy;
+  final bool selected;
+  final VoidCallback? onTap;
+  const _LocButton({
+    required this.icon,
+    required this.label,
+    this.busy = false,
+    this.selected = false,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: selected ? AppColors.brandGreenSurface : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(color: selected ? AppColors.brandGreen : CxColors.border, width: selected ? 1.5 : 1),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: SizedBox(
+            height: 44,
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              busy
+                  ? const SizedBox(width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.brandGreen))
+                  : Icon(icon, size: 18, color: AppColors.brandGreen),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(label,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.brandGreen)),
+              ),
+            ]),
+          ),
+        ),
       );
 }
