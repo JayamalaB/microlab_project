@@ -189,6 +189,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   String _paymentType = 'full';
   bool _isProcessing = false;
 
+  // ── Checkout step (0 = Schedule, 1 = Details, 2 = Payment) ───
+  int _currentStep = 0;
+
   // ── Family members (Home Collection only) ─────────────────
   final List<_FamilyMember> _familyMembers = [];
 
@@ -252,13 +255,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   double get _payableNow => _paymentType == 'full' ? _grandTotal : 0;
   double get _payableLater => _paymentType == 'full' ? 0 : _grandTotal;
 
-  bool get _canProceed {
+  bool get _step0Complete {
     if (_selectedDate == null || _selectedSlot == null) return false;
     if (_currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null) return false;
     if (widget.isVip && _selectedTechnician == null) return false;
-    if (_primaryNeedsPrescription && _prescriptions.isEmpty) return false;
     return true;
   }
+
+  bool get _step1Complete => !(_primaryNeedsPrescription && _prescriptions.isEmpty);
+
+  bool get _canProceed => _step0Complete && _step1Complete;
 
   // ── Date picker (future only) ─────────────────────────────
   @override
@@ -1160,6 +1166,65 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     return '${days[d.weekday - 1]}, ${d.day} ${months[d.month]} ${d.year}';
   }
 
+  // ── Step indicator bar ────────────────────────────────────
+  Widget _buildStepBar() {
+    const labels = ['Schedule', 'Details', 'Payment'];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, CxSpace.sm),
+      child: Row(
+        children: [
+          for (int i = 0; i < 3; i++) ...[
+            if (i > 0)
+              Expanded(
+                child: Container(
+                  height: 2,
+                  color: i <= _currentStep ? AppColors.brandGreen : CxColors.border,
+                ),
+              ),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 26,
+                  height: 26,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: i < _currentStep
+                        ? AppColors.brandGreen
+                        : i == _currentStep
+                            ? AppColors.brandGreenSurface
+                            : const Color(0xFFF5F5F5),
+                    border: Border.all(
+                      color: i <= _currentStep ? AppColors.brandGreen : CxColors.border,
+                      width: 2,
+                    ),
+                  ),
+                  child: Center(
+                    child: i < _currentStep
+                        ? const Icon(Icons.check_rounded, size: 13, color: Colors.white)
+                        : Text('${i + 1}',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: i == _currentStep ? AppColors.brandGreen : CxColors.textHint,
+                            )),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(labels[i],
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: i == _currentStep ? FontWeight.w700 : FontWeight.w500,
+                      color: i == _currentStep ? AppColors.brandGreen : CxColors.textSecondary,
+                    )),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Customer look for checkout and the sheets it opens.
@@ -1181,9 +1246,14 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       body: Center(
         child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: CxSize.contentMaxWidth),
-        child: ListView(
-        padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.lg, CxSpace.gutter, 140),
+        child: Column(
         children: [
+          _buildStepBar(),
+          Expanded(
+            child: ListView(
+            padding: const EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.sm, CxSpace.gutter, 140),
+            children: [
+          if (_currentStep == 0) ...[
 
           // ── Order Summary ─────────────────────────────────
           _SectionCard(
@@ -1290,6 +1360,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ],
             ),
           ),
+          ], // ── end page 0 ──────────────────────────────────
+          if (_currentStep == 1) ...[
 
           const SizedBox(height: CxSpace.sm),
 
@@ -1412,49 +1484,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             ),
 
           if (_anyDocRequired) const SizedBox(height: CxSpace.sm),
-
-          // ── Payment Options (horizontal) ──────────────────
-          _SectionCard(
-            title: 'Payment Option',
-            icon: Icons.payment_outlined,
-            required: true,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                IntrinsicHeight(
-                  child: Row(
-                    children: [
-                      // Pay Full Now
-                      Expanded(
-                        child: _PaymentOptionCompact(
-                          selected: _paymentType == 'full',
-                          title: 'Pay Now',
-                          amount: '₹${_grandTotal.toInt()}',
-                          accentColor: _fullPaymentEnabled ? AppColors.brandGreen : AppColors.textHint,
-                          enabled: _fullPaymentEnabled,
-                          onTap: _fullPaymentEnabled ? () => setState(() => _paymentType = 'full') : null,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      // Pay Later
-                      Expanded(
-                        child: _PaymentOptionCompact(
-                          selected: _paymentType == 'pay_later',
-                          title: 'Pay Later',
-                          amount: '₹0 now',
-                          accentColor: AppColors.blue,
-                          enabled: true,
-                          onTap: () => setState(() => _paymentType = 'pay_later'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: CxSpace.sm),
 
           // ── VIP: Technician Selection ─────────────────────
           if (widget.isVip) ...[
@@ -1767,6 +1796,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ),
             ),
           ],
+          ], // ── end page 1 ──────────────────────────────────
+          if (_currentStep == 2) ...[
 
           const SizedBox(height: CxSpace.sm),
 
@@ -1805,12 +1836,57 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
               ],
             ),
           ),
+
+          const SizedBox(height: CxSpace.sm),
+
+          // ── Payment Options (horizontal) ──────────────────
+          _SectionCard(
+            title: 'Payment Option',
+            icon: Icons.payment_outlined,
+            required: true,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                IntrinsicHeight(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _PaymentOptionCompact(
+                          selected: _paymentType == 'full',
+                          title: 'Pay Now',
+                          amount: '₹${_grandTotal.toInt()}',
+                          accentColor: _fullPaymentEnabled ? AppColors.brandGreen : AppColors.textHint,
+                          enabled: _fullPaymentEnabled,
+                          onTap: _fullPaymentEnabled ? () => setState(() => _paymentType = 'full') : null,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: _PaymentOptionCompact(
+                          selected: _paymentType == 'pay_later',
+                          title: 'Pay Later',
+                          amount: '₹0 now',
+                          accentColor: AppColors.blue,
+                          enabled: true,
+                          onTap: () => setState(() => _paymentType = 'pay_later'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ], // ── end page 2 ──────────────────────────────────
+            ],
+            ),
+          ),
         ],
-      ),
+        ),
         ),
       ),
 
-      // ── Bottom Pay Button ─────────────────────────────────
+      // ── Bottom: step nav ─────────────────────────────────
       bottomNavigationBar: Container(
         padding: EdgeInsets.fromLTRB(CxSpace.gutter, CxSpace.md, CxSpace.gutter, MediaQuery.of(context).padding.bottom + CxSpace.md),
         decoration: const BoxDecoration(
@@ -1825,7 +1901,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (!_canProceed)
+            // Error hints
+            if (_currentStep == 0 && !_step0Complete)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Row(
@@ -1833,65 +1910,97 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   children: [
                     const Icon(Icons.info_outline_rounded, size: 16, color: CxColors.error),
                     const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                  _selectedDate == null
-                      ? 'Please select a date'
-                      : _selectedSlot == null
-                          ? 'Please select a time slot'
-                          : _currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null
-                              ? 'Please select an appointment time'
-                              : widget.isVip && _selectedTechnician == null
-                                  ? 'Please choose your preferred technician'
-                                  : (_primaryNeedsPrescription && _prescriptions.isEmpty)
-                                      ? 'Upload prescription for ${widget.member.name} to continue'
+                    Flexible(child: Text(
+                      _selectedDate == null
+                          ? 'Please select a date'
+                          : _selectedSlot == null
+                              ? 'Please select a time slot'
+                              : _currentSlotIntervals.isNotEmpty && _selectedAppointmentTime == null
+                                  ? 'Please select an appointment time'
+                                  : widget.isVip && _selectedTechnician == null
+                                      ? 'Please choose your preferred technician'
                                       : '',
-                  style: const TextStyle(fontSize: 13, color: CxColors.error, fontWeight: FontWeight.w500),
-                  textAlign: TextAlign.center,
-                      ),
-                    ),
+                      style: const TextStyle(fontSize: 13, color: CxColors.error, fontWeight: FontWeight.w500),
+                      textAlign: TextAlign.center,
+                    )),
+                  ],
+                ),
+              ),
+            if (_currentStep == 1 && !_step1Complete)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.info_outline_rounded, size: 16, color: CxColors.error),
+                    const SizedBox(width: 6),
+                    Flexible(child: Text(
+                      'Upload prescription for ${widget.member.name} to continue',
+                      style: const TextStyle(fontSize: 13, color: CxColors.error, fontWeight: FontWeight.w500),
+                      textAlign: TextAlign.center,
+                    )),
                   ],
                 ),
               ),
             Row(children: [
-              // Amount at a glance next to the button.
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(_paymentType == 'pay_later' ? 'Pay later' : 'Pay now', style: CxText.caption),
-                  Text('₹${_payableNow.toInt()}',
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: CxColors.textPrimary)),
-                ],
-              ),
-              const SizedBox(width: CxSpace.lg),
+              // Back button on steps 1 and 2
+              if (_currentStep > 0) ...[
+                OutlinedButton(
+                  onPressed: () => setState(() => _currentStep--),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: CxColors.textPrimary,
+                    side: const BorderSide(color: CxColors.border),
+                    shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
+                    minimumSize: const Size(0, 52),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                  ),
+                  child: const Text('Back'),
+                ),
+                const SizedBox(width: 10),
+              ],
+              // Next / Pay button
               Expanded(
                 child: SizedBox(
                   height: 52,
-                  child: FilledButton(
-                    onPressed: _canProceed && !_isProcessing ? _proceedToPayment : null,
-                    style: FilledButton.styleFrom(
-                      backgroundColor: CxColors.brand,
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: _isProcessing ? CxColors.brand : CxColors.border,
-                      disabledForegroundColor: _isProcessing ? Colors.white : CxColors.textHint,
-                      shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
-                      textStyle: CxText.button,
-                    ),
-                    child: _isProcessing
-                        ? const SizedBox(width: 20, height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
-                        : Text(
-                            _paymentType == 'pay_later'
-                                ? 'Confirm Booking · Pay Later'
-                                : _paymentType == 'cash'
-                                    ? 'Confirm Booking · Pay Cash'
-                                    : 'Pay ₹${_payableNow.toInt()} via Razorpay',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                  child: _currentStep < 2
+                      ? FilledButton(
+                          onPressed: (_currentStep == 0 ? _step0Complete : _step1Complete)
+                              ? () => setState(() => _currentStep++)
+                              : null,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: CxColors.brand,
+                            foregroundColor: Colors.white,
+                            disabledBackgroundColor: CxColors.border,
+                            disabledForegroundColor: CxColors.textHint,
+                            shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
+                            textStyle: CxText.button,
                           ),
-                  ),
+                          child: Text(_currentStep == 0 ? 'Next: Details →' : 'Review & Pay →'),
+                        )
+                      : FilledButton(
+                          onPressed: _canProceed && !_isProcessing ? _proceedToPayment : null,
+                          style: FilledButton.styleFrom(
+                            backgroundColor: CxColors.brand,
+                            foregroundColor: Colors.white,
+                            disabledBackgroundColor: _isProcessing ? CxColors.brand : CxColors.border,
+                            disabledForegroundColor: _isProcessing ? Colors.white : CxColors.textHint,
+                            shape: const RoundedRectangleBorder(borderRadius: CxRadius.mdAll),
+                            textStyle: CxText.button,
+                          ),
+                          child: _isProcessing
+                              ? const SizedBox(width: 20, height: 20,
+                                  child: CircularProgressIndicator(strokeWidth: 2,
+                                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
+                              : Text(
+                                  _paymentType == 'pay_later'
+                                      ? 'Confirm Booking · Pay Later'
+                                      : _paymentType == 'cash'
+                                          ? 'Confirm Booking · Pay Cash'
+                                          : 'Pay ₹${_payableNow.toInt()} via Razorpay',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                        ),
                 ),
               ),
             ]),

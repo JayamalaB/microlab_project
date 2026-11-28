@@ -1491,7 +1491,7 @@ exports.createQrPayment = async (req, res) => {
         usage: 'single_use',
         fixed_amount: true,
         payment_amount: Math.round(Number(amount) * 100),
-        description: `Payment for booking ${bookingId}`,
+        description: 'MicroLab',
         close_by: closeBy,
         notes: {
           booking_id:    String(bookingId),
